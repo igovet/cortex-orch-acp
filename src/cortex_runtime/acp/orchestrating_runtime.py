@@ -5817,19 +5817,21 @@ class OrchestratingRuntime:
         with self._lock:
             executor = self._question_executors.get(session_id)
             for wait in waits:
-                if wait['status'] != 'open' or wait['wait_id'] in self._worker_question_deliveries:
+                if (wait['status'] != 'open' or wait.get('retry_at')
+                        or wait['question_id'] in self._worker_question_deliveries):
                     continue
+                decision = worker_waits.question_form(wait)
                 if executor is None:
                     executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="cortex-question")
                     self._question_executors[session_id] = executor
                 future = executor.submit(
                     self._handle_ask_user, task_id, session_id, emit_update, language,
-                    {k: wait[k] for k in ('question_id','question','options','batch_id','questions') if k in wait}, elicitor,
+                    decision, elicitor,
                 )
-                self._worker_question_deliveries[wait['wait_id']] = future
+                self._worker_question_deliveries[wait['question_id']] = future
             # Unanswered cards that timed out/declined keep their durable wait.
-            return any(not self._worker_question_deliveries[w['wait_id']].done()
-                       for w in waits if w['wait_id'] in self._worker_question_deliveries)
+            return any(not self._worker_question_deliveries[w['question_id']].done()
+                       for w in waits if w['question_id'] in self._worker_question_deliveries)
 
     def _park_worker_for_answer(self, task_id, assignment_ref, session_ref, cancel_event):
         from ..orchestration import worker_waits

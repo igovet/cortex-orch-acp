@@ -100,7 +100,10 @@ Declared scopes coordinate the agreed work areas of parallel writers; the
 runtime grants a writing worker project-wide gateway and jail write access, with
 private and user-protected paths still refused. Writers should reserve a project
 path outside their agreed work area with `access_request` before changing it; that
-request does not widen an OS jail. Outside-project effects use `outside_write` or
+request does not widen an OS jail. Writer conflicts receive bounded delayed
+runtime rechecks before selectable retry/continue options; policy, path and
+read-only refusals ask immediately. Only a fresh runtime predicate can grant
+access, never a user answer alone. Outside-project effects use `outside_write` or
 `outside_command` and, in Guarded mode, require the user's accepted permission
 card. Auto mode intentionally approves them without a per-action card, including
 when no client is connected; this is the owner's selected behavior. Guarded

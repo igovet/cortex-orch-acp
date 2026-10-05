@@ -156,6 +156,11 @@ Writing workers receive project-wide gateway write authority, except private and
 user-protected paths; a declared assignment scope is a coordination work area,
 not an enforced project-path boundary. Writers reserve additional paths with
 `access_request` before changing them so parallel assignments remain coordinated.
+Writer conflicts retry automatically on a bounded 1/2/4-second backoff before a
+validated retry/continue-without-access question; unsafe paths, owner deny-write
+policy and read-only roles ask immediately. A retry answer only requests fresh
+runtime checks, never a policy override; unrecognized free text declines access.
+See [the access wait contract](orchestration.md#worker-questions-and-additional-access).
 Read-only roles and review stages have no project write grant. Steering revokes
 old worker channels before its text is delivered to a model. Scope/replan/escalation
 requests are proposals; the replacement plan is validated again.

@@ -11,6 +11,9 @@ are never limited and never take a worker slot. Overlapping write scopes are
 serialized, while review-stage nodes and READ_ONLY roles do not participate in
 scope-overlap conflicts. A finished worker keeps its session slot until its
 engine is confirmed gone and the reservation is released or safely reclaimed.
+A finished, failed or cancelled worker's write scope is likewise held until
+its engine's reservation is released on a confirmed exit, in every task of the
+project, so a dead worker of an abandoned task never blocks new work.
 
 All project operations use the authenticated runtime gateway. Native engine action
 tools are disabled. Coordinator, consultant and review roles are read-only; other

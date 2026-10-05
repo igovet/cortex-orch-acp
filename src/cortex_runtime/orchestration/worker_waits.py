@@ -34,6 +34,17 @@ def projection(db, task_id, *, assignment_ref=None, question_id=None):
     return list(waits.values())
 
 
+def question_form(wait):
+    """Validate every worker card, including runtime-built waits, before relay."""
+    from .question_batches import forms
+    decision = {k: wait[k] for k in ('question_id', 'question', 'options', 'batch_id', 'questions') if k in wait}
+    if wait.get('batch_id'):
+        forms(dict(questions=[{k: q.get(k) for k in ('question', 'options')} for q in wait['questions']]))
+    else:
+        forms(dict(question=wait.get('question'), options=wait.get('options')))
+    return decision
+
+
 def current(db, task_id, assignment_ref):
     return next((w for w in reversed(projection(db, task_id, assignment_ref=assignment_ref))
                  if w['status'] in ACTIVE), None)
@@ -183,6 +194,10 @@ def answer_tx(db, question_id, text, source, *, session_id=None):
         if wait.get('kind') == 'access':
             from .access import resolve_tx
             wait = resolve_tx(db, wait, text)
+            if wait['status'] == 'open':
+                # The real answer requests another runtime cycle; no decision
+                # continuation is ready yet.
+                return True
         _change(db, wait, 'ready', answer_source=source, answer_session_id=session_id,
                 answer_ref=wait['question_id'] + ':answer',
                 **(dict(answer_refs=[q['question_id'] + ':answer' for q in batch['questions']]) if batch else {}))

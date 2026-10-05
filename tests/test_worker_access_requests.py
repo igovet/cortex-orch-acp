@@ -14,9 +14,9 @@ from cortex_runtime.acp import questions_store
 from cortex_runtime.acp.orchestrating_runtime import OrchestratingRuntime, PromptOutcome
 from cortex_runtime.bootstrap import bootstrap_task
 from cortex_runtime.contracts import StoreError
-from cortex_runtime.delegation import mcp_tools
+from cortex_runtime.delegation import capacity, mcp_tools
 from cortex_runtime.delegation.live_adapters import _jail_for
-from cortex_runtime.orchestration import access, policy, worker_waits
+from cortex_runtime.orchestration import access, policy, question_batches, worker_waits
 from cortex_runtime.orchestration.sandbox import engine_jail
 from cortex_runtime.orchestration.state import TaskMachine, event
 from cortex_runtime.portable.engine_contract import StopReason
@@ -26,6 +26,19 @@ from cortex_runtime.store import Store
 from cortex_runtime import task_workspace
 from orchestration_fakes import FakeConfigSnapshotSource, FakeSessionRuntime, FakeWorkspace
 from test_worker_wait_continuation import bound, _plan
+
+
+@pytest.fixture(autouse=True)
+def fast_access_backoff(monkeypatch):
+    # Integration cases retain the bounded number of checks without wall-clock
+    # sleeps; the deadline regression below exercises the production delays.
+    monkeypatch.setattr(access, 'RETRY_DELAYS_SECONDS', (0, 0, 0))
+
+
+def _exhaust(store, channel):
+    for _ in access.RETRY_DELAYS_SECONDS:
+        access.reconcile(store, channel.task_id)
+    return _wait(store, channel)
 
 
 def _request(store, channel, paths, key='access'):
@@ -162,13 +175,42 @@ def test_conflict_holds_until_observed_release_then_same_attempt_claims(bound):
     assert json.loads(decision)['status'] == 'granted'
     assert claimed['attempt_id'] == workers[0].attempt_id
     assert claimed['channel_id'] == workers[0].channel_id
-    assert questions_store.get(store, wait['question_id']).status == 'cancelled'
-    assert questions_store.get(store, wait['question_id']).answer_text is None
+    assert questions_store.get(store, wait['question_id']) is None  # no user question was created
     assert not questions_store.answer(store, wait['question_id'], 'late', 'text')
     assert _claim(store, coordinator) is None
     mcp_tools.dispatch(store, workers[0], 'project_write',
                        dict(path='part1.txt', content='new logical action', expected_sha256='absent', request_key='new-write'))
     assert machine.context(coordinator.task_id)['state'] == 'EXECUTING'
+
+
+def test_dead_worker_of_abandoned_task_releases_scope_only_on_confirmed_exit(bound):
+    store, machine, coordinator, workers = bound
+    with store.connection() as db:
+        ref1 = db.execute('SELECT idempotency_key FROM delegation_provisioning WHERE attempt_id=?',
+                          (workers[1].attempt_id,)).fetchone()[0]
+    machine.move(coordinator.task_id, 'BLOCKED', blocker='abandoned')
+    with store.connection() as db:
+        db.execute("UPDATE runtime_nodes SET status='failed' WHERE node_id='N1'")
+        db.commit()
+
+    def held():
+        with store.connection() as db:
+            return access.conflicting(db, coordinator.task_id, 'other', ['part1.txt'])
+
+    # No WORKER_RELEASED and no confirmed exit: the scope stays held.
+    assert held()
+    cap = capacity.reserve(store, 'cn_test', coordinator.task_id, workers[1].attempt_id, 'worker', assignment_ref=ref1)
+    assert held()
+    capacity.mark_ambiguous(store, cap)
+    assert held()
+    with store.connection() as db:
+        db.execute("UPDATE capacity_reservations SET state='released',release_observation='process_exited' "
+                   "WHERE reservation_id=?", (cap,))
+        db.commit()
+    assert not held()
+    # A later live reservation for the same attempt holds the scope again.
+    capacity.reserve(store, 'cn_test', coordinator.task_id, workers[1].attempt_id, 'worker', assignment_ref=ref1)
+    assert held()
 
 
 def test_concurrent_grants_serialize_and_fifo_prevents_overtaking(bound):
@@ -188,9 +230,10 @@ def test_conflict_answer_is_revalidation_not_approval_and_cycle_can_exit(bound):
     store, machine, coordinator, workers = bound
     _request(store, workers[0], ['part1.txt'])
     _request(store, workers[1], ['part0.txt'])
+    _exhaust(store, coordinator)
     waits = worker_waits.list_waits(store, coordinator.task_id)
     assert all(w['status'] == 'open' for w in waits)
-    assert questions_store.answer(store, waits[0]['question_id'], 'retry', 'text')
+    assert questions_store.answer(store, waits[0]['question_id'], access.DECLINE_OPTION, 'text')
     claimed = worker_waits.claim(store, coordinator.task_id, waits[0]['assignment_ref'], 'es_test0')
     assert json.loads(claimed[1])['status'] == 'denied'
     # Denial leaves a healthy worker able to use the explicit replan fallback.
@@ -206,6 +249,9 @@ def test_stop_and_new_policy_win_before_continuation(bound):
     policy.steer(store, coordinator.task_id, 'deny-write: part1.txt', 'queued')
     _release(store, workers[1])
     access.reconcile(store, coordinator.task_id)
+    wait = _wait(store, coordinator)
+    assert wait['retry_at'] is None and wait['reason'] == 'deny_write_policy'
+    assert questions_store.answer(store, wait['question_id'], access.RETRY_OPTION, 'text')
     assert _wait(store, coordinator)['access_decision']['status'] == 'denied'
     machine.cancel(coordinator.task_id)
     assert _claim(store, coordinator) is None
@@ -343,15 +389,13 @@ def test_real_production_jail_already_writes_sixth_file_and_keeps_denial(bound, 
     assert _request(store, workers[0], ['sixth'])['enforcement'] == 'already_project_writable'
 
 
-@pytest.mark.parametrize('mode', ['grant', 'denial', 'conflict', 'external_conflict'])
+@pytest.mark.parametrize('mode', ['grant', 'denial', 'conflict', 'external_conflict', 'external_declined'])
 def test_access_decision_continues_same_session_through_result_review_verification(tmp_path, mode):
     store = Store(tmp_path / '.cortex', project_root=tmp_path)
     boot = bootstrap_task(store, SourceEvent(origin='flow-access', event_id=mode), 'Implement', 'owner')
     identities, prompts = [], []
     pending = threading.Event()
-    declined = threading.Event()
-    releaser = None
-    if mode == 'external_conflict':
+    if mode in {'external_conflict', 'external_declined'}:
         machine = TaskMachine(store)
         other_boot = bootstrap_task(store, SourceEvent(origin='flow-access', event_id='external'), 'Other', 'owner')
         machine.create(other_boot.task_id, 'Other')
@@ -361,16 +405,6 @@ def test_access_decision_continues_same_session_through_result_review_verificati
         machine.submit_plan(other, plan, 'plan')
         machine.move(other_boot.task_id, 'EXECUTING')
         external = machine.claim_ready(other_boot.task_id, 'coordinator')[0]
-        def release_after_decline():
-            assert declined.wait(10)
-            # Exercise the all-parked scheduler path before the scripted
-            # external runtime observes its holder's release.
-            threading.Event().wait(.4)
-            with store.connection() as db:
-                event(db, other_boot.task_id, 'WORKER_RELEASED', dict(assignment_ref=external['assignment_ref']))
-                db.commit()
-        releaser = threading.Thread(target=release_after_decline)
-        releaser.start()
     def router(store, channel, ref, launch, instructions):
         def behavior(store, channel, ref, message, call_index):
             if channel.role == 'coordinator':
@@ -387,7 +421,7 @@ def test_access_decision_continues_same_session_through_result_review_verificati
                 prompts.append(message)
                 if call_index == 0:
                     path = ('extra' if mode == 'grant' else '.cortex/private' if mode == 'denial'
-                            else 'external' if mode == 'external_conflict' else 'part1.txt')
+                            else 'external' if mode in {'external_conflict', 'external_declined'} else 'part1.txt')
                     receipt = _request(store, channel, [path])
                     pending.set()
                     if mode != 'grant':
@@ -411,11 +445,27 @@ def test_access_decision_continues_same_session_through_result_review_verificati
     runtime = OrchestratingRuntime(store, engine, FakeWorkspace(), FakeConfigSnapshotSource(), allow_unqualified_delivery=True)
     class Elicitor:
         def elicit(self, session_id, question, options):
-            declined.set()
-            return 'retry' if mode == 'denial' else None
+            assert options == [access.RETRY_OPTION, access.DECLINE_OPTION]
+            if mode == 'external_conflict':
+                # Bounded retries have exhausted. The real selected option
+                # revalidates after an observed external release.
+                with store.connection() as db:
+                    event(db, other_boot.task_id, 'WORKER_RELEASED',
+                          dict(assignment_ref=external['assignment_ref']))
+                    db.commit()
+                return access.RETRY_OPTION
+            return access.RETRY_OPTION if mode in {'denial', 'conflict'} else None
     try:
         runtime.start_prompt(boot.task_id, 'incoming', 'Implement', lambda text: True, threading.Event(),
                              host_elicitor=Elicitor())
+        if mode == 'external_declined':
+            context = TaskMachine(store).context(boot.task_id)
+            assert context['state'] == 'EXECUTING'
+            wait = worker_waits.list_waits(store, boot.task_id)[-1]
+            assert wait['status'] == 'open' and wait['retry_at'] is None
+            assert questions_store.get(store, wait['question_id']).status == 'open'
+            assert len(prompts) == 1 and not (tmp_path / 'extra').exists()
+            return  # a declined card ends the host turn, not the healthy worker
         assert TaskMachine(store).context(boot.task_id)['state'] == 'COMPLETED'
         assert (tmp_path / 'extra').read_text() == 'done'
         assert len(set(identities)) == 1 and len(prompts) == (1 if mode == 'grant' else 2)
@@ -424,10 +474,6 @@ def test_access_decision_continues_same_session_through_result_review_verificati
             assert not db.execute("SELECT 1 FROM runtime_events WHERE type='ASSIGNMENT_RETRIED'").fetchone()
     finally:
         runtime.shutdown()
-        if releaser:
-            declined.set()
-            releaser.join(timeout=10)
-            assert not releaser.is_alive()
 
 
 def test_unbound_running_node_reserves_scope_and_excludes_stale_revisions(bound):
@@ -449,3 +495,234 @@ def test_unbound_running_node_reserves_scope_and_excludes_stale_revisions(bound)
     # stale unbound revisions must not reserve the same path forever.
     assert machine.claim_ready(coordinator.task_id, coordinator.channel_id) == []
     assert machine.context(coordinator.task_id)['nodes'][1]['status'] == 'pending'
+
+
+def _card_runtime(store):
+    return OrchestratingRuntime(store, FakeSessionRuntime(store, lambda *args: None), FakeWorkspace(),
+                                FakeConfigSnapshotSource(), allow_unqualified_delivery=True)
+
+
+def test_retry_deadlines_later_success_and_no_card(bound, monkeypatch):
+    from datetime import datetime, timedelta, timezone
+    store, _, coordinator, workers = bound
+    monkeypatch.setattr(access, 'RETRY_DELAYS_SECONDS', (1, 2, 4))
+    clock = [datetime.now(timezone.utc)]
+    monkeypatch.setattr(access, 'now', lambda: clock[0].isoformat(timespec='microseconds'))
+    original = access.predicate
+    checks = []
+    def counted(*args):
+        checks.append(clock[0])
+        return original(*args)
+    monkeypatch.setattr(access, 'predicate', counted)
+    _request(store, workers[0], ['part1.txt'])
+    runtime = _card_runtime(store)
+    cards = []
+    class Elicitor:
+        def elicit(self, *args):
+            cards.append(args)
+    try:
+        first = _wait(store, coordinator)
+        assert first['retry_attempt'] == 0 and first['retry_at']
+        for _ in range(3):
+            runtime._service_worker_questions(coordinator.task_id, 'incoming', lambda t: True, 'en', Elicitor())
+        assert len(checks) == 1 and not cards
+        assert not questions_store.list_open(store, coordinator.task_id)
+        clock[0] += timedelta(seconds=1)
+        runtime._service_worker_questions(coordinator.task_id, 'incoming', lambda t: True, 'en', Elicitor())
+        second = _wait(store, coordinator)
+        assert second['retry_attempt'] == 1
+        assert datetime.fromisoformat(second['retry_at']) == clock[0] + timedelta(seconds=2)
+        _release(store, workers[1])
+        clock[0] += timedelta(seconds=1)
+        access.reconcile(store, coordinator.task_id)
+        assert _wait(store, coordinator)['status'] == 'open'
+        clock[0] += timedelta(seconds=1)
+        runtime._service_worker_questions(coordinator.task_id, 'incoming', lambda t: True, 'en', Elicitor())
+        claimed, answer = _claim(store, coordinator)
+        assert json.loads(answer)['status'] == 'granted'
+        assert claimed['engine_session_ref'] == 'es_test0' and not cards
+        assert not questions_store.list_open(store, coordinator.task_id)
+        with store.connection() as db:
+            assert not db.execute("SELECT 1 FROM pending_questions WHERE answer_text IS NOT NULL").fetchone()
+    finally:
+        runtime.shutdown()
+
+
+def test_exhaustion_is_bounded_persisted_and_validated(bound):
+    store, _, coordinator, workers = bound
+    _request(store, workers[0], ['part1.txt'])
+    wait = _exhaust(store, coordinator)
+    assert wait['status'] == 'open' and wait['retry_at'] is None
+    assert wait['retry_attempt'] == 2
+    assert question_batches.forms(worker_waits.question_form(wait))
+    row = questions_store.get(store, wait['question_id'])
+    assert row.status == 'open' and row.options == [access.RETRY_OPTION, access.DECLINE_OPTION]
+    assert 'part1.txt' in row.text and 'another worker' in row.text
+    assert 'Justification (untrusted worker text)' in row.text
+    _release(store, workers[1])
+    for _ in range(5):
+        access.reconcile(store, coordinator.task_id)
+    assert _wait(store, coordinator) == wait  # no indefinite post-exhaustion auto-grant
+
+
+@pytest.mark.parametrize('answer', [access.DECLINE_OPTION, 'custom unrecognized answer'])
+def test_decline_and_free_text_never_grant_even_after_release(bound, answer):
+    store, _, coordinator, workers = bound
+    _request(store, workers[0], ['part1.txt'])
+    wait = _exhaust(store, coordinator)
+    _release(store, workers[1])
+    assert questions_store.answer(store, wait['question_id'], answer, 'elicitation')
+    assert json.loads(_claim(store, coordinator)[1]) == dict(
+        status='denied', request_id=wait['request_id'], reason='alternative_selected')
+    with store.connection() as db:
+        assert not access.grants(db, coordinator.task_id, wait['assignment_ref'])
+
+
+def test_retry_option_restarts_cycle_and_second_card_has_new_identity(bound):
+    store, _, coordinator, workers = bound
+    _request(store, workers[0], ['part1.txt'])
+    first = _exhaust(store, coordinator)
+    assert questions_store.answer(store, first['question_id'], access.RETRY_OPTION, 'text')
+    pending = _wait(store, coordinator)
+    assert pending['status'] == 'open' and pending['retry_attempt'] == 0 and pending['retry_at']
+    assert _claim(store, coordinator) is None
+    second = _exhaust(store, coordinator)
+    assert second['question_id'] != first['question_id'] and second['wait_id'] == first['wait_id']
+    assert not questions_store.answer(store, first['question_id'], access.DECLINE_OPTION, 'text')
+    _release(store, workers[1])
+    assert questions_store.answer(store, second['question_id'], access.RETRY_OPTION, 'text')
+    assert json.loads(_claim(store, coordinator)[1])['status'] == 'granted'
+
+
+@pytest.mark.parametrize('path', ['.cortex/private', 'a' * 512])
+def test_nonretryable_question_is_immediate_and_display_bounded(bound, path):
+    store, _, coordinator, workers = bound
+    if not path.startswith('.cortex'):
+        policy.steer(store, coordinator.task_id, 'deny-write: ' + path, 'deny')
+    mcp_tools.dispatch(store, workers[0], 'access_request', dict(
+        paths=[path], reason='x' + '\n' * 3999, request_key='bounded'))
+    wait = _wait(store, coordinator)
+    assert wait['retry_at'] is None and 'retry_attempt' not in wait
+    form = worker_waits.question_form(wait)
+    assert question_batches.forms(form) and len(form['question']) <= 4000
+
+
+@pytest.mark.parametrize('exhausted', [False, True])
+def test_authority_loss_cancels_retry_or_card(bound, exhausted):
+    store, _, coordinator, workers = bound
+    _request(store, workers[0], ['part1.txt'])
+    if exhausted:
+        _exhaust(store, coordinator)
+    wait = _wait(store, coordinator)
+    with store.connection() as db:
+        db.execute('UPDATE trusted_channels SET revoked_at=? WHERE channel_id=?',
+                   (store._now(), workers[0].channel_id))
+        db.commit()
+    access.reconcile(store, coordinator.task_id)
+    assert _wait(store, coordinator)['status'] == 'cancelled'
+    question = questions_store.get(store, wait['question_id'])
+    assert question is None or question.status == 'cancelled'
+    assert _claim(store, coordinator) is None
+
+
+def test_optionless_worker_wait_is_rejected_before_card(bound):
+    store, _, coordinator, workers = bound
+    receipt = mcp_tools.dispatch(store, workers[0], 'ask_question', dict(
+        question='Which target?', options=['small', 'large'], request_key='question'))
+    with store.connection() as db:
+        wait = worker_waits.current(db, coordinator.task_id, _wait(store, coordinator)['assignment_ref'])
+        del wait['options']
+        worker_waits._change(db, wait, 'open')
+        db.commit()
+    runtime = _card_runtime(store)
+    cards = []
+    try:
+        with pytest.raises(StoreError, match='question_options_required'):
+            runtime._service_worker_questions(coordinator.task_id, 'incoming', cards.append, 'en', None)
+        assert not cards and not runtime._worker_question_deliveries
+    finally:
+        runtime.shutdown()
+
+
+def test_legacy_optionless_access_wait_is_replaced_safely(bound):
+    store, _, coordinator, workers = bound
+    _request(store, workers[0], ['.cortex/private'])
+    old = _wait(store, coordinator)
+    with store.connection() as db:
+        legacy = dict(old)
+        for key in ('options', 'retry_at'):
+            del legacy[key]
+        worker_waits._change(db, legacy, 'open')
+        db.commit()
+    access.reconcile(store, coordinator.task_id)
+    replacement = _wait(store, coordinator)
+    assert replacement['question_id'] != old['question_id']
+    assert questions_store.get(store, old['question_id']).status == 'cancelled'
+    assert question_batches.forms(worker_waits.question_form(replacement))
+
+
+def test_second_exhausted_cycle_reaches_a_second_valid_card(bound):
+    store, _, coordinator, workers = bound
+    _request(store, workers[0], ['part1.txt'])
+    _exhaust(store, coordinator)
+    runtime = _card_runtime(store)
+    shown = []
+    class Elicitor:
+        def elicit(self, session_id, question, options):
+            shown.append((question, options))
+            return access.RETRY_OPTION if len(shown) == 1 else access.DECLINE_OPTION
+    try:
+        runtime._service_worker_questions(coordinator.task_id, 'incoming', lambda t: True, 'en', Elicitor())
+        for future in list(runtime._worker_question_deliveries.values()):
+            future.result(timeout=5)
+        assert _wait(store, coordinator)['retry_at']
+        _exhaust(store, coordinator)
+        runtime._service_worker_questions(coordinator.task_id, 'incoming', lambda t: True, 'en', Elicitor())
+        for future in list(runtime._worker_question_deliveries.values()):
+            future.result(timeout=5)
+        assert len(shown) == 2
+        assert all(options == [access.RETRY_OPTION, access.DECLINE_OPTION] for _, options in shown)
+        assert json.loads(_claim(store, coordinator)[1])['status'] == 'denied'
+    finally:
+        runtime.shutdown()
+
+
+def test_concurrent_reconciliation_does_not_duplicate_grant(bound):
+    store, _, coordinator, workers = bound
+    _request(store, workers[0], ['part1.txt'])
+    _release(store, workers[1])
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+        list(pool.map(lambda _: access.reconcile(store, coordinator.task_id), range(2)))
+    wait = _wait(store, coordinator)
+    with store.connection() as db:
+        assert len(access.grants(db, coordinator.task_id, wait['assignment_ref'])) == 1
+        assert db.execute("SELECT count(*) FROM runtime_events WHERE type='ACCESS_DECIDED'").fetchone()[0] == 1
+    assert json.loads(_claim(store, coordinator)[1])['status'] == 'granted'
+
+
+def test_backoff_checks_once_per_deadline_without_catchup_loop(bound, monkeypatch):
+    from datetime import datetime, timedelta, timezone
+    store, _, coordinator, workers = bound
+    monkeypatch.setattr(access, 'RETRY_DELAYS_SECONDS', (1, 2, 4))
+    clock = [datetime.now(timezone.utc)]
+    monkeypatch.setattr(access, 'now', lambda: clock[0].isoformat(timespec='microseconds'))
+    original = access.predicate
+    checks = []
+    def counted(*args):
+        checks.append(clock[0])
+        return original(*args)
+    monkeypatch.setattr(access, 'predicate', counted)
+    _request(store, workers[0], ['part1.txt'])
+    for attempt, delay in enumerate((1, 2, 4)):
+        wait = _wait(store, coordinator)
+        assert wait['retry_attempt'] == attempt
+        assert datetime.fromisoformat(wait['retry_at']) == clock[0] + timedelta(seconds=delay)
+        # A stalled scheduler runs a single due check, then spaces the next
+        # one relative to the observed check time rather than catching up.
+        clock[0] += timedelta(seconds=delay + 10)
+        access.reconcile(store, coordinator.task_id)
+        assert len(checks) == attempt + 2
+        access.reconcile(store, coordinator.task_id)
+        assert len(checks) == attempt + 2
+    wait = _wait(store, coordinator)
+    assert wait['retry_at'] is None and question_batches.forms(worker_waits.question_form(wait))

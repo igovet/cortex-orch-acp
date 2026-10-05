@@ -497,12 +497,12 @@ def run(runtime, task_id, session_id, channel, session_ref, content, emit_update
                 live = [n for n in nodes if n['status'] == 'running' and n['assignment_ref'] not in failed_refs]
                 with runtime._lock:
                     in_turn = bool(runtime._worker_turns_in_flight & waiting)
-                    presented = all(w['wait_id'] in runtime._worker_question_deliveries
-                                    and runtime._worker_question_deliveries[w['wait_id']].done()
+                    presented = all(w['question_id'] in runtime._worker_question_deliveries
+                                    and runtime._worker_question_deliveries[w['question_id']].done()
                                     for w in open_waits)
                 if (live and all(n['assignment_ref'] in waiting for n in live)
                         and presented and not question_delivery_active and not in_turn
-                        and not any(w.get('kind') == 'access' and w.get('reason') == 'active_writer_conflict'
+                        and not any(w.get('kind') == 'access' and w.get('retry_at')
                                     for w in open_waits)):
                     # Text-only/declined/timed-out host: end only the host turn.
                     # Retained runners, sessions and reservations wait for an exact answer.

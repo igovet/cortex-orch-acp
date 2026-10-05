@@ -421,11 +421,37 @@ to the worker's declared assignment scope. The runtime grants the complete
 request automatically only when all paths pass safety and role checks, queued
 and applied owner deny-write restrictions, and current writer-reservation
 checks. Existing grants and plan scope remain unchanged; no partial grant occurs.
-A path-policy denial or active-writer conflict becomes a local wait for safe
-revalidation or a user decision, and the result is delivered in the same healthy
-session. Requesting access neither writes a file nor makes user text an
-authorization. After denial, the worker can use an allowed alternative or
-submit the existing scope/replan request if the task decomposition must change.
+A refusal parks only that assignment. Active-writer conflicts get three runtime
+rechecks after delays of 1, 2 and 4 seconds (module-level, test-injectable
+`RETRY_DELAYS_SECONDS`); deadlines and attempt indices persist in wait events.
+The existing scheduler/retained runner reconciles due checks without sleeping
+under a database lock. Scheduling may deliver a check later than its deadline;
+there is no catch-up busy loop. A successful check grants transactionally and
+continues the same healthy session without a user question or fabricated answer.
+Authority loss cancels the wait. Writer conflicts no longer wait indefinitely
+for release: after the bounded cycle, automatic checking stops and a user decision
+is required.
+
+Private/non-canonical/unsafe paths, owner deny-write policy and read-only roles
+skip automatic retries because retrying cannot legitimately change those
+restrictions. These reasons, or an exhausted writer-conflict cycle, produce a
+validated question with **Retry access check** and **Continue without this access**.
+Its short final line identifies path labels and the plain-language reason;
+the separately labeled justification is untrusted worker text. Long display
+previews are explicitly shortened; exact paths and justification stay in the
+access ledger. Every worker card passes the same option validation as
+`ask_question`; old option-less access waits are retired and rebuilt safely.
+
+The retry option (or the legacy free-text `retry`) performs fresh policy checks:
+a grantable request succeeds, a remaining writer conflict starts another bounded
+cycle, and a remaining path/policy/role refusal returns a denial after that
+single check. The continue option and unrecognized custom text return denial,
+even if the paths have since become grantable. Each exhausted cycle has a new
+question identity so its selectable card can be delivered once. No answer
+overrides private paths, deny-write policy, read-only roles or live writers.
+Requesting access neither writes a file nor makes user text an authorization.
+After denial, the worker can use an allowed alternative or submit the existing
+scope/replan request if the task decomposition must change.
 
 These declared-scope extensions coordinate runtime writers; they do not
 dynamically remount or widen the OS jail. In the current launch boundary,

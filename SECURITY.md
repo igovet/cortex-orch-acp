@@ -162,7 +162,14 @@ narrower. That declared area coordinates parallel writers; it is not a gateway
 write boundary. The gateway enforces assignment/role authority, user-protected
 paths, private-path restrictions and path safety, but does not compare ordinary
 writes with the declared work area. An `access_request` reserves additional
-work for coordination; it does not remount or widen the OS jail. The engine
+work for coordination; it does not remount or widen the OS jail. Writer conflicts
+receive bounded delayed runtime rechecks (1/2/4 seconds), then validated selectable
+retry/continue options rather than an indefinite automatic release wait. Private,
+unsafe, deny-write and read-only refusals ask immediately. Retry requests run
+fresh policy checks; neither an option nor custom text overrides a restriction,
+and unrecognized text declines access. Retry scheduling is retained runtime state,
+not a synthesized user answer; authority loss cancels the wait. See
+[the access flow](docs/acp/orchestration.md#worker-questions-and-additional-access). The engine
 jail also leaves the host's real `/tmp` writable and the engine state directory
 writable apart from protected session-configuration files, so these locations
 are residual write surfaces, not denied by the project gateway. `.cortex` is hidden (for a task bound to a linked worktree, the jail root is that worktree
