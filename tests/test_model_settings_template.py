@@ -22,9 +22,9 @@ def test_public_asset_preserves_exact_baseline_tiers_efforts_and_coordinator():
     assert template["coordinator"] == {"engine": "claude-agent-acp", "model": "opus[1m]",
                                        "parameters": {"thought_level": "medium"}}
     assert template["language"] == "ru"
-    # Complete portable production default snapshot, saved 2026-10-05 12:58 UTC.
+    # Complete portable production default snapshot, saved 2026-10-05 14:45 UTC.
     canonical = json.dumps(template, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
-    assert hashlib.sha256(canonical.encode()).hexdigest() == "94d37ac210577a9684f54a2a0b52214d8c30bf64a4dcbef1dc7a2e54514d264b"
+    assert hashlib.sha256(canonical.encode()).hexdigest() == "a9a7d7c1504efb4f0a7bc713f985d2a68d5ca80c561f9ad918c07137be217bb4"
     expected = {
         ("claude-agent-acp", "default"): ("deep",),
         ("claude-agent-acp", "opus[1m]"): ("flagship", "deep"),

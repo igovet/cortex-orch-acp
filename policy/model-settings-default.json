@@ -113,7 +113,7 @@
               "review",
               "analysis"
             ],
-            "preferred_when": null,
+            "preferred_when": "Backend - only very complex point tasks.",
             "request_names": null
           }
         }
@@ -191,7 +191,7 @@
               "operations",
               "analysis"
             ],
-            "preferred_when": "Frontend - only if this work does not concern the design of layouts.",
+            "preferred_when": "Frontend - only if this work does not concern the design of layouts.\nBackend - in deep mode need use only hight/xhigh effort.",
             "request_names": null
           }
         }
