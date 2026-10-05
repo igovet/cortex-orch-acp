@@ -27,6 +27,7 @@ from .store import Store, private_directory
 from .project_storage import migrate_legacy_project_storage, project_store_directory, canonical_project
 from .trusted_channel import resolve_channel
 from .ownership import current_owner_epoch
+from .observability.wire_trace import get_trace
 from .diagnostic_boundary import emit_bounded_diagnostic, run_passive_diagnostic
 
 PLUGIN = Path(__file__).resolve().parents[2]
@@ -184,7 +185,32 @@ class Server:
         self._resolved_channel = resolve_channel(store, channel_id, secret)
         return self._resolved_channel
 
+    def _wire_trace_identity(self):
+        context = self._resolved_channel
+        return dict(channel_id=self.channel_credentials[0] if self.channel_credentials else None,
+                    task_id=getattr(context, "task_id", None),
+                    assignment_ref=getattr(context, "assignment_id", None),
+                    attempt_id=getattr(context, "attempt_id", None))
+
     def dispatch(self, method, params, request_id=None):
+        trace = get_trace()
+        if trace is None:
+            return self._dispatch(method, params, request_id)
+        trace.record("mcp", "in", dict(jsonrpc="2.0", id=request_id, method=method, params=params),
+                     **self._wire_trace_identity())
+        try:
+            result = self._dispatch(method, params, request_id)
+        except Exception as error:
+            trace.record("mcp", "out", dict(jsonrpc="2.0", id=request_id,
+                         error=dict(code=error.code if isinstance(error, ProtocolError) else -32603,
+                                    message=error.message if isinstance(error, ProtocolError) else INTERNAL_FAILURE_MESSAGE)),
+                         **self._wire_trace_identity())
+            raise
+        trace.record("mcp", "out", dict(jsonrpc="2.0", id=request_id, result=result),
+                     **self._wire_trace_identity())
+        return result
+
+    def _dispatch(self, method, params, request_id=None):
         if method == 'initialize':
             if not isinstance(params,dict) or not isinstance(params.get('protocolVersion'),str) or not isinstance(params.get('capabilities'),dict) or not isinstance(params.get('clientInfo'),dict) or any(not isinstance(params['clientInfo'].get(k),str) for k in ('name','version')):
                 raise ProtocolError(-32602,'Invalid initialize parameters. Supply protocolVersion (string), capabilities (object), and clientInfo with name and version strings.')
@@ -401,12 +427,15 @@ def main():
         if not line:
             break
         request_id = None
+        trace = get_trace()
         try:
             if len(line)>MAX_REQUEST_BYTES:
                 while line and not line.endswith(b'\n'):
                     line = sys.stdin.buffer.readline(MAX_REQUEST_BYTES+1)
                 raise ValueError
             item = json.loads(line, object_pairs_hook=reject_duplicates)
+            if trace is not None:
+                trace.record("mcp", "in", item, **server._wire_trace_identity())
             if not isinstance(item, dict) or item.get('jsonrpc')!='2.0' or not isinstance(item.get('method'),str):
                 raise ProtocolError(-32600,'Invalid JSON-RPC request. Use an object with jsonrpc=2.0, a string method, and a string or integer id for requests.')
             request_id = item.get('id')
@@ -415,11 +444,14 @@ def main():
                 raise ProtocolError(-32600,'Request id must be a string of at most 128 characters or an integer; null and boolean ids are not valid MCP request ids.')
             if 'id' not in item:
                 continue
-            result = server.dispatch(item['method'],item.get('params',{}),request_id=request_id)
+            result = server._dispatch(item['method'],item.get('params',{}),request_id=request_id)
             reply = dict(jsonrpc='2.0',id=request_id,result=result)
         except ProtocolError as exc:
             reply = dict(jsonrpc='2.0',id=request_id,error=dict(code=exc.code,message=exc.message))
         except (ValueError, UnicodeError, RecursionError):
+            if trace is not None:
+                trace.record("mcp", "in", {"trace_error": "malformed_or_oversized_frame"},
+                             **server._wire_trace_identity())
             reply = dict(jsonrpc='2.0',id=None,error=dict(code=-32700,message='Cannot parse the request. Send one valid UTF-8 JSON object per line without duplicate keys; keep each line within 2,000,000 bytes. Nothing in this frame was executed.'))
         except Exception:
             _log_unexpected('dispatch')
@@ -427,5 +459,9 @@ def main():
         # One reply that cannot be encoded must never end this process: the
         # engine's MCP client would report every later Cortex call of the
         # session as a closed transport (see encode_reply).
-        sys.stdout.buffer.write(encode_reply(reply))
+        encoded_reply = encode_reply(reply)
+        sys.stdout.buffer.write(encoded_reply)
         sys.stdout.buffer.flush()
+        trace = get_trace()
+        if trace is not None:
+            trace.record("mcp", "out", json.loads(encoded_reply), **server._wire_trace_identity())

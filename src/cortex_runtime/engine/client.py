@@ -76,6 +76,7 @@ class EngineClient:
         on_client_request,
         on_unknown_notification=None,
         logs=None,
+        trace_context=None,
     ):
         self._process = process
         self.correlation = correlation
@@ -95,6 +96,7 @@ class EngineClient:
         self.transport = StdioTransport(
             self._on_message, raw_stdout=process.process.stdin, raw_stdin=process.process.stdout,
             on_writer_closed=self._handle_writer_closed,
+            trace_channel="downstream_acp", trace_context=trace_context,
         )
 
     def start(self) -> "EngineClient":

@@ -153,7 +153,7 @@ def _effort_calls(log_path):
 
 def test_deep_work_moves_off_the_account_above_the_threshold(tmp_path):
     store, channel, provisioning, adapter, connection_a, connection_b, log_a, log_b, project, environ = _setup(tmp_path)
-    _codex_used(connection_a, 90.0)
+    _codex_used(connection_a, 95.0)
     result = provisioning.delegate(channel, "Audit", "Audit it.", "security-auditor", "Report.", "req-1")
     assert result.status == "ready"
     assert "session/new" in [entry["method"] for entry in _read_log(log_b)]
@@ -173,10 +173,10 @@ def test_deep_work_moves_off_the_account_above_the_threshold(tmp_path):
     assert detail["decision_detail"]["route_basis"] == "auto"
     assert detail["decision_detail"]["effort"] == "high"
     decision = detail["decision_detail"]["route_decision"]
-    assert decision["rank_version"] == 9
+    assert decision["rank_version"] == 10
     assert "balance" not in decision
     assert decision["used_percent_compared"] is False
-    assert decision["usage"] == dict(compared=False, margin=10.0, least_used_percent=None)
+    assert decision["usage"] == dict(compared=False, active=False, status="unavailable", threshold=95.0, margin=10.0, least_used_percent=None)
     assert {c["quota_state"] for c in decision["candidates"]} == {"known", "unknown"}
     assert not hasattr(adapter, "_route_inflight")
     adapter.terminate_owned(result.attempt_id)
@@ -188,7 +188,7 @@ def test_crossing_the_hot_band_alone_no_longer_overrides_affinity(tmp_path):
     HOT_PERCENT alone no longer overrides task/model fit."""
     store, channel, provisioning, adapter, connection_a, connection_b, log_a, log_b, project, environ = _setup(tmp_path)
     _routing(project, {"engine_affinity": {"*": "codex-acp"}})
-    _codex_used(connection_a, 90.0)
+    _codex_used(connection_a, 95.0)
     result = provisioning.delegate(channel, "Look", "Find it.", "explorer", "Found.", "req-1")
     assert result.status == "ready"
     assert "session/new" in [entry["method"] for entry in _read_log(log_a)]
@@ -204,7 +204,7 @@ def test_light_work_still_moves_off_the_account_above_the_threshold_on_a_meaning
     the hot account, through the usage-gap signal."""
     store, channel, provisioning, adapter, connection_a, connection_b, log_a, log_b, project, environ = _setup(tmp_path)
     _routing(project, {"engine_affinity": {"*": "codex-acp"}})
-    _codex_used(connection_a, 90.0)
+    _codex_used(connection_a, 95.0)
     _claude_used(connection_b, 10.0, environ)
     result = provisioning.delegate(channel, "Look", "Find it.", "explorer", "Found.", "req-1")
     assert result.status == "ready"
@@ -220,8 +220,8 @@ def test_a_late_quota_tie_breaker_still_moves_work_when_affinity_ties(tmp_path):
     """Debugging has no engine affinity lean (neutral); with no meaningful
     usage gap, the quota band remains a real, if late, tie breaker."""
     store, channel, provisioning, adapter, connection_a, connection_b, log_a, log_b, project, environ = _setup(tmp_path)
-    _codex_used(connection_a, 90.0)
-    _claude_used(connection_b, 84.0, environ)
+    _codex_used(connection_a, 95.0)
+    _claude_used(connection_b, 94.0, environ)
     result = provisioning.delegate(channel, "Debug", "Debug it.", "debugger", "Fixed.", "req-1")
     assert result.status == "ready"
     assert "session/new" in [entry["method"] for entry in _read_log(log_b)]
@@ -314,7 +314,7 @@ def test_an_unavailable_pin_is_refused_not_substituted(tmp_path):
 
 def test_denied_models_are_never_chosen(tmp_path):
     store, channel, provisioning, adapter, connection_a, connection_b, log_a, log_b, project, environ = _setup(tmp_path)
-    _codex_used(connection_a, 90.0)
+    _codex_used(connection_a, 95.0)
     _routing(project, {"deny": ["reviewer-model"]})
     result = provisioning.delegate(channel, "Audit", "Audit it.", "security-auditor", "Report.", "req-1")
     assert result.status == "ready"
@@ -326,7 +326,7 @@ def test_providers_restrict_auto_routing_to_the_listed_engine(tmp_path):
     """Codex is hot and would normally lose the deep-work pick to Claude,
     but 'providers' excludes Claude, so the work stays on Codex instead."""
     store, channel, provisioning, adapter, connection_a, connection_b, log_a, log_b, project, environ = _setup(tmp_path)
-    _codex_used(connection_a, 90.0)
+    _codex_used(connection_a, 95.0)
     _routing(project, {"providers": ["codex-acp"]})
     result = provisioning.delegate(channel, "Audit", "Audit it.", "security-auditor", "Report.", "req-1")
     assert result.status == "ready"
@@ -362,7 +362,7 @@ def test_providers_excluding_every_route_fails_closed(tmp_path):
 def test_connection_without_launch_command_is_skipped(tmp_path):
     """A discovery placeholder must not shadow a launchable ACP connection."""
     store, channel, provisioning, adapter, connection_a, connection_b, log_a, log_b, project, environ = _setup(tmp_path)
-    _codex_used(connection_a, 90.0)
+    _codex_used(connection_a, 95.0)
     placeholder_id = new_connection_id()
     placeholder = replace(
         connection_b, id=placeholder_id, name="discovery-placeholder", launch_command=None,
@@ -819,3 +819,75 @@ def test_legacy_settings_diagnostic_is_not_replaced_by_saved_route_selection(tmp
         adapter._authorize_dispatch(connection_a, row["task_id"], launch, str(project))
     assert error.value.code == "model_policy_migration_required"
     assert _read_log(log_a) == [] and _read_log(log_b) == []
+
+
+@pytest.mark.parametrize("denied", [False, True])
+def test_recorded_nonflagship_request_dispatches_or_refuses_without_substitution(tmp_path, monkeypatch, denied):
+    from cortex_runtime.bootstrap import append_source_event
+    from cortex_runtime.orchestration import state
+    from cortex_runtime.portable.identity import SourceEvent
+    from cortex_runtime.routing import auto_route
+
+    store, channel, provisioning, adapter, a, b, log_a, log_b, project, env = _setup(
+        tmp_path, model_a="gpt-6-sol", model_b="claude-sonnet-5")
+    target = "codex-acp/gpt-6-sol"
+    _routing(project, {"pin": {"*": "claude-agent-acp/claude-sonnet-5"},
+                       "deny": ["gpt-6-sol"] if denied else []})
+    _codex_used(a, 99.0)
+    _claude_used(b, 0.0, env)
+    source = append_source_event(store, SourceEvent(origin="test", event_id="exact-owner"),
+                                 f"Use {target}", channel.task_id)
+    grant = auto_route.user_model_request(store, channel.task_id, target)
+    monkeypatch.setattr(state, "attempt_routing", lambda *_: state.AttemptRouting(
+        True, "normal", target, "User choice.", "codex-acp", grant))
+    if denied:
+        with pytest.raises(PortableError, match="user_requested_route_unavailable"):
+            provisioning.delegate(channel, "Build", "Build it.", "backend-dev", "Done.", "req-strict")
+        assert _read_log(log_a) == [] and _read_log(log_b) == []
+        assert not routing_store.list_audit_for_task(store, channel.task_id)
+    else:
+        result = provisioning.delegate(channel, "Build", "Build it.", "backend-dev", "Done.", "req-strict")
+        assert result.status == "ready"
+        audit = routing_store.list_audit_for_attempt(store, result.attempt_id)[0]
+        assert (audit["engine"], audit["model"]) == ("codex-acp", "gpt-6-sol")
+        assert audit["decision_detail"]["route_basis"] == "auto:user_request"
+        decision = audit["decision_detail"]["route_decision"]
+        assert decision["user_model_request"]["source_ref"] == f"{source.report_id}:-1"
+        assert _read_log(log_b) == [] and _effort_calls(log_a)[-1]["params"]["value"] == "high"
+        adapter.terminate_owned(result.attempt_id)
+
+
+def test_coordinator_only_profile_cannot_silently_replace_user_model(tmp_path, monkeypatch):
+    from cortex_runtime.orchestration import state
+    from cortex_runtime.configuration.policy import RouteProfile
+
+    store, channel, provisioning, adapter, a, b, log_a, log_b, project, env = _setup(tmp_path)
+    revision = ConfigurationService(store).current(channel.task_id)
+    profile = RouteProfile(role_routes={"worker-backend-dev": {revision["route_id"]}})
+    monkeypatch.setattr(adapter, "_dispatch_configuration", lambda _: (revision, profile))
+    grant = dict(source_ref="fixture-owner", family="claude-agent-acp/reviewer-model", matched="reviewer-model")
+    monkeypatch.setattr(state, "attempt_routing", lambda *_: state.AttemptRouting(
+        False, "normal", "claude-agent-acp/reviewer-model", "User choice.", None, grant))
+    launch = dict(task_id=channel.task_id, attempt_id="requested-attempt",
+                  assignment_id="requested-assignment", role_id="worker-backend-dev")
+    with pytest.raises(PortableError, match="user_requested_route_unavailable"):
+        adapter._resolve_runtime_route(launch, str(project))
+    assert not launch.get("resolved_connection_id")
+    assert _read_log(log_a) == [] and _read_log(log_b) == []
+
+
+@pytest.mark.parametrize("used,expected_engine", [(94.999, "codex-acp"), (95.0, "claude-agent-acp")])
+def test_usage_boundary_reaches_real_dispatch(tmp_path, used, expected_engine):
+    store, channel, provisioning, adapter, a, b, log_a, log_b, project, env = _setup(
+        tmp_path, model_a="gpt-5.6-terra", model_b="claude-sonnet-5")
+    _codex_used(a, used)
+    _claude_used(b, 0.0, env)
+    result = provisioning.delegate(channel, "Build", "Build it.", "backend-dev", "Done.", "boundary")
+    try:
+        audit = routing_store.list_audit_for_attempt(store, result.attempt_id)[0]
+        assert audit["engine"] == expected_engine
+        usage = audit["decision_detail"]["route_decision"]["usage"]
+        assert usage["active"] is (used >= 95.0)
+        assert _read_log(log_a if expected_engine == "claude-agent-acp" else log_b) == []
+    finally:
+        adapter.terminate_owned(result.attempt_id)

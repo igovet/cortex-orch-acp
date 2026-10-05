@@ -933,6 +933,12 @@ class EngineProcess:
             # to Claude's own ceiling (2^31-1 ms, ~24.8 days).
             process_env["CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT"] = "0"
             process_env["MCP_TOOL_TIMEOUT"] = "2147483647"
+        from ..observability.wire_trace import get_trace
+        trace = get_trace()
+        if trace is not None:
+            # Credential references have now been resolved for this launch.
+            # Teach redaction their literals without ever tracing the environment.
+            trace.learn_environment(process_env)
         self.state = ProcessObservation.STARTING
         self._exit_code = None
         self._exited_event = threading.Event()

@@ -598,7 +598,9 @@ test("engines & models: every engine and model is a labelled switch with full id
     assert.ok(typeof element.props.accessibilityLabel === "string" && element.props.accessibilityLabel.length > 0, "unlabelled button");
     assert.ok(["button", "radio", "checkbox"].includes(String(element.props.accessibilityRole)));
   }
-  assert.ok(!elements.some((element) => element.type === "TextInput" && element.props.multiline === true));
+  // The only free text here is each model's owner-written preference condition.
+  assert.ok(elements.filter((element) => element.type === "TextInput" && element.props.multiline === true)
+    .every((element) => /^Prefer .+ when$/.test(String(element.props.accessibilityLabel))));
   assert.ok(!screen.has("Use claude-agent-acp/opus[1m] for automatic ranking"));
   assert.equal(screen.find("Automatic routing may use Claude (claude-agent-acp)", "Switch").props.value, false);
   assert.equal(screen.find("Use Claude (claude-agent-acp) in Cortex", "Switch").props.value, true, "automatic routing is not disabling");
@@ -1006,6 +1008,20 @@ test("exact model policy controls edit arbitrary withdrawn IDs and preserve unsu
   assert.deepEqual(saved.models["codex-acp"].policy["ARBITRARY@9"], { ...rules.models["codex-acp"].policy["ARBITRARY@9"], effort_floor: "high" });
   assert.equal(saved.model_policy_version, 2);
   assert.ok(screen.texts().some((text) => text.includes("future is not supported here; kept unchanged")));
+});
+
+test("preferred work kinds are chosen from the list and the preference condition is free text", async () => {
+  const data = fixtures();
+  const rules = data.routing.sources.find((source) => source.source === "user")!.rules as any;
+  rules.models = { "codex-acp": { auto: ["ARBITRARY@9"], tiers: { "ARBITRARY@9": "standard" }, policy: { "ARBITRARY@9": { preferred_for: ["review"] } } } };
+  const screen = await openScreen(data); await screen.section("Routing");
+  assert.ok(!screen.has("preferred_for for codex-acp/ARBITRARY@9 1"), "no free-text entries for work kinds");
+  await screen.press("preferred_for for codex-acp/ARBITRARY@9: code");
+  screen.find("preferred_when for codex-acp/ARBITRARY@9", "TextInput").props.onChangeText("Frontend changes without design work");
+  await screen.runtime.settle();
+  await screen.press("Save user routing");
+  assert.deepEqual((screen.updates[0].rules as any).models["codex-acp"].policy["ARBITRARY@9"],
+    { preferred_for: ["review", "code"], preferred_when: "Frontend changes without design work" });
 });
 
 test("portable ambiguity and missing policy diagnostics survive rendering without substituting a model", async () => {

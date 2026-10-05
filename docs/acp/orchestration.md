@@ -123,7 +123,22 @@ reviewer approved. The runtime then records `REVIEW_NOT_REQUIRED` with the reaso
 and digest, projects it into the pipeline's "Independent review" section, and goes
 straight to verification, which binds to that digest. Any other observation, an
 unavailable observation, or a revision that already has a reviewer (a fix cycle)
-schedules review. Retried nodes and fix nodes are covered because the decision
+schedules review. The controller makes this decision as soon as every execution
+node has an accepted completed result; it does not wait for result-bearing worker
+engine turns to finish. Result acceptance revokes the exact attempt's worker MCP
+channels transactionally with the node result. New authenticated wire calls,
+including result replays, are then refused as `channel_revoked`; the durable
+result receipt remains available to runtime recovery without republishing.
+Lingering engines still consume
+capacity until their exit is confirmed, so a full session or connection can
+queue the reviewer. Review remains independent and digest-bound; MCP revocation
+does not intercept native filesystem edits, which still invalidate the review
+binding. A late engine failure, timeout or cancellation does not replace an
+accepted result or authorize a retry of that completed node. Verification and
+final completion gates are unchanged, including confirmed absence of live worker
+sessions at completion.
+
+Retried nodes and fix nodes are covered because the decision
 compares the whole project, not individual worker claims. No model argument or
 hint can waive review; `EXECUTING → VERIFYING` is refused without the runtime's own
 record. A review result binds to the project digest recorded in `REVIEW_STARTED`.
@@ -258,6 +273,37 @@ every check's recorded `outcome` with its `claimed_outcome`/`evidence_gap`, and
 `call_incomplete`, `nonzero_exit`, `zero_exit` (a failed claim citing exit 0),
 `result_missing`, `result_truncated`, `command_unrecorded`, `trivial_command`,
 `later_run_failed`, `later_run_unresolved` (below).
+
+### Speculative verification during review
+
+Once the capacity-checked reviewer is running and `REVIEW_STARTED` binds its
+assignment to a project digest, the controller may run the plan's verification
+commands concurrently. There is at most one speculative command sequence at a
+time per task turn; it creates no engine session or extra worker reservation. Reviewer
+capacity and the four-worker/per-connection limits are unchanged; a pending,
+capacity-queued reviewer does not start speculation. Commands use the same
+verification sandbox and retained-output path as ordinary verification: only
+git-ignored project directories and private scratch are writable, and the real
+runtime store remains inaccessible.
+
+A speculative result is candidate evidence, not a `VERIFICATION_PASSED` or
+`VERIFICATION_FAILED` event. After APPROVE and confirmed worker teardown, credit
+requires the same plan revision, reviewer assignment and digest, complete
+commands and a fresh unchanged-project observation. Credit and the existing
+authoritative verification event commit together. A failed command on that
+approved digest follows the existing coordinator repair path and repair limit;
+it is never softened into a diagnostic pass.
+
+REQUEST_CHANGES, replan, a rebound review or digest drift discards the candidate.
+Verification runs again for the new approved binding; a run that itself changes
+the digest is stale. A change after approval cannot authorize verification on
+an unreviewed digest: the existing review-revision gate still applies.
+Stopping/disconnecting/ending the controller turn cancels and joins its owned
+sequence, killing the running subprocess group. Interrupted candidates cannot
+pass. Restart recovery reruns ordinary verification rather than replaying
+speculative diagnostic events. Metadata-only `SPECULATIVE_VERIFICATION_*`
+events record start, finish, discard and credit; command output stays in the
+private retained-output store, not in those events.
 
 ### Check history and current outcome
 
@@ -485,3 +531,10 @@ bounded wait. Senior escalation inserts a read-only consultant routed automatica
 by the runtime. Three accepted automatic replans since the latest user message or
 answer and three review cycles bound the respective loops; exhausted limits require
 user input or a new plan, and any user message or answer restores the replan budget.
+
+## Timing diagnostics
+
+The runtime records metadata-only startup, first-update and changing scheduler
+wait observations. They do not alter dependency, scope, capacity, review or
+release decisions. Use the [read-only phase timeline](observability.md#orchestration-phase-measurement)
+to analyze delays; missing historical evidence is not inferred.

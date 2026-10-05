@@ -15,12 +15,14 @@ EFFORT_ORDER = ("low", "medium", "high", "xhigh", "max", "ultra")
 #: Efforts a policy may name: ``ultra`` is never used by automatic routing.
 POLICY_EFFORTS = EFFORT_ORDER[:-1]
 POLICY_ATTRIBUTES = ("effort_floor", "max_effort", "effort_ladder", "also_standard_for", "preferred_for",
-                     "request_names")
+                     "preferred_when", "request_names")
 ENGINE_KEYS = ("auto", "tiers", "policy")
 TIER_SOURCES = ("configured",)
 SELECTION_MODES = ("listed",)
 MAX_SELECTED = 1000
 MAX_REQUEST_NAMES = 16
+#: Longest owner-written ``preferred_when`` condition, in characters.
+MAX_PREFERRED_WHEN = 500
 WORK_KINDS = ("implementation", "operations", "debugging", "testing", "investigation",
               "review", "design", "writing", "planning", "analysis")
 WORK_KIND_LABELS = {
@@ -45,6 +47,10 @@ class RoutePolicy:
     effort_ladder: tuple[str, ...] = ()
     also_standard_for: frozenset = frozenset()
     preferred_for: frozenset = frozenset()
+    #: The owner's free-text condition for the preference. The runtime cannot
+    #: read it: the coordinator judges each node against it and marks a match
+    #: with this exact route as the node's model hint.
+    preferred_when: str | None = None
     request_names: tuple[str, ...] = ()
     attribute_sources: Mapping[str, str] = field(default_factory=dict)
     #: Every tier the model is a candidate of, strongest first (``(tier,)``
@@ -64,7 +70,8 @@ class RoutePolicy:
         """The effective attributes as JSON, with each one's source."""
         return dict(effort_floor=self.effort_floor, max_effort=self.max_effort,
                     effort_ladder=list(self.effort_ladder), also_standard_for=sorted(self.also_standard_for),
-                    preferred_for=sorted(self.preferred_for), request_names=list(self.request_names),
+                    preferred_for=sorted(self.preferred_for), preferred_when=self.preferred_when,
+                    request_names=list(self.request_names),
                     attribute_sources=dict(self.attribute_sources))
 
 
@@ -117,6 +124,7 @@ def _policy(engine: str, model: str, overrides: Mapping, tiers: tuple[str, ...],
         effort_ladder=tuple(attributes.get("effort_ladder") or ()),
         also_standard_for=frozenset(attributes.get("also_standard_for") or ()),
         preferred_for=frozenset(attributes.get("preferred_for") or ()),
+        preferred_when=attributes.get("preferred_when"),
         request_names=tuple(attributes.get("request_names") or ()),
         attribute_sources={name: sources[name] for name in POLICY_ATTRIBUTES if name in sources},
     )
@@ -238,11 +246,11 @@ def validate_models(value, *, engines: Sequence[str], work_kinds: Sequence[str],
                     add(where, "invalid_type", f"must be an object of {', '.join(POLICY_ATTRIBUTES)}")
                     continue
                 problems.extend(_policy_problems(where, policy, kinds, reserved_word))
-                preferred = policy.get("preferred_for")
-                if ("auto" in config and isinstance(config["auto"], list)
-                        and isinstance(preferred, list) and preferred and model not in config["auto"]):
-                    add(f"{where}.preferred_for", "preferred_not_selected",
-                        "a preferred model must be selected in this engine's auto list")
+                if "auto" in config and isinstance(config["auto"], list) and model not in config["auto"]:
+                    for key in ("preferred_for", "preferred_when"):
+                        if policy.get(key):
+                            add(f"{where}.{key}", "preferred_not_selected",
+                                "a preferred model must be selected in this engine's auto list")
     return problems
 
 
@@ -271,6 +279,11 @@ def _policy_problems(where: str, policy: Mapping, kinds: Sequence[str],
         if (not isinstance(value, list) or len(set(map(str, value))) != len(value)
                 or not all(isinstance(kind, str) and kind in kinds for kind in value)):
             yield f"{where}.{key}", "invalid_value", f"must be null or unique work kinds from {', '.join(kinds)}"
+    when = policy.get("preferred_when")
+    if when is not None and (not isinstance(when, str) or not when.strip() or len(when) > MAX_PREFERRED_WHEN
+                             or any(ord(c) < 32 and c not in "\n\t" or ord(c) == 127 for c in when)):
+        yield (f"{where}.preferred_when", "invalid_value",
+               f"must be null or non-blank text of at most {MAX_PREFERRED_WHEN} characters without control characters")
     names = policy.get("request_names")
     if names is not None:
         if not isinstance(names, list) or not 1 <= len(names) <= MAX_REQUEST_NAMES or len(set(map(str, names))) != len(names):

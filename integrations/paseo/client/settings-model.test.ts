@@ -22,6 +22,8 @@ import {
   setModelAutoSelected,
   modelAutoSelected,
   setModelPreferredFor,
+  setModelPreferredWhen,
+  PREFERRED_WHEN_MAX,
   shadowingSource,
   unmatchedTokens,
   type CatalogRoute,
@@ -612,6 +614,29 @@ test("purpose preferences round-trip other policy attributes and require an auto
   });
 });
 
+
+test("a preference condition is free text, bounded, and needs an auto-selected model", () => {
+  const parsed = routingRulesToForm({ models: { opencode: { auto: ["zai-coding-plan/glm-5"], policy: {} } } });
+  assert.equal(parsed.ok, true);
+  if (!parsed.ok) return;
+  const vocabulary = routingVocabulary(routing());
+  let form = setModelPreferredWhen(parsed.form, "opencode", "zai-coding-plan/glm-5", "для фронтенда без дизайна");
+  const built = buildRoutingRules(form, vocabulary);
+  assert.equal(built.ok, true);
+  if (built.ok) assert.deepEqual(built.value.models?.opencode?.policy, { "zai-coding-plan/glm-5": { preferred_when: "для фронтенда без дизайна" } });
+  const key = "rules.models.opencode.policy.zai-coding-plan/glm-5.preferred_when";
+  const long = buildRoutingRules(setModelPreferredWhen(form, "opencode", "zai-coding-plan/glm-5", "x".repeat(PREFERRED_WHEN_MAX + 1)), vocabulary);
+  assert.equal(long.ok, false);
+  if (!long.ok) assert.ok(key in long.errors);
+  const other = buildRoutingRules(setModelPreferredWhen(form, "opencode", "zai-coding-plan/glm-4", "frontend"), vocabulary);
+  assert.equal(other.ok, false);
+  if (!other.ok) assert.ok("rules.models.opencode.policy.zai-coding-plan/glm-4.preferred_when" in other.errors);
+  form = setModelPreferredWhen(form, "opencode", "zai-coding-plan/glm-5", "  ");
+  assert.equal(form.models?.opencode.policy["zai-coding-plan/glm-5"].preferred_when, null);
+  form = setModelPreferredWhen(form, "opencode", "zai-coding-plan/glm-5", "frontend");
+  form = setModelAutoSelected(form, "opencode", "zai-coding-plan/glm-5", false, []);
+  assert.ok(!("preferred_when" in form.models!.opencode.policy["zai-coding-plan/glm-5"]));
+});
 
 function profileView(): ProfilesView {
   return {

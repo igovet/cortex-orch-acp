@@ -26,9 +26,13 @@ def load_model_settings_template(path: Path | None = None) -> dict:
     from ..connections.model import SUPPORTED_ENGINES
 
     document = json.loads((TEMPLATE_PATH if path is None else path).read_text(encoding="utf-8"))
-    if (not isinstance(document, dict) or set(document) != {"schema_version", "routing", "coordinator"}
+    if (not isinstance(document, dict) or (not {"schema_version", "routing", "coordinator"} <= set(document)
+                                         or set(document) - {"schema_version", "routing", "coordinator", "language"})
             or type(document["schema_version"]) is not int or document["schema_version"] != 1):
         raise ValueError("invalid model-settings template envelope")
+    if "language" in document and (not isinstance(document["language"], str)
+                                   or document["language"] not in {"en", "ru"}):
+        raise ValueError("invalid install language")
     routing = document["routing"]
     if not isinstance(routing, dict) or set(routing) - {
             "model_policy_version", "pin", "deny", "enabled", "auto_allow", "providers", "engine_affinity", "models", "quota_windows"}:
@@ -44,7 +48,7 @@ def load_model_settings_template(path: Path | None = None) -> dict:
             or set(coordinator["parameters"]) - {"thought_level", "mode"}
             or any(not isinstance(v, str) for v in coordinator["parameters"].values())
             or coordinator["parameters"].get("thought_level") not in auto_route.model_policy.POLICY_EFFORTS
-            or coordinator["parameters"].get("mode") not in {"agent"}):
+            or coordinator["parameters"].get("mode") not in {None, "agent"}):
         raise ValueError("invalid portable coordinator preference")
     return document
 
@@ -137,7 +141,8 @@ def ensure_model_settings(environ=None, *, routing_only=False):
                     data = registry.read_owner_file(path)
                     if data is None:
                         payload = (template["routing"] if name == "routing" else
-                                   {"defaults": {"coordinator": template["coordinator"]}})
+                                   {"defaults": dict(coordinator=template["coordinator"],
+                                                     **({"language": template["language"]} if "language" in template else {}))})
                         created = _create_private(path, json.dumps(payload, indent=2, ensure_ascii=False) + "\n")
                         result[name] = dict(path=str(path), status="created" if created else "existing", changed=created)
                         continue

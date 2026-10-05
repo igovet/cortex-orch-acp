@@ -194,11 +194,25 @@ writing configuration or dispatching work.
 - `auto_allow`: tokens of the same form that may enter automatic selection despite the built-in Haiku and OpenCode exclusions (on an engine without a `models` selection list; a list replaces these exclusions). OpenCode model IDs name their provider, so an OpenCode entry is the exact route, for example `"opencode/anthropic/claude-sonnet-4-5"`. It does not override `deny`, `providers`, catalog availability, connection readiness or quota limits.
 - `tiers`: object mapping model names to `flagship`, `deep`, `standard`, or `light`, for every engine. Built-in known families/models are classified automatically; this key overrides that classification, and a per-engine `models` tier overrides this key. A Luna model moved out of `light` routes like any model of its new tier; only the Luna effort floor (`high`) and `max` still apply.
 - `providers`: array restricted to `codex-acp`, `claude-agent-acp` and/or `opencode`. When absent, every configured provider is considered. It restricts automatic routing, failover and pins; it does not hide models from the selector or disable manual selection. A disallowed pin is refused.
-- `engine_affinity`: object mapping a work kind or `*` to `codex-acp`, `claude-agent-acp`, `opencode`, or `null` (no lean). Work kinds are `implementation`, `operations`, `debugging`, `testing`, `investigation`, `review`, `design`, `writing`, `planning`, and `analysis` (each worker role's kind is `routing.auto_route.ROLE_WORK_KINDS`; an unlisted role is `implementation`). A kind named here wins, then `*`, then the built-in default: `implementation` and `operations` lean to `codex-acp`; `investigation`, `review`, `design`, `writing`, `planning` and `analysis` lean to `claude-agent-acp`; `debugging` and `testing` are neutral. Affinity breaks ties only after plan usage and retry diversification (a plan at least 10 points less used wins first), and it is itself broken by the 85% quota band only as a late tie breaker; it never overrides a pin, `deny`, `providers`, availability or the 100% quota exclusion. An unknown kind or engine makes the file invalid.
+- `engine_affinity`: object mapping a work kind or `*` to `codex-acp`, `claude-agent-acp`, `opencode`, or `null` (no lean). Work kinds are `implementation`, `operations`, `debugging`, `testing`, `investigation`, `review`, `design`, `writing`, `planning`, and `analysis` (each worker role's kind is `routing.auto_route.ROLE_WORK_KINDS`; an unlisted role is `implementation`). A kind named here wins, then `*`, then the built-in default: `implementation` and `operations` lean to `codex-acp`; `investigation`, `review`, `design`, `writing`, `planning` and `analysis` lean to `claude-agent-acp`; `debugging` and `testing` are neutral. Affinity breaks ties only after plan usage and retry diversification (a plan at least 10 points less used wins first only once known usage reaches 95%), and it is itself broken by the 95% quota band only as a late tie breaker; it never overrides a pin, `deny`, `providers`, availability or the 100% quota exclusion. An unknown kind or engine makes the file invalid.
 - `models`: object mapping a supported engine id to an object with any of `auto`, `tiers` and `policy`, each keyed by the exact model id the engine reports (OpenCode ids are `<provider>/<model>`). Validation (`routing.model_policy.validate_models`) reports every problem with its field path.
   - `auto`: array of unique model ids. Present, it is the complete list of that engine's models automatic routing may use (`[]`: none), replacing the built-in Haiku/optional-engine exclusions, `auto_allow` and newest-version-only routing for that engine; absent, the built-in rules apply. `deny` and `providers` still win; a `pin` or the model selector can still use any offered model.
   - `tiers`: model id to `flagship`, `deep`, `standard` or `light`, or to a non-empty list of them (for example `["standard", "deep"]`); it wins over the legacy top-level `tiers`, which wins over the built-in classification. A model given several tiers is an automatic-routing candidate of each (it is listed under each in `list_route_options`) and runs at the effort of the tier it was chosen for; a pin or explicit effort may use any effort one of its tiers permits, and it counts as flagship for a user's explicit flagship request when `flagship` is one of its tiers. Only this per-engine key takes a list; the legacy top-level `tiers` stays one tier per model. In Settings > Engines & models the tier control is a multi-select; clearing every tier removes the setting.
-  - `policy`: model id to an object of optional attributes, each overriding the model's built-in value (`null` removes it): `effort_floor` and `max_effort` (efforts `low`..`max`; without `max_effort` a flagship-tier model stops at `high`), `effort_ladder` (1-3 strictly ascending efforts a light model runs at for light work, standard work, and standard work that fell short once), `also_standard_for` (work kinds for which a light model is also a standard-tier candidate, as the built-in Luna rule does for `testing`), `preferred_for` (work kinds this model is preferred for: rank version 9 puts it ahead of new plan hints, plan usage and retry diversification within its tier; it yields for quota only when at least 85% used and more than 10 points worse than a known usable alternative) and `request_names` (1-16 lowercase extra spellings, Cyrillic stems taking Russian endings, that count as the user naming this model's family in an explicit flagship request; ordinary request, work or negation words are refused).
+  - `policy`: model id to an object of optional attributes, each overriding the model's built-in value (`null` removes it): `effort_floor` and `max_effort` (efforts `low`..`max`; without `max_effort` a flagship-tier model stops at `high`), `effort_ladder` (1-3 strictly ascending efforts a light model runs at for light work, standard work, and standard work that fell short once), `also_standard_for` (work kinds for which a light model is also a standard-tier candidate, as the built-in Luna rule does for `testing`), `preferred_for` (work kinds this model is preferred for: rank version 9 puts it ahead of new plan hints, plan usage and retry diversification within its tier; it yields for quota only when at least 95% used and more than 10 points worse than a known usable alternative), `preferred_when` (optional owner-written condition, non-blank text of at most 500 characters, for example `"frontend changes without design work"`; see below) and `request_names` (1-16 lowercase extra spellings, Cyrillic stems taking Russian endings, that count as the user naming this model's family in an explicit flagship request; ordinary request, work or negation words are refused).
+
+  `preferred_when` makes the preference conditional. The runtime cannot judge
+  free text, so `list_route_options.preferred_when` gives the coordinator each
+  such auto-eligible route with its `when` text and `work_kinds` (the model's
+  `preferred_for`, empty meaning any kind); such routes are left out of
+  `preferred`. The model ranks as preferred (rank key `purpose`) only on a node
+  whose plan hint names its exact `engine/model` route, which is the
+  coordinator's judgement that the node meets the condition, and only for a
+  listed kind when `preferred_for` is non-empty. On other nodes it is an
+  ordinary candidate of its tier; retries and fixes ignore hints and so the
+  condition too. Like `preferred_for`, a non-empty `preferred_when` needs the
+  model in an explicit `models.auto` list. In Settings both work-kind lists
+  are chosen from the work-kind vocabulary, never typed, and the condition
+  is a text field next to the preferred-work switches.
 
   `preferred_for` uses the same ten work kinds as `engine_affinity`. The API's
   `routing.builtin` includes English `work_kind_labels`, the worker-role list
@@ -400,13 +414,33 @@ variants, punctuated prefixes and different provider paths do not authorize
 each other. Optional owner-configured `request_names` remain separate labels
 with the existing case-insensitive ending rules and ambiguity checks. Retained
 user-source provenance and request/negation grammar still govern authorization;
-a plan hint alone never promotes a flagship or overrides routing eligibility.
+an unconfirmed plan hint alone never promotes a flagship or overrides hard routing authorization.
 See [exact user-request boundaries](acp/routing-and-fallback.md#settings-only-routing).
 
 The runtime and coordinator use only the effective first-existing routing file (project, then $CORTEX_ROUTING, then user); these files are not merged. Routing must declare model_policy_version: 2. The read-only `list_route_options` tool preserves `model_policy_migration_required`, `model_policy_version_unsupported` and `invalid_routing_overrides`, with the policy field and corrective action; it does not misclassify these refusals as `storage_error`. Missing, invalid, unsupported or legacy settings produce visible diagnostics; runtime does not overlay, infer or repair them from install data. The effective policy explicitly supplies exact enabled identities, per-engine automatic membership, tier placement and any non-neutral per-model effort/preference/request-label attributes. Omitted membership means none; new, renamed, unmatched and withdrawn identities do not inherit policy from spelling, family, catalog position or neighboring versions. Required fields/tiers and supported effort constraints are validated; unsupported policy refuses rather than silently weakening it. Coordinator route choice is a portable exact engine/model/parameter preference resolved only against one unique current selectable catalog match; automatic-worker `providers` does not restrict that binding, while enabled identities and deny rules still do; ambiguous/unavailable matches remain diagnostics, not substitutions.
 
 The validated public asset policy/model-settings-default.json is installation/migration input only, not a runtime fallback or overlay. It contains a production-derived baseline candidate and portable coordinator preference, but no account/connection identity or credentials. Setup validates it completely and creates missing owner settings privately without replacement; existing, partial, invalid and legacy owner files and saved profiles are not silently changed. The asset cannot prove installed deployment or a live route. Migration is an explicit two-step operation: preview a candidate (non-mutating), then apply only with explicit consent, the exact preview source revision and candidate digest. Apply verifies a private backup and written bytes and rolls back on failure. Migrate each saved profile from a candidate derived from that profile itself; never fill an inactive profile from current settings or the install template. Retain backups and preview/apply evidence. See [model-policy migration](acp/packaging-and-onboarding.md#model-policy-installation-and-explicit-migration).
 
+
+### Fresh-install owner default snapshot
+
+The public install asset reflects the saved production `default` profile updated
+on 2026-10-05 at 10:45 UTC. Its routing is an exact non-secret snapshot, including
+multi-tier memberships, effort floors/ceilings, preferences, request labels and
+quota-window associations. The portable coordinator is
+`claude-agent-acp/opus[1m]` with `thought_level: medium`; no mode override is
+added. New `defaults.json` files also set `language: ru`. The install envelope
+remains schema version 1 with optional `language` (`en` or `ru`); coordinator
+`mode` is optional, and when present the install template accepts `agent`.
+
+This is portable model/settings installation, not cloning the owner's machine:
+route/connection IDs, account bindings, MCP installation definitions and local
+read/write paths are excluded. The saved unrestricted ceiling needs no override.
+Existing connection session limits and MCP registrations/policies are not changed;
+no saved `routing-profiles.json` snapshot is created or replaced. A fresh host must
+register its own connections/MCP servers and resolve the exact coordinator against
+one observed selectable route. Missing or unsupported model/effort observations
+still fail closed; this snapshot is not live qualification.
 
 ### Exact quota-window associations
 
@@ -439,3 +473,24 @@ python3 -B scripts/cortex_model_policy_migrate.py preview --candidate /absolute/
 Saved profiles capture this field on explicit save/create and restore it on activation; older snapshots are not silently rewritten or filled from working settings/template data. Migrate a saved snapshot from its own candidate with `--profile`, or save the intended current working settings explicitly. Deleting a selected profile still only unlinks it, without resetting materialized settings.
 
 The public install-only asset retains the previous seven-route tiers, efforts, preferences and denies, disabled OpenCode, and explicit canonical scoped-label associations preserving the former quota predicate for the configured identities. No runtime template overlay exists. Unknown/new provider labels remain conservative until configured; this is not evidence those labels are currently emitted or that production has adopted the candidate. Production application requires separate reviewed/verified adoption.
+
+### Explicit user model priority and usage switching
+
+For each node it covers, an explicit model request confirmed from recorded user
+messages or answers takes priority over automatic role tiers, pins, preferred
+models (including conditional preferences), automatic membership, usage ranking
+and retry diversification. The coordinator carries the exact engine/model on
+covered nodes, including retries/fixes; other nodes route normally. This applies
+to light, standard, deep and flagship models. Hard owner deny/disabled/provider,
+task route/profile/recipient authorization, missing configured/observed identity
+or supported effort, engine unavailability and exhausted quota still refuse
+visibly with no silent substitution. No model-authored text establishes consent.
+
+Usage-based selection activates only at observed usage >=95%
+(USAGE_SWITCH_PERCENT in routing.auto_route; no new configuration field).
+Below that threshold, neither percentage gaps nor exact percentages affect
+ranking; normal selection applies. Unknown usage is unavailable, not hot.
+Audit usage status reports active, below_threshold or unavailable, with the
+threshold and observed candidate percentages. Exhaustion at 100% is still a
+hard exclusion. Confirmed user model requests cannot be replaced by usage
+switching at 95–99.999%. See [routing priority](acp/routing-and-fallback.md#user-requested-flagship-route).

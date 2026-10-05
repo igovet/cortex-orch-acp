@@ -6,10 +6,13 @@ Cortex automatically selects worker engine, model, and effort from the runtime's
 current model catalog, task tier, work kind, routing policy and each engine's
 observed subscription plan usage; how often an engine was chosen before is not
 an input. The model may submit a routing recommendation in
-its plan. A recommendation alone is advisory, but an exact eligible flagship
-route explicitly requested by the user can select that route for the covered
-node. The runtime validates the request against current policy and dispatches;
-no hint bypasses eligibility or raises effort/tier beyond policy. `list_route_options` is a
+its plan. A recommendation alone is advisory. An explicit model choice
+confirmed from the task's recorded user messages or answers has first priority
+on covered exact-route nodes in every tier, including retries and review fixes.
+It overrides pins, preferences, usage ranking, automatic membership and role-tier
+caps, but never hard owner authorization or engine availability. Refusals are
+visible and never silently substitute another model. Effort remains supported
+and bounded by the configured per-model policy. `list_route_options` is a
 read-only snapshot for coordinators; dispatch validates current eligibility
 again.
 
@@ -36,7 +39,7 @@ The runtime routing loader still uses first-existing-file precedence:
 project, `$CORTEX_ROUTING`, then user. Thus project/environment routing
 shadows an activated user profile; activation does not override precedence or
 change an already-open worker route. Owner model preferences (`preferred_for`)
-rank within an eligible tier ahead of plan hints, plan-usage heuristics and retry diversification,
+rank within an eligible tier ahead of unconfirmed plan hints, plan-usage heuristics and retry diversification,
 but grant no route: pins, deny, automatic membership, providers, tier,
 availability and quota rules remain controlling. Preferences cannot promote
 a model into a different tier. See [configuration](../configuration.md#user-routing-profiles).
@@ -378,9 +381,11 @@ every routing decision is the same as before rank version 8.
   ladder holding `max` permits `max` outside the light tier),
   `also_standard_for` (work kinds for which a light model is also a
   standard-tier candidate: the stretch rule below), `preferred_for` (work
-  kinds the owner prefers this model for: rank key `purpose` below) and
+  kinds the owner prefers this model for: rank key `purpose` below),
+  `preferred_when` (an owner-written condition that makes that preference
+  conditional on the coordinator naming the route; see `purpose` below) and
   `request_names` (extra spellings for the
-  [user-requested flagship route](#user-requested-flagship-route); a request,
+  [user-requested route](#user-requested-flagship-route); a request,
   work, means or negation word is refused).
 
 `list_route_options` is the coordinator's only source of model names: every
@@ -389,7 +394,8 @@ route carries `tier_source`, `selection`, `auto_reason` and its effective
 effective engine per work kind, or `null` when it has no auto-eligible route),
 `affinity_not_eligible` (the withheld engines), `affinity_source` (`routing.json` or `builtin`
 per kind), `role_work_kinds`, `preferred` (only auto-eligible routes per
-`preferred_for` work kind), `flagship` (`routes`, `request_names`, `rule`) and
+`preferred_for` work kind, without a `preferred_when` condition),
+`preferred_when` (auto-eligible route to its `when` text and `work_kinds`), `flagship` (`routes`, `request_names`, `rule`) and
 `stretch` (each light model with a stretch rule: `effort_floor`, `efforts` by
 work, `standard_work_kinds`, `standard_candidate_roles`). The `plan_submit`
 node schema and the orchestrator's `worker-routing` reference name no model
@@ -399,10 +405,9 @@ An exact hint may name a route whose model id holds `/` or `,`
 
 ### User-requested flagship route
 
-A user may ask for a flagship model family in the task (for example "use
-Astra for the implementation" or "сделай ревью на Фейбле"). The coordinator
-then puts that exact flagship `engine/model` route from `list_route_options`
-in the node's `model` hint. The hint alone never grants flagship: the grant
+The historical heading is retained for links; this rule now applies to **every
+configured tier**, not just flagship. The coordinator must name the exact model
+on each covered node. Model-authored text is never consent. Authorization
 comes only from user-authored text the runtime itself recorded for the same
 task (`routing.auto_route.user_model_request`):
 
@@ -413,14 +418,13 @@ task (`routing.auto_route.user_model_request`):
   (`<question_id>:answer`), never the question text, which the asking model
   wrote.
 
-Coordinator prose, `model_reason`, questions, reports and worker output are
-never read for it. A source requests the family when it names the hinted
-model's family (`model_line`: `astra` for `gpt-6-astra`, `fable` for
-`claude-fable-5-1[1m]`) as a whole word, case-insensitively, or by one of its
-extra spellings -- the hinted model's `request_names` policy, by default the
-built-in Russian spellings (`CYRILLIC_FAMILY_NAMES`: `астр...`,
-`фейбл`/`фэйбл`, `мифос`/`майтос`/`митос`) -- and, in the same sentence
-(`requests_family`):
+Coordinator prose, model reasons, question text, reports and worker output are
+never read for consent. A source must request the complete, case-sensitive
+configured engine/model identity or an owner-configured request label.
+No model family or version is inferred from the ID. Paired quotes separate
+opaque IDs from prose punctuation (see [settings-only routing](#settings-only-routing)).
+The existing conservative request/negation grammar still applies, in the same
+sentence:
 
 - within the four words before it, either an explicit request word stands
   (`REQUEST_WORDS`: `use`, `run`, `switch`, `prefer`, `choose`, `request`,
@@ -462,29 +466,25 @@ not recognised, the node stays on its ordinary tier, and the receipt shows
 ("use Astra", "используй Астру"). Conversely, a statement the rule cannot
 tell from a request still grants (for example "the plan requires Astra"),
 which is why the coordinator's exact hint remains a required second step.
-The family comes from the route, not from a fixed list, so a future flagship
-family works by its Latin name once the engine offers it and
-`routing.auto_route` (or a `tiers` override) classifies it as flagship.
+At dispatch, choose runs the exact requested route at its configured tier,
+including for non-flagship, light/stretch, high-complexity, retry and fix nodes.
+Pins, owner preferred_for/preferred_when ranking, automatic membership,
+automatic role tiers and usage at 95–99.999% cannot replace it.
+Supported effort and explicit per-model effort constraints still apply.
+The audit records basis auto:user_request, decided_by user_request and
+user_model_request = {source_ref, family, matched, status: honoured}; the
+historical family field holds the exact identity.
 
-At dispatch, `choose` runs such a node on the requested route at the
-flagship tier (effort `high`, the flagship ceiling), even on a retry or a
-review fix, and records `basis: auto:user_request` with
-`route_decision.decided_by: user_request` and
-`route_decision.user_model_request = {source_ref, family, matched, status}` in
-the attempt's `attempt_route_audit` detail, distinct from escalation. Only that
-node is affected: other nodes, and a hint for a non-flagship route
-(`status: not_flagship`), route as usual. Policy still wins, and a refused
-request routes the node at its ordinary tier with the reason recorded:
-a matching pin (`ignored:pinned`), `deny` (`refused:denied`), `providers`
-(`refused:provider_not_allowed`), a route no connection offers
-(`refused:not_offered`), a superseded version (`refused:superseded`), an
-availability record (`refused:unavailable`), or a 100% plan
-(`refused:quota_exhausted`). A flagship hint without the user's request keeps
-the old behaviour: `model_hint_status: ignored:tier_mismatch` and
-`user_model_request.status: not_requested_by_user`. At plan submission the
-receipt's `model_hints` preview shows `pending_dispatch:user_request` with the
-user's `user_request` source ref, or `ignored:tier_mismatch` when no request
-was found.
+Hard deny/disabled/provider/route-profile/recipient authorization, a missing
+observed identity or tier/effort policy, engine unavailability and 100% exhausted
+quota refuse with user_requested_route_unavailable and a concrete corrective
+reason before dispatch. There is no ordinary-tier substitution. Failure
+fallback also refuses a different model identity; an authorized alternate
+connection offering the same exact engine/model can still qualify.
+Plan submission previews pending_dispatch:user_request with the user source
+reference for every tier. Only covered exact-route nodes receive this priority;
+other nodes retain automatic selection. Without user consent, flagship remains
+escalation-only.
 
 ### Configured stretch policy
 
@@ -506,7 +506,7 @@ a built-in fallback. Setting the attributes to `null` removes them.
   of those kinds retain the standard pool before generic escalation.
   Ranking, hints, preferences, quota safety and retry diversification still
   apply; stretch candidacy does not guarantee selection.
-- **Exclusions.** High complexity, deep/flagship work and deep roles
+- **Exclusions.** For ordinary automatic routing, high complexity, deep/flagship work and deep roles
   exclude light stretch candidates, even as a fallback. When no permitted
   route remains, dispatch refuses with `no_available_route`.
 - **Audits.** New decisions emit `stretch` (`status`, `candidate`,
@@ -538,22 +538,22 @@ hand its place to an older one.
 an exact `engine/model` route label from `list_route_options`. A non-`auto`
 recommendation requires a short `model_reason`; it is optional for `auto`. This is a recommendation only. A model hint is
 considered only within the runtime-computed tier (except a
-[user-requested flagship route](#user-requested-flagship-route)) and cannot
+[user-requested route](#user-requested-flagship-route)) and cannot
 override pin, deny, providers, availability, or the 100% quota exclusion. A hint from another tier is recorded as `ignored:tier_mismatch`;
 using `auto` delegates all selection to ranking. Legacy stored plans without
 `model` retain their old `provider` preference behavior; new plans use `model`.
 
 On escalation, the previous hint is not inherited (a
-[user-requested flagship route](#user-requested-flagship-route) is the
+[user-requested route](#user-requested-flagship-route) is the
 exception). The runtime ranks the new
 tier and prefers a different engine from the failed attempt when candidates
 otherwise tie. A hint is honoured unless the hinted route is excluded,
-unavailable or exhausted, or its usage is both at or above 85%
+unavailable or exhausted, or its usage is both at or above 95%
 (`HINT_TOLERANCE`, equal to `HOT_PERCENT`) and meaningfully worse -- by more
 than `USAGE_MARGIN` (10) points -- than an available alternative's known
-usage (`ignored:near_quota_limit`). Crossing 85% alone, with no known
+usage (`ignored:near_quota_limit`). Crossing 95% alone, with no known
 alternative or no meaningful gap, no longer disqualifies a hint (rank
-version 6). How often an engine was chosen
+version 10). How often an engine was chosen
 before never affects a hint. Other hint statuses include
 `ignored:provider_not_allowed`, `ignored:not_offered`,
 `ignored:tier_mismatch`, `ignored:superseded`, `ignored:auto_excluded`, `ignored:no_candidate_in_tier`,
@@ -572,27 +572,30 @@ count. Hard exclusions are applied before ranking: unavailable routes, `deny`,
 eligible candidates the rank criteria are, first difference wins:
 
 1. Honoured legacy provider preference for a stored pre-model plan (ignored
-   when the preferred route's usage is both at or above 85% and meaningfully
+   when the preferred route's usage is both at or above 95% and meaningfully
    worse -- by more than `USAGE_MARGIN` (10) points -- than an available
    alternative's known usage).
 2. Purpose (rank version 9): a model whose `routing.json` `models` policy
    lists the role's work kind under `preferred_for` -- the owner's choice --
    ranks ahead of a new plan's hint, plan usage and retry diversification.
    It never moves a tier or bypasses exclusions. Like a hint, it is passed
-   over for quota only when hot (at least 85%) and more than 10 points worse
+   over for quota only when hot (at least 95%) and more than 10 points worse
    than a known usable alternative. The audit records `purpose.status` as
    `none`, `honoured` or `ignored:near_quota_limit`. A conflicting hint loses
    with `ignored:owner_preferred`; coordinators use `auto` when the menu lists
-   owner preferences for the work kind. Legacy provider preference remains
-   first for pre-model stored plans.
+   owner preferences for the work kind. A model with `preferred_when` counts
+   as preferred only on a node whose hint names its exact route (the
+   coordinator's judgement that the owner's condition holds) and, when its
+   `preferred_for` is non-empty, only for those kinds; never on escalation.
+   Legacy provider preference remains first for pre-model stored plans.
 3. Honoured model hint for a new plan (see above), ignored on the same
    hot-and-meaningfully-worse basis.
-4. Plan usage, only when every candidate's usage is known: each full 10
-   points (`USAGE_MARGIN`) above the least-used candidate ranks a candidate
-   one step behind (`usage_band`). The plan with clearly more remaining quota
-   takes the work; a smaller difference is left to the rest of the order
-   below. This usage-gap signal, not the quota band, is what usually
-   separates candidates on remaining quota.
+4. Plan usage (rank version 10), only when every candidate's usage is known
+   and at least one reaches the named USAGE_SWITCH_PERCENT threshold of 95%.
+   Below 95%, usage bands and exact percentages do not affect selection,
+   regardless of the gap; normal preferences, hints, diversification, affinity
+   and stable order apply. Once active, each full 10-point USAGE_MARGIN gap
+   above the least-used candidate ranks it one step behind.
 5. On escalation, an engine other than the one whose attempt fell short --
    unless step 4 already sent the work to a meaningfully less-used plan,
    diversification does not retry onto a plan with meaningfully less room.
@@ -602,20 +605,10 @@ eligible candidates the rank criteria are, first difference wins:
    `claude-agent-acp`; debugging and testing are neutral. `routing.json`
    `engine_affinity` overrides it per work kind (see
    [configuration](../configuration.md#routing-rules)).
-7. Quota band, as a late tie breaker only (rank version 6): known usage at
-   or above 85% (`HOT_PERCENT`) ranks behind candidates below 85%, but only
-   once steps 1-6 have not already separated the candidates. Unknown quota
-   is not hot. Crossing 85% alone no longer overrides plan usage, retry
-   diversification or engine affinity, and no longer causes a cliff right at
-   the boundary -- a candidate at 86% used is barely behind one at 84% used,
-   not sent to the back of the rank. Light work used to spend a hot plan
-   first (commit 7b7aca22); quota was then promoted to an early, absolute
-   cut ahead of plan usage because `used_percent` is the most-used open
-   window (often a weekly one) and the rank never sees its reset time, so it
-   could otherwise push cheap work into a plan about to run out -- rank
-   version 6 keeps that protection through the usage-gap signal in step 4
-   instead, and only demotes the raw 85% crossing itself.
-8. Exact used percentage, only when every candidate has a known value.
+7. Quota band as a late tie breaker: observed usage at or above 95%
+   (HOT_PERCENT, the same threshold) ranks behind cooler candidates only
+   after steps 1–6 tie. Unknown usage is never treated as hot.
+8. Exact used percentage only when usage switching is active (step 4).
 9. Stable engine order.
 
 `decided_by` names the first of these keys (`preference`, `purpose`, `hint`, `usage`,
@@ -624,18 +617,20 @@ separated the chosen candidate from the runner-up, or `only_candidate`; a pin
 records `pin`. It is never `balance`. The runner-up can be another model on
 the same engine, in which case `engine_order` is the usual answer.
 
-Unknown quota remains neutral and is never coerced to zero for percentage
-comparison: when any candidate's usage is unknown, steps 4 and 8 compare
-nothing and the order falls through to diversify, affinity or the quota tie
-breaker (`quota` is `false`/not-hot for unknown usage, so it still separates
-a known-hot candidate from an unknown one).
+Unknown quota is not inferred to exceed the threshold. The audit's usage
+status is unavailable when any candidate has unknown usage, below_threshold
+when all are known but below 95%, and active otherwise. It retains the threshold,
+active and compared fields and raw candidate values. Steps 4 and 8 compare
+nothing while inactive. A genuinely known-hot route may still lose the late
+quota tie breaker to an unknown route; this does not claim the unknown route's
+percentage was observed.
 
 Effort is derived from the runtime-selected tier, task complexity/escalation,
 and each model's supported effort list. `effort_basis` records whether it came
 from the role tier, escalation step, a stretch model's effort ladder (the
 configured stretch rule; recorded as `stretch:<tier>` or `stretch:<tier>:escalated`), or a pin. A pin may explicitly name an
-effort; otherwise the runtime chooses a supported effort. A model hint cannot
-raise tier or effort.
+effort; otherwise the runtime chooses a supported effort. An unconfirmed model hint cannot
+raise tier or effort; a confirmed user request selects the requested model's configured tier.
 
 The read-only `list_route_options` tool reports currently engine-confirmed
 routes, tier and tier source, supported effort, policy, automatic eligibility,
@@ -676,7 +671,7 @@ built-in defaults, skips supersede on LISTED engines and adds the `purpose`
 key between `diversify` and `affinity` (no decision changes without
 `models`); 9 moves `purpose` just after legacy `preference`, ahead of hints,
 usage and diversification, and adds the hot-and-meaningfully-worse safety
-exception for owner preferences (no selection change without `preferred_for`).
+exception for owner preferences (no selection change without `preferred_for`). Rank version 10 gates usage bands and exact-percentage comparison at observed usage >=95% and prioritizes confirmed user model requests across every tier.
 Older rows keep their own fields
 (`balance`, `balance_excess`, `cross_tier`, `chosen_cross_tier`) and still
 render. These fields are evidence of runtime decisions, not proof of
@@ -868,8 +863,8 @@ label/ending matching; no label is inferred from an ID. The existing request,
 negation and same-sentence grammar still applies. Only retained user sources
 and user answers supply grants, never plan hints, questions or model output;
 source references and exact matched text are retained. A grant does not bypass
-enabled/deny/provider/automatic-membership, observed-catalog, availability or
-quota checks. These current identity rules supersede the historical family
+enabled/deny/provider, observed-catalog, availability,
+hard authorization and exhausted-quota checks. Confirmed user requests override automatic membership and role tiers, but never those hard checks. These current identity rules supersede the historical family
 recognition examples above.
 
 The public policy/model-settings-default.json is validated install-only data. Fresh installation creates only missing owner settings without replacement. Existing settings/profiles require explicit preview/apply migration against exact checked revisions and profile-specific candidate data; see [model-policy migration](packaging-and-onboarding.md#model-policy-installation-and-explicit-migration). Unknown or ambiguous portable coordinator bindings remain unavailable diagnostics; no substitute account or route is selected.
@@ -877,4 +872,4 @@ The public policy/model-settings-default.json is validated install-only data. Fr
 
 ### Settings-only quota applicability
 
-Model-window associations are optional `quota_windows` settings, never a built-in family/version substring table. Exact per-engine labels map to `models: null` (shared), exact model lists, or an explicit empty exclusion list; duplicate labels are refused. Unmapped windows conservatively apply to every model, including exhausted windows; no numeric evidence remains unknown rather than zero. The same effective first-existing routing file governs route menus, automatic selection and failure reset lookup. Invalid reset policy cannot erase a genuine engine refusal: availability retains its bounded default expiry. Provider time/cache/authentication algorithms and quota rankings are unchanged. See [exact field, diagnostics and migration semantics](../configuration.md#exact-quota-window-associations). The route menu includes `quota_window_policy` with effective rules and its conservative-unmapped decision, while raw status remains provider evidence.
+Model-window associations are optional `quota_windows` settings, never a built-in family/version substring table. Exact per-engine labels map to `models: null` (shared), exact model lists, or an explicit empty exclusion list; duplicate labels are refused. Unmapped windows conservatively apply to every model, including exhausted windows; no numeric evidence remains unknown rather than zero. The same effective first-existing routing file governs route menus, automatic selection and failure reset lookup. Invalid reset policy cannot erase a genuine engine refusal: availability retains its bounded default expiry. Provider time/cache/authentication algorithms are unchanged; ranking now obeys the 95% usage-switch threshold. See [exact field, diagnostics and migration semantics](../configuration.md#exact-quota-window-associations). The route menu includes `quota_window_policy` with effective rules and its conservative-unmapped decision, while raw status remains provider evidence.

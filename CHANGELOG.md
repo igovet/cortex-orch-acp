@@ -2,6 +2,35 @@
 
 ## 1.0.0 (unreleased)
 
+Model policy gains an optional owner-written `preferred_when` condition. The
+coordinator sees it in `list_route_options.preferred_when` and names the model
+on the plan nodes that meet it; only there does it rank as the owner's preferred
+model. Settings now choose `preferred_for` and `also_standard_for` work kinds
+from the list instead of free-text entries, which the runtime always rejected.
+
+Orchestration now records coordinator/engine timing milestones and changed
+scheduler wait reasons, with a read-only phase timeline for checkpointed stores.
+Review can start while accepted worker engines wind down; unchanged-file digest
+hashes are reused where filesystem metadata supports it. Sandboxed verification
+may overlap a running reviewer, but only an unchanged approved binding can credit
+its result; stale candidates are discarded and interrupted work is rerun through
+ordinary verification. Engine prewarming remains deferred pending live timing
+evidence; no performance gain is claimed.
+
+Routing now honors an explicit user-requested model before other routing
+preferences, subject to hard authorization and availability checks; an unusable
+requested route is refused visibly rather than replaced. Usage-based model
+switching activates only at observed usage of 95% or higher; unknown usage is
+unavailable. Fresh installs now receive the owner's portable default routing,
+coordinator preference and language, while existing settings and machine-local
+account, connection and MCP bindings are not replaced or copied.
+
+Added opt-in developer wire tracing for the isolated dev Paseo daemon. It records
+redacted ACP, MCP, verification and lifecycle frames to private, capped files
+outside project storage; it is off by default and refuses installed production
+state. Trace data can still include sensitive content and must be treated as
+confidential. No paid/live qualification is implied by these changes.
+
 Updated prompt and access documentation for the four-role unified base prompt,
 profile `access_class`, class-selected verification guidance, skill-layer splits
 and shorter shared worker report protocol. Clarified that Auto intentionally

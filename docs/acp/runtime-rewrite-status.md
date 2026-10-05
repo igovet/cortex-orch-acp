@@ -240,3 +240,72 @@ The current router and coordinator no longer classify model names/families or us
 policy/model-settings-default.json is public install/migration data only. Fresh installation validates it and creates only missing owner files, with private no-replacement writes. Existing files and profiles are never silently overwritten or migrated. Existing settings require explicit, digest-bound preview/apply; saved profiles migrate only from their own candidates. Automated tests imply no production adoption or live route qualification. The former complete core run's profile integration failure was historically recorded; its dependent follow-up reports unfiltered 396-case core and 428-case targeted checks passing.
 
 Saved-profile deletion asks confirmation for the exact name and uses the last observed revision. Cancel is mutation-free. Selected deletion clears only saved-profile linkage and leaves materialized settings unchanged; deleting the last profile is valid. Refusals/errors preserve profile and settings; stale/error paths do not retry invisibly. Typed plugin checks establish form/model/API interaction, not installed desktop reachability or rendered GUI qualification.
+
+
+## 2026-10-05 orchestration measurement, overlap and dev wire tracing
+
+The checkout now includes metadata-only critical-path observations:
+`COORDINATOR_TURN_STARTED`, per-attempt `ENGINE_READY` and
+`FIRST_MODEL_OUTPUT` events, plus change-only scheduler wait diagnostics
+(dependency, scope overlap, session/connection capacity and route capacity).
+`scripts/cortex_timeline.py` reads a checkpointed project store without
+initializing or mutating it and reports exact observed phase pairs; missing,
+duplicate, invalid or out-of-order endpoints remain explicit, and overlapping
+worker intervals are not summed into a fabricated total. It refuses legacy or
+unsupported formats, busy/uncheckpointed storage, missing tasks and event sets
+over its cap.
+
+Accepted execution results can trigger independent review before their engine
+processes fully exit. Accepted workers lose channel authority immediately, but
+their capacity slot remains occupied until exit is confirmed. Review remains
+digest-bound and late project drift requires rebinding/review. Per-file digest
+hashes are reused only on recognized local filesystems when the observed
+metadata key is unchanged; manifest identity and drift gates are unchanged.
+
+One sandboxed verification sequence may run while the capacity-checked reviewer
+is active. The candidate is bound to the plan, reviewer and review digest; only
+an unchanged APPROVE can credit it. Stale, rejected, interrupted or failed
+candidates do not become passes; approval waits for worker teardown and ordinary
+verification/recovery rules still apply. No faster live completion or measured
+speedup is claimed.
+
+Opt-in wire tracing is available only on guarded `~/.paseo-dev` daemon start.
+The wrapper strips inherited opt-in for ordinary invocations; installed
+production state/payloads are refused. Redacted ACP (upstream/downstream), MCP,
+verification and lifecycle records use private 0700 directories/0600 files,
+four 16 MiB rotating files, and remain outside project stores and Git. Redaction
+and write failures are fail-safe for task behavior but can leave explicit trace
+gaps. Traces are sensitive diagnostics, not command receipts, commit receipts,
+acceptance evidence or a substitute for retained task events. The read-only
+`scripts/cortex_trace_view.py` filters existing JSONL but can exit on unsafe,
+invalid or incomplete files; stop the writer for exact analysis.
+
+Engine prewarming (proposal item 4) remains deferred until a permitted live
+measurement separates process/ACP startup from model latency. These implemented
+surfaces and automated tests do not release-qualify the runtime or prove an
+end-to-end performance improvement.
+
+
+## 2026-10-05 routing defaults and trace boundary follow-up
+
+An explicit user-requested model is the highest routing preference across tiers
+and retries, but it does not bypass authorization, current catalog identity,
+supported effort or engine availability. If that exact route is unavailable or
+unauthorized, the runtime exposes a hard refusal rather than substituting a
+model. Usage-based ranking becomes active only at observed usage >=95%; below
+that threshold it is neutral, and missing/unknown observations remain
+unavailable. See [routing and fallback](routing-and-fallback.md).
+
+Fresh-install settings now import the owner's saved default as portable
+installation data: routing policy, coordinator engine/model/parameters and
+message language. This is not a runtime fallback or a full profile clone.
+Existing owner files are never replaced; local account/connection bindings and
+machine-specific MCP definitions and paths are excluded. See
+[configuration](../configuration.md#fresh-install-owner-default-snapshot).
+
+The developer trace writer and viewer now open files non-blockingly and
+close-on-exec, while retaining no-follow and descriptor checks that accept only
+safe regular files. FIFO paths therefore cannot hang either operation; unsafe
+files are refused without being altered. This hardens the existing opt-in
+`~/.paseo-dev`-only tracing boundary; it does not enable tracing in production
+or make traces complete, nonsensitive, or acceptance evidence.

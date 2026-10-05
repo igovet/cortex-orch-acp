@@ -392,3 +392,34 @@ stop is not their proof. If readiness, cycle, history or cleanup evidence is
 missing, report the run incomplete rather than extending the budget or passing
 an absent signal. Restore only the owned dev changes against retained backups
 and matching revisions; never touch production or another task's resources.
+
+## Opt-in private wire tracing
+
+For an explicitly authorized dev daemon launch, `--wire-trace` opts in to the
+[developer-only trace](observability.md#developer-only-wire-tracing).
+It is accepted only with `start` or `daemon start` at the canonical
+`~/.paseo-dev` home:
+
+```bash
+python3 -B scripts/cortex_paseo_dev.py --wire-trace -- start --timeout 60 --json
+```
+
+Start between tasks, after the existing dev-daemon stop procedure; starting an
+already-running daemon cannot change its environment. The wrapper sets
+`CORTEX_DEV_WIRE_TRACE=1` and `CORTEX_DEV_TRACE_HOME` only for this opt-in,
+with the existing checkout-source/XDG isolation. Ordinary wrapper invocations
+discard inherited trace opt-ins. The runtime refuses installed production
+payloads or non-dev state even if these variables are supplied.
+
+Traces are confined to
+`~/.paseo-dev/cortex-xdg/state/cortex/wire-traces/`, outside Git and project
+storage, with private ownership/modes and capped rotation. Existing permissive
+or symlinked targets stop tracing rather than being changed. The read-only
+`python3 -B scripts/cortex_trace_view.py --task "$TASK" --pretty` command
+filters surviving records. Read the trace guide for redaction, missing IDs,
+rotation and completeness limits. Do not publish raw traces: redaction does
+not make private prompts, file/report bodies or thought updates public.
+
+Disable by stopping only the dev daemon and starting it without
+`--wire-trace`. No production launch, daemon configuration, plugin install,
+paid prompt or GUI qualification is authorized by enabling logging.

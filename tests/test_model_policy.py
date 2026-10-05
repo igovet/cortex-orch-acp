@@ -104,6 +104,19 @@ def test_preferred_model_must_be_selected_when_auto_list_is_explicit():
                                         work_kinds=model_policy.WORK_KINDS) == []
 
 
+def test_conditional_preference_must_be_selected_and_is_resolved():
+    rules = {"opencode": {"auto": ["zai-coding-plan/glm-5.3"], "policy": {
+        "zai-coding-plan/glm-5.2": {"preferred_when": "Frontend changes without design work."}}}}
+    problems = model_policy.validate_models(rules, engines=SUPPORTED_ENGINES, work_kinds=model_policy.WORK_KINDS)
+    assert {(field, code) for field, code, _ in problems} == {
+        ("models.opencode.policy.zai-coding-plan/glm-5.2.preferred_when", "preferred_not_selected")}
+    rules["opencode"]["auto"].append("zai-coding-plan/glm-5.2")
+    assert model_policy.validate_models(rules, engines=SUPPORTED_ENGINES, work_kinds=model_policy.WORK_KINDS) == []
+    policy = model_policy.policy_for("opencode", "zai-coding-plan/glm-5.2", {"models": rules})
+    assert policy.preferred_when == "Frontend changes without design work."
+    assert policy.attributes()["preferred_when"] == policy.preferred_when
+
+
 def test_a_configured_tier_list_places_a_model_in_each_tier():
     overrides = {"models": {"codex-acp": {"tiers": {"gpt-6-sol": ["standard", "flagship"]}}}}
     policy = model_policy.policy_for("codex-acp", "gpt-6-sol", overrides)

@@ -28,6 +28,21 @@ project digest from dispatch to verdict, verification and completion. Drift bloc
 acceptance; a digest does not prove which OS process authored a change. Unsaved
 editor buffers are not inferred from an absent client capability.
 
+Project captures still rescan the tree and rebuild the same sorted manifest.
+For content-hashed regular files, an in-process, thread-safe LRU retains at most
+8,192 hashes (no file contents or paths), keyed by device, inode, size,
+mtime/ctime nanoseconds, mode and owner. Each reuse still opens the file with
+the existing no-follow checks and verifies its state before and after lookup;
+permission failures remain unavailable captures. Same-size writes with restored
+mtime invalidate the key through ctime. Entries within one second of hashing
+time (or future-dated) are not cached: this conservatively covers timestamp
+granularity on the recognized local Linux ext2/3/4, XFS, Btrfs and tmpfs
+filesystems. Unknown, remote and overlay filesystems, or unavailable filesystem
+type detection, use uncached hashing. Large-file metadata fingerprints and
+logical byte budgets are unchanged; warm and cold captures produce identical
+digests for the same tree. Nothing is persisted and no acceptance gate is
+skipped.
+
 Fixed read-only Git status/diff commands provide retained review context, with
 external diff, text conversion, hooks and fsmonitor disabled. The diff includes
 pre-existing edits and is not an authorship claim. Model commands cannot read `.git`.

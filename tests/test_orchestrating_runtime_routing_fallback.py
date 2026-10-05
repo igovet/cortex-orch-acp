@@ -692,3 +692,30 @@ def test_recancelling_an_interrupted_worker_keeps_the_graph_in_sync(tmp_path):
         ).fetchall()
     assert (row["status"], row["failure_reason"]) == ("failed", "turn_interrupted")
     assert [r["payload_json"] for r in sync_events] == []
+
+
+@pytest.mark.parametrize("via_predecessor", [False, True])
+def test_user_selected_model_never_falls_back_to_a_different_identity(tmp_path, via_predecessor):
+    store, task_id, connections, a, b = _setup_two_route_task(tmp_path)
+    runtime, engine = _make_runtime(store, lambda *_: None, connections)
+    revision = ConfigurationService(store).current(task_id)
+    routing_store.record_attempt_audit(
+        store, attempt_id="strict-attempt", task_id=task_id, role=ROLE_ID,
+        engine=a.route.engine, connection_id=a.connection_id, model=a.route.model,
+        params_fingerprint="strict-fp", config_revision_id=revision["id"], decision="authorized",
+        detail={"route_basis": "auto:user_request"})
+    old_attempt = "strict-attempt"
+    if via_predecessor:
+        old_attempt = "strict-successor"
+        routing_store.record_attempt_audit(
+            store, attempt_id=old_attempt, task_id=task_id, role=ROLE_ID,
+            engine=a.route.engine, connection_id=a.connection_id, model=a.route.model,
+            params_fingerprint="strict-fp", config_revision_id=revision["id"], decision="fallback",
+            predecessor_attempt_id="strict-attempt", detail={})
+    result = runtime._attempt_worker_route_fallback(
+        task_id, "strict-assignment", "strict-assignment-id", ROLE_ID, old_attempt,
+        "strict-workspace", revision["id"], ENGINE_FAILURE, "Build it")
+    assert result == (None, True, None)
+    assert engine.fallback_calls == []
+    failures = [e for e in delegation_events.list_since(store, task_id) if e.event_type == "assignment_failed"]
+    assert any(e.payload["error"] == "fallback_refused:user_requested_route_unavailable" for e in failures)

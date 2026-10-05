@@ -3297,7 +3297,15 @@ def main(argv=None, runtime=None, environ=None):
     sys.stdout = sys.stderr
 
     agent = Agent(runtime if runtime is not None else UnavailableRuntime(), environ=environ)
-    transport = StdioTransport(agent.handle_message, raw_stdout, on_writer_closed=agent.handle_writer_closed)
+    def trace_context(session_id):
+        session = agent.sessions.get(session_id) or {}
+        channel = session.get("channel")
+        return dict(task_id=session.get("task_id"),
+                    channel_id=getattr(channel, "channel_id", None))
+
+    transport = StdioTransport(agent.handle_message, raw_stdout,
+                               on_writer_closed=agent.handle_writer_closed,
+                               trace_context=trace_context)
     agent.bind_transport(transport)
     transport.start()
     # Stop waiting on whichever happens first: the reader hits EOF (normal

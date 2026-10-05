@@ -30,6 +30,12 @@ delivered only after the commit can also be omitted; see the
 [question display boundary](docs/acp/orchestration.md#plan-submission-and-coordinator-polling).
 
 
+Fresh-install model settings use the saved 2026-10-05 owner default's portable
+routing policy, `claude-agent-acp/opus[1m]` coordinator at medium effort, and Russian
+message language. Existing owner settings are never replaced. Account/connection
+identities and machine-specific MCP definitions/paths are not cloned; see
+[the install snapshot boundary](docs/configuration.md#fresh-install-owner-default-snapshot).
+
 ## Clear old project tasks from chat
 
 Preview `/cortex-clear before 2026-10-01`, then use the displayed command ending
@@ -51,6 +57,12 @@ ACP route/effort selection retains the owner and project ceilings and any
 task-local narrowing. Automatic workers and reviewers use only eligible
 observed routes within that ceiling; a denied pin is refused, not replaced.
 See [route authorization](docs/acp/routing-and-fallback.md#pre-dispatch-enforcement).
+
+An explicit model requested by the user is the first routing priority, but it
+never overrides authorization, availability, or supported parameters. If that
+exact route cannot be used, Cortex reports the refusal instead of silently
+substituting another model. Usage-based ranking switches only at observed usage
+of at least 95%; unknown usage remains unavailable, not assumed below threshold.
 
 Initial host model/provider echoes preserve the configured native effort/mode;
 they are not parameter resets. [Bound task inspection](docs/acp/observability.md#bound-task-inspection)
@@ -107,13 +119,20 @@ Explicit user requests must name the complete case-sensitive `engine/model`
 identity or an owner-configured request label. Keep an exact identity
 whitespace-delimited or quote it (`Use "engine/unit".`); attached unquoted
 punctuation is ambiguous identity data, never authorization for a shorter ID.
-Plan hints alone cannot promote a flagship. See the routing guidance above.
+Plan hints alone cannot promote a flagship. Confirmed requests in recorded
+user messages/answers select that exact model first on covered nodes in every
+tier, including retries/fixes, ahead of pins, preferences and usage ranking.
+Hard policy or unavailable routes refuse visibly rather than substitute.
+Usage switching engages only at observed usage >=95%; below it normal selection
+applies, and unknown usage is unavailable. See the routing guidance above.
 
 New route audits use the neutral `stretch` policy key and `stretch:<tier>` effort basis for any configured stretch model; stored historical audits remain readable and are not rewritten.
 
 Owner profiles now capture the complete supported set of user-level settings—not just routing—including defaults and owner ceiling, MCP usage policy and connection session limits. Save edits explicitly to the selected profile or save them as a new profile; activating one materializes its captured settings into the existing user configuration files. Project settings, MCP installation commands/arguments/environment and connection credentials are excluded. Project and `$CORTEX_ROUTING` files still shadow user routing. See [user routing profiles](docs/configuration.md#user-routing-profiles).
 
 Within an eligible routing tier, owner `preferred_for` model choices now rank ahead of plan hints, plan-usage heuristics and retry diversification. Preferences do not grant a route: pins, deny rules, automatic model membership, providers, tier eligibility, availability and quota safety still apply.
+
+A model's preference can also carry an owner-written `preferred_when` condition (for example "frontend changes without design work"). The coordinator judges each plan node against it and names the model only where it holds; elsewhere the model is an ordinary candidate. In Settings, preferred work kinds are now chosen from the work-kind list instead of typed. See [model policy](docs/configuration.md).
 
 The current Codex adapter is codex-acp 2.0.1 with Codex CLI 0.159.1, with a separately observed offline catalog. The installed Claude adapter is claude-agent-acp 0.84.0. Codex 1.12.0 and 1.13.0 remain supported fallbacks; later Codex adapters still need explicit compatibility support. This one-time update does not change the existing background installer. See [adapter compatibility](docs/acp/codex-acp-adapter.md).
 
@@ -251,3 +270,38 @@ Root `.gitignore` writes through Cortex keep a final `/.cortex/` rule,
 including after negations. Command edits are reconciled at completion and
 native edits before a fresh writable worker result is published; there is no
 universal native pre-action hook. See [the boundary and tracked-file limits](docs/acp/permissions-and-containment.md#runtime-store-ignore-protection).
+
+Independent review can start once all execution results are accepted, while
+finished workers' engine turns wind down. Their MCP authority is revoked at
+acceptance; capacity remains occupied until confirmed exit. Review and completion
+remain bound to project digests. Verification can overlap the running reviewer;
+only an unchanged, approved binding credits its result. Stale or rejected
+candidates are discarded, and stops cancel their command sequence. See
+[orchestration](docs/acp/orchestration.md#speculative-verification-during-review).
+Project digest captures reuse bounded in-memory hashes of unchanged files on
+recognized local filesystems without changing the manifest or drift gates;
+see [project digest caching](docs/acp/workspaces-and-integration.md).
+
+## Orchestration timing
+
+Use `python3 -B scripts/cortex_timeline.py --project "$PROJECT" --task "$TASK" --json`
+for a read-only, metadata-only phase breakdown of a checkpointed project store.
+Missing milestones stay missing; worker overlaps are not summed.
+See [timing observations and limits](docs/acp/observability.md#orchestration-phase-measurement).
+
+Developer debugging can opt in to private dev-only wire traces through the
+guarded wrapper, only when starting the isolated dev daemon:
+
+```bash
+python3 -B scripts/cortex_paseo_dev.py --wire-trace -- daemon start --timeout 60 --json
+python3 -B scripts/cortex_trace_view.py --task "$TASK" --pretty
+```
+
+Tracing is off by default; ordinary wrapper launches strip inherited opt-in.
+The guarded switch is accepted only for `~/.paseo-dev` daemon start, and the
+runtime refuses installed production payload/state. Redacted traces live in
+private capped files below the dev home, outside project stores and Git; stop
+the dev daemon to avoid concurrent rotation while analyzing exact history.
+Records can contain sensitive project/model content even after redaction, so
+treat the files as confidential and remove them only under the dev-home's
+normal retention procedure. See [wire-trace boundaries and limits](docs/acp/observability.md#developer-only-wire-tracing).

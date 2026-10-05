@@ -183,7 +183,22 @@ def test_worker_gateway_publication_and_result_cross_real_mcp_process(tmp_path):
     args=dict(report_ref=report['report_id'],summary='Observed',checks=[],request_key='result')
     result=call('result_submit',**args)
     assert result['recorded']
-    assert call('result_submit',**args)==result
+    # Accepted result revokes the channel even while its engine lingers.
+    # A new authenticated wire call, including a replay, cannot reactivate it;
+    # runtime recovery reads the durable receipt instead of republishing.
+    for name, arguments in [('result_submit', args), ('project_write', dict(
+            path='late.txt', content='late', expected_sha256='absent', request_key='late'))]:
+        response = _call(project, worker, wsecret, _init_and(
+            'tools/call', dict(name=name, arguments=arguments)), tmp_path)[-1]
+        assert response['result']['isError']
+        assert json.loads(response['result']['content'][0]['text'])['error'] == 'channel_revoked'
+    with store.connection() as db:
+        receipt = db.execute("SELECT result_json FROM runtime_requests WHERE task_id=? "
+                             "AND actor=? AND request_key='result'", (task, worker)).fetchone()[0]
+        assert json.loads(receipt)['complete']
+        assert db.execute("SELECT COUNT(*) FROM task_events WHERE task_id=? AND event_type='worker_result'",
+                          (task,)).fetchone()[0] == 1
+    assert not (project / 'late.txt').exists()
     context=TaskMachine(store).context(task)
     assert context['state']=='EXECUTING'
     assert context['nodes'][0]['status']=='completed'

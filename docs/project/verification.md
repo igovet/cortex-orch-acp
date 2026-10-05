@@ -330,3 +330,52 @@ See [binding provenance and limits](../acp/dev-paseo-environment.md#read-only-de
 After all edits, sequentially stamp, validate, check profiles, run isolated
 `tests/test_package.py`, then validate again. Runtime independent review and
 current-artifact final verification remain separate from these worker checks.
+
+
+## Orchestration timing and developer wire-trace checks
+
+For changes to orchestration timing or scheduler diagnostics, run the focused
+measurement tests and inspect a fixture's read-only behavior:
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 python3 -B -m pytest -q tests/test_orchestration_measurement.py
+python3 -B scripts/cortex_timeline.py --project "$PROJECT" --task "$TASK" --json
+```
+
+The timeline command requires a checkpointed supported project store and an
+exact task ID. It is observational only; missing/duplicate milestones are not
+filled in, overlapping phases are not summed, and it refuses busy, uncheckpointed,
+legacy, unsupported or over-limit inputs. Use an authorized disposable project
+and do not treat the timeline as a live qualification.
+
+For early review, digest caching and speculative verification, use the focused
+tests covering the changed behavior, including:
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 python3 -B -m pytest -q tests/test_early_review.py tests/test_artifact_revision.py tests/test_speculative_verification.py
+```
+
+For dev-only wire tracing, run the trace/redaction and wrapper gate tests:
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 python3 -B -m pytest -q tests/test_dev_wire_trace.py
+```
+
+A requested trace session is separate from automated checks and must follow
+[dev Paseo isolation policy](../acp/dev-paseo-environment.md). Do not use
+production Paseo. Start tracing only through
+`python3 -B scripts/cortex_paseo_dev.py --wire-trace -- daemon start ...`;
+inspect existing traces with
+`python3 -B scripts/cortex_trace_view.py --task "$TASK" --pretty`.
+Trace files are private but may contain sensitive content; stop the writer before
+exact-history analysis. Traces are diagnostic records only, may contain explicit
+gaps, and never verify a command or prove a task outcome. Do not run a paid live
+check unless the owner explicitly requested its mode for this work.
+
+After these documentation edits, regenerate the package hash and run the focused
+package test sequentially:
+
+```bash
+python3 -B scripts/cortex_package.py stamp
+PYTHONDONTWRITEBYTECODE=1 python3 -B -m pytest -q tests/test_package.py
+```

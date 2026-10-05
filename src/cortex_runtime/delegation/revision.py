@@ -60,13 +60,17 @@ documented limitation of the shared-root design, not a bug in this module.
 """
 from __future__ import annotations
 
+import ctypes
 import fcntl
 import hashlib
 import json
 import os
 import re
 import stat
+import sys
+import threading
 import time
+from collections import OrderedDict
 from datetime import datetime, timezone
 
 _MAX_FILES = 50_000
@@ -394,6 +398,66 @@ def _classify(entry: os.DirEntry) -> str:
     return "o"
 
 
+# Hashes only, never file contents or paths. The LRU is shared by captures in
+# this process, bounded independently of project size, and locked only while
+# looking up/publishing (filesystem I/O never holds the lock).
+_CONTENT_HASH_CACHE_MAX_ENTRIES = 8192
+_CONTENT_HASH_CACHE: OrderedDict[tuple, str] = OrderedDict()
+_CONTENT_HASH_CACHE_LOCK = threading.Lock()
+
+try:
+    _FSTATFS = ctypes.CDLL(None).fstatfs if sys.platform == "linux" else None
+    if _FSTATFS is not None:
+        _FSTATFS.argtypes = [ctypes.c_int, ctypes.c_void_p]
+        _FSTATFS.restype = ctypes.c_int
+except (AttributeError, OSError):
+    _FSTATFS = None
+
+
+def _timestamp_guard_ns(fd: int) -> int | None:
+    """Conservative granularity for known local Linux filesystems.
+
+    Remote/unknown filesystems may not update ctime synchronously, so never
+    reuse their hashes. ext2/3/4, XFS, Btrfs and tmpfs have at most one-second
+    mtime/ctime granularity. Do not guess the backing filesystem of overlayfs.
+    """
+    if _FSTATFS is None:
+        return None
+    # Linux struct statfs starts with a native long f_type and fits in this
+    # buffer on both 32- and 64-bit ABIs. No paths or mount tables are read.
+    buf = (ctypes.c_long * 32)()
+    if _FSTATFS(fd, ctypes.byref(buf)) != 0:
+        return None
+    if (buf[0] & 0xFFFFFFFF) not in {0xEF53, 0x58465342, 0x9123683E, 0x01021994}:
+        return None
+    return 1_000_000_000
+
+
+def _content_cache_key(st) -> tuple:
+    return (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns,
+            st.st_ctime_ns, st.st_mode, st.st_uid, st.st_gid)
+
+
+def _cached_content_hash(key: tuple) -> str | None:
+    with _CONTENT_HASH_CACHE_LOCK:
+        if _CONTENT_HASH_CACHE_MAX_ENTRIES <= 0:
+            return None
+        digest = _CONTENT_HASH_CACHE.get(key)
+        if digest is not None:
+            _CONTENT_HASH_CACHE.move_to_end(key)
+        return digest
+
+
+def _remember_content_hash(key: tuple, digest: str) -> None:
+    with _CONTENT_HASH_CACHE_LOCK:
+        if _CONTENT_HASH_CACHE_MAX_ENTRIES <= 0:
+            return
+        _CONTENT_HASH_CACHE[key] = digest
+        _CONTENT_HASH_CACHE.move_to_end(key)
+        while len(_CONTENT_HASH_CACHE) > _CONTENT_HASH_CACHE_MAX_ENTRIES:
+            _CONTENT_HASH_CACHE.popitem(last=False)
+
+
 def _hash_file(path: str, budget: dict, deadline: float, *, parent_fd=None, name=None, expected=None) -> str:
     h = hashlib.sha256()
     size = 0
@@ -417,7 +481,21 @@ def _hash_file(path: str, budget: dict, deadline: float, *, parent_fd=None, name
             return "stat:" + hashlib.sha256(
                 f"{opened_st.st_size}:{opened_st.st_ino}:{opened_st.st_mtime_ns}:{opened_st.st_ctime_ns}".encode()
             ).hexdigest()
-        while True:
+        started_ns = time.time_ns()
+        guard_ns = _timestamp_guard_ns(fd)
+        cacheable = (guard_ns is not None
+                     and max(opened_st.st_mtime_ns, opened_st.st_ctime_ns) < started_ns - guard_ns)
+        key = _content_cache_key(opened_st)
+        cached = _cached_content_hash(key) if cacheable else None
+        if time.monotonic() > deadline:
+            raise _Unavailable("capture_timed_out")
+        if cached is not None:
+            # Charge logical bytes, not physical reads: otherwise a warm
+            # cache changes which later files take the metadata-only branch.
+            if opened_st.st_size > _MAX_FILE_HASH_BYTES:
+                raise _Unavailable("workspace_too_large")
+            budget["total_bytes"] += opened_st.st_size
+        while cached is None:
             if time.monotonic() > deadline:
                 raise _Unavailable("capture_timed_out")
             try:
@@ -439,9 +517,12 @@ def _hash_file(path: str, budget: dict, deadline: float, *, parent_fd=None, name
             raise _Unavailable(f"unreadable_entry:{path}:{error}") from error
         if not _same_node_state(opened_st, final_st):
             raise _Unavailable(f"changed_while_reading:{path}")
+        digest = cached if cached is not None else h.hexdigest()
+        if cached is None and cacheable and size == opened_st.st_size:
+            _remember_content_hash(key, digest)
     finally:
         os.close(fd)
-    return h.hexdigest()
+    return digest
 
 
 def _walk(root: str, budget: dict, deadline: float, records: list, *, parent_fd=None, relprefix="", expected=None) -> None:

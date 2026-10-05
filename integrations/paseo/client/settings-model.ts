@@ -150,6 +150,9 @@ export function mergeErrors(...sets: Array<FieldErrors | null | undefined>): Fie
 
 const CONTROL = /[\x00-\x1f\x7f]/;
 const SPACE_OR_CONTROL = /[\s\x00-\x1f\x7f]/;
+const CONTROL_EXCEPT_NEWLINE_TAB = /[\x00-\x08\x0b-\x1f\x7f]/;
+/** Longest `preferred_when` condition; the runtime's model_policy.MAX_PREFERRED_WHEN. */
+export const PREFERRED_WHEN_MAX = 500;
 export const ROUTE_ID = /^xr_[0-9a-f]{12,64}$/;
 export const CONNECTION_ID = /^cn_[0-9a-f]{12}$/;
 export const PARAMETER_NAME = /^[a-z][a-z0-9_]{0,63}$/;
@@ -610,7 +613,8 @@ export function routingRulesToForm(rules: Record<string, unknown> | undefined): 
         || (raw.policy !== undefined && !isPlainObject(raw.policy))) return unrepresentable("models");
       const policy: Record<string, Record<string, unknown>> = {};
       for (const [model, value] of Object.entries(raw.policy ?? {})) {
-        if (!isPlainObject(value) || (value.preferred_for != null && !isStringArray(value.preferred_for))) return unrepresentable("models.policy");
+        if (!isPlainObject(value) || (value.preferred_for != null && !isStringArray(value.preferred_for))
+          || (value.preferred_when != null && typeof value.preferred_when !== "string")) return unrepresentable("models.policy");
         policy[model] = { ...value };
       }
       models[engine] = { auto: raw.auto === undefined ? null : [...raw.auto as string[]], tiers: raw.tiers === undefined ? {} : Object.fromEntries(Object.entries(raw.tiers as Record<string, ModelTierValue>)
@@ -769,6 +773,14 @@ export function buildRoutingRules(form: RoutingForm, vocabulary: RoutingVocabula
             addError(errors, `rules.models.${engine}.policy.${model}.preferred_for`, "Choose known work kinds.");
           if (Array.isArray(preferred) && preferred.length > 0 && auto !== null && !auto.includes(model))
             addError(errors, `rules.models.${engine}.policy.${model}.preferred_for`, "Select this model for automatic ranking first.");
+        }
+        const when = policy.preferred_when;
+        if (when != null) {
+          const key = `rules.models.${engine}.policy.${model}.preferred_when`;
+          if (typeof when !== "string" || !when.trim()) addError(errors, key, "Write the condition or clear the field.");
+          else if (when.length > PREFERRED_WHEN_MAX) addError(errors, key, `At most ${PREFERRED_WHEN_MAX} characters.`);
+          else if (CONTROL_EXCEPT_NEWLINE_TAB.test(when)) addError(errors, key, "Remove control characters.");
+          else if (auto !== null && !auto.includes(model)) addError(errors, key, "Select this model for automatic ranking first.");
         }
       }
       models[engine] = { ...(auto === null ? {} : { auto }), ...(Object.keys(tiers).length ? { tiers } : {}),
@@ -938,7 +950,10 @@ export function modelAutoSelected(form: RoutingForm, engine: string, model: stri
 export function setModelAutoSelected(form: RoutingForm, engine: string, model: string, selected: boolean, defaultSelected: readonly string[]): RoutingForm {
   const models = { ...(form.models ?? {}) }; const current = models[engine] ?? { auto: null, tiers: {}, policy: {} }; const auto = current.auto ?? [];
   const policy = { ...current.policy };
-  if (!selected && policy[model]) policy[model] = { ...policy[model], preferred_for: [] };
+  if (!selected && policy[model]) {
+    const { preferred_when: _when, ...rest } = policy[model];
+    policy[model] = { ...rest, preferred_for: [] };
+  }
   models[engine] = { ...current, policy, auto: selected ? (auto.includes(model) ? auto : [...auto, model]) : auto.filter((item) => item !== model) };
   return { ...form, models };
 }
@@ -975,6 +990,14 @@ export function setModelPreferredFor(form: RoutingForm, engine: string, model: s
   const previous = Array.isArray(entry.preferred_for) ? entry.preferred_for as string[] : [];
   entry.preferred_for = enabled ? [...new Set([...previous, kind])] : previous.filter((item) => item !== kind);
   policy[model] = entry;
+  models[engine] = { ...current, policy };
+  return { ...form, models };
+}
+/** Set the owner's free-text `preferred_when` condition; blank text removes it. */
+export function setModelPreferredWhen(form: RoutingForm, engine: string, model: string, text: string): RoutingForm {
+  const models = { ...(form.models ?? {}) };
+  const current = models[engine] ?? { auto: null, tiers: {}, policy: {} };
+  const policy = { ...current.policy, [model]: { ...(current.policy[model] ?? {}), preferred_when: text.trim() ? text : null } };
   models[engine] = { ...current, policy };
   return { ...form, models };
 }

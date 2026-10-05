@@ -7,7 +7,9 @@ existing free-text sinks in this runtime; both route through the functions
 below instead of formatting a raw string/mapping themselves. No prompt,
 report, or source body is ever logged here (never call these on a content
 body -- log a ref + digest + size instead, as every other durable evidence
-path in this runtime already does).
+path in this runtime already does). The explicitly gated developer wire trace
+uses scrub_wire_text plus its full-frame credential redactor; it is not normal
+production evidence or display logging.
 
 Three independent redaction passes, applied to every string value:
 
@@ -363,6 +365,17 @@ def scrub_command(command: Any) -> dict:
     argv0 = command[0] if isinstance(command[0], str) else str(command[0])
     joined = "\x1f".join(str(part) for part in command)
     return dict(argv0=argv0, argv_hash=_digest(joined), argc=len(command))
+
+
+def scrub_wire_text(value: str) -> str:
+    """Shared explicit-credential forms for private dev wire bodies.
+
+    No display truncation or heuristic hashing of long identity/digest strings:
+    the gated trace's rotation cap bounds retention, and its structured redactor
+    handles sensitive fields, environment/argv literals and embedded JSON.
+    """
+    value = _URL_CREDENTIALS.sub(lambda m: m[1] + "[REDACTED]@", value)
+    return _SECRET_CLAIM.sub(lambda m: f"{m.group(1)} [REDACTED]", value)
 
 
 def scrub_url(value: Any) -> str:

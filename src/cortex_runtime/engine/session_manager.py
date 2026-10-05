@@ -243,6 +243,8 @@ class EngineSessionManager:
         broker_mcp=False,
         jail=None,
         engine_instructions: str | None = None,
+        lifecycle_observer=None,
+        trace_identity=None,
     ):
         """``install`` -- a
         :class:`~.codex_install.CodexAcpInstall`, or ``None`` -- is passed
@@ -266,6 +268,10 @@ class EngineSessionManager:
         ``None`` by default, so a caller that never opts in keeps this
         bridge's pre-existing behaviour exactly (the refusal itself is
         unaffected either way; only the model-visible "why" delivery is)."""
+        # Optional metadata-only sink: (kind, portable_session_id), no wire content.
+        self._trace_identity = dict(trace_identity or {})
+        self._lifecycle_observer = lifecycle_observer
+        self._first_update_sessions = set()
         self._record = record
         self._workspace_root = workspace_root
         self._environ = environ
@@ -479,6 +485,7 @@ class EngineSessionManager:
                 on_client_request=self._handle_client_request,
                 on_unknown_notification=self._on_unknown_notification,
                 logs=self._process.logs,
+                trace_context=self._wire_trace_context,
             ).start()
 
     def _opencode_prompt(self) -> str:
@@ -644,6 +651,14 @@ class EngineSessionManager:
         self._process.logs.observe("unknown_notification_ignored", method=method)
 
     # -- T014: resource binding registration/invalidation ----------------
+
+    def _wire_trace_context(self, wire_session_id):
+        portable = self.correlation.portable_session_id(wire_session_id) if wire_session_id else None
+        identity = dict(self._trace_identity, engine_session_id=portable,
+                        connection_id=self._record.id)
+        if self._channel_credentials is not None:
+            identity["channel_id"] = self._channel_credentials[0]
+        return identity
 
     def bind_resource(self, binding: ResourceBinding) -> None:
         self.bindings.bind(binding)
@@ -832,6 +847,8 @@ class EngineSessionManager:
                 "tool_schemas_observed": False,
             }
             self._session_locks[portable_session_id] = threading.Lock()
+        if self._lifecycle_observer is not None:
+            self._lifecycle_observer('ENGINE_READY', portable_session_id)
         self._process.logs.observe("session_created", portable_session_id=portable_session_id)
         if self._record.engine == "opencode":
             self._await_opencode_mcp(portable_session_id)
@@ -1271,6 +1288,12 @@ class EngineSessionManager:
         if not isinstance(params, dict):
             return
         wire_session_id = params.get("sessionId")
+        if self._lifecycle_observer is not None and wire_session_id not in self._first_update_sessions:
+            # Count the first actual session/update, even if it has no text.
+            portable = self.correlation.portable_session_id(wire_session_id)
+            if portable is not None:
+                self._lifecycle_observer('FIRST_MODEL_OUTPUT', portable)
+                self._first_update_sessions.add(wire_session_id)
         update = params.get("update") or {}
         entry = self._update_queues.get(wire_session_id)
         event = self._translate_update(wire_session_id, update)

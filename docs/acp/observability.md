@@ -473,3 +473,144 @@ truncated history or incomplete action receipts block qualification. The
 inspector does not probe `/proc`, prove native resource liveness, verify report
 body bytes, or invent SIGKILL telemetry. It has no acceptance verdict. Missing
 host/cleanup/engine evidence still requires an explicit limitation, not a pass.
+
+## Orchestration phase measurement
+
+Inspect a checkpointed format-12 project store without a model call:
+
+```bash
+python3 -B scripts/cortex_timeline.py --project "$PROJECT" --task "$TASK"
+python3 -B scripts/cortex_timeline.py --project "$PROJECT" --task "$TASK" --json
+```
+
+This reader uses the existing guarded immutable snapshot: SQLite URI
+`mode=ro&immutable=1`, query-only, an existing access lock opened read-only,
+and no Store initialization, migration, repair, checkpoint or file creation.
+Unsafe paths, a busy lock, nonempty WAL, unsupported/legacy storage, a missing
+task or more than 10,000 events refuse (exit 1), never return partial success.
+Wait for the normal runtime to checkpoint; do not bypass a refusal.
+
+Only allowlisted event metadata is projected. Text and JSON show coordinator
+turn → plan, plan → baseline, assignment → engine ready → first update → first
+gateway tool → completed → released, review, verification and synthesis
+intervals. Exact event IDs and timestamps are returned with durations. Missing
+endpoints remain `missing` with null durations; duplicate milestones are not
+selected as a success. No start time is synthesized from task creation.
+Historical runs without the new milestones cannot split startup latency.
+Overlapping workers are shown separately, not summed into a claimed critical
+path; this is a phase breakdown for analyzing the critical path, not a
+reconstructed DAG critical-path verdict. Native engine actions are not gateway
+tool receipts, and their first-call timing is not inferred.
+
+Additive `runtime_events`:
+- `COORDINATOR_TURN_STARTED`: immediately before a planning/reconciliation
+  prompt, carrying revision, state and engine session identity.
+- `ENGINE_READY`: the downstream process has started, initialize and
+  session/new have acknowledged a valid session. This is not native model
+  configuration confirmation.
+- `FIRST_MODEL_OUTPUT`: the first correlated session/update from that engine,
+  including non-text updates; it is **not** a first-token assertion.
+  Both worker/reviewer milestones carry only assignment, attempt and engine
+  session IDs; created_at supplies the timestamp. They are transactionally
+  deduplicated per actual attempt. Updates before session/new identity is
+  available are not attributed or fabricated.
+- `SCHEDULER_WAIT_REASON`: changes only, keyed by revision/node or attempt.
+  `dependency`, `scope_overlap` and `capacity_limit` are actual scheduler
+  decisions; `route_capacity` means the selected connection/session
+  reservation refused capacity (not proof of provider quota exhaustion).
+  A null reason clears an observed wait. Legacy standalone adapter calls
+  without a runtime task retain their existing progress event only.
+- `WORKER_COMPLETED`/`WORKER_FAILED` retain their prior fields and now
+  additionally carry attempt_id, preventing cross-attempt completion matching.
+
+These are metadata-only observations in normal runtime storage, not full dev
+wire logging. No prompt, tool content, credentials or private report body is
+added; acceptance, authority, scheduling limits and process release semantics
+are unchanged.
+
+## Developer-only wire tracing
+
+Wire tracing is **off by default**. Disabled instrumentation does not create
+directories or files and only checks the trace flag. There is no routing,
+production settings or MCP tool switch for it. The guarded wrapper clears
+inherited trace opt-ins on ordinary calls. Enable it only on a fresh
+`~/.paseo-dev` daemon start, between active tasks:
+
+```bash
+python3 -B scripts/cortex_paseo_dev.py --wire-trace -- start --timeout 60 --json
+```
+
+This command does not authorize a paid workload. Follow the
+[dev environment rules](dev-paseo-environment.md) before any launch.
+An already-running daemon does not acquire a new environment; stop it before
+an explicitly authorized traced start. To disable tracing, stop that dev daemon
+and start it through the wrapper without `--wire-trace`.
+
+The wrapper accepts this opt-in only for `start` or `daemon start` at the
+exact canonical `~/.paseo-dev` home, not alternate homes, GUI, status or binding
+commands. The runtime additionally requires the matching dev config/state XDG
+paths, the wrapper's explicit source root, and a real checkout with `.git`
+and the guarded script. Installed production payloads/state refuse even with
+the opt-in. These are source/state launch checks, not a cryptographic proof
+of environment provenance; the account owner controls their environment.
+
+JSONL goes only to
+`~/.paseo-dev/cortex-xdg/state/cortex/wire-traces/`: private owned 0700
+directories, 0600 files, no symlinks/hardlinked files, outside every Git
+repository and project `.cortex` store. Existing non-private targets refuse
+rather than being chmodded. All processes share a locked rotation ring:
+`trace.jsonl` and three numbered predecessors, each at most 16 MiB
+(64 MiB total plus an empty lock). Rotation replaces old history.
+A record too large for one file becomes an explicit
+`record_exceeds_rotation_size` diagnostic, never silently a full capture.
+Path/redaction/write failure stops that process's trace with a sanitized stderr
+diagnostic; it cannot change protocol, command or storage outcomes.
+
+Channels and directions:
+- `upstream_acp`: parsed client → Cortex (`in`), successfully written
+  Cortex → client (`out`) JSON-RPC at Cortex's stdio boundary, including
+  requests, responses and notifications.
+- `downstream_acp`: the same traffic between Cortex and each engine,
+  including initialization, session setup, updates, tool events and errors.
+- `mcp`: actual Cortex MCP request/reply frames, including `tools/call`
+  arguments, complete results and JSON-RPC errors.
+- `verification`: literal argv/cwd (`out`), complete combined stdout/stderr
+  lines and exit/interruption status (`in`); setup/launch failures are explicit.
+- `lifecycle`: runtime event insert attempts (`internal`), labelled
+  `transaction: pending`. They are **not** commit receipts; SQLite remains
+  authoritative.
+
+Rows include UTC timestamp, monotonic time, PID, direction/channel, session,
+channel, task, assignment and attempt IDs, with engine-session/connection or
+command references when available. Pre-session/pre-task/unbound IDs are null,
+not guessed. Response correlation is bounded to 1,024 requests per transport;
+evicted or unavailable identities stay missing. Malformed/oversized input has
+a diagnostic rather than an invented parsed body.
+
+Credentials are redacted before serialization: sensitive keys and environment
+name/value pairs, inherited and runtime-resolved engine secret-looking environment literals,
+auth headers,
+Bearer/Basic values, token/API-key/password argv, relay tokens, embedded JSON,
+common key formats, URL userinfo/credential claims through the shared redactor,
+and verification private-key blocks. Learned credential
+literals are also removed from echoes. Exhausting the bounded secret registry
+stops capture. Redaction is not a guarantee against arbitrary unfamiliar
+secrets or secrets fragmented across independent messages. Traces can contain
+private prompts, report/file bodies and model thought updates: never commit,
+publish or include raw traces in reports. Native actions invisible on these
+wires are not synthesized as command receipts.
+
+Read existing traces without a daemon, Store initialization or writes:
+
+```bash
+python3 -B scripts/cortex_trace_view.py --task "$TASK" --assignment "$ASSIGNMENT" --direction in --pretty
+python3 -B scripts/cortex_trace_view.py --channel verification --pretty
+```
+
+Optional `--directory` selects an existing private trace directory; unsafe
+targets and invalid/incomplete JSON return exit 1 (earlier output may be partial).
+Stop the writer before exact analysis: concurrent rotation can change which
+generations a reader sees. Rotation, explicit gaps or missing IDs prevent
+claims of complete retained history. Traces are debugging data, never
+acceptance evidence or substitutes for independent review and verified receipts.
+Production's metadata-only observations and timeline reader are unchanged.

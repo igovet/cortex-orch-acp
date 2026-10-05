@@ -1,6 +1,7 @@
 {
   "schema_version": 1,
   "routing": {
+    "model_policy_version": 2,
     "deny": [
       "gpt-5.5",
       "haiku",
@@ -16,7 +17,6 @@
       "codex-acp/gpt-6-sol"
     ],
     "enabled": {
-      "opencode": [],
       "claude-agent-acp": [
         "default",
         "opus[1m]",
@@ -27,7 +27,8 @@
         "gpt-6.1-sol",
         "gpt-6-astra",
         "gpt-6-luna"
-      ]
+      ],
+      "opencode": []
     },
     "auto_allow": [
       "opencode/byteplus-plan/glm-5.3-flash"
@@ -38,61 +39,6 @@
     ],
     "models": {
       "claude-agent-acp": {
-        "policy": {
-          "claude-fable-5-1[1m]": {
-            "preferred_for": [
-              "design"
-            ],
-            "effort_floor": null,
-            "max_effort": "high",
-            "effort_ladder": null,
-            "also_standard_for": null,
-            "request_names": [
-              "fable",
-              "фейбл",
-              "фэйбл"
-            ]
-          },
-          "claude-sonnet-5": {
-            "preferred_for": [
-              "implementation",
-              "debugging",
-              "testing",
-              "investigation",
-              "review",
-              "writing",
-              "analysis",
-              "operations"
-            ],
-            "effort_floor": null,
-            "max_effort": null,
-            "effort_ladder": null,
-            "also_standard_for": null,
-            "request_names": null
-          },
-          "opus[1m]": {
-            "preferred_for": [
-              "design",
-              "planning",
-              "implementation",
-              "debugging",
-              "review"
-            ],
-            "effort_floor": null,
-            "max_effort": null,
-            "effort_ladder": null,
-            "also_standard_for": null,
-            "request_names": null
-          },
-          "default": {
-            "effort_floor": null,
-            "max_effort": null,
-            "effort_ladder": null,
-            "also_standard_for": null,
-            "preferred_for": null,
-            "request_names": null
-          }
-        },
         "auto": [
           "default",
           "opus[1m]",
@@ -100,48 +46,125 @@
           "claude-sonnet-5"
         ],
         "tiers": {
-          "default": [
-            "deep"
-          ],
-          "opus[1m]": [
-            "deep"
-          ],
           "claude-fable-5-1[1m]": [
             "flagship"
           ],
           "claude-sonnet-5": [
             "standard"
+          ],
+          "default": [
+            "deep"
+          ],
+          "opus[1m]": [
+            "deep",
+            "flagship"
           ]
+        },
+        "policy": {
+          "claude-fable-5-1[1m]": {
+            "also_standard_for": null,
+            "effort_floor": "low",
+            "effort_ladder": null,
+            "max_effort": "high",
+            "preferred_for": [
+              "design"
+            ],
+            "request_names": [
+              "fable",
+              "фейбл",
+              "фэйбл"
+            ]
+          },
+          "claude-sonnet-5": {
+            "also_standard_for": null,
+            "effort_floor": "medium",
+            "effort_ladder": null,
+            "max_effort": "xhigh",
+            "preferred_for": [
+              "implementation",
+              "debugging",
+              "testing",
+              "investigation",
+              "review",
+              "writing",
+              "analysis",
+              "operations"
+            ],
+            "request_names": null
+          },
+          "default": {
+            "also_standard_for": null,
+            "effort_floor": null,
+            "effort_ladder": null,
+            "max_effort": null,
+            "preferred_for": null,
+            "request_names": null
+          },
+          "opus[1m]": {
+            "also_standard_for": null,
+            "effort_floor": "medium",
+            "effort_ladder": null,
+            "max_effort": "xhigh",
+            "preferred_for": [
+              "design",
+              "planning",
+              "implementation",
+              "debugging",
+              "review",
+              "analysis"
+            ],
+            "request_names": null
+          }
         }
       },
       "codex-acp": {
+        "auto": [
+          "gpt-6.1-sol",
+          "gpt-6-astra",
+          "gpt-6-luna"
+        ],
         "tiers": {
-          "gpt-6.1-sol": [
-            "standard",
-            "deep"
-          ],
           "gpt-6-astra": [
+            "deep",
             "flagship"
           ],
           "gpt-6-luna": [
             "light"
+          ],
+          "gpt-6.1-sol": [
+            "standard",
+            "deep"
           ]
         },
         "policy": {
           "gpt-6-astra": {
-            "preferred_for": [
-              "design"
-            ],
-            "effort_floor": null,
-            "max_effort": "high",
-            "effort_ladder": null,
             "also_standard_for": null,
+            "effort_floor": "low",
+            "effort_ladder": null,
+            "max_effort": "high",
+            "preferred_for": [
+              "design",
+              "implementation",
+              "review",
+              "planning",
+              "analysis"
+            ],
             "request_names": [
               "astra",
               "астр"
             ]
           },
           "gpt-6-luna": {
+            "also_standard_for": [
+              "testing"
+            ],
+            "effort_floor": "high",
+            "effort_ladder": [
+              "high",
+              "xhigh",
+              "max"
+            ],
+            "max_effort": "max",
             "preferred_for": [
               "analysis",
               "writing",
@@ -151,19 +174,13 @@
               "investigation",
               "operations"
             ],
-            "effort_floor": "high",
-            "max_effort": null,
-            "effort_ladder": [
-              "high",
-              "xhigh",
-              "max"
-            ],
-            "also_standard_for": [
-              "testing"
-            ],
             "request_names": null
           },
           "gpt-6.1-sol": {
+            "also_standard_for": null,
+            "effort_floor": "medium",
+            "effort_ladder": null,
+            "max_effort": "xhigh",
             "preferred_for": [
               "implementation",
               "planning",
@@ -172,18 +189,9 @@
               "debugging",
               "operations"
             ],
-            "effort_floor": null,
-            "max_effort": null,
-            "effort_ladder": null,
-            "also_standard_for": null,
             "request_names": null
           }
-        },
-        "auto": [
-          "gpt-6.1-sol",
-          "gpt-6-astra",
-          "gpt-6-luna"
-        ]
+        }
       },
       "opencode": {
         "auto": [
@@ -213,7 +221,6 @@
         }
       }
     },
-    "model_policy_version": 2,
     "quota_windows": {
       "claude-agent-acp": [
         {
@@ -242,11 +249,11 @@
     }
   },
   "coordinator": {
-    "engine": "codex-acp",
-    "model": "gpt-6.1-sol",
+    "engine": "claude-agent-acp",
+    "model": "opus[1m]",
     "parameters": {
-      "thought_level": "high",
-      "mode": "agent"
+      "thought_level": "medium"
     }
-  }
+  },
+  "language": "ru"
 }

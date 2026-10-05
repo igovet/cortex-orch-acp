@@ -47,11 +47,13 @@ root-cause analysis, production incidents, concurrency, security or data-loss ri
 `low` for a narrow lookup or mechanical change; omit it otherwise. It sets how
 strong, and how costly, the worker's model is; overrating it wastes the plan.
 Follow the live plan schema for route recommendations. A recommendation alone
-is advisory; however, an exact eligible flagship route explicitly requested by
-the user for this task can select that route for the covered node. Confirm the
-request and matching route against the live menu and schema; never infer consent
-from a model-authored paraphrase. The runtime still validates and schedules the
-node and applies policy.
+is advisory unless it carries the user's explicit model choice for this task.
+Honor that choice first on every node it covers, including retries and fixes:
+it outranks automatic tiers, pins, preferences and usage ranking for any model
+tier. Confirm the exact route against the live menu and schema and establish
+consent only from recorded user messages or answers, never model-authored text.
+Hard owner authorization or an unavailable route must be surfaced visibly;
+never silently substitute another model. The runtime validates and schedules.
 Take verification commands from the project's own documentation
 (docs/project/verification.md, AGENTS.md, CLAUDE.md, Makefile or package.json
 scripts) and copy them exactly, with the documented interpreter path and its

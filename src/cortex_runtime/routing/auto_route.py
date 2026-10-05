@@ -19,7 +19,8 @@ from ..portable.errors import PortableError, PortableErrorCategory
 from . import model_policy
 
 ENV_VAR = "CORTEX_ROUTING"
-HOT_PERCENT = 85.0
+USAGE_SWITCH_PERCENT = 95.0
+HOT_PERCENT = USAGE_SWITCH_PERCENT
 TIERS = model_policy.TIERS
 _FALLBACK_ORDER = {
     "flagship": ("flagship", "deep", "standard", "light"),
@@ -183,7 +184,8 @@ def suitability(role: str | None, engine: str, affinity: Mapping[str, str | None
 # Excluded, unavailable and exhausted (100%) routes are never honoured at
 # all.
 HINT_TOLERANCE = HOT_PERCENT
-# Plan usage ranks candidates in steps of this many percentage points above
+# Once observed usage reaches USAGE_SWITCH_PERCENT, plan usage ranks
+# candidates in steps of this many percentage points above
 # the least-used candidate: a smaller difference is not a meaningful
 # difference in remaining quota, so the task (engine affinity) decides it.
 USAGE_MARGIN = 10.0
@@ -206,7 +208,7 @@ def route_menu(project_root=None, environ=None, unavailable=()):
     roles = sorted(role for role in set(WORKER_ALIASES.values()) if role.startswith("worker-")
                    and role not in {"worker-code-reviewer", "worker-build-verification"})
     result = {tier: [] for tier in TIERS}
-    flagship, stretch, preferred = [], [], {}
+    flagship, stretch, preferred, conditional = [], [], {}, {}
     eligible_engines = set()
     for entry in entries:
         engine, model = entry.route.engine, entry.route.model
@@ -244,8 +246,11 @@ def route_menu(project_root=None, environ=None, unavailable=()):
                 never="complexity high, deep or flagship work, deep roles"))
         if reason is None:
             eligible_engines.add(engine)
-            for kind in sorted(policy.preferred_for):
-                preferred.setdefault(kind, []).append(label)
+            if policy.preferred_when is not None:
+                conditional[label] = dict(when=policy.preferred_when, work_kinds=sorted(policy.preferred_for))
+            else:
+                for kind in sorted(policy.preferred_for):
+                    preferred.setdefault(kind, []).append(label)
     return dict(tiers=result, quota_window_policy=dict(unmapped="conservative_shared",
                                                       rules=overrides.get("quota_windows", {})),
                 roles={role: {complexity: tier_for(role, complexity=complexity)
@@ -263,6 +268,9 @@ def route_menu(project_root=None, environ=None, unavailable=()):
                 affinity_source={kind: "routing.json" if kind in affinity or "*" in affinity else "builtin"
                                  for kind in WORK_KIND_ENGINES},
                 preferred=preferred,
+                # Owner-written conditions only the coordinator can judge: a
+                # node that meets one carries that exact route as its hint.
+                preferred_when=conditional,
                 flagship=dict(routes=[label for label, _policy in flagship],
                               request_names={label: list(policy.request_names) for label, policy in flagship
                                              if policy.request_names},
@@ -301,14 +309,11 @@ def choose(role: str, project_root=None, environ: Mapping[str, str] | None = Non
     usable, the delegation is refused (``no_available_route``) with every
     unavailable route named -- never the coordinator's route instead.
 
-    ``user_request`` (:func:`user_model_request`) is the
-    user's own request, in this task, for an exact
-    ``model_hint``. When that hinted route is a flagship model it runs at
-    the flagship tier even without escalation (basis ``auto:user_request``);
-    a pin still wins, and a denied, excluded, unavailable or
-    exhausted requested route is refused with its reason in
-    ``decision["user_model_request"]`` while the node is routed as usual.
-    Without a user request a flagship hint stays escalation-only.
+    User requests are established by user_model_request from retained user
+    text. For covered exact hints they precede pins, ranking, automatic
+    membership and role tiers, including on retries. Hard owner authorization,
+    observed identity, availability and exhausted quota still refuse visibly;
+    a requested route is never silently substituted.
 
     Tiers, automatic eligibility and per-model policy come from routing.json
     ``models`` only (:mod:`routing.model_policy`). ``eligible_route_ids`` is
@@ -362,6 +367,29 @@ def choose(role: str, project_root=None, environ: Mapping[str, str] | None = Non
                       for route_id, policy in policies.items() if policy.stretch}
     stretch_ids = frozenset(stretch_states)
     stretch_summary = _stretch_summary(stretch_states)
+    if user_request is not None and "/" in model_hint:
+        requested = _requested_routes(model_hint, overrides, entries, eligible_route_ids, blocked, usage)
+        picked = sorted(requested, key=lambda e: _order_key(usage(e)))[0]
+        policy = model_policy.policy_for(picked.route.engine, picked.route.model, overrides)
+        if not policy.tiers:
+            raise _policy_error("user_requested_route_unavailable",
+                                f"{model_hint}: no configured tier/effort policy; no substitution permitted.")
+        requested_tier = policy.tier
+        effort = nearest(EFFORT_BY_TIER[requested_tier],
+                         permitted_efforts(picked, requested_tier, policy))
+        decision = dict(
+            role=role, base_role_tier=base_role_tier, role_tier=requested_tier, tier=requested_tier,
+            basis="user_request", decided_by="user_request", rank_version=RANK_VERSION,
+            escalated=escalate, preference=preference,
+            preference_status="ignored:user_request" if preference else "none",
+            model_hint=model_hint, model_hint_status="honoured", model_hint_reason=model_reason,
+            effort_basis=f"user_request:{requested_tier}",
+            user_model_request=dict(user_request, status="honoured"),
+            candidates=[_candidate(e, usage, role, False, affinity=affinity) for e in requested],
+            chosen=model_hint, chosen_connection_id=picked.connection_id)
+        if profile_label is not None:
+            decision["routing_profile"] = profile_label
+        return Choice(picked.connection_id, picked.route.model, effort, "auto:user_request", decision, picked.route.id)
     pin = _pin_for(overrides, role)
     if pin is not None:
         engine, model, effort = pin
@@ -431,24 +459,9 @@ def choose(role: str, project_root=None, environ: Mapping[str, str] | None = Non
                               if status == "standard_candidate")
     superseded = _applied_superseded(overrides, allowed, superseded_routes(allowed))
     providers = overrides.get("providers")
-    # A flagship route the user asked for in this task (see user_model_request).
-    requested, request_status = _user_flagship(model_hint, user_request, overrides, allowed, tier_sets,
-                                               frozenset(blocked), superseded, usage)
-    if requested:
-        picked, decision = rank("flagship", requested, usage, overrides.get("tiers") or {},
-                                role=role, model_hint=model_hint, model_reason=model_reason,
-                                all_entries=entries, providers=providers, affinity=affinity, models=models)
-        decision.update(
-            base_role_tier=base_role_tier, role_tier="flagship", basis="user_request",
-            decided_by="user_request", escalated=escalate, preference=preference,
-            preference_status="ignored:user_request" if preference else "none",
-            effort_basis="user_request:flagship",
-            user_model_request=dict(user_request, status=request_status))
-        if profile_label is not None:
-            decision["routing_profile"] = profile_label
-        effort = nearest(EFFORT_BY_TIER["flagship"],
-                         permitted_efforts(picked, "flagship", policies[picked.route.id]))
-        return Choice(picked.connection_id, picked.route.model, effort, "auto:user_request", decision, picked.route.id)
+    request_status = ("not_requested_by_user" if model_hint != "auto"
+                      and any(_route_label(e) == model_hint and "flagship" in tier_sets[e.route.id]
+                              for e in allowed) else None)
     status = None
     if preference is not None and providers is not None and preference not in providers:
         status = "ignored:provider_not_allowed"
@@ -557,7 +570,7 @@ def pick(role_tier: str, entries: Sequence, usage, tier_overrides: Mapping[str, 
 
 
 # Generic rank ordering; historical decision keys remain readable by clients.
-RANK_VERSION = 9
+RANK_VERSION = 10
 # The rank key's parts in order, named for the decision's ``decided_by``.
 # ``quota`` moved from right after ``hint`` to right before ``used_percent``
 # in rank version 6: it is now a late tie breaker rather than an early hard
@@ -594,11 +607,17 @@ def rank(role_tier: str, entries: Sequence, usage, tier_overrides: Mapping[str, 
        role's work kind under ``preferred_for`` (the owner's choice of model
        for that kind of work) ranks ahead of the tier's other candidates,
        unless its plan is hot and meaningfully worse on the same basis
-       (``decision["purpose"]["status"]``). It never moves the tier;
+       (``decision["purpose"]["status"]``). A model whose policy also has
+       ``preferred_when`` (owner-written text the runtime cannot judge) is
+       preferred only for a node whose model hint names that exact route,
+       the coordinator's judgement that the condition holds; its
+       ``preferred_for`` then narrows the kinds of work, and on escalation
+       the condition no longer applies. It never moves the tier;
     3. an honoured model hint (see :data:`HINT_TOLERANCE`), ignored on the
        same hot-and-meaningfully-worse basis; a hint naming no preferred
        route loses to ``purpose`` and records ``ignored:owner_preferred``;
-    4. subscription plan usage, only if every candidate's usage is known:
+    4. subscription plan usage, only if every candidate's usage is known
+       and at least one reaches :data:`USAGE_SWITCH_PERCENT` (95%):
        each full :data:`USAGE_MARGIN` points above the least-used candidate
        ranks a candidate one step behind (``usage_band``) -- this usage-gap
        signal, not the quota band below, is what usually separates
@@ -612,7 +631,7 @@ def rank(role_tier: str, entries: Sequence, usage, tier_overrides: Mapping[str, 
        :data:`HOT_PERCENT` ranks behind one below it. Crossing the band
        alone no longer overrides plan usage or affinity, and no longer
        causes a cliff at the boundary;
-    8. lower exact used percent, only if every candidate's usage is known;
+    8. lower exact used percent, only when usage switching is active;
     9. engine order.
 
     How many attempts each engine received before never enters the rank:
@@ -634,7 +653,14 @@ def rank(role_tier: str, entries: Sequence, usage, tier_overrides: Mapping[str, 
     kind = work_kind(role)
 
     def purpose(e) -> bool:
-        return kind is not None and kind in policies[e.route.id].preferred_for
+        policy = policies[e.route.id]
+        if policy.preferred_when is None:
+            return kind is not None and kind in policy.preferred_for
+        # A conditional preference: the coordinator judged this node against
+        # the owner's ``preferred_when`` text and named this exact route.
+        # Retries and fixes ignore hints, so they ignore the condition too.
+        return (not escalated and model_hint == _route_label(e)
+                and (not policy.preferred_for or kind in policy.preferred_for))
     usable = [e for e in entries if e.route.id not in excluded and (usage(e) or 0.0) < 100.0]
     order = {e.route.id: index for index, e in enumerate(entries)}
 
@@ -657,10 +683,11 @@ def rank(role_tier: str, entries: Sequence, usage, tier_overrides: Mapping[str, 
                 status = "honoured"
         honoured = preference if status == "honoured" else None
         used_percent_compared = all(usage(e) is not None for e in candidates)
-        least_used = min(usage(e) for e in candidates) if used_percent_compared else None
+        usage_active = used_percent_compared and any(_hot(usage(e)) for e in candidates)
+        least_used = min(usage(e) for e in candidates) if usage_active else None
 
         def usage_band(e):
-            return int((usage(e) - least_used) // USAGE_MARGIN) if used_percent_compared else None
+            return int((usage(e) - least_used) // USAGE_MARGIN) if usage_active else None
 
         hint_status = "auto"
         hinted = []
@@ -715,7 +742,7 @@ def rank(role_tier: str, entries: Sequence, usage, tier_overrides: Mapping[str, 
                     not (escalated and previous_engine and e.route.engine != previous_engine),
                     -suitability(role, e.route.engine, affinity),
                     _hot(usage(e)),
-                    usage(e) if used_percent_compared else 0.0, order[e.route.id])
+                    usage(e) if usage_active else 0.0, order[e.route.id])
 
         ranked = sorted(candidates, key=key)
         best = ranked[0]
@@ -737,7 +764,9 @@ def rank(role_tier: str, entries: Sequence, usage, tier_overrides: Mapping[str, 
             preference=preference, preference_status=status,
             model_hint=model_hint, model_hint_status=reported_hint_status,
             model_hint_reason=model_reason, diversify_from=previous_engine if escalated else None,
-            usage=dict(compared=used_percent_compared, margin=USAGE_MARGIN, least_used_percent=least_used),
+            usage=dict(compared=used_percent_compared, active=usage_active,
+                       status="unavailable" if not used_percent_compared else "active" if usage_active else "below_threshold",
+                       threshold=USAGE_SWITCH_PERCENT, margin=USAGE_MARGIN, least_used_percent=least_used),
             affinity=dict(work_kind=affinity_kind, engine=affinity_engine(role, affinity),
                           source=("routing.json" if affinity_kind is not None and affinity
                                   and (affinity_kind in affinity or "*" in affinity) else "default")),
@@ -764,40 +793,35 @@ def rank(role_tier: str, entries: Sequence, usage, tier_overrides: Mapping[str, 
     return None, None
 
 
-def _user_flagship(model_hint: str, user_request: Mapping | None, overrides: Mapping, allowed: Sequence,
-                   tiers: Mapping[str, Sequence[str]], blocked: frozenset, superseded: Mapping[str, str], usage):
-    """``(entries, status)`` for an exact flagship ``model_hint``: the usable
-    entries of the route the user asked for (status ``honoured``), or none
-    and why not. ``status`` is ``None`` when the hint is not an exact route,
-    or names a route of another tier the user did not ask for."""
-    engine, slash, model = model_hint.partition("/")
-    if not slash:
-        return (), None
-    offered = [e for e in allowed if e.route.engine == engine and e.route.model == model]
-    flagship = bool(offered) and all("flagship" in tiers[e.route.id] for e in offered)
-    if user_request is None:
-        return (), "not_requested_by_user" if flagship else None
+def _requested_routes(model_hint, overrides, entries, eligible_route_ids, blocked, usage):
+    """Exact user choices bypass ranking, never hard authorization or availability."""
+    from . import availability
+    engine, _, model = model_hint.partition("/")
+
+    def refuse(reason):
+        raise _policy_error("user_requested_route_unavailable",
+                            f"{model_hint}: {reason}; no substitution permitted. "
+                            "Change the request or repair the configured route.")
+
     if _denied(overrides, engine, model):
-        return (), "refused:denied"
+        refuse("denied or disabled by owner policy")
     providers = overrides.get("providers")
     if providers is not None and engine not in providers:
-        return (), "refused:provider_not_allowed"
+        refuse("provider not allowed by owner policy")
+    offered = [e for e in entries if _route_label(e) == model_hint]
     if not offered:
-        return (), "refused:not_offered"
-    if not flagship:
-        return (), "not_flagship"
-    if all(_auto_exclusion(overrides, e) for e in offered):
-        return (), "refused:not_selected"
-    current = offered
-    if not current:
-        return (), "refused:superseded"
-    open_routes = [e for e in current if e.route.id not in blocked]
-    if not open_routes:
-        return (), "refused:unavailable"
-    usable = [e for e in open_routes if (usage(e) or 0.0) < 100.0]
+        refuse("not offered by a configured engine connection")
+    if eligible_route_ids is not None:
+        offered = [e for e in offered if e.route.id in eligible_route_ids]
+        if not offered:
+            refuse("outside the task's route/profile authorization ceiling")
+    opened = [e for e in offered if e.route.id not in blocked]
+    if not opened:
+        refuse("unavailable: " + "; ".join(availability.describe(blocked[e.route.id]) for e in offered))
+    usable = [e for e in opened if usage(e) is None or usage(e) < 100.0]
     if not usable:
-        return (), "refused:quota_exhausted"
-    return usable, "honoured"
+        refuse("quota exhausted (100%)")
+    return usable
 
 
 def _hot(used: float | None) -> bool:
@@ -864,7 +888,7 @@ def _order_key(used: float | None):
     window (often a weekly one) and the rank never sees its reset time, so
     it could push cheap work into an exhausting plan and fail it mid-run.
     Unknown quota is never hot; 100% never gets here."""
-    return (_hot(used), used or 0.0)
+    return (_hot(used), used if _hot(used) else 0.0)
 
 
 def permitted_efforts(entry, tier: str, policy: model_policy.RoutePolicy | None = None) -> tuple[str, ...]:

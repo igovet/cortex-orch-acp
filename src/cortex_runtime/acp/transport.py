@@ -22,6 +22,9 @@ import json
 import queue
 import sys
 import threading
+from collections import OrderedDict
+
+from ..observability.wire_trace import get_trace
 import time
 
 # One inbound line. A session/prompt carries its images inline as base64, and
@@ -203,7 +206,13 @@ class StdioTransport:
     """
 
     def __init__(self, inbound_handler, raw_stdout, raw_stdin=None,
-                 update_timeout=DEFAULT_UPDATE_TIMEOUT, on_writer_closed=None):
+                 update_timeout=DEFAULT_UPDATE_TIMEOUT, on_writer_closed=None,
+                 trace_channel="upstream_acp", trace_context=None):
+        self._trace = get_trace()
+        self._trace_channel = trace_channel
+        self._trace_context = trace_context
+        self._trace_pending = OrderedDict() if self._trace is not None else None
+        self._trace_lock = threading.Lock() if self._trace is not None else None
         self._raw_stdout = raw_stdout
         self._raw_stdin = raw_stdin if raw_stdin is not None else sys.stdin.buffer
         self._inbound_handler = inbound_handler
@@ -227,6 +236,30 @@ class StdioTransport:
         self._shutdown_requested = threading.Event()
         self._reader_thread = threading.Thread(target=self._read_loop, name="acp-reader", daemon=True)
         self._writer_thread = threading.Thread(target=self._write_loop, name="acp-writer", daemon=True)
+
+    def _trace_message(self, direction, message):
+        if self._trace is None:
+            return
+        try:
+            params = message.get("params") or message.get("result") or {}
+            identity = {"session_id": params["sessionId"]} if isinstance(params, dict) and params.get("sessionId") else {}
+            with self._trace_lock:
+                if "id" in message:
+                    key = (direction, type(message["id"]).__name__, str(message["id"]))
+                    if "method" in message:
+                        self._trace_pending[key] = identity
+                        while len(self._trace_pending) > 1024:
+                            self._trace_pending.popitem(last=False)
+                    else:
+                        opposite = ("out" if direction == "in" else "in", *key[1:])
+                        identity = self._trace_pending.pop(opposite, {}) | identity
+                if self._trace_context is not None:
+                    identity.update(self._trace_context(identity.get("session_id")) or {})
+            self._trace.record(self._trace_channel, direction, message, **identity)
+        except Exception:
+            # Identity enrichment is passive; never change transport outcome.
+            self._trace.record(self._trace_channel, direction, message)
+            self._trace.record(self._trace_channel, "internal", {"trace_error": "identity_unavailable"})
 
     def start(self):
         self._writer_thread.start()
@@ -327,6 +360,8 @@ class StdioTransport:
             try:
                 self._raw_stdout.write(body)
                 self._raw_stdout.flush()
+                if self._trace is not None:
+                    self._trace_message("out", json.loads(body))
             except (BrokenPipeError, OSError, ValueError) as error:
                 # The peer or the underlying pipe is gone (a closed pipe
                 # raises BrokenPipeError/OSError; writing to an
@@ -360,6 +395,8 @@ class StdioTransport:
                     # accumulating the rest, then reply without echoing any
                     # content (id null when the head does not show one).
                     error = oversized_frame_error(raw_line[:ID_RECOVERY_PREFIX_BYTES])
+                    if self._trace is not None:
+                        self._trace.record(self._trace_channel, "in", {"trace_error": "oversized_or_unterminated_frame"})
                     while raw_line and not raw_line.endswith(b"\n"):
                         raw_line = self._raw_stdin.readline(MAX_FRAME_BYTES + 1)
                     self._inbound_handler(None, error)
@@ -370,6 +407,8 @@ class StdioTransport:
                 try:
                     message = parse_frame(line)
                 except FrameError as error:
+                    if self._trace is not None:
+                        self._trace.record(self._trace_channel, "in", {"trace_error": "malformed_frame", "code": error.code})
                     self._inbound_handler(None, error)
                     continue
                 except Exception as error:
@@ -382,6 +421,7 @@ class StdioTransport:
                           file=sys.stderr, flush=True)
                     self._inbound_handler(None, FrameError(-32700, "Frame could not be parsed."))
                     continue
+                self._trace_message("in", message)
                 try:
                     self._inbound_handler(message, None)
                 except Exception as error:

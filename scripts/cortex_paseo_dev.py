@@ -35,6 +35,9 @@ def isolated_environment(home: Path) -> dict[str, str]:
     """Keep a dev Paseo process out of the user's normal Cortex XDG state."""
     config_home, state_home = cortex_xdg_paths(home)
     env = os.environ.copy()
+    # Inherited opt-in must not activate tracing for an ordinary invocation.
+    env.pop("CORTEX_DEV_WIRE_TRACE", None)
+    env.pop("CORTEX_DEV_TRACE_HOME", None)
     env["XDG_CONFIG_HOME"] = str(config_home)
     env["XDG_STATE_HOME"] = str(state_home)
     env["CORTEX_PASEO_SOURCE_ROOT"] = str(Path(__file__).resolve().parent.parent)
@@ -159,6 +162,8 @@ def main(argv: list[str]) -> int:
             default=str(Path.home() / ".paseo-dev"),
             help="absolute isolated Paseo home (default: ~/.paseo-dev)",
         )
+        parser.add_argument("--wire-trace", action="store_true",
+                            help="opt in to private wire tracing on dev daemon start only")
         parser.add_argument("--check", action="store_true", help="validate only")
         parser.add_argument("command", nargs=argparse.REMAINDER, help="Paseo command after --")
 
@@ -295,6 +300,13 @@ def _run_cli(args) -> int:
         print("cortex_paseo_dev: command may not override --home or select --host", file=sys.stderr)
         return 2
 
+    if args.wire_trace:
+        if (home != Path.home() / ".paseo-dev" or home.resolve() != home
+                or not (command[:1] == ["start"] or command[:2] == ["daemon", "start"])
+                or args.check):
+            print("cortex_paseo_dev: --wire-trace requires ~/.paseo-dev daemon start", file=sys.stderr)
+            return 2
+
     if args.check:
         if command:
             print("cortex_paseo_dev: --check accepts no Paseo command", file=sys.stderr)
@@ -307,6 +319,9 @@ def _run_cli(args) -> int:
         return 2
 
     env = isolated_environment(home)
+    if args.wire_trace:
+        env["CORTEX_DEV_WIRE_TRACE"] = "1"
+        env["CORTEX_DEV_TRACE_HOME"] = str(home)
     # A wrapper invoked from an active Paseo agent must not target that agent.
     env.pop("PASEO_AGENT_ID", None)
     env.pop("PASEO_AGENT_CWD", None)

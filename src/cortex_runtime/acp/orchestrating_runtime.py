@@ -4741,12 +4741,15 @@ class OrchestratingRuntime:
         # forever.
         tried_connection_ids = {revision["route_connection_id"]}
         current_attempt_id, seen = old_attempt_id, set()
+        requested_identity = None
         while current_attempt_id and current_attempt_id not in seen and len(seen) < 50:
             seen.add(current_attempt_id)
             hops = routing_store.list_audit_for_attempt(self._store, current_attempt_id)
             if not hops:
                 break
             last = hops[-1]
+            if last["decision_detail"].get("route_basis") == "auto:user_request":
+                requested_identity = (last["engine"], last["model"])
             tried_connection_ids.add(last["connection_id"])
             current_attempt_id = last["predecessor_attempt_id"]
         candidates = {
@@ -4754,6 +4757,15 @@ class OrchestratingRuntime:
             if route_id in extras["route_details"]
             and extras["route_details"][route_id]["connection_id"] not in tried_connection_ids
         }
+        # A durable user-selected identity is not permission to substitute
+        # another model after an engine failure, even under fallback policy.
+        if requested_identity is not None:
+            candidates = {route_id for route_id in candidates
+                          if (extras["route_details"][route_id]["engine"],
+                              extras["route_details"][route_id].get("model")) == requested_identity}
+            if not candidates:
+                _refuse("user_requested_route_unavailable")
+                return None, True, None
         if not candidates:
             _refuse("no_untried_authorized_route")
             return None, True, None

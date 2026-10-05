@@ -1,5 +1,11 @@
 # Security policy
 
+Fresh-install model settings use the saved 2026-10-05 owner default's portable
+routing policy, `claude-agent-acp/opus[1m]` coordinator at medium effort, and Russian
+message language. Existing owner settings are never replaced. Account/connection
+identities and machine-specific MCP definitions/paths are not cloned; see
+[the install snapshot boundary](docs/configuration.md#fresh-install-owner-default-snapshot).
+
 ## Paseo dependency findings (2026-10-04)
 
 The plugin lockfile retains GHSA-vfj7-8cjw-p6xm in `braces@3.0.3`,
@@ -26,7 +32,19 @@ the runtime may omit review only when its observed project state equals the
 execution baseline or a state independently approved by a reviewer. It records
 that decision as `REVIEW_NOT_REQUIRED` and binds verification to the same digest.
 Any project change, every fix cycle, or an unobservable project still requires
-independent review. No model hint can waive review. A model tool call cannot
+independent review. Review may start before completed workers' engine turns
+end. Accepted results revoke that attempt's worker MCP channels in the same
+transaction; capacity is not released until process exit is confirmed. Native
+edits are not intercepted by channel revocation: late project changes still
+invalidate the digest-bound review, verification or completion gate.
+Verification may run speculatively in the existing ignored-path/scratch sandbox
+while the reviewer runs. Candidate results grant no completion authority:
+credit requires APPROVE on the exact plan/reviewer/digest binding and a fresh
+unchanged-project observation. Stale, rejected and interrupted candidates are
+discarded; stop joins the command sequence and kills its subprocess group.
+Recovery never replays speculative diagnostic events as verification evidence.
+See [speculative verification](docs/acp/orchestration.md#speculative-verification-during-review).
+No model hint can waive review. A model tool call cannot
 select a task state, accept the task or directly create an engine session.
 A model hint cannot grant a route or infer model family/quality. Eligibility, tier, effort and automatic membership come from the effective version-2 owner routing settings and current observed catalogs; the runtime also enforces pins, denies, provider policy, availability, quota and user authorization. New or renamed identities are not automatically eligible. New audits identify configured stretch policy with the neutral `stretch` key and effort basis; no historical audit is rewritten and this label grants no authorization. Policy refusals happen before worker capacity reservation or engine launch; the coordinator route-menu tool reports the named validation failure without claiming an uncertain storage write. See [settings-only routing](docs/acp/routing-and-fallback.md#settings-only-routing).
 
@@ -36,7 +54,15 @@ punctuation is not a substring boundary: another variant or provider path
 cannot authorize a shorter flagship identity. Ambiguous unquoted punctuation
 is refused; paired quotes explicitly delimit an identity from prose. Request
 and negation grammar, source provenance, label ambiguity refusal and all route
-eligibility checks still apply. No source or settings rewrite repairs a refusal.
+hard authorization checks still apply. Confirmed user model requests take
+priority over pins, preferences, automatic membership, role tiers and usage
+ranking for covered exact-route nodes in every tier, including retries/fixes.
+They never waive owner deny/disabled/provider policy, route/profile/recipient
+ceilings, supported effort, engine availability or exhausted quota. Failure
+fallback cannot silently switch that choice to another model identity.
+Usage switching starts only at observed usage >=95%; unknown usage is reported
+unavailable, never inferred above the threshold.
+No source or settings rewrite repairs a refusal.
 
 ACP selection carries the owner/project ceiling into selected and active
 revisions without passing the saved identity envelope as native parameters.
@@ -584,6 +610,14 @@ sessions. Workers cannot choose the reviewed revision, weaken check contracts or
 write outside their scope. Runtime and independent reviewer effects are separate
 from the worker who proposes the implementation.
 
+Project digest caching retains only bounded in-process content hashes.
+Reuse requires unchanged device/inode/size/mode/owner/mtime/ctime, the same
+no-follow open and final state checks, and timestamps older than the local
+filesystem granularity guard. Restoring mtime alone cannot hide a same-size
+write. Unknown, remote and overlay filesystems are not cached; no authorization,
+persistent revision evidence or review/verification gate is bypassed. See
+[project scope and digest caching](docs/acp/workspaces-and-integration.md).
+
 The runtime creates its project `.cortex` directory owner-only (`0700`) and
 refuses a pre-existing directory with broader permissions. The refusal keeps the
 path and expected mode and tells the local owner the exact `chmod 700` command;
@@ -676,3 +710,41 @@ submits may leave an unsafe ignore file. Neither ignoring nor this guard removes
 already tracked store content, prevents a deliberate `git add -f`, or undoes a
 commit made before reconciliation. The guard never untracks, deletes store data,
 stages or commits files. See [permissions](docs/acp/permissions-and-containment.md#runtime-store-ignore-protection).
+
+## Metadata-only orchestration timing
+
+The [timeline reader](docs/acp/observability.md#orchestration-phase-measurement)
+uses a guarded SQLite read-only immutable snapshot; it never initializes,
+migrates, checkpoints or repairs storage. Busy locks and nonempty WALs refuse.
+Runtime startup/first-update milestones and scheduler wait diagnostics carry
+only identities, timestamps and safe reason labels, never prompts, reports or
+tool bodies. These observations do not establish acceptance or native-action
+receipts and do not enable full wire logging in production.
+
+## Developer wire-trace boundary
+
+Full [wire tracing](docs/acp/observability.md#developer-only-wire-tracing)
+is disabled by default, with no file creation on the disabled path.
+Only an explicit guarded `~/.paseo-dev` daemon-start opt-in supplies its
+launch markers; inherited opt-ins are stripped from ordinary wrapper calls.
+The runtime checks the exact dev source/config/state combination and refuses
+installed production payloads/state even with opt-in. Environment/source
+checks are not authentication against the account owner forging their own
+environment.
+
+The fixed dev-only trace directory is outside all Git repositories and project
+`.cortex` stores. Owned private directories/files, no-follow descriptor opens,
+hardlink checks, a cross-process lock and 64 MiB rotation cap constrain retention.
+Unsafe paths, redaction exhaustion and write failures stop tracing without
+changing runtime authority or protocol outcomes. Credentials are redacted
+before writing, including headers, secret-looking environment values, relay
+tokens, argv and embedded JSON; unfamiliar/fragmented secrets remain a risk.
+Traces deliberately include confidential prompts, report/file bodies and
+engine thought traffic, so never commit or publish them or paste raw traces
+into reports.
+
+Lifecycle traces label uncommitted event insert attempts, not successful
+transactions. Malformed/oversized frames, record-size gaps, rotation and
+unavailable identity mappings are explicit limitations. The read-only viewer
+does not validate acceptance, establish complete native-action receipts or
+repair storage. Normal production metadata logging is unchanged.

@@ -1,6 +1,7 @@
 """Public install data is explicit, safe, and preserves the retained seven-route baseline."""
 from copy import deepcopy
 import json
+import hashlib
 from types import SimpleNamespace
 
 import pytest
@@ -18,15 +19,19 @@ def entry(engine, model, efforts=("low", "medium", "high", "xhigh", "max", "ultr
 def test_public_asset_preserves_exact_baseline_tiers_efforts_and_coordinator():
     template = defaults.load_model_settings_template()
     routing = template["routing"]
-    assert template["coordinator"] == {"engine": "codex-acp", "model": "gpt-6.1-sol",
-                                       "parameters": {"thought_level": "high", "mode": "agent"}}
+    assert template["coordinator"] == {"engine": "claude-agent-acp", "model": "opus[1m]",
+                                       "parameters": {"thought_level": "medium"}}
+    assert template["language"] == "ru"
+    # Complete portable production default snapshot, saved 2026-10-05 10:45 UTC.
+    canonical = json.dumps(template, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+    assert hashlib.sha256(canonical.encode()).hexdigest() == "952f4e5bf42164c3c26a7ea1523d3d7634167777ffc77aebf7b4b5f4624df166"
     expected = {
         ("claude-agent-acp", "default"): ("deep",),
-        ("claude-agent-acp", "opus[1m]"): ("deep",),
+        ("claude-agent-acp", "opus[1m]"): ("flagship", "deep"),
         ("claude-agent-acp", "claude-fable-5-1[1m]"): ("flagship",),
         ("claude-agent-acp", "claude-sonnet-5"): ("standard",),
         ("codex-acp", "gpt-6.1-sol"): ("deep", "standard"),
-        ("codex-acp", "gpt-6-astra"): ("flagship",),
+        ("codex-acp", "gpt-6-astra"): ("flagship", "deep"),
         ("codex-acp", "gpt-6-luna"): ("light",),
     }
     assert {(e, m) for e, models in routing["enabled"].items() for m in models} == set(expected)
@@ -34,9 +39,15 @@ def test_public_asset_preserves_exact_baseline_tiers_efforts_and_coordinator():
         policy = model_policy.policy_for(engine, model, routing)
         assert policy.selected and policy.tiers == tiers and policy.tier_source == "configured"
         for tier in tiers:
-            efforts = (("low", "medium", "high") if tier == "flagship" else
-                       ("high", "xhigh", "max") if tier == "light" else
-                       ("low", "medium", "high", "xhigh"))
+            efforts = {
+                "default": ("low", "medium", "high", "xhigh"),
+                "opus[1m]": ("medium", "high", "xhigh"),
+                "claude-fable-5-1[1m]": ("low", "medium", "high"),
+                "claude-sonnet-5": ("medium", "high", "xhigh"),
+                "gpt-6.1-sol": ("medium", "high", "xhigh"),
+                "gpt-6-astra": ("low", "medium", "high"),
+                "gpt-6-luna": ("high", "xhigh", "max"),
+            }[model]
             assert auto_route.permitted_efforts(entry(engine, model), tier, policy) == efforts
     assert routing["enabled"]["opencode"] == []
     assert routing["models"]["opencode"]["auto"] == ["byteplus-plan/glm-5.3-flash"]
@@ -78,14 +89,15 @@ def test_arbitrary_renames_order_new_and_withdrawn_ids():
     assert withdrawn.route.model in renamed["models"][withdrawn.route.engine]["tiers"]
 
 
-@pytest.mark.parametrize("change", ["version", "private", "route_id", "coordinator-disabled", "coordinator-param", "envelope"])
+@pytest.mark.parametrize("change", ["version", "private", "route_id", "coordinator-disabled", "coordinator-param", "language", "envelope"])
 def test_template_rejects_invalid_or_private_data(tmp_path, change):
     data = defaults.load_model_settings_template()
     if change == "version": data["schema_version"] = 99
     elif change == "private": data["routing"]["mcp"] = {}
     elif change == "route_id": data["coordinator"]["route_id"] = "local-fingerprint"
-    elif change == "coordinator-disabled": data["routing"]["enabled"]["codex-acp"] = []
+    elif change == "coordinator-disabled": data["routing"]["enabled"]["claude-agent-acp"] = []
     elif change == "coordinator-param": data["coordinator"]["parameters"]["credential"] = "not-secret"
+    elif change == "language": data["language"] = "unsupported"
     else: data["owner_profile"] = "not-portable"
     path = tmp_path / "template.json"
     path.write_text(json.dumps(data))
@@ -99,3 +111,22 @@ def test_template_reads_are_fresh_and_runtime_never_uses_asset(tmp_path, monkeyp
     monkeypatch.setattr(defaults, "load_model_settings_template", lambda: pytest.fail("runtime template fallback"))
     with pytest.raises(PortableError, match="model_policy_migration_required"):
         auto_route.load_overrides(tmp_path, {"HOME": str(tmp_path)})
+
+
+def test_legacy_template_without_language_and_with_explicit_mode_still_valid(tmp_path):
+    data = defaults.load_model_settings_template()
+    del data["language"]
+    data["coordinator"]["parameters"]["mode"] = "agent"
+    path = tmp_path / "template.json"
+    path.write_text(json.dumps(data))
+    assert defaults.load_model_settings_template(path) == data
+
+
+@pytest.mark.parametrize("language", [None, {}, [], True, "unsupported"])
+def test_install_language_rejects_non_supported_values(tmp_path, language):
+    data = defaults.load_model_settings_template()
+    data["language"] = language
+    path = tmp_path / "template.json"
+    path.write_text(json.dumps(data))
+    with pytest.raises(ValueError, match="invalid install language"):
+        defaults.load_model_settings_template(path)

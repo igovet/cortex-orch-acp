@@ -403,6 +403,8 @@ const catalogRoute = z.object({
   automatic: z.string(),
   auto_selected: z.boolean().nullable(),
   preferred_for: z.array(z.string()),
+  // Owner-written condition the coordinator judges per node (null: none).
+  preferred_when: z.string().nullable().optional(),
   preferred_inactive: z.boolean(),
   superseded_by: z.string().nullable(),
   // Per routing file (project/env/user) that is valid.

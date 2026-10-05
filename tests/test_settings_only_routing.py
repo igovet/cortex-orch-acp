@@ -254,7 +254,7 @@ def test_retained_request_selects_only_its_complete_configured_identity(tmp_path
 
 @pytest.mark.parametrize("restriction,status", [
     ("deny", "refused:denied"), ("disabled", "refused:denied"),
-    ("unselected", "refused:not_selected"), ("missing-policy", "not_flagship"),
+    ("missing-policy", "not_flagship"),
     ("unobserved", "refused:not_offered"), ("provider", "refused:provider_not_allowed"),
     ("unavailable", "refused:unavailable"), ("exhausted", "refused:quota_exhausted"),
 ])
@@ -281,10 +281,14 @@ def test_exact_grant_cannot_override_eligibility(tmp_path, monkeypatch, restrict
     task = bootstrap_task(store, SourceEvent(origin="test", event_id="exact"), f"Use {target}", "owner")
     grant = auto_route.user_model_request(store, task.task_id, target)
     assert grant is not None
-    choice = auto_route.choose("worker-backend-dev", tmp_path, env, model_hint=target,
-                              user_request=grant, unavailable=unavailable)
-    assert choice.model == "ordinary-id"
-    assert choice.decision["user_model_request"]["status"] == status
+    with pytest.raises(PortableError, match="user_requested_route_unavailable") as caught:
+        auto_route.choose("worker-backend-dev", tmp_path, env, model_hint=target,
+                          user_request=grant, unavailable=unavailable)
+    assert target in caught.value.remediation and "no substitution" in caught.value.remediation
+    reason = {"deny": "denied", "disabled": "disabled", "missing-policy": "no configured tier",
+              "unobserved": "not offered", "provider": "provider not allowed",
+              "unavailable": "unavailable", "exhausted": "quota exhausted"}[restriction]
+    assert reason in caught.value.remediation
 
 
 @pytest.mark.parametrize("answer,expected", [

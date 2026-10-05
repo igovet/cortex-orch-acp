@@ -755,7 +755,7 @@ def test_routing_models_are_validated_with_field_paths_and_round_trip(home):
     assert "models" in management.ROUTING_KEYS and len(management.ROUTING_KEYS) == 10
     builtin = written["builtin"]
     assert builtin["policy_attributes"] == ["effort_floor", "max_effort", "effort_ladder", "also_standard_for",
-                                            "preferred_for", "request_names"]
+                                            "preferred_for", "preferred_when", "request_names"]
     assert builtin["selection_modes"] == ["listed"] and "ultra" not in builtin["policy_efforts"]
     assert builtin["tier_sources"] == ["configured"]
     assert builtin["work_kind_labels"]["design"] == "Design and architecture"

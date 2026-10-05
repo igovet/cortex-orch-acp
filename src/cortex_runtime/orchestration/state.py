@@ -90,6 +90,16 @@ def encoded(value):
 
 
 def event(db, task_id, kind, payload, actor='runtime'):
+    from ..observability.wire_trace import get_trace
+    trace = get_trace()
+    if trace is not None:
+        # Attempted transactional insert, not evidence of a later commit.
+        identity = payload if isinstance(payload, dict) else {}
+        trace.record("lifecycle", "internal", dict(type=kind, actor=actor, payload=payload,
+                     transaction="pending"), task_id=task_id,
+                     assignment_ref=identity.get("assignment_ref"),
+                     attempt_id=identity.get("attempt_id"),
+                     engine_session_id=identity.get("engine_session_id"))
     db.execute('INSERT INTO runtime_events(task_id,type,actor,payload_json,created_at) VALUES(?,?,?,?,?)',
                (task_id, kind, actor, encoded(payload), now()))
 
@@ -309,7 +319,7 @@ class AttemptRouting(NamedTuple):
     model_reason: str | None
     previous_engine: str | None
     # The user's own request for the exact hint's model family in this
-    # task (routing.auto_route.user_model_request); only a flagship hint uses it.
+    # task (routing.auto_route.user_model_request), for every configured tier.
     user_request: dict | None = None
 
 
@@ -692,10 +702,8 @@ class TaskMachine:
                             for entry in group if entry['route'] == model]
             hinted = next((entry for group in menu['tiers'].values() for entry in group
                            if entry['route'] == model), {})
-            # A flagship route runs only on escalation or when the user asked
-            # for its family in this task (auto_route.user_model_request).
-            request = (user_model_request(self.store, channel.task_id, model)
-                       if 'flagship' in hinted_tiers else None)
+            # Every exact user-requested route precedes automatic tier selection.
+            request = user_model_request(self.store, channel.task_id, model)
             if request is not None:
                 item.update(preview_status='pending_dispatch:user_request', user_request=request['source_ref'])
             elif not any(hint_serves_tier(model.partition('/')[2], tier, role, item['tier_now'], complexity,
@@ -834,7 +842,7 @@ class TaskMachine:
         return tuple(row) if row is not None else None
 
     @staticmethod
-    def _ready_nodes(db, task_id):
+    def _ready_nodes(db, task_id, waits=None):
         """Select reservable nodes without writing; longest remaining chain first."""
         task = db.execute('SELECT * FROM runtime_tasks WHERE task_id=?', (task_id,)).fetchone()
         if task is None or task['state'] not in {'EXECUTING', 'REVIEWING'}:
@@ -845,6 +853,10 @@ class TaskMachine:
         stage = 'review' if task['state'] == 'REVIEWING' else 'execution'
         ready = [n for n in nodes if n['status'] == 'pending' and n['stage'] == stage
                  and set(json.loads(n['dependencies_json'])) <= completed]
+        if waits is not None:
+            waits.update({n['node_id']: 'dependency' for n in nodes
+                          if n['status'] == 'pending' and n['stage'] == stage
+                          and n not in ready})
         if not ready:
             return task, []
         from .access import holdings, effective_scope, absolute_scope, pending
@@ -878,6 +890,8 @@ class TaskMachine:
             scope = absolute_scope(db, task_id, effective_scope(db, candidate))
             read_only = candidate['stage'] == 'review' or candidate['role'] in READ_ONLY
             if not read_only and any(overlaps(a,b) for grant in occupied for a in grant for b in scope):
+                if waits is not None:
+                    waits[candidate['node_id']] = 'scope_overlap'
                 continue
             selected.append(candidate)
             if not read_only:
@@ -886,6 +900,9 @@ class TaskMachine:
         # at once, whatever their engine or role; the rest stay pending.
         from ..delegation.capacity import MAX_WORKERS_PER_SESSION
         free = MAX_WORKERS_PER_SESSION - TaskMachine._session_worker_slots(db, task_id, task['revision'])
+        if waits is not None:
+            waits.update({n['node_id']: (None if i < max(0, free) else 'capacity_limit')
+                          for i, n in enumerate(selected)})
         return task, selected[:max(0, free)]
 
     @staticmethod
@@ -912,11 +929,23 @@ class TaskMachine:
         never takes the write lock; the selection is repeated under it.
         """
         with self.store.connection() as db:
-            if not self._ready_nodes(db, task_id)[1]:
+            waits = {}
+            task, ready = self._ready_nodes(db, task_id, waits)
+            previous = {json.loads(r[0])['identity']: json.loads(r[0]).get('reason')
+                        for r in db.execute("SELECT payload_json FROM runtime_events WHERE task_id=? "
+                                            "AND type='SCHEDULER_WAIT_REASON' ORDER BY id", (task_id,))}
+            if not ready and not any(previous.get(f"node:{task['revision']}:{node}") != reason
+                                     for node, reason in waits.items()):
                 return []
             db.execute('BEGIN IMMEDIATE')
-            task, ready = self._ready_nodes(db, task_id)
+            waits = {}
+            task, ready = self._ready_nodes(db, task_id, waits)
+            from .measurement import wait_reason
+            for node, reason in waits.items():
+                wait_reason(db, task_id, f"node:{task['revision']}:{node}", reason,
+                            node=node, revision=task['revision'])
             if not ready:
+                db.commit()
                 return []
             retries = [json.loads(row[0]) for row in db.execute(
                 "SELECT payload_json FROM runtime_events WHERE task_id=? AND type='ASSIGNMENT_RETRIED'", (task_id,))]
@@ -1030,8 +1059,15 @@ class TaskMachine:
                 result['project_digest'] = self._review_binding_tx(db, task_id, assignment_ref, request_key)
             db.execute('UPDATE runtime_nodes SET status=?,result_json=? WHERE task_id=? AND revision=? AND node_id=?',
                        (status, encoded(result), task_id, task['revision'], node['node_id']))
+            # Accepted results end MCP authority, not engine ownership. Keep
+            # the capacity reservation until an observed process exit; revoke
+            # every channel of this exact attempt in the same transaction.
+            db.execute("UPDATE trusted_channels SET revoked_at=? WHERE task_id=? "
+                       "AND attempt_id=? AND role='worker' AND revoked_at IS NULL",
+                       (now(), task_id, provision['attempt_id']))
             event(db, task_id, 'WORKER_COMPLETED' if not failed else 'WORKER_FAILED',
-                  dict(node=node['node_id'], assignment_ref=assignment_ref, result=result))
+                  dict(node=node['node_id'], assignment_ref=assignment_ref,
+                       attempt_id=provision['attempt_id'], result=result))
             db.commit()
 
     def start_review(self, task_id, assignment_ref):
@@ -1199,10 +1235,23 @@ class TaskMachine:
             db.commit()
         return dict(recorded=True)
 
-    def record_verification(self, task_id, checks, revision_digest):
+    def record_verification(self, task_id, checks, revision_digest, *, speculative_binding=None):
         with self.store.connection() as db:
             db.execute('BEGIN IMMEDIATE')
             task = db.execute('SELECT * FROM runtime_tasks WHERE task_id=?', (task_id,)).fetchone()
+            if speculative_binding is not None:
+                review = db.execute(
+                    "SELECT assignment_ref,result_json FROM runtime_nodes WHERE task_id=? AND revision=? "
+                    "AND stage='review' ORDER BY rowid DESC LIMIT 1",
+                    (task_id, task['revision'] if task else -1)).fetchone()
+                result = json.loads(review['result_json']) if review and review['result_json'] else {}
+                if (not task or task['state'] != 'VERIFYING'
+                        or task['revision'] != speculative_binding['revision']
+                        or not review or review['assignment_ref'] != speculative_binding['assignment_ref']
+                        or result.get('verdict') != 'APPROVE'
+                        or result.get('project_digest') != speculative_binding['digest']
+                        or revision_digest != speculative_binding['digest']):
+                    return None
             if not task or task['state'] != 'VERIFYING':
                 raise StoreError('verification_not_expected')
             if reviewed_digest(db, task_id, task['revision']) != revision_digest:
@@ -1213,6 +1262,8 @@ class TaskMachine:
             passed = (len(checks) == len(commands) and len(revision_digest) == 64
                       and all(c.get('argv') == argv and c.get('exit_code') == 0 and c.get('complete') is True
                               and c.get('revision_digest') == revision_digest for c, argv in zip(checks, commands)))
+            if speculative_binding is not None:
+                event(db, task_id, 'SPECULATIVE_VERIFICATION_CREDITED', dict(binding=speculative_binding))
             event(db, task_id, 'VERIFICATION_PASSED' if passed else 'VERIFICATION_FAILED',
                   dict(revision=task['revision'], revision_digest=revision_digest, checks=checks))
             failures = db.execute("SELECT COUNT(*) FROM runtime_events WHERE task_id=? AND type='VERIFICATION_FAILED'",

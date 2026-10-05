@@ -58,6 +58,7 @@ import {
   setModelTiers,
   modelTierValues,
   setModelPreferredFor,
+  setModelPreferredWhen,
   removeRoutingToken,
   sameJson,
   selectorText,
@@ -112,7 +113,7 @@ import {
   type UserDefaultsForm,
   type UserDefaultsView,
 } from "./settings-model.ts";
-import { HELP, HELP_LANGUAGES, PREFERRED_WORK_HELP, workKindHelp, type HelpLanguage, type HelpText } from "./settings-help.ts";
+import { HELP, HELP_LANGUAGES, PREFERRED_WHEN_HELP, PREFERRED_WORK_HELP, workKindHelp, type HelpLanguage, type HelpText } from "./settings-help.ts";
 
 /**
  * The Cortex Settings screen. Every editable setting is a typed control
@@ -193,9 +194,9 @@ function Group({ title, children, theme, hint }: { title: string; children: Reac
   </View>;
 }
 
-function TextField({ label, value, onChangeText, theme, placeholder, hint, help, error, secure, numeric, editable = true, compact }: {
+function TextField({ label, value, onChangeText, theme, placeholder, hint, help, error, secure, numeric, editable = true, compact, multiline }: {
   label: string; value: string; onChangeText: (value: string) => void; theme: Theme; placeholder?: string; hint?: string; help?: HelpText;
-  error?: string; secure?: boolean; numeric?: boolean; editable?: boolean; compact?: boolean;
+  error?: string; secure?: boolean; numeric?: boolean; editable?: boolean; compact?: boolean; multiline?: boolean;
 }) {
   return <View style={compact ? { flex: 1, minWidth: 120 } : undefined}>
     {compact ? null : <Label text={label} theme={theme} />}
@@ -211,6 +212,7 @@ function TextField({ label, value, onChangeText, theme, placeholder, hint, help,
       accessibilityHint={error}
       accessibilityState={{ disabled: !editable }}
       secureTextEntry={secure}
+      multiline={multiline}
       keyboardType={numeric ? "number-pad" : "default"}
       inputMode={numeric ? "numeric" : "text"}
       autoCapitalize="none"
@@ -756,9 +758,10 @@ function ProjectCeilingSection({ theme, workspaceId }: { theme: Theme; workspace
 
 // --- Routing ----------------------------------------------------------------------
 
-function PolicyEditor({ form, onChange, vocabulary, theme }: {
-  form: RoutingForm; onChange: (form: RoutingForm) => void; vocabulary: RoutingVocabulary; theme: Theme;
+function PolicyEditor({ form, onChange, vocabulary, theme, errors }: {
+  form: RoutingForm; onChange: (form: RoutingForm) => void; vocabulary: RoutingVocabulary; theme: Theme; errors: FieldErrors;
 }) {
+  const kindOptions = vocabulary.workKinds.filter((kind) => kind !== "*").map((value) => ({ value, label: value }));
   const [engine, setEngine] = useState("");
   const [model, setModel] = useState("");
   const put = (engineId: string, modelId: string, key: string, value: unknown) => {
@@ -788,11 +791,20 @@ function PolicyEditor({ form, onChange, vocabulary, theme }: {
               options={[{ value: "", label: "Neutral (unset)" }, ...(vocabulary.policyEfforts ?? vocabulary.efforts).map((value) => ({ value, label: value }))]}
               onChange={(value) => put(engineId, modelId, key, value || null)} />
             : <ReadOnlyNotice key={key} theme={theme} text={`${key} has unsupported data; kept unchanged.`} />)}
-          {["effort_ladder", "also_standard_for", "preferred_for", "request_names"].map((key) => policy[key] == null || (Array.isArray(policy[key]) && (policy[key] as unknown[]).every((item) => typeof item === "string"))
+          {["also_standard_for", "preferred_for"].map((key) => policy[key] == null || (Array.isArray(policy[key]) && (policy[key] as unknown[]).every((item) => typeof item === "string"))
+            ? <MultiChoiceField key={key} label={`${key} for ${id}`} values={policy[key] as string[] ?? []} options={kindOptions} theme={theme}
+              error={errorAt(errors, `rules.models.${engineId}.policy.${modelId}.${key}`)} onChange={(value) => put(engineId, modelId, key, value)} />
+            : <ReadOnlyNotice key={key} theme={theme} text={`${key} has unsupported data; kept unchanged.`} />)}
+          {policy.preferred_when == null || typeof policy.preferred_when === "string"
+            ? <TextField label={`preferred_when for ${id}`} value={policy.preferred_when as string ?? ""} theme={theme} multiline
+              placeholder="e.g. frontend changes without design work" error={errorAt(errors, `rules.models.${engineId}.policy.${modelId}.preferred_when`)}
+              onChangeText={(text) => onChange(setModelPreferredWhen(form, engineId, modelId, text))} />
+            : <ReadOnlyNotice theme={theme} text="preferred_when has unsupported data; kept unchanged." />}
+          {["effort_ladder", "request_names"].map((key) => policy[key] == null || (Array.isArray(policy[key]) && (policy[key] as unknown[]).every((item) => typeof item === "string"))
             ? <StringListField key={key} errorKey={`rules.models.${engineId}.policy.${modelId}.${key}`} label={`${key} for ${id}`} values={policy[key] as string[] ?? []} theme={theme}
               ordered={key === "effort_ladder"} onChange={(value) => put(engineId, modelId, key, value.length === 0 && (key === "effort_ladder" || key === "request_names") ? null : value)} />
             : <ReadOnlyNotice key={key} theme={theme} text={`${key} has unsupported data; kept unchanged.`} />)}
-          {Object.keys(policy).filter((key) => !["effort_floor", "max_effort", "effort_ladder", "also_standard_for", "preferred_for", "request_names"].includes(key)).map((key) => <ReadOnlyNotice key={key} theme={theme} text={`${key} is not supported here; kept unchanged.`} />)}
+          {Object.keys(policy).filter((key) => !["effort_floor", "max_effort", "effort_ladder", "also_standard_for", "preferred_for", "preferred_when", "request_names"].includes(key)).map((key) => <ReadOnlyNotice key={key} theme={theme} text={`${key} is not supported here; kept unchanged.`} />)}
         </Group>;
       })}
     </Group>)}
@@ -806,7 +818,7 @@ function RoutingEditor({ form, onChange, vocabulary, theme, errors }: {
   const engineOptions = vocabulary.engines.map((engine) => ({ value: engine, label: vocabulary.optionalEngines.includes(engine) ? `${engine} (optional)` : engine }));
   return <View style={{ gap: 12 }}>
     <ReadOnlyRow label="Model policy version" value={form.model_policy_version === undefined ? "missing — explicit migration required" : String(form.model_policy_version)} theme={theme} />
-    <PolicyEditor form={form} onChange={onChange} vocabulary={vocabulary} theme={theme} />
+    <PolicyEditor form={form} onChange={onChange} vocabulary={vocabulary} theme={theme} errors={errors} />
     <Optional label="Quota window associations" value={form.quota_windows ?? null} emptyValue={() => ({} as Record<string, QuotaWindowRow[]>)}
       onChange={(quota_windows) => set({ quota_windows })} theme={theme} help={HELP.quotaWindows}
       unsetText="Unmapped windows conservatively apply to every model; unknown usage is not zero.">
@@ -1114,6 +1126,12 @@ function ModelRow({ group, form, onChange, target, tiers, availableModels, workK
           ? route.automatic !== "eligible" : !form.models[route.engine].auto?.includes(route.model))}
         theme={theme} onValueChange={(on) => onChange(setModelPreferredFor(form, route.engine, route.model, kind, on,
           route.automatic === "eligible"))} help={workKindHelp(kind, workKindRoles[kind] ?? [])} />)}
+      <TextField label={`Prefer ${title} when`} help={PREFERRED_WHEN_HELP} theme={theme} multiline
+        value={(form.models?.[route.engine]?.policy?.[route.model]?.preferred_when as string | null | undefined) ?? ""}
+        placeholder="e.g. frontend changes without design work"
+        editable={!deny.on && (form.models?.[route.engine]?.auto == null
+          ? route.automatic === "eligible" : Boolean(form.models[route.engine].auto?.includes(route.model)))}
+        onChangeText={(text) => onChange(setModelPreferredWhen(form, route.engine, route.model, text))} />
     </Group>
     {route.default_auto_excluded !== null && (canAutoAllow(route)
       ? <>

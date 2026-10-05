@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import signal
 import sqlite3
 import subprocess
 import tempfile
@@ -56,34 +57,34 @@ def _verification_output_tail(output):
     return tail
 
 
-def _verification(runtime, task_id, machine, emit_tool_call, cancel):
+def _verification_observation(runtime, task_id, context, expected, emit_tool_call, cancel, run_id):
     """Run retained literal argv commands to completion with complete output.
 
     The root filesystem is read-only; checks can write only in
-    their private temporary directory. The real runtime store is inaccessible.
+    their private temporary directory and git-ignored project directories.
+    The real runtime store is inaccessible.
     Missing OS isolation is a failure, never an unsandboxed fallback.
     """
-    context = machine.context(task_id)
     root = Path(runtime._task_workspace_root(task_id))
     before = revision.capture_revision(str(root))
     digest = before.get('dirty_digest') or before.get('digest')
     if not digest:
-        machine.move(task_id, 'BLOCKED', blocker='verification_revision_unavailable')
-        return
-    # Bound to the approved review's project digest, or to the runtime's own
-    # no-change observation when the planned work needed no review.
-    reviews = [node for node in context['nodes'] if node['stage'] == 'review']
-    expected = ((reviews[-1]['result'] or {}).get('project_digest') if reviews
-                else (context['review_not_required'] or {}).get('revision_digest'))
+        return dict(blocker='verification_revision_unavailable', stale=True)
     if not expected or expected != digest:
-        machine.move(task_id, 'BLOCKED', blocker='verification_review_revision_changed')
-        return
+        return dict(blocker='verification_review_revision_changed', stale=True)
     checks = []
     for index, argv in enumerate(context['plan']['verification']):
-        ref = f"verification:{context['revision']}:{index}"
+        ref = f"verification:{context['revision']}:{run_id}:{index}"
+        if cancel.is_set():
+            return dict(checks=checks, digest=digest, stale=True)
         if emit_tool_call:
             emit_tool_call(dict(tool_call_id=ref, new=True, title='Verify project', kind='execute',
                                 status='in_progress', raw_input=dict(argv=argv, cwd=str(root))))
+        from ..observability.wire_trace import get_trace
+        trace = get_trace()
+        if trace is not None:
+            trace.record("verification", "out", dict(argv=argv, cwd=str(root)),
+                         task_id=task_id, command_ref=ref)
         with tempfile.TemporaryDirectory(prefix='cortex-verification-') as scratch, contextlib.ExitStack() as stack:
             # The owner's toolchain (npm, node in their home), as a worker's
             # command_run has it: a bare /usr/bin sandbox made every npm check
@@ -100,14 +101,21 @@ def _verification(runtime, task_id, machine, emit_tool_call, cancel):
                 as_owner(command, os.environ)
                 readonly_test_cache(command, scratch, os.environ)
             except StoreError as error:
-                machine.move(task_id, 'BLOCKED', blocker=str(error))
-                return
+                if trace is not None:
+                    trace.record("verification", "in", dict(blocker=str(error)),
+                                 task_id=task_id, command_ref=ref)
+                return dict(blocker=str(error), stale=False)
             with tempfile.TemporaryFile() as output:
                 from .sandbox import compact_argv
                 launch, launch_fds = compact_argv(command, fds)
                 try:
                     proc = subprocess.Popen(launch, stdout=output, stderr=subprocess.STDOUT, pass_fds=launch_fds,
-                                            env={'PATH': '/usr/bin:/bin'})
+                                            env={'PATH': '/usr/bin:/bin'}, start_new_session=True)
+                except Exception as error:
+                    if trace is not None:
+                        trace.record("verification", "in", dict(launch_error=type(error).__name__),
+                                     task_id=task_id, command_ref=ref)
+                    raise
                 finally:
                     for extra in set(launch_fds) - set(fds):
                         os.close(extra)
@@ -117,9 +125,25 @@ def _verification(runtime, task_id, machine, emit_tool_call, cancel):
                 while proc.poll() is None:
                     if cancel.wait(.1):
                         interrupted = True
-                        proc.kill()
+                        _kill_verification(proc)
                         break
                 code = proc.wait()
+                if trace is not None:
+                    # Read the spool separately; retention below still receives
+                    # the complete stream from offset zero. Lines keep credentials
+                    # intact for redaction even across pipe-read boundaries.
+                    output.seek(0)
+                    private_key = False
+                    for line in output:
+                        text = line.decode("utf-8", errors="replace")
+                        if private_key or ("-----BEGIN " in text and "PRIVATE KEY-----" in text):
+                            private_key = not ("-----END " in text and "PRIVATE KEY-----" in text)
+                            text = "[REDACTED private-key output]\n"
+                        trace.record("verification", "in", dict(output=text),
+                                     task_id=task_id, command_ref=ref)
+                    trace.record("verification", "in",
+                                 dict(exit_code=code, interrupted=interrupted),
+                                 task_id=task_id, command_ref=ref)
                 after = revision.capture_revision(str(root))
                 unchanged = (after.get('dirty_digest') or after.get('digest')) == digest
                 from ..recovery.large_output_store import persist_output_stream
@@ -146,12 +170,152 @@ def _verification(runtime, task_id, machine, emit_tool_call, cancel):
             ))
         if failed:
             break
-    machine.record_verification(task_id, checks, digest)
+    after = revision.capture_revision(str(root))
+    stale = (cancel.is_set() or
+             (after.get('dirty_digest') or after.get('digest')) != digest or
+             any(not c['complete'] for c in checks))
+    if stale and checks:
+        checks[-1]['complete'] = False
+    return dict(checks=checks, digest=digest, stale=stale)
+
+
+def _kill_verification(proc):
+    # Also stop descendants: discarded checks must not leave cache writers.
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+
+
+def _verification(runtime, task_id, machine, emit_tool_call, cancel):
+    context = machine.context(task_id)
+    reviews = [node for node in context['nodes'] if node['stage'] == 'review']
+    expected = ((reviews[-1]['result'] or {}).get('project_digest') if reviews
+                else (context['review_not_required'] or {}).get('revision_digest'))
+    observed = _verification_observation(
+        runtime, task_id, context, expected, emit_tool_call, cancel, time.monotonic_ns())
+    if cancel.is_set():
+        return
+    if observed.get('blocker'):
+        machine.move(task_id, 'BLOCKED', blocker=observed['blocker'])
+    else:
+        machine.record_verification(task_id, observed['checks'], observed['digest'])
+
+
+class _SpeculativeVerification:
+    """One owned command sequence, never an extra engine/worker reservation.
+
+    Only the controller can credit it after review and engine teardown. Losing
+    the turn discards the candidate; recovery uses ordinary verification.
+    """
+    def __init__(self, runtime, task_id, emit_tool_call):
+        self.runtime, self.task_id, self.emit_tool_call = runtime, task_id, emit_tool_call
+        self.thread = None
+        self.binding = None
+        self.observed = None
+
+    def _event(self, kind, **payload):
+        with self.runtime._store.connection() as db:
+            db.execute('BEGIN IMMEDIATE')
+            event(db, self.task_id, 'SPECULATIVE_VERIFICATION_' + kind,
+                  dict(binding=self.binding, **payload))
+            db.commit()
+
+    def start(self, context, assignment_ref, digest):
+        binding = dict(revision=context['revision'], assignment_ref=assignment_ref, digest=digest)
+        if self.binding == binding:
+            return
+        self.close('review_binding_changed')
+        self.binding = binding
+        self.cancel = threading.Event()
+        self.observed = None
+        self._event('STARTED')
+        def work():
+            try:
+                self.observed = _verification_observation(
+                    self.runtime, self.task_id, context, digest, self.emit_tool_call,
+                    self.cancel, time.monotonic_ns())
+            except Exception:
+                # Never a pass or a lifecycle mutation from the command thread.
+                self.observed = dict(stale=True, blocker='speculative_verification_error')
+            self._event('FINISHED', stale=self.observed.get('stale', False),
+                        blocker=self.observed.get('blocker'),
+                        failed=any(c.get('exit_code') != 0 or not c.get('complete')
+                                   for c in self.observed.get('checks', [])))
+        self.thread = threading.Thread(target=work, name='cortex-speculative-verification')
+        self.thread.start()
+
+    def refresh(self, context):
+        reviews = [n for n in context['nodes'] if n['stage'] == 'review']
+        if not reviews or reviews[-1]['status'] != 'running':
+            return
+        review = reviews[-1]
+        with self.runtime._store.connection() as db:
+            row = db.execute(
+                "SELECT payload_json FROM runtime_events WHERE task_id=? AND type='REVIEW_STARTED' "
+                "AND json_extract(payload_json,'$.assignment_ref')=? ORDER BY id DESC LIMIT 1",
+                (self.task_id, review['assignment_ref'])).fetchone()
+        if row:
+            self.start(context, review['assignment_ref'], json.loads(row[0])['revision_digest'])
+
+    def credit(self, context, machine):
+        if not self.thread:
+            return False
+        reviews = [n for n in context['nodes'] if n['stage'] == 'review']
+        review = reviews[-1] if reviews else None
+        expected = dict(revision=context['revision'], assignment_ref=review['assignment_ref'],
+                        digest=review['result']['project_digest']) if review else None
+        if self.binding != expected:
+            self.close('approved_binding_changed')
+            return False
+        if self.thread.is_alive():
+            return None
+        observed = self.observed
+        current = revision.capture_revision(self.runtime._task_workspace_root(self.task_id))
+        if (not observed or observed.get('stale') or
+                (current.get('dirty_digest') or current.get('digest')) != self.binding['digest']):
+            self.close('project_revision_changed')
+            return False
+        if observed.get('blocker'):
+            self.close('speculative_verification_unavailable')
+            return False
+        # Bind credit transactionally to the exact plan and approving reviewer.
+        recorded = machine.record_verification(
+            self.task_id, observed['checks'], observed['digest'], speculative_binding=self.binding)
+        if recorded is None:
+            self.close('approved_binding_changed')
+            return False
+        self.thread = None
+        self.binding = None
+        return True
+
+    def close(self, reason='controller_turn_ended'):
+        if self.thread:
+            self.cancel.set()
+            self.thread.join()
+            self._event('DISCARDED', reason=reason)
+            self.thread = None
+            self.binding = None
+            self.observed = None
 
 
 def run(runtime, task_id, session_id, channel, session_ref, content, emit_update,
         cancel_event, language, host_elicitor=None, *, emit_tool_call=None,
         emit_display_update=None, prompt_blocks=None, initial_project_docs_context=None):
+    speculation = _SpeculativeVerification(runtime, task_id, emit_tool_call)
+    try:
+        return _run(runtime, task_id, session_id, channel, session_ref, content, emit_update,
+                    cancel_event, language, host_elicitor, emit_tool_call=emit_tool_call,
+                    emit_display_update=emit_display_update, prompt_blocks=prompt_blocks,
+                    initial_project_docs_context=initial_project_docs_context, speculation=speculation)
+    finally:
+        speculation.close()
+
+
+def _run(runtime, task_id, session_id, channel, session_ref, content, emit_update,
+        cancel_event, language, host_elicitor=None, *, emit_tool_call=None,
+        emit_display_update=None, prompt_blocks=None, initial_project_docs_context=None,
+        speculation=None):
     machine = TaskMachine(runtime._store)
     context = machine.create(task_id, content)
     from .recovery import reconcile_results
@@ -179,11 +343,14 @@ def run(runtime, task_id, session_id, channel, session_ref, content, emit_update
     reopened = False
     while True:
         if cancel_event.is_set() or _transport_lost(runtime, task_id):
+            speculation.close('task_stopped')
             return _stop_turn(runtime, task_id, machine, emit_tool_call, emit_update, language)
         # Read before the pass: a change committed during it moves the value.
         fingerprint = machine.change_fingerprint(task_id)
         context = machine.context(task_id)
         state = context['state']
+        if state not in {'REVIEWING', 'VERIFYING'}:
+            speculation.close('review_not_approved')
         from .policy import apply_pending_steering
         # Steering applies only at a boundary; in EXECUTING/REVIEWING the call
         # is a no-op that would still take the write lock on every pass.
@@ -330,6 +497,11 @@ def run(runtime, task_id, session_id, channel, session_ref, content, emit_update
                     flush()
                 if emit_display_update:
                     return emit_display_update(update)
+            with runtime._store.connection() as db:
+                db.execute('BEGIN IMMEDIATE')
+                event(db, task_id, 'COORDINATOR_TURN_STARTED',
+                      dict(revision=context['revision'], state=state, engine_session_id=session_ref))
+                db.commit()
             try:
                 # No clock bound: a silent engine is woken by the engine
                 # adapter's stall nudge, never killed (see live_adapters.prompt).
@@ -471,6 +643,8 @@ def run(runtime, task_id, session_id, channel, session_ref, content, emit_update
             if batch:
                 events.mark_delivered(runtime._store, task_id, marker)
             context = machine.context(task_id)
+            if state == 'REVIEWING' and context['state'] == state:
+                speculation.refresh(context)
             if context['state']!=state: continue
             nodes = context['nodes']
             with runtime._lock:
@@ -479,6 +653,7 @@ def run(runtime, task_id, session_id, channel, session_ref, content, emit_update
             # A worker ends early when its turn is cancelled or its host
             # connection closes; that is not a lost worker to retry here.
             if cancel_event.is_set() or _transport_lost(runtime, task_id):
+                speculation.close('task_stopped')
                 return _stop_turn(runtime, task_id, machine, emit_tool_call, emit_update, language)
             open_waits = [n['wait'] for n in nodes
                           if n.get('wait') and n['wait']['status'] == 'open']
@@ -520,6 +695,13 @@ def run(runtime, task_id, session_id, channel, session_ref, content, emit_update
                 # coordinator's to handle, not a stop: it replans or notes it.
                 if not machine.return_to_coordinator(task_id, 'worker_failed'):
                     machine.move(task_id, 'BLOCKED', blocker='worker_failed')
+                continue
+            # Results, not engine teardown, unlock independent review.
+            # Lingering engines still own their capacity slots, so claim_ready
+            # may queue the reviewer until a slot is positively released.
+            if state == 'EXECUTING' and nodes and all(n['status'] == 'completed' for n in nodes):
+                machine.add_review(task_id)
+                capacity_wait_started = None
                 continue
             if running:
                 capacity_wait_started = None
@@ -565,7 +747,21 @@ def run(runtime, task_id, session_id, channel, session_ref, content, emit_update
                 machine.move(task_id, 'BLOCKED', blocker='no_runnable_nodes')
             continue
         if state == 'VERIFYING':
-            _verification(runtime, task_id, machine, emit_tool_call, cancel_event)
+            # An early unchanged-project decision can bypass REVIEWING while
+            # result-bearing engines still wind down. Reap them before the
+            # ordinary verification/synthesis path, just as after review.
+            runtime._terminate_completed_workers(task_id)
+            with runtime._lock:
+                workers = frozenset(runtime._running.get(task_id, ()))
+            if workers:
+                _wait_for_change(runtime, machine, task_id, fingerprint, workers, cancel_event, language, relay_requests=True)
+                continue
+            credited = speculation.credit(context, machine)
+            if credited is None:
+                cancel_event.wait(_POLL_SECONDS)
+                continue
+            if not credited:
+                _verification(runtime, task_id, machine, emit_tool_call, cancel_event)
             continue
         if state == 'WAITING_USER':
             for node in context['nodes']:

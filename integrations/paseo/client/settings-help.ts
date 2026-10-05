@@ -239,8 +239,12 @@ export const HELP = {
         "Виды работ, где light-модель тоже считается кандидатом уровня standard (например testing).",
       )],
       ["preferred_for", h(
-        "Work kinds this model is preferred for within its tier. The model must be an automatic member.",
-        "Виды работ, где модель предпочтительна внутри своего уровня. Модель должна быть в автоматическом списке.",
+        "Work kinds this model is preferred for within its tier; pick them from the list. The model must be an automatic member. With preferred_when set, these kinds only narrow that condition (none: any kind).",
+        "Виды работ, где модель предпочтительна внутри своего уровня; выбираются из списка. Модель должна быть в автоматическом списке. Если задано preferred_when, эти виды лишь сужают условие (ни одного — любой вид).",
+      )],
+      ["preferred_when", h(
+        "Optional free-text condition, for example \"frontend changes without design work\". The runtime cannot judge text: the coordinator reads it, and for each task step that meets it names this model, which then ranks first as preferred. Steps that do not meet it treat the model as an ordinary candidate. Retries and fixes ignore the condition. Up to 500 characters.",
+        "Необязательное условие свободным текстом, например «для фронтенда без дизайна». Runtime текст не понимает: его читает координатор и для каждого шага, который подходит под условие, указывает эту модель — тогда она ставится первой как предпочтительная. Для остальных шагов модель остаётся обычным кандидатом. Повторы и исправления условие не учитывают. До 500 символов.",
       )],
       ["request_names", h(
         "Extra lowercase names (Russian stems allowed) that count as you naming this model in a request such as \"do it with …\". Recommended: the short name you actually type.",
@@ -505,6 +509,11 @@ export function workKindHelp(kind: string, roles: readonly string[]): HelpText {
     : `${lang === "en" ? "Agents" : "Агенты"}:\n${roles.map((role) => `  • ${role}${ROLE_HELP[role] ? ` — ${ROLE_HELP[role][lang]}` : ""}`).join("\n")}`;
   return { en: `${base.en}\n${agents("en")}`, ru: `${base.ru}\n${agents("ru")}` };
 }
+
+export const PREFERRED_WHEN_HELP = h(
+  "Optional condition in your own words, for example \"frontend changes without design work\". The coordinator judges each task step against it and names this model for the steps that meet it; Cortex then ranks the model first for them. The switches above, if any, limit the condition to those kinds of work. Steps that do not meet it treat the model as an ordinary candidate. Leave empty for a plain preference by kind of work.",
+  "Необязательное условие своими словами, например «для фронтенда без дизайна». Координатор сверяет с ним каждый шаг задачи и для подходящих шагов указывает эту модель; Cortex ставит её для них первой. Включённые выше виды работ, если есть, ограничивают условие этими видами. Для неподходящих шагов модель остаётся обычным кандидатом. Оставьте пустым для обычного предпочтения по видам работ.",
+);
 
 export const PREFERRED_WORK_HELP = h(
   "Turn a work kind on to rank this model first, within its tier, when Cortex picks a worker for that kind. It affects only automatic worker selection (not the coordinator or models you pick by hand), never overrides availability, policy or plan usage, and needs the model selected for automatic ranking. Recommended: mark only the kinds where this model is clearly strongest; leave the rest off.",

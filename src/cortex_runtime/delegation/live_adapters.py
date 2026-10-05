@@ -1029,6 +1029,15 @@ class EngineSessionManagerAdapter:
                     role_id=launch.get("role_id"))
             if "jail" not in manager_kwargs and self._store is not None and channel_credentials is not None:
                 manager_kwargs["jail"] = _jail_for(self._store, channel_credentials)
+            if recipient == "worker" and self._store is not None:
+                from ..orchestration.measurement import attempt_event
+                manager_kwargs["lifecycle_observer"] = (
+                    lambda kind, session: attempt_event(self._store, task_id, attempt_id, kind, session))
+            from ..observability.wire_trace import get_trace
+            if get_trace() is not None:
+                manager_kwargs["trace_identity"] = dict(
+                    task_id=task_id, assignment_ref=launch.get("assignment_id"),
+                    attempt_id=attempt_id)
             manager = EngineSessionManager(
                 record, workspace_root, environ=self._environ,
                 channel_credentials=channel_credentials,
@@ -1769,6 +1778,11 @@ class EngineSessionManagerAdapter:
             return
         from ..routing import auto_route
 
+        from ..orchestration.state import attempt_routing, review_provider_preference
+
+        route = (attempt_routing(self._store, launch['task_id'], launch['attempt_id'])
+                 if launch.get('task_id') and launch.get('attempt_id') else None)
+
         configuration = self._dispatch_configuration(launch)
         eligible_ids = None
         if configuration is not None:
@@ -1777,7 +1791,7 @@ class EngineSessionManagerAdapter:
                 role_routes = profile.allowed_routes_for(role, revision["route_id"])
                 if not role_routes:
                     raise self._route_authorization_error("role_route_not_authorized")
-                if role_routes == {revision["route_id"]}:
+                if role_routes == {revision["route_id"]} and not (route and route.user_request):
                     # An explicit coordinator-only role is ordinary profile
                     # inheritance, not an automatic alternate selection.
                     from ..routing import store as routing_store
@@ -1790,10 +1804,6 @@ class EngineSessionManagerAdapter:
             eligible_ids = frozenset(entry.route.id for entry in
                                      self._automatic_route_entries(revision, profile, role))
 
-        from ..orchestration.state import attempt_routing, review_provider_preference
-
-        route = (attempt_routing(self._store, launch['task_id'], launch['attempt_id'])
-                 if launch.get('task_id') and launch.get('attempt_id') else None)
         escalate = route.escalate if route else False
         complexity = route.complexity if route else 'normal'
         model_hint = route.model_hint if route else 'auto'
@@ -2341,10 +2351,16 @@ class EngineSessionManagerAdapter:
                 self._store, connection_id, task_id, attempt_id, kind, limit=limit,
             )
             if reservation_id is not None:
+                if queued_note_recorded and kind == "worker":
+                    from ..orchestration.measurement import attempt_wait
+                    attempt_wait(self._store, task_id, attempt_id, None, connection_id)
                 return reservation_id
             if kind == "worker" and self.reclaim_stale_capacity(task_id):
                 continue
             if not queued_note_recorded:
+                if kind == "worker":
+                    from ..orchestration.measurement import attempt_wait
+                    attempt_wait(self._store, task_id, attempt_id, 'route_capacity', connection_id)
                 note = (
                     f"Attempt {attempt_id} is queued: this session already runs "
                     f"{delegation_capacity.MAX_WORKERS_PER_SESSION} workers, or connection "
