@@ -94,9 +94,9 @@
           },
           "default": {
             "also_standard_for": null,
-            "effort_floor": null,
+            "effort_floor": "medium",
             "effort_ladder": null,
-            "max_effort": null,
+            "max_effort": "xhigh",
             "preferred_for": null,
             "request_names": null
           },
@@ -113,6 +113,7 @@
               "review",
               "analysis"
             ],
+            "preferred_when": null,
             "request_names": null
           }
         }
@@ -187,8 +188,10 @@
               "design",
               "review",
               "debugging",
-              "operations"
+              "operations",
+              "analysis"
             ],
+            "preferred_when": "Frontend - only if this work does not concern the design of layouts.",
             "request_names": null
           }
         }

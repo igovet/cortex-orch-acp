@@ -22,9 +22,9 @@ def test_public_asset_preserves_exact_baseline_tiers_efforts_and_coordinator():
     assert template["coordinator"] == {"engine": "claude-agent-acp", "model": "opus[1m]",
                                        "parameters": {"thought_level": "medium"}}
     assert template["language"] == "ru"
-    # Complete portable production default snapshot, saved 2026-10-05 10:45 UTC.
+    # Complete portable production default snapshot, saved 2026-10-05 12:58 UTC.
     canonical = json.dumps(template, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
-    assert hashlib.sha256(canonical.encode()).hexdigest() == "952f4e5bf42164c3c26a7ea1523d3d7634167777ffc77aebf7b4b5f4624df166"
+    assert hashlib.sha256(canonical.encode()).hexdigest() == "94d37ac210577a9684f54a2a0b52214d8c30bf64a4dcbef1dc7a2e54514d264b"
     expected = {
         ("claude-agent-acp", "default"): ("deep",),
         ("claude-agent-acp", "opus[1m]"): ("flagship", "deep"),
@@ -40,7 +40,7 @@ def test_public_asset_preserves_exact_baseline_tiers_efforts_and_coordinator():
         assert policy.selected and policy.tiers == tiers and policy.tier_source == "configured"
         for tier in tiers:
             efforts = {
-                "default": ("low", "medium", "high", "xhigh"),
+                "default": ("medium", "high", "xhigh"),
                 "opus[1m]": ("medium", "high", "xhigh"),
                 "claude-fable-5-1[1m]": ("low", "medium", "high"),
                 "claude-sonnet-5": ("medium", "high", "xhigh"),
