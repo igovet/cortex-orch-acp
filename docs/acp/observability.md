@@ -518,7 +518,12 @@ Additive `runtime_events`:
   `dependency`, `scope_overlap` and `capacity_limit` are actual scheduler
   decisions; `route_capacity` means the selected connection/session
   reservation refused capacity (not proof of provider quota exhaustion).
-  A null reason clears an observed wait. Legacy standalone adapter calls
+  A null reason clears an observed wait. Node waits for `scope_overlap` and
+  `capacity_limit` also carry `blocked_by` (holder kind, task, node, role,
+  objective, running state and the overlapping held/requested paths, or the
+  worker limit); a change of holder is recorded as a new wait. The chat shows
+  these waits as runtime "Waiting" cards (see
+  [orchestration](orchestration.md)); the cards only present recorded events. Legacy standalone adapter calls
   without a runtime task retain their existing progress event only.
 - `WORKER_COMPLETED`/`WORKER_FAILED` retain their prior fields and now
   additionally carry attempt_id, preventing cross-attempt completion matching.

@@ -60,11 +60,23 @@ per-connection limit. A worker queued for available session or connection
 capacity waits in bounded periods (`capacity_queue_timeout_seconds`, 600 s);
 cancellation ends the wait at once. A finished worker continues to occupy its
 session slot until its engine is confirmed gone and its reservation is released
-or safely reclaimed. Scope overlap serializes writing nodes; review-stage nodes
-and READ_ONLY roles neither block nor are blocked by overlapping scopes. Scope overlap
-serializes writing nodes; review-stage nodes and READ_ONLY roles neither block nor are blocked by overlapping scopes. Runtime routing resolves model and
+or safely reclaimed. Scope overlap serializes writing nodes across every task of
+the project, including tasks of other chats; review-stage nodes and READ_ONLY
+roles neither block nor are blocked by overlapping scopes. Runtime routing resolves model and
 effort from the current tier, policy, catalog and plan usage; plan hints remain
 advisory. All 23 specialist/consultant profiles remain available.
+
+A planned step that cannot start because of `scope_overlap` or
+`capacity_limit` is shown in the chat as a runtime "Waiting" card
+(`orchestration/wait_notices.py`). The card names what holds the step: for a
+scope wait, the holding node, its role and state (working, or finished and
+still releasing), its task and, for another chat, that task's ACP session, plus
+the overlapping held and requested paths; for a capacity wait, the session's
+worker limit. It also gives the local time the wait began. The card closes when
+the step starts, when a different holder replaces the wait (a new card follows),
+when the plan changes, or when the turn ends. Dependency waits are not shown.
+Cards are presentation of the recorded `SCHEDULER_WAIT_REASON` decisions only;
+they never change scheduling.
 
 For streamed coordinator text, the controller reads only the task's durable
 state; it does not rebuild the full context for each delta. A full

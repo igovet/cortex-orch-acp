@@ -521,6 +521,13 @@ def validate_plan(plan):
     return plan
 
 
+def _relative(path, root):
+    """A scope path shown relative to the task's project root when inside it."""
+    if path == root:
+        return '.'
+    return path[len(root) + 1:] if path.startswith(root + '/') else path
+
+
 class TaskMachine:
     def __init__(self, store):
         self.store = store
@@ -842,8 +849,13 @@ class TaskMachine:
         return tuple(row) if row is not None else None
 
     @staticmethod
-    def _ready_nodes(db, task_id, waits=None):
-        """Select reservable nodes without writing; longest remaining chain first."""
+    def _ready_nodes(db, task_id, waits=None, details=None):
+        """Select reservable nodes without writing; longest remaining chain first.
+
+        ``details`` (optional) receives, per waiting node, what holds it:
+        for ``scope_overlap`` the holder and the overlapping paths, for
+        ``capacity_limit`` the session's worker limit. It only describes the
+        decision for display; it never changes it."""
         task = db.execute('SELECT * FROM runtime_tasks WHERE task_id=?', (task_id,)).fetchone()
         if task is None or task['state'] not in {'EXECUTING', 'REVIEWING'}:
             return task, []
@@ -881,21 +893,36 @@ class TaskMachine:
         # Import lazily: gateway imports this module for shared state helpers.
         from .gateway import READ_ONLY
         occupied = [
-            absolute_scope(db, n['task_id'], effective_scope(db, n)) for n in active_nodes
+            (absolute_scope(db, n['task_id'], effective_scope(db, n)),
+             dict(kind='worker', task_id=n['task_id'], node=n['node_id'], role=n['role'],
+                  objective=n['objective'], running=n['status'] == 'running'))
+            for n in active_nodes
             if n['stage'] != 'review' and n['role'] not in READ_ONLY
         ]
-        occupied.extend(absolute_scope(db, w['task_id'], w['paths']) for w in pending(db))
+        occupied.extend((absolute_scope(db, w['task_id'], w['paths']),
+                         dict(kind='access_request', task_id=w['task_id'],
+                              assignment_ref=w.get('assignment_ref')))
+                        for w in pending(db))
         selected = []
         for candidate in ready:
             scope = absolute_scope(db, task_id, effective_scope(db, candidate))
             read_only = candidate['stage'] == 'review' or candidate['role'] in READ_ONLY
-            if not read_only and any(overlaps(a,b) for grant in occupied for a in grant for b in scope):
+            holder = None if read_only else next(
+                (dict(who, held=a, requested=b) for grant, who in occupied
+                 for a in grant for b in scope if overlaps(a, b)), None)
+            if holder is not None:
                 if waits is not None:
                     waits[candidate['node_id']] = 'scope_overlap'
+                if details is not None:
+                    root = str(Path(task_workspace.task_root(db, task_id)).resolve())
+                    holder.update({key: _relative(holder[key], root) for key in ('held', 'requested')})
+                    details[candidate['node_id']] = dict(holder, role_waiting=candidate['role'])
                 continue
             selected.append(candidate)
             if not read_only:
-                occupied.append(scope)
+                occupied.append((scope, dict(kind='worker', task_id=task_id, node=candidate['node_id'],
+                                             role=candidate['role'], objective=candidate['objective'],
+                                             running=False)))
         # At most MAX_WORKERS_PER_SESSION workers of this chat session run
         # at once, whatever their engine or role; the rest stay pending.
         from ..delegation.capacity import MAX_WORKERS_PER_SESSION
@@ -903,6 +930,9 @@ class TaskMachine:
         if waits is not None:
             waits.update({n['node_id']: (None if i < max(0, free) else 'capacity_limit')
                           for i, n in enumerate(selected)})
+        if details is not None:
+            details.update({n['node_id']: dict(limit=MAX_WORKERS_PER_SESSION, role_waiting=n['role'])
+                            for n in selected[max(0, free):]})
         return task, selected[:max(0, free)]
 
     @staticmethod
@@ -928,22 +958,27 @@ class TaskMachine:
         A plain read looks for candidates first, so an idle scheduler pass
         never takes the write lock; the selection is repeated under it.
         """
+        from .measurement import wait_reason, wait_signature
         with self.store.connection() as db:
-            waits = {}
-            task, ready = self._ready_nodes(db, task_id, waits)
-            previous = {json.loads(r[0])['identity']: json.loads(r[0]).get('reason')
-                        for r in db.execute("SELECT payload_json FROM runtime_events WHERE task_id=? "
-                                            "AND type='SCHEDULER_WAIT_REASON' ORDER BY id", (task_id,))}
-            if not ready and not any(previous.get(f"node:{task['revision']}:{node}") != reason
+            waits, details = {}, {}
+            task, ready = self._ready_nodes(db, task_id, waits, details)
+            previous = {}
+            for r in db.execute("SELECT payload_json FROM runtime_events WHERE task_id=? "
+                                "AND type='SCHEDULER_WAIT_REASON' ORDER BY id", (task_id,)):
+                payload = json.loads(r[0])
+                previous[payload['identity']] = wait_signature(payload.get('reason'), payload.get('blocked_by'))
+            if not ready and not any(previous.get(f"node:{task['revision']}:{node}")
+                                     != wait_signature(reason, details.get(node))
                                      for node, reason in waits.items()):
                 return []
             db.execute('BEGIN IMMEDIATE')
-            waits = {}
-            task, ready = self._ready_nodes(db, task_id, waits)
-            from .measurement import wait_reason
+            waits, details = {}, {}
+            task, ready = self._ready_nodes(db, task_id, waits, details)
             for node, reason in waits.items():
+                blocked_by = details.get(node) if reason else None
                 wait_reason(db, task_id, f"node:{task['revision']}:{node}", reason,
-                            node=node, revision=task['revision'])
+                            node=node, revision=task['revision'],
+                            **({'blocked_by': blocked_by} if blocked_by else {}))
             if not ready:
                 db.commit()
                 return []

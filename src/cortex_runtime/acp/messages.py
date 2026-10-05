@@ -350,6 +350,65 @@ _CATALOG: dict[str, dict[str, str]] = {
         "en": "Using the deterministic recovery capsule instead of a model-authored summary ({reason}); no requirement or status was invented.",
         "ru": "Вместо резюме, составленного моделью, используется детерминированная капсула восстановления ({reason}); ни одно требование или статус не были придуманы.",
     },
+    # Scheduler waits, shown as a runtime card while a planned step cannot
+    # start (see orchestration.wait_notices). Parameters are runtime facts:
+    # node ids, roles, scope paths, ids and times -- never worker text.
+    "scheduler_wait.title.scope_overlap": {
+        "en": "Waiting: {node} — paths held by {holder}",
+        "ru": "Ожидание: {node} — пути заняты ({holder})",
+    },
+    "scheduler_wait.title.capacity_limit": {
+        "en": "Waiting: {node} — no free worker slot",
+        "ru": "Ожидание: {node} — нет свободного слота воркера",
+    },
+    "scheduler_wait.scope_overlap.other_chat": {
+        "en": "Step {node} ({role}) has not started: its paths overlap paths held by a worker of another chat in this project. "
+              "Holder: {holder_role} «{holder_node}» ({holder_state}), task {holder_task}, session {holder_session}. "
+              "Overlap: {held} ↔ {requested}. Waiting since {since}. The step starts on its own once that worker releases the paths; "
+              "to start it sooner, finish or stop that worker in its chat.",
+        "ru": "Шаг {node} ({role}) не запускается: его пути пересекаются с путями, которые держит воркер другого чата этого проекта. "
+              "Держит: {holder_role} «{holder_node}» ({holder_state}), задача {holder_task}, сессия {holder_session}. "
+              "Пересечение: {held} ↔ {requested}. Ждём с {since}. Шаг запустится сам, когда тот воркер освободит пути; "
+              "чтобы ускорить, завершите или остановите тот воркер в его чате.",
+    },
+    "scheduler_wait.scope_overlap.same_task": {
+        "en": "Step {node} ({role}) has not started: its paths overlap paths held by step «{holder_node}» ({holder_role}, {holder_state}) of this task. "
+              "Overlap: {held} ↔ {requested}. Waiting since {since}. It starts on its own once those paths are released.",
+        "ru": "Шаг {node} ({role}) не запускается: его пути пересекаются с путями шага «{holder_node}» ({holder_role}, {holder_state}) этой задачи. "
+              "Пересечение: {held} ↔ {requested}. Ждём с {since}. Шаг запустится сам, когда эти пути освободятся.",
+    },
+    "scheduler_wait.scope_overlap.access_request": {
+        "en": "Step {node} ({role}) has not started: its paths overlap paths a worker of task {holder_task} has requested access to and is waiting for. "
+              "Overlap: {held} ↔ {requested}. Waiting since {since}. It starts on its own once that request is settled.",
+        "ru": "Шаг {node} ({role}) не запускается: его пути пересекаются с путями, доступ к которым запросил и ждёт воркер задачи {holder_task}. "
+              "Пересечение: {held} ↔ {requested}. Ждём с {since}. Шаг запустится сам, когда этот запрос будет решён.",
+    },
+    "scheduler_wait.capacity_limit": {
+        "en": "Step {node} ({role}) has not started: this chat already runs its maximum of {limit} workers at once. Waiting since {since}. "
+              "It starts on its own when a worker finishes.",
+        "ru": "Шаг {node} ({role}) не запускается: в этом чате уже работает предельное число воркеров одновременно ({limit}). Ждём с {since}. "
+              "Шаг запустится сам, когда освободится слот.",
+    },
+    "scheduler_wait.holder_running": {"en": "working", "ru": "работает"},
+    "scheduler_wait.holder_other_chat": {"en": "another chat", "ru": "другой чат"},
+    "scheduler_wait.holder_access_request": {"en": "access request", "ru": "запрос доступа"},
+    "scheduler_wait.holder_finishing": {"en": "finished, releasing", "ru": "завершён, освобождает"},
+    "scheduler_wait.resolved": {
+        "en": "Wait over: the step is starting.",
+        "ru": "Ожидание закончилось: шаг запускается.",
+    },
+    "scheduler_wait.changed": {
+        "en": "This wait changed; see the newer waiting card.",
+        "ru": "Причина ожидания изменилась — см. новую карточку ожидания.",
+    },
+    "scheduler_wait.dropped": {
+        "en": "Wait no longer applies: the plan or the task state changed.",
+        "ru": "Ожидание больше не актуально: изменился план или состояние задачи.",
+    },
+    "scheduler_wait.turn_ended": {
+        "en": "This turn ended while the step was still waiting; the wait continues with the task.",
+        "ru": "Ход завершился, пока шаг ещё ждал; ожидание продолжится вместе с задачей.",
+    },
 }
 
 

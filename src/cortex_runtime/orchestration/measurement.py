@@ -32,14 +32,25 @@ def attempt_event(store, task_id, attempt_id, kind, engine_session_id):
         db.commit()
 
 
+def wait_signature(reason, blocked_by=None):
+    """What makes a wait a new one: its reason and, for a scope wait, which
+    holder and paths. A different holder of the same reason is a change the
+    user should see; repeated passes over the same wait are not."""
+    if not reason or not blocked_by:
+        return (reason,)
+    return (reason, blocked_by.get('kind'), blocked_by.get('task_id'), blocked_by.get('node'),
+            blocked_by.get('assignment_ref'), blocked_by.get('held'), blocked_by.get('limit'))
+
+
 def wait_reason(db, task_id, identity, reason, **ids):
     """Persist changes only, including an explicit cleared (null) reason."""
     previous = db.execute(
         "SELECT payload_json FROM runtime_events WHERE task_id=? AND type='SCHEDULER_WAIT_REASON' "
         "AND json_extract(payload_json,'$.identity')=? ORDER BY id DESC LIMIT 1",
         (task_id, identity)).fetchone()
-    old = json.loads(previous[0]).get('reason') if previous else None
-    if old == reason:
+    old = json.loads(previous[0]) if previous else {}
+    if (wait_signature(old.get('reason'), old.get('blocked_by'))
+            == wait_signature(reason, ids.get('blocked_by'))):
         return
     event(db, task_id, 'SCHEDULER_WAIT_REASON', dict(identity=identity, reason=reason, **ids))
 

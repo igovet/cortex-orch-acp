@@ -303,20 +303,26 @@ def run(runtime, task_id, session_id, channel, session_ref, content, emit_update
         cancel_event, language, host_elicitor=None, *, emit_tool_call=None,
         emit_display_update=None, prompt_blocks=None, initial_project_docs_context=None):
     speculation = _SpeculativeVerification(runtime, task_id, emit_tool_call)
+    wait_cards = {}
     try:
         return _run(runtime, task_id, session_id, channel, session_ref, content, emit_update,
                     cancel_event, language, host_elicitor, emit_tool_call=emit_tool_call,
                     emit_display_update=emit_display_update, prompt_blocks=prompt_blocks,
-                    initial_project_docs_context=initial_project_docs_context, speculation=speculation)
+                    initial_project_docs_context=initial_project_docs_context, speculation=speculation,
+                    wait_cards=wait_cards)
     finally:
         speculation.close()
+        if wait_cards:
+            from .wait_notices import close_all
+            close_all(task_id, emit_tool_call, language, wait_cards)
 
 
 def _run(runtime, task_id, session_id, channel, session_ref, content, emit_update,
         cancel_event, language, host_elicitor=None, *, emit_tool_call=None,
         emit_display_update=None, prompt_blocks=None, initial_project_docs_context=None,
-        speculation=None):
+        speculation=None, wait_cards=None):
     machine = TaskMachine(runtime._store)
+    wait_cards = {} if wait_cards is None else wait_cards
     context = machine.create(task_id, content)
     from .recovery import reconcile_results
     if context['state'] not in {'COMPLETED', 'FAILED', 'CANCELLED'}:
@@ -631,6 +637,11 @@ def _run(runtime, task_id, session_id, channel, session_ref, content, emit_updat
                     acceptance='Publish a truthful immutable report and structured result. '
                                + ('Include a review verdict.' if node['stage'] == 'review' else 'Complete the assigned objective.'),
                     request_key=node['request_key']))
+            # A step that cannot start is shown, with what holds it, instead
+            # of a silent chat; the card closes when the wait ends.
+            if wait_cards or any(n['status'] == 'pending' for n in context['nodes']):
+                from .wait_notices import show as show_waits
+                show_waits(runtime._store, task_id, emit_tool_call, language, wait_cards)
             runtime._process_new_events_safely(task_id, channel, cancel_event, emit_tool_call, phase="scheduler")
             # Project a batch once to lifecycle cards. This is presentation, not decision input.
             marker = f'runtime-controller:{time.monotonic_ns()}'
