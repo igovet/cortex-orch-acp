@@ -135,3 +135,38 @@ def close_all(task_id, emit_tool_call, language, cards):
             emit_tool_call(dict(tool_call_id=open_card, new=False, status='completed',
                                 text=f"{explanation}\n\n{messages.render('scheduler_wait.turn_ended', language)}"))
     cards.clear()
+
+
+def holder_alive(db, holder):
+    """Whether the worker holding a scope wait is observed alive right now.
+
+    Only a recorded worker process with a matching identity counts
+    (``recovery.registry.probe_liveness``); a missing record, an
+    unreadable process or a confirmed exit is not alive.
+    """
+    from ..recovery.registry import probe_liveness
+    ref = holder.get('assignment_ref')
+    if not ref:
+        return False
+    row = db.execute("SELECT r.* FROM delegation_provisioning p JOIN attempt_process_registry r "
+                     "ON r.attempt_id=p.attempt_id AND r.role='worker' "
+                     "WHERE p.task_id=? AND p.idempotency_key=?",
+                     (holder.get('task_id'), ref)).fetchone()
+    return row is not None and probe_liveness(dict(row)) == 'alive'
+
+
+def waiting_on_live_holders(store, task_id):
+    """Every shown wait of the task is a scope wait on a live worker.
+
+    Such a wait ends when that worker does, so the scheduler keeps waiting
+    instead of stopping the task on its deadline. A capacity wait, or a
+    scope wait whose holder is gone, finishing or unverifiable, does not
+    qualify: those keep the deadline that bounds a release never observed.
+    """
+    with store.connection() as db:
+        waits = current_waits(db, task_id)
+        return bool(waits) and all(
+            wait['reason'] == 'scope_overlap'
+            and (wait.get('blocked_by') or {}).get('kind') == 'worker'
+            and holder_alive(db, wait['blocked_by'])
+            for wait in waits.values())

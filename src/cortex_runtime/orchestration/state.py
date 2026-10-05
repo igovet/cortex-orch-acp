@@ -895,7 +895,8 @@ class TaskMachine:
         occupied = [
             (absolute_scope(db, n['task_id'], effective_scope(db, n)),
              dict(kind='worker', task_id=n['task_id'], node=n['node_id'], role=n['role'],
-                  objective=n['objective'], running=n['status'] == 'running'))
+                  objective=n['objective'], running=n['status'] == 'running',
+                  assignment_ref=n['assignment_ref']))
             for n in active_nodes
             if n['stage'] != 'review' and n['role'] not in READ_ONLY
         ]
@@ -922,7 +923,7 @@ class TaskMachine:
             if not read_only:
                 occupied.append((scope, dict(kind='worker', task_id=task_id, node=candidate['node_id'],
                                              role=candidate['role'], objective=candidate['objective'],
-                                             running=False)))
+                                             running=True, assignment_ref=None)))
         # At most MAX_WORKERS_PER_SESSION workers of this chat session run
         # at once, whatever their engine or role; the rest stay pending.
         from ..delegation.capacity import MAX_WORKERS_PER_SESSION

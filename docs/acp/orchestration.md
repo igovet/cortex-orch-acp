@@ -78,6 +78,15 @@ when the plan changes, or when the turn ends. Dependency waits are not shown.
 Cards are presentation of the recorded `SCHEDULER_WAIT_REASON` decisions only;
 they never change scheduling.
 
+When no worker of the task is running and a step still cannot start, the
+scheduler stops the task with `scheduler_capacity_timeout` after 30 minutes,
+which bounds a slot or path release that is never observed. That deadline does
+not run while every shown wait is a scope wait on a worker observed alive
+through its recorded process identity (a matching pid, start time and boot):
+such a worker, often in another chat, releases its paths when it ends. The
+deadline starts afresh once the holder is gone, finished but still releasing,
+or cannot be verified; capacity waits always keep it.
+
 For streamed coordinator text, the controller reads only the task's durable
 state; it does not rebuild the full context for each delta. A full
 `TaskMachine.context()` read uses one SQLite read transaction, and assignment

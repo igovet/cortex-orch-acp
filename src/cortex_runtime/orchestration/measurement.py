@@ -38,8 +38,11 @@ def wait_signature(reason, blocked_by=None):
     user should see; repeated passes over the same wait are not."""
     if not reason or not blocked_by:
         return (reason,)
+    # A worker holder is its task and node; its assignment_ref only appears
+    # once the node is claimed and is not a different holder.
     return (reason, blocked_by.get('kind'), blocked_by.get('task_id'), blocked_by.get('node'),
-            blocked_by.get('assignment_ref'), blocked_by.get('held'), blocked_by.get('limit'))
+            blocked_by.get('assignment_ref') if blocked_by.get('kind') == 'access_request' else None,
+            blocked_by.get('held'), blocked_by.get('limit'))
 
 
 def wait_reason(db, task_id, identity, reason, **ids):

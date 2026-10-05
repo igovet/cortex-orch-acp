@@ -227,8 +227,8 @@ _CATALOG: dict[str, dict[str, str]] = {
         "ru": "движок координатора упал ({detail})",
     },
     "stop_reason.scheduler_capacity_timeout": {
-        "en": "no worker capacity became free in time",
-        "ru": "не освободились слоты для исполнителей",
+        "en": "within 30 minutes no worker slot, or no path held by a worker that is gone or still releasing, became free",
+        "ru": "за 30 минут не освободились слоты исполнителей или пути, которые держит завершившийся или неподтверждённый воркер",
     },
     "stop_reason.workers_still_running": {
         "en": "workers are still running",

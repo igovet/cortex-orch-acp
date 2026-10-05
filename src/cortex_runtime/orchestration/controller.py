@@ -749,6 +749,14 @@ def _run(runtime, task_id, session_id, channel, session_ref, content, emit_updat
             # A finished worker of this task may still hold an overlapping
             # scope until its engine is seen gone. Wait with a deadline.
             if any(n['status']=='pending' for n in nodes):
+                from .wait_notices import waiting_on_live_holders
+                if waiting_on_live_holders(runtime._store, task_id):
+                    # A live worker (often of another chat) holds the paths:
+                    # it releases them when it ends, so no deadline applies
+                    # until it is gone. The chat shows this wait on its card.
+                    capacity_wait_started = None
+                    _wait_for_change(runtime, machine, task_id, fingerprint, workers, cancel_event, language, relay_requests=False)
+                    continue
                 capacity_wait_started = capacity_wait_started or time.monotonic()
                 if time.monotonic()-capacity_wait_started < 1800:
                     _wait_for_change(runtime, machine, task_id, fingerprint, workers, cancel_event, language, relay_requests=False)
