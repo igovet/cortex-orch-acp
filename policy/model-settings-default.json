@@ -113,7 +113,7 @@
               "review",
               "analysis"
             ],
-            "preferred_when": "Backend - only very complex point tasks.",
+            "preferred_when": "Any work of the listed kinds, except backend work; for backend, only very complex, narrowly scoped tasks.",
             "request_names": null
           }
         }
@@ -188,7 +188,7 @@
               "operations",
               "analysis"
             ],
-            "preferred_when": "Frontend - only if this work does not concern the design of layouts.\nBackend - in deep mode need use only hight/xhigh effort.",
+            "preferred_when": "Any work of the listed kinds, except frontend work that concerns layout design.",
             "request_names": null
           }
         }

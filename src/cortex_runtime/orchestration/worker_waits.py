@@ -177,6 +177,10 @@ def answer_tx(db, question_id, text, source, *, session_id=None):
         for member in [q['question_id'] for q in batch['questions']] if batch else [question_id]:
             db.execute("UPDATE pending_questions SET status='cancelled' WHERE id=? AND status='open'", (member,))
         return False
+    if wait and wait.get('kind') == 'access':
+        # Old access cards are not user decisions. Reconciliation retires
+        # them and makes a fresh runtime policy decision, never an approval.
+        return False
     db.execute(
         "UPDATE pending_questions SET status='answered',answer_text=?,answer_source=?,answered_at=? WHERE id=?",
         (text, source, now(), question_id),
@@ -191,13 +195,6 @@ def answer_tx(db, question_id, text, source, *, session_id=None):
     if wait:
         if batch and not completed_tx(db, batch):
             return True
-        if wait.get('kind') == 'access':
-            from .access import resolve_tx
-            wait = resolve_tx(db, wait, text)
-            if wait['status'] == 'open':
-                # The real answer requests another runtime cycle; no decision
-                # continuation is ready yet.
-                return True
         _change(db, wait, 'ready', answer_source=source, answer_session_id=session_id,
                 answer_ref=wait['question_id'] + ':answer',
                 **(dict(answer_refs=[q['question_id'] + ':answer' for q in batch['questions']]) if batch else {}))

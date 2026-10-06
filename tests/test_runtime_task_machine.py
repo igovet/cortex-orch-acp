@@ -353,7 +353,9 @@ def test_composed_runtime_executes_plan_review_verification_synthesis(tmp_path, 
                         (tmp_path / 'unexpected.txt').write_text('external change')
             else:
                 assert 'Communicate exclusively in English' in message
-                assert message.endswith('Worker response language: English only, including the final response.')
+                assert 'Worker response language: English only, including the final response.' in message
+                assert 'user_question_language: en' in message
+                assert 'Exception: user-facing structured question text' in message
                 if scenario in {'worker_question','replan','scope','escalation'} and not questions:
                     questions.append('pending')
                     if scenario=='worker_question':

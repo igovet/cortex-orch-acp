@@ -5045,10 +5045,14 @@ class OrchestratingRuntime:
                 recovery_prompt = None
                 worker_prompt = (
                     'You are a worker, not the user-facing coordinator. Communicate exclusively in English: '
-                    'all progress messages, summaries, reports, questions and final responses. '
+                    'all progress messages, summaries, reports and final responses. '
                     'The original user text and coordinator language below are context, not your response language. '
                     'Preserve exact quoted evidence and any language explicitly required for project artifacts.\n\n'
-                    + worker_prompt + '\n\nWorker response language: English only, including the final response.'
+                    + worker_prompt + '\n\nWorker response language: English only, including the final response.\n'
+                    + 'user_question_language: ' + self._resolve_language(task_id) + '\n'
+                    + 'Exception: user-facing structured question text and every selectable option use '
+                      'user_question_language as required by the advertised question tool contract, not English '
+                      'when ru is selected. This exception applies on ordinary, recovery and answer turns.'
                 )
                 delivered_prompt, generation_delivery_id, delivery_blocked = self._begin_generation_delivery(
                     task_id, result.engine_session_ref, payload["role"], worker_prompt,
@@ -5829,7 +5833,7 @@ class OrchestratingRuntime:
         with self._lock:
             executor = self._question_executors.get(session_id)
             for wait in waits:
-                if (wait['status'] != 'open' or wait.get('retry_at')
+                if (wait.get('kind') == 'access' or wait['status'] != 'open' or wait.get('retry_at')
                         or wait['question_id'] in self._worker_question_deliveries):
                     continue
                 decision = worker_waits.question_form(wait)

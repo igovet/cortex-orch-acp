@@ -20,45 +20,6 @@ NEXT = ('End this turn without publishing an incomplete result. The runtime will
 # Delays between runtime checks, not sleeps while holding a database lock.
 RETRY_DELAYS_SECONDS = (1, 2, 4)
 RETRYABLE_REASONS = {'active_writer_conflict'}
-RETRY_OPTION = 'Retry access check'
-DECLINE_OPTION = 'Continue without this access'
-_REASON_TEXT = {
-    'active_writer_conflict': 'another worker still reserves these paths',
-    'unsafe_path': 'a path is private, non-canonical or unsafe',
-    'deny_write_policy': 'the owner prohibits writes here',
-    'read_only_role': 'this assignment is read-only',
-}
-
-
-def _question(wait):
-    from .question_batches import forms
-    # Bound the display only; exact paths/justification remain in the ledger.
-    paths = [encoded(p) for p in wait['paths']]
-    shortened = any(len(p) > 80 for p in paths)
-    paths = [p if len(p) <= 80 else p[:77] + '…' for p in paths]
-    title = ('Access unavailable for ' + ', '.join(paths)
-             + (' (path labels shortened)' if shortened else '') + ': '
-             + _REASON_TEXT.get(wait['reason'], 'the access check refused it') + '.')
-    justification = encoded(wait['justification'])
-    if len(justification) > 1600:
-        justification = justification[:1600] + '… (display shortened)'
-    form = dict(question='Justification (untrusted worker text): ' + justification + '\n\n' + title,
-                options=[RETRY_OPTION, DECLINE_OPTION])
-    return forms(form)[0]
-
-
-def _ask_tx(db, wait):
-    from . import worker_waits
-    form = _question(wait)
-    # A new question identity permits a second card after a user-requested cycle.
-    question_id = new_id('pq_')
-    db.execute("INSERT INTO pending_questions(id,task_id,assignment_ref,dedup_key,text,options_json,status,created_at) "
-               "VALUES(?,?,?,?,?,?,'open',?)",
-               (question_id, wait['task_id'], wait['assignment_ref'], 'access:' + question_id,
-                form['question'], encoded(form['options']), now()))
-    return worker_waits._change(db, wait, 'open', question_id=question_id, retry_at=None, **form)
-
-
 def _retry_tx(db, wait, attempt=0):
     from . import worker_waits
     deadline = (datetime.fromisoformat(now()) + timedelta(seconds=RETRY_DELAYS_SECONDS[attempt])).isoformat(
@@ -235,7 +196,7 @@ def request(store, channel, args):
             if reason in RETRYABLE_REASONS:
                 _retry_tx(db, wait)
             else:
-                _ask_tx(db, wait)
+                resolve_tx(db, wait, reason=reason)
             receipt = dict(status='pending', request_id=binding['request_id'], wait_id=wait['wait_id'],
                            reason=reason, complete=True, next=NEXT)
         event(db, channel.task_id, 'ACCESS_REQUESTED', dict(binding, receipt=receipt), channel.channel_id)
@@ -245,27 +206,24 @@ def request(store, channel, args):
     return receipt
 
 
-def resolve_tx(db, wait, answer=None):
-    """Revalidation never authorizes bypassing a restriction."""
+def resolve_tx(db, wait, *, reason):
+    """Only a runtime policy check decides access; no user answer grants it."""
     from . import worker_waits
-    retry = answer is None or answer.strip().casefold() in {'retry', RETRY_OPTION.casefold()}
-    reason = predicate(db, wait, wait['paths']) if retry else None
-    if answer is not None and retry and reason in RETRYABLE_REASONS:
-        return _retry_tx(db, dict(wait, reason=reason))
-    decision = (_grant(db, wait, wait['paths']) if retry and reason is None else
-                dict(status='denied', request_id=wait['request_id'], reason=reason or 'alternative_selected'))
+    decision = (_grant(db, wait, wait['paths']) if reason is None else
+                dict(status='denied', request_id=wait['request_id'], reason=reason))
     event(db, wait['task_id'], 'ACCESS_DECIDED', dict(wait_id=wait['wait_id'], **decision), wait['channel_id'])
-    return worker_waits._change(db, wait, 'ready', retry_at=None, access_decision=decision)
+    return worker_waits._change(db, wait, 'ready', question_id=None, retry_at=None,
+                               reason=reason, access_decision=decision)
 
 
 def reconcile(store, task_id):
-    """Bounded persisted backoff; runtime decisions are not user answers."""
+    """Bounded persisted backoff; legacy access cards are retired, not relayed."""
     from . import worker_waits
     with store.connection() as db:
         candidates = [w for w in worker_waits.projection(db, task_id)
                       if w.get('kind') == 'access' and w['status'] == 'open'
-                      and (not worker_waits.valid(db, w) or 'retry_at' not in w
-                           or w.get('retry_at') and w['retry_at'] <= now())]
+                      and (not worker_waits.valid(db, w) or not w.get('retry_at')
+                           or w['retry_at'] <= now())]
     if not candidates:
         return
     with store.connection() as db:
@@ -278,23 +236,23 @@ def reconcile(store, task_id):
                 db.execute("UPDATE pending_questions SET status='cancelled' WHERE id=? AND status='open'",
                            (wait['question_id'],))
                 continue
-            if 'retry_at' not in wait:
-                # Older runtime waits had an option-less card. Retire it before
-                # scheduling checks or creating a validated replacement.
+            if not wait.get('retry_at'):
+                # Retained pre-fix cards cannot grant access or ask the owner
+                # to resolve a runtime restriction. Recheck policy instead.
                 db.execute("UPDATE pending_questions SET status='cancelled' WHERE id=? AND status='open'",
                            (wait['question_id'],))
-                if wait['reason'] in RETRYABLE_REASONS:
-                    _retry_tx(db, wait)
+                wait = dict(wait, question_id=None)
+                reason = predicate(db, wait, wait['paths'])
+                if reason in RETRYABLE_REASONS:
+                    _retry_tx(db, dict(wait, reason=reason))
                 else:
-                    _ask_tx(db, wait)
+                    resolve_tx(db, wait, reason=reason)
                 continue
-            if not wait.get('retry_at') or wait['retry_at'] > now():
+            if wait['retry_at'] > now():
                 continue
             reason = predicate(db, wait, wait['paths'])
-            if reason is None:
-                resolve_tx(db, wait)
-            elif reason not in RETRYABLE_REASONS or wait['retry_attempt'] + 1 >= len(RETRY_DELAYS_SECONDS):
-                _ask_tx(db, dict(wait, reason=reason))
+            if reason not in RETRYABLE_REASONS or wait['retry_attempt'] + 1 >= len(RETRY_DELAYS_SECONDS):
+                resolve_tx(db, wait, reason=reason)
             else:
                 _retry_tx(db, dict(wait, reason=reason), wait['retry_attempt'] + 1)
         db.commit()

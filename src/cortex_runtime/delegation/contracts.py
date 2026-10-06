@@ -2,7 +2,7 @@
 from __future__ import annotations
 import copy
 from ..contracts import StoreError
-from ..orchestration.contracts import COORDINATOR, WORKER, obj, text, validate as validate_schema
+from ..orchestration.contracts import COORDINATOR, WORKER, obj, required_bounds, text, validate as validate_schema
 
 
 def integer(description, minimum=0, maximum=1000000000):
@@ -38,10 +38,28 @@ def schemas_for(role_kind):
         schema['then'] = {'not': {'anyOf': [{'required': [name]} for name in ('question', 'options')]}}
         batch = schema['properties']['questions']
         batch['description'] = batch['description'].replace('question/options/skill_proposal', 'question/options')
+        purpose = (
+            'Only for a genuine user decision that cannot be resolved from the assignment, retained context or runtime tools. '
+            'Never ask the user for missing project access, permissions or declared work paths: use access_request, '
+            'which the runtime grants or refuses under policy. Use scope_request/replan_request only for a changed '
+            'decomposition; unavailable evidence is a report limitation, not a request that the user repair tool access. ')
+        language = (
+            'Write the user-facing question and every selectable option in user_question_language supplied by the '
+            'runtime in the current turn (en = English, ru = Russian), even though worker communication and reports '
+            'stay English. The runtime forwards these strings verbatim; it does not translate them. ')
         schema['properties']['question']['description'] = (
-            'Information needed to finish the assignment. Always use this structured tool with meaningful selectable options, '
-            'not a prose-only question or native engine question tool. Registers an assignment-local wait and returns promptly. '
-            'End this turn without publishing an incomplete result; all real answers arrive in the same healthy session.')
+            purpose + language + 'One self-contained question with meaningful selectable options, not a prose-only '
+            'question or native engine question tool. Registers an assignment-local wait and returns promptly. '
+            'End this turn without publishing an incomplete result; the runtime delivers the real answer.')
+        options = schema['properties']['options']
+        options['description'] = (
+            required_bounds(options['minItems'], options['maxItems']) +
+            ' 2 to 8 distinct meaningful answers; never a placeholder or Other. Custom free text remains available. ' + language)
+        options['items']['description'] = 'One meaningful selectable answer. ' + language
+        batch['description'] += ' ' + purpose + language
+        form = batch['items']['properties']
+        form['question']['description'] = schema['properties']['question']['description']
+        form['options'] = copy.deepcopy(options)
     return result
 
 

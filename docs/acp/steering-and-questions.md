@@ -178,9 +178,10 @@ a retained session binding.
 Workers may also request additional exact project paths needed for their
 assignment. Safe requests are granted only after runtime validation against role,
 owner deny-write policy, path safety and current workspace writer reservations;
-a multi-path request is granted all-or-none. A contested or disallowed request
-parks only that worker for a user decision or revalidation, delivered through
-the same healthy-session continuation. A request itself performs no write and
+a multi-path request is granted all-or-none. A contested request gets bounded
+runtime retries, then a grant or denial through the same healthy-session
+continuation, without a user access question. Policy, path and role refusals
+are immediate runtime decisions; retained old access cards are retired. A request itself performs no write and
 user text does not override policy. After denial the worker can use an allowed
 alternative or request a replacement decomposition through the existing
 scope/replan flow. This does not dynamically widen the operating-system jail:
@@ -191,8 +192,13 @@ See [orchestration](orchestration.md#worker-questions-and-additional-access).
 The coordinator uses the language selected for the submitted message, including
 when reports and context are English. Workers receive an English communication
 rule in their shared generated protocol and in every ordinary, recovery and
-fallback turn. Exact quotes and explicitly requested project-artifact languages
-are preserved. This is model instruction, not automatic translation or a claim
+fallback turn. User-facing structured question text and all options are the
+exception: the advertised question contract requires the current turn's
+`user_question_language` (`en` or `ru`). The same strings reach a form or
+text fallback verbatim. Only genuine user decisions belong in that question
+tool; missing project access goes to runtime `access_request`, and unavailable
+evidence is reported as a limitation. Exact quotes and explicitly requested
+project-artifact languages are preserved. This is model instruction, not automatic translation or a claim
 that arbitrary model output can be deterministically language-validated.
 
 ## Native composer queue versus captured steering

@@ -17,7 +17,11 @@ build-verification role is retained among the 23 but is runtime-reserved: it is
 not plannable or dispatched because command verification is executed by the
 runtime itself. The runtime directive selects the coordinator's user-facing reply
 language from the chat language (English or Russian); worker communications and
-reports remain English.
+reports remain English. User-facing structured question text and options are
+the exception: the question tool contract requires the current turn's
+`user_question_language` (`en` or `ru`), supplied on every worker turn.
+The runtime relays strings verbatim and does not translate or deterministically
+verify their natural language.
 
 The profile catalogue (`profiles.json`) declares `access_class` as `write`,
 `read_only` or `consultant` for each profile. The generator selects the matching
@@ -101,9 +105,10 @@ runtime grants a writing worker project-wide gateway and jail write access, with
 private and user-protected paths still refused. Writers should reserve a project
 path outside their agreed work area with `access_request` before changing it; that
 request does not widen an OS jail. Writer conflicts receive bounded delayed
-runtime rechecks before selectable retry/continue options; policy, path and
-read-only refusals ask immediately. Only a fresh runtime predicate can grant
-access, never a user answer alone. Outside-project effects use `outside_write` or
+runtime rechecks before a grant or denial without a user question; policy, path
+and read-only refusals are immediate runtime decisions. Only a fresh runtime
+predicate can grant access, never a user answer. The worker question contract
+reserves questions for genuine user decisions, not missing tool access. Outside-project effects use `outside_write` or
 `outside_command` and, in Guarded mode, require the user's accepted permission
 card. Auto mode intentionally approves them without a per-action card, including
 when no client is connected; this is the owner's selected behavior. Guarded

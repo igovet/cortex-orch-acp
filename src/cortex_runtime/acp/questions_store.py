@@ -122,7 +122,13 @@ def get(store, question_id: str) -> PendingQuestion | None:
 def list_open(store, task_id: str) -> list[PendingQuestion]:
     with store.connection() as db:
         rows = db.execute(
-            "SELECT * FROM pending_questions WHERE task_id=? AND status='open' ORDER BY id", (task_id,),
+            # Historical access cards are runtime decisions, not questions to
+            # list, disambiguate or relay. Match their recorded identity/kind,
+            # never keywords in user-decision prose.
+            "SELECT q.* FROM pending_questions q WHERE q.task_id=? AND q.status='open' "
+            "AND NOT EXISTS (SELECT 1 FROM runtime_events e WHERE e.task_id=q.task_id "
+            "AND e.type='WORKER_WAIT_CHANGED' AND json_extract(e.payload_json,'$.kind')='access' "
+            "AND json_extract(e.payload_json,'$.question_id')=q.id) ORDER BY q.id", (task_id,),
         ).fetchall()
     return [PendingQuestion._from_row(row) for row in rows]
 

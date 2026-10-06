@@ -142,9 +142,13 @@ def test_wrong_session_or_ambiguous_started_delivery_is_never_replayed(bound):
     assert worker_waits.list_waits(store, coordinator.task_id)[0]['status'] == 'orphaned'
 
 
-def _runtime_flow(tmp_path, *, questions=1, elicitor=True, early=False, sibling=False, stopped=False, sibling_fails=False, batch=False):
+def _runtime_flow(tmp_path, *, questions=1, elicitor=True, early=False, sibling=False, stopped=False, sibling_fails=False, batch=False, language='en'):
     store = Store(tmp_path / '.cortex', project_root=tmp_path)
     boot = bootstrap_task(store, SourceEvent(origin='flow-test', event_id='one'), 'Implement', 'owner')
+    from cortex_runtime.acp.steering import set_language_override
+    set_language_override(store, boot.task_id, language)
+    question = 'Какую цель выбрать?' if language == 'ru' else 'Which target?'
+    options = ['Малую', 'Большую'] if language == 'ru' else ['small', 'large']
     prompts, identities, cards, output = [], [], [], []
     card_entered, sibling_done = threading.Event(), threading.Event()
     def router(store, channel, ref, launch, instructions):
@@ -164,6 +168,10 @@ def _runtime_flow(tmp_path, *, questions=1, elicitor=True, early=False, sibling=
             if node['node_id'] == 'N1' and sibling_fails:
                 raise EngineTurnFailed('refusal')
             if node['node_id'] == 'N0':
+                assert 'user_question_language: ' + language in message
+                assert 'Worker response language: English only' in message
+                assert 'all progress messages, summaries, reports and final responses' in message
+                assert 'every selectable option use' in message
                 prompts.append(message)
                 identities.append((channel.attempt_id, channel.channel_id, ref))
                 if call_index == 0:
@@ -172,16 +180,17 @@ def _runtime_flow(tmp_path, *, questions=1, elicitor=True, early=False, sibling=
                 if call_index < questions:
                     args = dict(request_key=f'question{call_index}')
                     if batch:
-                        args['questions'] = [dict(question='Which target?', options=['small', 'large']),
-                                             dict(question='Which format?', options=['JSON', 'CSV'])]
+                        args['questions'] = [dict(question=question, options=options),
+                                             dict(question='Какой формат?' if language == 'ru' else 'Which format?',
+                                                  options=['JSON', 'CSV'])]
                     else:
-                        args.update(question='Which target?', options=['small', 'large'])
+                        args.update(question=question, options=options)
                     mcp_tools.dispatch(store, channel, 'ask_question', args)
                     if early:
                         assert card_entered.wait(10)
                         assert len(prompts) == 1  # answer cannot prompt into the busy session
                     return PromptOutcome(StopReason.END_TURN, '')
-                assert 'Runtime answer continuation' in message and 'small' in message
+                assert 'Runtime answer continuation' in message and options[0] in message
                 if batch:
                     assert 'custom format' in message and 'batch_id' in message and 'answer_ref' in message
                 read = mcp_tools.dispatch(store, channel, 'project_read', dict(path='part0.txt'))
@@ -203,13 +212,15 @@ def _runtime_flow(tmp_path, *, questions=1, elicitor=True, early=False, sibling=
         def elicit_batch(self, session_id, saved):
             card_entered.set()
             first, second = saved['questions']
-            assert questions_store.answer(store, first['question_id'], 'small', 'elicitation', session_id=session_id)
+            assert first['question'] == question and first['options'] == options
+            assert questions_store.answer(store, first['question_id'], options[0], 'elicitation', session_id=session_id)
             wait = worker_waits.list_waits(store, boot.task_id)[0]
             assert wait['status'] == 'open' and len(prompts) == 1
             if sibling:
                 assert sibling_done.wait(10), 'sibling was blocked by the partial batch'
             assert questions_store.answer(store, second['question_id'], 'custom format', 'elicitation', session_id=session_id)
-        def elicit(self, session_id, question, options):
+        def elicit(self, session_id, shown_question, shown_options):
+            assert shown_question == question and shown_options == options
             card_entered.set()
             if sibling:
                 assert sibling_done.wait(10), 'scheduler was blocked by the question card'
@@ -218,7 +229,7 @@ def _runtime_flow(tmp_path, *, questions=1, elicitor=True, early=False, sibling=
             if elicitor == 'timeout':
                 from cortex_runtime.acp.host_requests import HostRequestTimeout
                 raise HostRequestTimeout('timed out')
-            return 'small'
+            return options[0]
     try:
         reason = runtime.start_prompt(boot.task_id, 'incoming', 'Implement', output.append, threading.Event(),
                                       emit_tool_call=cards.append, host_elicitor=Elicitor() if elicitor else None)
@@ -238,7 +249,8 @@ def _runtime_flow(tmp_path, *, questions=1, elicitor=True, early=False, sibling=
                 assert worker_waits.list_waits(store, boot.task_id)[0]['status'] == 'cancelled'
                 assert len(prompts) == 1 and (tmp_path / 'part0.txt').read_text() == 'before'
                 return
-            reason = runtime.start_prompt(boot.task_id, 'incoming', 'small', output.append, threading.Event(),
+            assert question in ''.join(output) and all(option in ''.join(output) for option in options)
+            reason = runtime.start_prompt(boot.task_id, 'incoming', options[0], output.append, threading.Event(),
                                           emit_tool_call=cards.append)
         assert reason == StopReason.END_TURN
         assert TaskMachine(store).context(boot.task_id)['state'] == 'COMPLETED'
@@ -536,3 +548,11 @@ def test_worker_without_retained_session_uses_question_fallback_not_mutation_fai
 
 def test_complete_batch_resumes_same_worker_session_without_blocking_sibling(tmp_path):
     _runtime_flow(tmp_path, batch=True, sibling=True)
+
+
+@pytest.mark.parametrize('language', ['en', 'ru'])
+@pytest.mark.parametrize('mode', ['card', 'text', 'batch'])
+def test_user_selected_language_reaches_worker_question_and_options_verbatim(tmp_path, language, mode):
+    # Scripted generation verifies prompt delivery and transport, not a claim
+    # that a paid model always obeys the language contract.
+    _runtime_flow(tmp_path, language=language, elicitor=mode != 'text', batch=mode == 'batch')

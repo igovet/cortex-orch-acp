@@ -37,8 +37,14 @@ Implemented production paths:
 - Informational questions have a read-only direct-answer path before any plan or
   worker exists. Planned work receives independent review when required by the
   observed project state, plus verification.
-- Workers receive English-only communication instructions on every turn; the
-  coordinator receives the selected message language after its context.
+- Worker internal communication remains English on every turn; the coordinator
+  receives the selected message language after its context. User-facing worker
+  question text and all options are the exception: the advertised question
+  contract requires the current turn's `user_question_language` (`en` or `ru`).
+  Delivery is tested with scripted models, not automatic translation or a model
+  compliance guarantee. Missing project access goes to runtime `access_request`;
+  access grants/refusals and bounded writer-conflict retries never ask the user.
+  Retained old access cards are retired, not treated as authorization.
 
 ## Installed capabilities and the engine jail
 

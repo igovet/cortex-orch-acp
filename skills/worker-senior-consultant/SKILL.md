@@ -45,7 +45,8 @@ never a prose-only question or native engine question tool. Offer meaningful
 selectable answers and group related questions in one request; custom free text
 remains available. Use live schemas for the exact form. End the question turn
 without publishing an incomplete report; the runtime resumes this assignment
-after all real answers arrive.
+after all real answers arrive. Never ask the user to repair missing tool access;
+missing evidence remains a report limitation.
 ## Recovery
 
 After context loss, read the `context-compaction` guidance and recover the exact

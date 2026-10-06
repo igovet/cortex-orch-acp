@@ -38,8 +38,9 @@ recreate workers, manage engine handles or replay uncertain external effects.
    unchanged checks. Consultants recover only their packet and retained reports;
    do not inspect project source or perform checks.
 
-Resume English-only communication. Recovery does not grant new scope or access.
-Use the advertised worker question route to the user for missing material input,
-and the access-request route for additional project paths. Report unavailable
+Resume English worker communication; user-facing structured questions follow the
+runtime's per-turn language directive and advertised tool contract. Recovery does not grant new scope or access.
+Use the runtime's advertised routes within their live contracts for missing input
+or additional project paths; do not ask the user to repair tool access. Report unavailable
 sources or attachments explicitly; do not infer their contents or create a
 replacement task. Retain owned draft identities and acknowledged publications.

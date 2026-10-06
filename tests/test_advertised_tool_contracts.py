@@ -276,3 +276,32 @@ def test_read_skill_advertises_only_matching_situational_triggers(kind, role_id)
         assert "interactive-resources:" not in entry["description"]
     if kind == "worker":
         assert "cortex-control:" not in entry["description"]
+
+
+@pytest.mark.parametrize("role_id,stage", [("worker-backend-dev", "execution"),
+                                         ("worker-explorer", "execution"),
+                                         ("worker-code-reviewer", "review"),
+                                         ("worker-senior-consultant", "execution")])
+def test_worker_question_contract_routes_access_and_localizes_all_form_fields(role_id, stage):
+    tool = next(t for t in mcp_tools.tool_definitions("worker", role_id=role_id, stage=stage)
+                if t["name"] == "ask_question")
+    props = tool["inputSchema"]["properties"]
+    for description in (tool["description"], props["question"]["description"],
+                        props["questions"]["description"],
+                        props["questions"]["items"]["properties"]["question"]["description"]):
+        assert "genuine user decision" in description and "access_request" in description
+        assert "runtime" in description and "user_question_language" in description
+    for field in (props["options"], props["options"]["items"],
+                  props["questions"]["items"]["properties"]["options"],
+                  props["questions"]["items"]["properties"]["options"]["items"]):
+        assert "user_question_language" in field["description"]
+        assert "verbatim" in field["description"]
+    # A worker-specific rewrite must not mutate coordinator or later tool lists.
+    assert "user_question_language" not in COORDINATOR["user_question_request"]["properties"]["options"]["description"]
+
+
+def test_access_contract_promises_runtime_decision_not_user_question():
+    tool = next(t for t in mcp_tools.tool_definitions("worker", role_id="worker-backend-dev", stage="execution")
+                if t["name"] == "access_request")
+    assert "without a user question" in tool["description"]
+    assert "grant" in tool["description"] and "refuse" in tool["description"]

@@ -234,6 +234,8 @@ def test_fallback_worker_prompt_rebuilds_project_docs_catalog(tmp_path):
     index.parent.mkdir(parents=True)
     index.write_text("# Before fallback\n", encoding="utf-8")
     store, task_id, connections, _entry_a, _entry_b = _setup_two_route_task(tmp_path)
+    from cortex_runtime.acp.steering import set_language_override
+    set_language_override(store, task_id, 'ru')
     prompts = []
     versions = [build_project_docs_catalog(tmp_path)["catalog_version"]]
     decided = {"done": False}
@@ -249,6 +251,7 @@ def test_fallback_worker_prompt_rebuilds_project_docs_catalog(tmp_path):
 
     def failed_worker(store, channel, session_ref, message, call_index):
         prompts.append(message)
+        set_language_override(store, task_id, 'en')
         index.write_text("# After fallback\n", encoding="utf-8")
         versions.append(build_project_docs_catalog(tmp_path)["catalog_version"])
         raise EngineTurnFailed("transport_eof")
@@ -275,6 +278,8 @@ def test_fallback_worker_prompt_rebuilds_project_docs_catalog(tmp_path):
         assert versions[1] in prompts[1] and versions[0] not in prompts[1]
         assert "Before fallback" in prompts[0] and "After fallback" in prompts[1]
         assert all("Acceptance:" in prompt for prompt in prompts)
+        assert "user_question_language: ru" in prompts[0]
+        assert all("user_question_language: en" in prompt for prompt in prompts[1:])
         assert len(engine.fallback_calls) == 1
     finally:
         runtime.shutdown()

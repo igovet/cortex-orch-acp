@@ -459,8 +459,25 @@ the OS jail. See [permissions and containment](permissions-and-containment.md).
 
 ## Worker questions and additional access
 
-The worker-only `ask_question` route registers an assignment-local wait and
-returns promptly. The worker ends its turn without publishing an incomplete
+The worker-only `ask_question` contract reserves user questions for genuine
+decisions only the user can make, not missing project access, permissions,
+work paths or evidence available through runtime tools. Workers use
+`access_request` for additional project paths and the existing scope/replan
+routes only when decomposition must change; unavailable evidence remains an
+explicit report limitation. The runtime does not classify arbitrary question
+prose with keyword heuristics, and a question or answer never grants access.
+
+Each worker turn receives `user_question_language` (`en` or `ru`) derived
+from the same selected language/automatic language resolution used by the
+coordinator. The advertised question contract requires the question and every
+option, including batch members, in that language. Worker-facing briefs,
+reports and other communication remain English. Ordinary, recovery, answer and
+fallback turns refresh this directive. Strings are relayed verbatim to structured
+forms or text fallback; there is no runtime translation or deterministic
+natural-language validation. Automated scripted tests prove directive delivery
+and string transport, not arbitrary model compliance.
+
+The route registers an assignment-local wait and returns promptly. The worker ends its turn without publishing an incomplete
 result. Once a real answer is recorded, the runtime sends it as the next prompt
 to the same assignment, attempt and retained healthy engine session. Sibling
 assignments can continue; the coordinator is not restarted and need not submit a
@@ -488,37 +505,26 @@ to the worker's declared assignment scope. The runtime grants the complete
 request automatically only when all paths pass safety and role checks, queued
 and applied owner deny-write restrictions, and current writer-reservation
 checks. Existing grants and plan scope remain unchanged; no partial grant occurs.
-A refusal parks only that assignment. Active-writer conflicts get three runtime
-rechecks after delays of 1, 2 and 4 seconds (module-level, test-injectable
+A refusal parks only that assignment for a runtime decision continuation, never
+a user access question. Active-writer conflicts get three runtime rechecks after
+delays of 1, 2 and 4 seconds (module-level, test-injectable
 `RETRY_DELAYS_SECONDS`); deadlines and attempt indices persist in wait events.
-The existing scheduler/retained runner reconciles due checks without sleeping
-under a database lock. Scheduling may deliver a check later than its deadline;
-there is no catch-up busy loop. A successful check grants transactionally and
-continues the same healthy session without a user question or fabricated answer.
-Authority loss cancels the wait. Writer conflicts no longer wait indefinitely
-for release: after the bounded cycle, automatic checking stops and a user decision
-is required.
-
+The scheduler reconciles due checks without sleeping under a database lock.
+Scheduling can deliver a check later than its deadline; there is no catch-up
+busy loop. A successful check grants transactionally and continues the same
+healthy session. An exhausted conflict cycle returns a runtime denial.
 Private/non-canonical/unsafe paths, owner deny-write policy and read-only roles
-skip automatic retries because retrying cannot legitimately change those
-restrictions. These reasons, or an exhausted writer-conflict cycle, produce a
-validated question with **Retry access check** and **Continue without this access**.
-Its short final line identifies path labels and the plain-language reason;
-the separately labeled justification is untrusted worker text. Long display
-previews are explicitly shortened; exact paths and justification stay in the
-access ledger. Every worker card passes the same option validation as
-`ask_question`; old option-less access waits are retired and rebuilt safely.
+return runtime denials immediately, without retries. Authority loss cancels or
+orphans the continuation.
 
-The retry option (or the legacy free-text `retry`) performs fresh policy checks:
-a grantable request succeeds, a remaining writer conflict starts another bounded
-cycle, and a remaining path/policy/role refusal returns a denial after that
-single check. The continue option and unrecognized custom text return denial,
-even if the paths have since become grantable. Each exhausted cycle has a new
-question identity so its selectable card can be delivered once. No answer
-overrides private paths, deny-write policy, read-only roles or live writers.
-Requesting access neither writes a file nor makes user text an authorization.
-After denial, the worker can use an allowed alternative or submit the existing
-scope/replan request if the task decomposition must change.
+Access waits never create pending user questions or synthesize user answers.
+Retained pre-fix access cards are cancelled and policy is rechecked by the
+runtime; late card answers cannot grant access. No decision overrides private
+paths, deny-write policy, read-only roles or live writers. A ready grant is
+revalidated before continuation. The complete request remains all-or-none.
+After denial the worker may use an allowed alternative, issue a new logical
+access request when conditions change, or use scope/replan for a replacement
+decomposition; it must not replay a refused action.
 
 These declared-scope extensions coordinate runtime writers; they do not
 dynamically remount or widen the OS jail. In the current launch boundary,
