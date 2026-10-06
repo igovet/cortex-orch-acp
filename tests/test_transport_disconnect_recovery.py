@@ -71,7 +71,7 @@ def _finishing_router(coordinator_messages=None, *, ask_user=False):
                 return PromptOutcome(StopReason.END_TURN, "Coordinator turn")
             report_id = _publish(store, channel, channel.attempt_id)
             mcp_tools.dispatch(store, channel, "result_submit", dict(
-                report_ref=report_id, summary="Observed result", checks=[], request_key="result"))
+                report=dict(report_ref=report_id), summary="Observed result", checks=[], request_key="result"))
             return PromptOutcome(StopReason.END_TURN, "Worker done")
         return behavior
     return router

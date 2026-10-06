@@ -30,13 +30,17 @@ def test_result_submit_describes_receipt_sources_and_exclusive_report_forms():
     entry = next(t for t in mcp_tools.tool_definitions("worker", role_id="worker-backend-dev", stage="execution")
                  if t["name"] == "result_submit")
     schema = entry["inputSchema"]
-    # Exactly one report form, as if/then/else: a root oneOf hides every field from Codex code mode.
-    assert "oneOf" not in schema
-    assert (schema["if"], schema["then"], schema["else"]) == (
-        {"required": ["report_ref"]}, {"not": {"required": ["report"]}}, {"required": ["report"]})
-    assert "write_report.report_id" in entry["description"]
+    # The report is required; only its two forms are an if/then/else inside it
+    # (a root oneOf hides every field from Codex code mode, and models fill
+    # the plain required list rather than evaluate a root conditional).
+    assert not {"oneOf", "if", "then", "else"} & set(schema) and "report" in schema["required"]
+    report = schema["properties"]["report"]
+    assert (report["if"], report["then"], report["else"]) == (
+        {"required": ["report_ref"]}, {"not": {"anyOf": [{"required": ["title"]}, {"required": ["markdown"]}]}},
+        {"required": ["title", "markdown"]})
+    assert "report={report_ref: <that write_report's report_id>}" in entry["description"]
     assert "command_run" in entry["description"] and "tool_call_ref" in entry["description"]
-    assert "write_report" in schema["properties"]["report_ref"]["description"]
+    assert "write_report" in report["properties"]["report_ref"]["description"]
     assert "same attempt" in schema["properties"]["checks"]["items"]["properties"]["tool_call_ref"]["description"]
     assert "closed_by" in schema["properties"]["checks"]["items"]["properties"]["tool_call_ref"]["description"]
     assert "identical" in schema["properties"]["request_key"]["description"]

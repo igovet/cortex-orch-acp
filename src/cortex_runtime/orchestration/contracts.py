@@ -150,13 +150,30 @@ FINDING = obj(dict(
     cross_cutting=dict(type='boolean', description='true when the problem spans several plan tasks or changes an interface, contract or file other tasks depend on; the runtime then sends a fix to every original plan task. false for a problem local to the named task.'),
 ), required=['node', 'files', 'fix', 'cross_cutting'])
 FINDING['properties']['node']['pattern'] = r'^[A-Za-z][A-Za-z0-9_-]{0,63}$'
-INLINE_REPORT = obj(dict(
-    title=text('Readable English report title.', 200),
-    markdown=text('Complete report Markdown: the opening decision brief (conclusion, observed evidence, checks, contradictions, limits, next action), then the detailed evidence. No draft marker and no template placeholder comments; the runtime adds the marker.', 1000000),
-))
+REPORT_FORM = obj(dict(
+    title=text('Inline form, sent with markdown: readable English report title. Omit report_ref.', 200),
+    markdown=text('Inline form, sent with title: complete report Markdown: the opening decision brief (conclusion, observed evidence, checks, contradictions, limits, next action), then the detailed evidence. No draft marker and no template placeholder comments; the runtime adds the marker. Omit report_ref.', 1000000),
+    report_ref=text('Reference form, sent alone instead of title and markdown: the exact report_id that this worker\'s own write_report returned in this attempt (r_ plus 12 lowercase hex characters). Never a draft_id, a report from another attempt or a tool_call_ref.', 14),
+), required=[])
+REPORT_FORM['description'] = (
+    'Required in every result_submit, a review included: this attempt\'s report. summary, verdict and findings never '
+    'replace it. Send exactly one form. Inline (simplest): {"title": "...", "markdown": "..."}; the runtime publishes '
+    'it as this attempt\'s immutable report before recording the result. Reference, only after create_draft, '
+    'draft_write and write_report: {"report_ref": "<that write_report report_id>"}. Retry an uncertain delivery with '
+    'exactly the same request_key and entire payload; a changed report needs a new logical delivery.')
+REPORT_FORM['properties']['report_ref']['pattern'] = r'^r_[0-9a-f]{12}$'
+# Models fill the plain `required` list; a conditional must never be the only
+# statement that a field is needed. With report and report_ref as two optional
+# root fields under a root if/then/else, reviewers repeatedly sent only
+# summary/checks/request_key/verdict and were refused (session 973dbe54,
+# 2026-10-06; 16 such refusals across six projects after a description-only
+# fix). So the report is one required field and only its two forms are
+# conditional (if/then/else, never oneOf: see the Codex note below).
+REPORT_FORM['if'] = {'required': ['report_ref']}
+REPORT_FORM['then'] = {'not': {'anyOf': [{'required': ['title']}, {'required': ['markdown']}]}}
+REPORT_FORM['else'] = {'required': ['title', 'markdown']}
 RESULT = obj(dict(
-    report_ref=text('Send exactly one of report_ref or report. Use report_ref only after this worker publishes its own filled draft with write_report: copy that call\'s report_id exactly (r_ plus 12 lowercase hex characters) into result_submit.report_ref. Do not use draft_id, a report from another attempt, or a tool_call_ref. Omit report when sending report_ref.', 14),
-    report=dict(INLINE_REPORT, description='Send exactly one of report or report_ref. Simpler alternative to the draft flow: send this title and complete Markdown as result_submit.report, with no report_ref. The runtime publishes it as this attempt\'s immutable report before recording the result. Retry an uncertain delivery with exactly the same request_key and entire payload; a changed report needs a new logical delivery.'),
+    report=REPORT_FORM,
     summary=text('What was found or changed, in plain words: the conclusion first, then what supports it. At most 4000 characters.', 4000),
     verdict=dict(type='string', enum=['APPROVE', 'REQUEST_CHANGES', 'BLOCK', 'approve', 'request_changes', 'block'], description='Required for a review-stage worker, omitted for other workers. Send APPROVE (or approve) when correct, REQUEST_CHANGES (or request_changes) for fixable problems, BLOCK (or block) when the task must not proceed. Lowercase forms normalize to the uppercase decision.'),
     findings=array(FINDING, 'Review only, optional, used only with verdict REQUEST_CHANGES and ignored with any other verdict. One entry per problem, each naming the original plan task that must fix it. When every finding names a task of the accepted plan, is not cross_cutting and lists only files inside that task\'s scope, the runtime creates fixes only for the named tasks, each receiving only its own findings and this review\'s report_ref, ordered as in the plan. Otherwise, or when omitted, every original plan task receives a fix with this summary.', maximum=16),
@@ -168,17 +185,13 @@ RESULT = obj(dict(
                          tool_call_ref=text('For a verified passed check, copy the exact tool_call_ref field from the completed command_run (or user-confirmed outside_command) result of this same attempt; engine shell calls never verify a check, and their exit code or output is not retained. Never derive the receipt from a command, draft, report or engine shell call. A real gateway receipt has gateway: followed by 32 lowercase hex characters, but its shape alone proves nothing. Cite one receipt for one check only, after confirming complete=true, exit_code=0 and untruncated retained output. A missing, foreign, pending, failed, truncated, replayed or trivial receipt makes a claimed pass unverified or failed, not accepted as passed. A failed check may cite its nonzero command receipt; a later same-command passing rerun closes it and the runtime supplies closed_by in the result (do not send closed_by).',128)), required=['name','outcome']),
                   'Automated checks this attempt actually ran.', maximum=20),
     request_key=text('New unique key for this logical result_submit delivery, distinct from keys used for prior mutations on this channel. Generate it once and retain it with the exact report/summary/checks payload; reuse it only to retry an uncertain delivery with identical arguments. Changed content requires a new key and, for a by-reference result, a new owned report.',128),
-), required=['summary','checks','request_key'])
-RESULT['properties']['report_ref']['pattern'] = r'^r_[0-9a-f]{12}$'
+), required=['report','summary','checks','request_key'])
 RESULT['properties']['checks']['items']['properties']['blocker']['pattern'] = r'[\s\S]*\S[\s\S]*'
 # Presence rules are if/then/else, never oneOf/allOf: Codex code mode
 # (0.159.1 json_schema_types.rs) renders a combinator instead of the object's
 # own properties, so a root oneOf hid every result_submit field and an allOf
 # made each checks item `unknown`. Codex drops if/then/else and shows the
 # properties; clients that validate JSON Schema still enforce the rule.
-RESULT['if'] = {'required': ['report_ref']}
-RESULT['then'] = {'not': {'required': ['report']}}
-RESULT['else'] = {'required': ['report']}
 RESULT['properties']['checks']['items'].update({
     'if': {'properties': {'outcome': {'enum': ['not_run', 'unverified']}}, 'required': ['outcome']},
     'then': {'required': ['blocker']},
@@ -276,13 +289,16 @@ def _collect(schema, value, field, violations):
             schema['then'] if _matches_presence_rule(conditional, value) else schema['else'])
         if branch is None or _matches_presence_rule(branch, value):
             pass
-        elif 'report_ref' in conditional.get('required', ()):  # exactly one of report_ref or report
-            present = [name for name in ('report_ref', 'report') if name in value]
+        elif 'report_ref' in conditional.get('required', ()):  # one result_submit report form
+            if 'report_ref' in value:
+                received = 'report_ref together with ' + ' and '.join(n for n in ('title', 'markdown') if n in value)
+            else:
+                received = 'inline form without ' + ' and '.join(n for n in ('title', 'markdown') if n not in value)
             violations.append(dict(
-                field=f'{field}.report_ref, {field}.report',
-                received='both supplied' if len(present) == 2 else 'neither supplied',
-                expected='exactly one of report_ref or report',
-                correction='Send report={title, markdown} inline, or copy report_id from this worker\'s write_report into report_ref; omit the other field.',
+                field=field, received=received,
+                expected='exactly one report form: {title, markdown} inline, or {report_ref} alone',
+                correction='Send report={"title": ..., "markdown": ...} inline, or report={"report_ref": <report_id from '
+                           'this worker\'s own write_report>} alone.',
             ))
         elif 'questions' in conditional.get('required', ()):
             violations.append(dict(field=field, received='mixed or incomplete question form',

@@ -68,7 +68,8 @@ test("humanizes unknown names and keeps expanded payload out of the collapsed la
   const row = presentToolSemantics({ name: "mcp__other__search_code", input: { query: "secret" } });
   assert.equal(row.label, "Search Code");
   assert.equal(row.target, null);
-  assert.equal(presentToolSemantics({ name: "mcp.cortex.result_submit", input: { report_ref: "r_abc" } }).label, "Submit result — r_abc");
+  assert.equal(presentToolSemantics({ name: "mcp.cortex.result_submit", input: { report: { report_ref: "r_abc" } } }).label, "Submit result — r_abc");
+  assert.equal(presentToolSemantics({ name: "mcp.cortex.result_submit", input: { report: { title: "Review", markdown: "# secret body" } } }).label, "Submit result");
   assert.equal(presentToolSemantics({ name: "mcp__other__search_code", input: { query: "{\"secret\":true}" } }).label, "Search Code");
 });
 

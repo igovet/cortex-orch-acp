@@ -88,10 +88,11 @@ a recovery answer is fixed and has a focused no-paid regression. This repairs
 the recovery transition only; it does not establish why a model produced no
 proposal in a separate three-prompt run, nor qualify Desktop batch/worker UI.
 
-The worker result schema requires exactly one owned report form: an explicit
-`report_ref` for an already published report, or inline `report: {title, markdown}`.
-When a draft was published through `write_report`, its returned `report_id` is
-passed as `result_submit.report_ref`; a unique own-report suggestion is only a
+The worker result schema requires a `report` in exactly one owned form:
+`report: {report_ref}` for an already published report, or inline
+`report: {title, markdown}`. When a draft was published through `write_report`,
+its returned `report_id` is passed as `result_submit.report.report_ref`; a unique
+own-report suggestion is only a
 correction hint and does not bind a report. Check blockers and command evidence
 are distinct. Rejected submissions retain only a safe error code and bounded
 field-path diagnostics in observability events; rejected values and report bodies

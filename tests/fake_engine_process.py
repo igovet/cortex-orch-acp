@@ -345,7 +345,7 @@ class FakeEngine:
                 draft=call('create_draft',template='general',request_key='draft')
                 call('draft_write',draft_id=draft['draft_id'],content=draft['required_first_line']+'\n\n# Report\n\nObserved disposable fixture.\n',request_key='draft-body')
                 report=call('write_report',draft_id=draft['draft_id'],title='Observed report',summary='Observed fixture',author='worker',request_key='report')
-                result_args=dict(report_ref=report['report_id'],summary='Observed fixture',checks=[],request_key='result')
+                result_args=dict(report=dict(report_ref=report['report_id']),summary='Observed fixture',checks=[],request_key='result')
                 value=call('result_submit',**result_args)
                 if value.get('error')=='review_verdict_required':value=call('result_submit',**dict(result_args,verdict='APPROVE'))
             if value.get('error'):raise RuntimeError(json.dumps(value))

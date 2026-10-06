@@ -166,7 +166,9 @@ function targetFor(name: string, input: ToolPresentationInput, action: string): 
   const author = stringValue(args, "author", "report_author", "worker_name", "worker")
     ?? stringValue(input.metadata, "author", "report_author", "worker_name", "worker");
   const descriptive = stringValue(args, "skill", "summary", "node_key", "statement");
-  const value = stringValue(args, "report_id", "report_ref", "draft_id", "source_ref", "check_ref", "candidate_ref", "assignment_ref");
+  // result_submit names a published report as report: {report_ref}.
+  const value = stringValue(args, "report_id", "report_ref", "draft_id", "source_ref", "check_ref", "candidate_ref", "assignment_ref")
+    ?? stringValue(record(args).report, "report_ref");
   if ((name === "read_skill" || name === "skill") && descriptive) return compactTarget(descriptive);
   if (name === "read_report") return compactTarget(author ? `by ${author}` : value);
   if (name === "publish_result") return compactTarget(descriptive ?? value);

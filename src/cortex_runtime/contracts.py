@@ -100,7 +100,7 @@ TOOLS = [
          "Publish this channel's fully filled draft as an immutable Markdown report. "
          "Use create_draft, then draft_write; preserve the marker and remove all placeholders before publication. "
          "The runtime validates ownership, UTF-8, hashes and atomically publishes complete bytes in the project store. "
-          "A worker then sends this exact report_id as result_submit.report_ref (or omits write_report and sends report inline). Publication alone does not complete an assignment or task. "
+          "A worker then sends this exact report_id as result_submit report={report_ref: <report_id>} (or omits write_report and sends report={title, markdown} inline). Publication alone does not complete an assignment or task. "
          "Open the report with a concise decision brief: conclusion, observed evidence, checks, contradictions, limits and next action. "
          "Choose a unique request_key and use the same arguments for an uncertain retry.", {
              "source_revision": dict(type="integer",minimum=0,maximum=2**53-1,description="Requirements source revision actually used for this evidence. Omit to retain the revision recorded when this draft was created. Later sources signal reconciliation, never automatic rejection of old evidence."),
@@ -309,8 +309,6 @@ ERROR_HELP = {
     "unknown_skill": "No readable skill or reference has that id. Use one of the ids listed for this role.",
     "unknown_report_ref": "No published report has that report_ref in this task. Pass the exact report_id that write_report returned.",
     "report_not_own": "That report was not published from this attempt's own draft. Publish your result with write_report and pass its report_id.",
-    "result_report_required": "result_submit needs its report: send report (title and complete Markdown) and the runtime publishes it, or report_ref from your own write_report.",
-    "result_report_conflict": "Send exactly one of report_ref or report in result_submit, never both. Nothing was published or recorded.",
     "report_ref_already_published": "That report_ref is already the result of a different attempt. Publish this attempt's own report and pass its report_id.",
     "unknown_large_output_ref": "No retained output has that large_output_id for this channel. Pass the exact id a command_run or project_git result returned.",
     "assignment_report_missing": "The result names no published report of this assignment. Publish the report with write_report first.",

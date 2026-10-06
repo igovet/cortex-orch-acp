@@ -1,4 +1,5 @@
-"""result_submit may carry the report itself instead of a report_ref.
+"""result_submit may carry the report itself (report={title, markdown})
+instead of a reference (report={report_ref}).
 
 The runtime publishes an inline report through the ordinary
 create_draft/write_report path as the worker's own draft, bound to the
@@ -178,14 +179,21 @@ def test_recovery_refuses_an_inline_result_not_bound_to_its_own_delivery(tmp_pat
         reconcile_results(store, task.task_id)
 
 
-@pytest.mark.parametrize('both, error', [(True, 'invalid_arguments'), (False, 'invalid_arguments')])
-def test_report_ref_and_inline_report_are_mutually_exclusive(tmp_path, both, error):
+@pytest.mark.parametrize('form', ['both', 'missing', 'empty'])
+def test_report_is_required_in_exactly_one_form(tmp_path, form):
     store, task, worker, assignment = setup_worker(tmp_path)
     report = publish_fixture_report(store, worker)
-    args = inline_args(report_ref=report) if both else {k: v for k, v in inline_args().items() if k != 'report'}
+    args = inline_args()
+    if form == 'both':
+        args['report'] = dict(args['report'], report_ref=report)
+    elif form == 'missing':
+        del args['report']
+    else:
+        args['report'] = {}
     before = report_count(store, task.task_id)
-    with pytest.raises(StoreError, match=error):
+    with pytest.raises(StoreError, match='invalid_arguments') as caught:
         mcp_tools.dispatch(store, worker, 'result_submit', args)
+    assert caught.value.field == 'arguments.report'
     assert report_count(store, task.task_id) == before
     assert worker_results(store, task, worker) == []
     with store.connection() as db:
@@ -194,12 +202,12 @@ def test_report_ref_and_inline_report_are_mutually_exclusive(tmp_path, both, err
         row = db.execute("SELECT outcome, detail_json FROM observability_events "
                          "WHERE task_id=? AND category='submission_rejection' ORDER BY created_at DESC LIMIT 1",
                          (task.task_id,)).fetchone()
-    assert row['outcome'] == error
+    assert row['outcome'] == 'invalid_arguments'
     detail = json.loads(row['detail_json'])
     assert detail == {
         'operation': 'result_submit',
-        'field': 'arguments.report_ref, arguments.report',
-        'fields': ['arguments.report_ref, arguments.report'],
+        'field': 'arguments.report',
+        'fields': ['arguments.report'],
     }
 
 
@@ -212,10 +220,10 @@ def test_an_inline_report_with_an_unfilled_template_placeholder_is_refused_befor
     assert node_of(store, task, assignment)['status'] == 'running'
 
 
-def test_the_report_ref_path_is_unchanged(tmp_path):
+def test_the_reference_form_names_the_published_report(tmp_path):
     store, task, worker, assignment = setup_worker(tmp_path)
     report = publish_fixture_report(store, worker)
-    args = dict(report_ref=report, summary='Observed', checks=[], request_key='result')
+    args = dict(report=dict(report_ref=report), summary='Observed', checks=[], request_key='result')
     receipt = mcp_tools.dispatch(store, worker, 'result_submit', args)
     assert receipt['recorded'] and receipt['report_ref'] == report
     assert node_of(store, task, assignment)['result']['report_ref'] == report
@@ -225,13 +233,16 @@ def test_inline_report_is_advertised_and_validated():
     (tool,) = [t for t in mcp_tools.tool_definitions('worker', role_id='worker-backend-dev', stage='execution')
                if t['name'] == 'result_submit']
     schema = tool['inputSchema']
-    assert 'report_ref' not in schema['required'] and 'report' not in schema['required']
-    assert set(schema['required']) == {'summary', 'checks', 'request_key'}
+    assert schema['required'] == ['report', 'summary', 'checks', 'request_key']
+    assert 'report_ref' not in schema['properties'] and not {'if', 'then', 'else'} & set(schema)
     report = schema['properties']['report']
-    assert report['required'] == ['title', 'markdown'] and report['additionalProperties'] is False
-    assert 'exactly one' in report['description'] and 'exactly one' in schema['properties']['report_ref']['description']
-    assert 'report_ref' in tool['description'] and 'Exactly one' in tool['description']
+    assert set(report['properties']) == {'title', 'markdown', 'report_ref'} and report['additionalProperties'] is False
+    assert report['else'] == {'required': ['title', 'markdown']}
+    assert 'Required in every result_submit' in report['description'] and 'exactly one form' in report['description']
+    assert 'report is required in every call' in tool['description'] and 'report={report_ref:' in tool['description']
     delegation_contracts.validate('worker', 'result_submit', inline_args())
-    for bad in (dict(title='T'), dict(title='T', markdown=''), dict(title='T', markdown='x', draft_id='d_' + 'a' * 12)):
+    delegation_contracts.validate('worker', 'result_submit', dict(inline_args(), report=dict(report_ref='r_' + 'a' * 12)))
+    for bad in (dict(title='T'), dict(title='T', markdown=''), dict(title='T', markdown='x', draft_id='d_' + 'a' * 12),
+                {}, dict(report_ref='r_x'), dict(title='T', markdown='x', report_ref='r_' + 'a' * 12)):
         with pytest.raises(StoreError, match='invalid_arguments'):
             delegation_contracts.validate('worker', 'result_submit', dict(inline_args(), report=bad))

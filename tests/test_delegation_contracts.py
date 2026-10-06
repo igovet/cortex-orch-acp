@@ -81,10 +81,10 @@ def test_plan_accepts_model_recommendation_and_rejects_legacy_provider():
 
 
 def test_report_identity_and_verdict_are_structured():
-    args=dict(report_ref='r_'+'a'*12,summary='Observed',checks=[],request_key='result')
+    args=dict(report=dict(report_ref='r_'+'a'*12),summary='Observed',checks=[],request_key='result')
     dc.validate('worker','result_submit',args)
     for value in ['not-a-report','r_'+'g'*12,'../report.md']:
-        with pytest.raises(StoreError): dc.validate('worker','result_submit',dict(args,report_ref=value))
+        with pytest.raises(StoreError): dc.validate('worker','result_submit',dict(args,report=dict(report_ref=value)))
     with pytest.raises(StoreError): dc.validate('worker','result_submit',dict(args,verdict='looks fine'))
 
 
@@ -102,7 +102,7 @@ def test_integer_fields_reject_boolean_and_array_bounds_are_real():
 
 def test_overlong_result_summary_names_the_limit():
     # A worker once retried result_submit three times against a bare 'arguments.summary'.
-    args=dict(report_ref='r_'+'a'*12,summary='x'*4053,checks=[],request_key='result')
+    args=dict(report=dict(report_ref='r_'+'a'*12),summary='x'*4053,checks=[],request_key='result')
     with pytest.raises(StoreError) as error: dc.validate('worker','result_submit',args)
     assert (error.value.field,error.value.received,error.value.expected)==('arguments.summary','4053 Unicode characters','between 1 and 4000 characters')
     assert '4000' in error.value.correction

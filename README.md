@@ -75,8 +75,9 @@ The objective property description exposes its Unicode code-point limit even
 when a host renders only descriptions; rewrite overlong text without dropping
 requirements. Rejection does not accept a plan or start workers.
 
-For `result_submit`, send exactly one of an inline `report` or the `report_id`
-returned by this worker's `write_report` as `report_ref`. The advertised schema
+For `result_submit`, `report` is required in exactly one form: inline
+`report: {title, markdown}`, or `report: {report_ref}` naming the `report_id`
+returned by this worker's `write_report`. The advertised schema
 specifies check fields and receipt sources; rejected result submissions attempt to retain
 only a code and safe field path for diagnostics, not the submitted content.
 Review workers must send a verdict (`APPROVE`, `REQUEST_CHANGES` or `BLOCK`;

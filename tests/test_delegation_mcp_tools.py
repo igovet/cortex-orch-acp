@@ -89,7 +89,7 @@ def test_write_report_description_names_result_submit_report_ref():
     from cortex_runtime.contracts import TOOLS
 
     description = next(tool["description"] for tool in TOOLS if tool["name"] == "write_report")
-    assert "result_submit.report_ref" in description
+    assert "result_submit report={report_ref: <report_id>}" in description
 
 
 @pytest.mark.parametrize("report_count, expects_hint", [(0, False), (1, True), (2, False)])

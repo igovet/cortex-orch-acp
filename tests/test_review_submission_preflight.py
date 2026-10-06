@@ -19,7 +19,8 @@ def test_submission_guidance_preflights_report_presence_and_json_transport():
     tool = next(t for t in mcp_tools.tool_definitions(
         'worker', role_id='worker-code-reviewer', stage='review')
         if t['name'] == 'result_submit')
-    assert 'summary and verdict do not replace a report' in tool['description']
+    assert 'summary, verdict and findings never replace it' in tool['description']
+    assert tool['inputSchema']['required'][0] == 'report'
     assert 'JSON parse error' in tool['description']
     assert 'draft_write' in tool['description']
     protocol = (Path(__file__).resolve().parents[1] /
@@ -52,11 +53,12 @@ def test_review_first_valid_submission_and_exact_retry(tmp_path, report_form, om
                             (task.task_id,)).fetchone()[0]
     args = dict(summary='Independent review.', checks=[], verdict='APPROVE', request_key='review-result')
     if omit_report_first:
-        # The observed omission must still fail, without a report or accepted request.
+        # The observed omission (session 973dbe54) is refused by the plain
+        # required list, without a report or accepted request.
         with pytest.raises(StoreError) as caught:
             mcp_tools.dispatch(store, worker, 'result_submit', args)
-        assert caught.value.field == 'arguments.report_ref, arguments.report'
-        assert caught.value.received == 'neither supplied'
+        assert caught.value.field == 'arguments.report'
+        assert caught.value.received == 'missing'
         with store.connection() as db:
             assert db.execute("SELECT COUNT(*) FROM reports WHERE task_id=? AND kind='report'",
                               (task.task_id,)).fetchone()[0] == before
@@ -66,7 +68,7 @@ def test_review_first_valid_submission_and_exact_retry(tmp_path, report_form, om
     if report_form == 'inline':
         args['report'] = dict(title='Review', markdown=markdown)
     else:
-        args['report_ref'] = publish_fixture_report(store, worker, markdown)
+        args['report'] = dict(report_ref=publish_fixture_report(store, worker, markdown))
     schema = next(t['inputSchema'] for t in mcp_tools.tool_definitions(
         'worker', role_id='worker-code-reviewer', stage='review') if t['name'] == 'result_submit')
     # Encode the object, rather than hand-escaping Markdown into a JSON string.

@@ -11,16 +11,18 @@ Workers submit a result with its report in one of two forms. Inline:
 publishes it through the same `create_draft`/`write_report` path as the worker's own
 draft before recording the result. By reference: the worker creates an owned
 draft, fills it through `draft_write`, publishes using `write_report`, and submits
-the exact returned `report_id` as `result_submit.report_ref`. Exactly one form is
-accepted (`invalid_arguments` identifies both or neither form). The channel binds
-the task, owner epoch and attempt.
+the exact returned `report_id` as `result_submit.report.report_ref`. `report` is
+required and exactly one form is accepted (`invalid_arguments` on
+`arguments.report` identifies a missing report, an incomplete inline form or a
+mixed form). The channel binds the task, owner epoch and attempt.
 
-The advertised `result_submit` JSON schema expresses this exclusive choice and
+The advertised `result_submit` JSON schema lists `report` in its plain `required`
+list, expresses the exclusive choice of forms inside it, and states
 the check-field combinations: `not_run`/`unverified` require `blocker`, while
 `passed`/`failed` omit `blocker`; an optional `command` is descriptive only and
 never replaces receipt evidence. A new result needs a fresh
 `request_key`; retry an uncertain delivery only with identical arguments.
-The worker copies `write_report.report_id` into `result_submit.report_ref`, not
+The worker copies `write_report.report_id` into `result_submit.report.report_ref`, not
 the draft id or a command receipt. New rejected `result_submit` calls attempt
 to retain only their error code and safe field path in `submission_rejection`
 observability events, never the rejected arguments or report body. That

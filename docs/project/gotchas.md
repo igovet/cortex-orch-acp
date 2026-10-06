@@ -15,6 +15,16 @@ the routing repair report were the expected pre-fix reproduction. See
 [configuration routing](../configuration.md#routing-rules) and
 [the routing decision](decisions.md#2026-09-30-owner-profiles-snapshot-full-user-settings-routing-preferences-rank-within-eligibility).
 
+A JSON-Schema conditional is not a requirement models follow. `result_submit`
+once advertised `report` and `report_ref` as two optional fields under a root
+`if/then/else`; reviewers repeatedly sent exactly the plain `required` fields
+(summary, checks, request_key, verdict) and were refused, and a description-only
+warning did not stop it. Every field a call needs belongs in the plain
+`required` list; keep alternatives inside one required field (`report` is
+`{title, markdown}` or `{report_ref}`), and never use a root `oneOf`, which
+Codex code mode renders instead of the properties. See
+[publications](../acp/publications-and-consistency.md).
+
 An ACP client session and an executor attempt are different identities. On
 resume or replacement, select the adapter from the actual attempt and engine;
 do not infer it from the coordinator.

@@ -80,7 +80,7 @@ def _publish_worker_result(store, worker, *, summary="A concise result.", body="
     )
     pub = mcp_tools.dispatch(
         store, worker, "result_submit",
-        dict(report_ref=result["report_id"], summary=summary, checks=[], request_key="pub-" + uuid.uuid4().hex),
+        dict(report=dict(report_ref=result["report_id"]), summary=summary, checks=[], request_key="pub-" + uuid.uuid4().hex),
     )
     return result["report_id"], pub
 

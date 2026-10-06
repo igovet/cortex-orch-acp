@@ -119,13 +119,13 @@ def test_result_submit_wire_advertises_and_rejects_missing_report(tmp_path):
     worker, worker_secret, _ = _worker_channel(store, task, coordinator)
     tools = _call(project, worker, worker_secret, _init_and('tools/list', {}), tmp_path)[-1]['result']['tools']
     schema = next(tool['inputSchema'] for tool in tools if tool['name'] == 'result_submit')
-    assert 'oneOf' not in schema and schema['else'] == {'required': ['report']}
-    assert schema['properties']['report_ref']['pattern'] == r'^r_[0-9a-f]{12}$'
+    assert 'oneOf' not in schema and 'if' not in schema and 'report' in schema['required']
+    assert schema['properties']['report']['properties']['report_ref']['pattern'] == r'^r_[0-9a-f]{12}$'
     args = dict(summary='Observed', checks=[], request_key='missing-report')
     refused = _call(project, worker, worker_secret, _init_and('tools/call',
                     dict(name='result_submit', arguments=args)), tmp_path)[-1]
-    assert 'result_report_required' in json.dumps(refused) or 'invalid_arguments' in json.dumps(refused)
-    assert 'report_ref' in json.dumps(refused) and 'report' in json.dumps(refused)
+    assert 'invalid_arguments' in json.dumps(refused) and 'arguments.report' in json.dumps(refused)
+    assert 'report_ref' in json.dumps(refused)
 
 
 def test_plan_wire_is_idempotent_and_does_not_start_a_worker(tmp_path):
@@ -180,7 +180,7 @@ def test_worker_gateway_publication_and_result_cross_real_mcp_process(tmp_path):
     draft=call('create_draft',template='general',request_key='draft')
     call('draft_write',draft_id=draft['draft_id'],content=draft['required_first_line']+'\n\n# Report\n\nCompleted fixture.\n',request_key='body')
     report=call('write_report',draft_id=draft['draft_id'],title='Report',summary='Observed',author='worker',request_key='publish')
-    args=dict(report_ref=report['report_id'],summary='Observed',checks=[],request_key='result')
+    args=dict(report=dict(report_ref=report['report_id']),summary='Observed',checks=[],request_key='result')
     result=call('result_submit',**args)
     assert result['recorded']
     # Accepted result revokes the channel even while its engine lingers.

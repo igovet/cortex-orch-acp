@@ -107,13 +107,13 @@ def dispatch(store, channel, operation, args):
         return propose_replan(store,channel,operation,args)
     if operation == 'result_submit':
         from ..delegation.mcp_tools import _worker_publish_result, inline_report_form, publish_inline_report
-        if ('report_ref' in args) == ('report' in args):
-            both = 'report_ref' in args
-            raise StoreError('result_report_conflict' if both else 'result_report_required',
-                             'report_ref, report', 'both' if both else 'neither',
-                             'exactly one of report_ref or report',
-                             'Send either report_ref from your own write_report or the report itself in report, never both.'
-                             if both else 'Add report (title and markdown), or report_ref from your own write_report.')
+        # The advertised report is one required field in one of two forms
+        # (validated above). A reference is retained as the top-level
+        # report_ref it always was, so request digests, delivery recovery and
+        # worker_result events keep one internal shape.
+        if 'report_ref' in args['report']:
+            args = dict({key: value for key, value in args.items() if key != 'report'},
+                        report_ref=args['report']['report_ref'])
         with store.connection() as db:
             provision = db.execute('SELECT idempotency_key FROM delegation_provisioning WHERE task_id=? AND attempt_id=?',
                                    (channel.task_id, channel.attempt_id)).fetchone()

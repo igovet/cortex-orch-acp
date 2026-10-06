@@ -104,12 +104,15 @@ def test_every_delegation_read_bypasses_mutation_epoch_gate():
 
 @pytest.mark.parametrize("args, valid", [
     ({"report": {"title": "Report", "markdown": "# Report"}, "summary": "Done", "checks": [], "request_key": "once"}, True),
-    ({"report_ref": "r_" + "a" * 12, "summary": "Done", "checks": [], "request_key": "once"}, True),
+    ({"report": {"report_ref": "r_" + "a" * 12}, "summary": "Done", "checks": [], "request_key": "once"}, True),
+    ({"report": {}, "summary": "Done", "checks": [], "request_key": "once"}, False),
+    ({"report": {"title": "Report"}, "summary": "Done", "checks": [], "request_key": "once"}, False),
+    ({"report_ref": "r_" + "a" * 12, "summary": "Done", "checks": [], "request_key": "once"}, False),
     ({"summary": "Done", "checks": [], "request_key": "once"}, False),
-    ({"report_ref": "r_" + "a" * 12, "report": {"title": "Report", "markdown": "# Report"}, "summary": "Done", "checks": [], "request_key": "once"}, False),
-    ({"report_ref": "r_" + "a" * 12, "summary": "Done", "checks": [{"name": "GUI", "outcome": "not_run"}], "request_key": "once"}, False),
-    ({"report_ref": "r_" + "a" * 12, "summary": "Done", "checks": [{"name": "GUI", "outcome": "unverified", "blocker": "   "}], "request_key": "once"}, False),
-    ({"report_ref": "r_" + "a" * 12, "summary": "Done", "checks": [{"name": "pytest", "outcome": "passed", "command": ["pytest"]}], "request_key": "once"}, True),
+    ({"report": {"title": "Report", "markdown": "# Report", "report_ref": "r_" + "a" * 12}, "summary": "Done", "checks": [], "request_key": "once"}, False),
+    ({"report": {"report_ref": "r_" + "a" * 12}, "summary": "Done", "checks": [{"name": "GUI", "outcome": "not_run"}], "request_key": "once"}, False),
+    ({"report": {"report_ref": "r_" + "a" * 12}, "summary": "Done", "checks": [{"name": "GUI", "outcome": "unverified", "blocker": "   "}], "request_key": "once"}, False),
+    ({"report": {"report_ref": "r_" + "a" * 12}, "summary": "Done", "checks": [{"name": "pytest", "outcome": "passed", "command": ["pytest"]}], "request_key": "once"}, True),
 ])
 def test_result_report_and_check_combinations_match_validator(args, valid):
     schema = next(t["inputSchema"] for t in mcp_tools.tool_definitions("worker") if t["name"] == "result_submit")
@@ -141,7 +144,7 @@ def test_review_findings_contract_agrees_with_its_validator():
     finding_schema = schema["properties"]["findings"]["items"]
     finding = {name: _sample(finding_schema["properties"][name]) for name in finding_schema["required"]}
     args = dict({key: _sample(schema["properties"][key]) for key in schema["required"]},
-                report_ref="r_" + "a" * 12, findings=[finding])
+                report={"report_ref": "r_" + "a" * 12}, findings=[finding])
     assert not list(Draft202012Validator(schema).iter_errors(args))
     delegation_contracts.validate("worker", "result_submit", args)
     for bad in (dict(finding, cross_cutting="false"), dict(finding, files=[]), dict(finding, node="_fix_1_x")):

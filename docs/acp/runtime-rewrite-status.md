@@ -16,7 +16,7 @@ Implemented production paths:
   and READ_ONLY nodes do not conflict by scope.
 - Closed plan/result/question/scope/replan/escalation/synthesis tools. No public
   delegate, decide, integrate, acceptance or model/effort selection API.
-  `result_submit` accepts either a published `report_ref` or the report inline,
+  `result_submit` requires `report`: `{report_ref}` naming a published report or the report inline,
   which the runtime publishes idempotently through the ordinary owned-draft path
   (see [publications](publications-and-consistency.md)).
 - Independent review whenever the observed project differs from its execution

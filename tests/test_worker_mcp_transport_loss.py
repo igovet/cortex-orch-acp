@@ -129,7 +129,7 @@ def test_lost_cortex_channel_after_the_result_committed_keeps_the_result(tmp_pat
 
     def worker(store, channel):
         report_id = _publish(store, channel, channel.attempt_id)
-        arguments = dict(report_ref=report_id, summary="Observed result", checks=[], request_key="result")
+        arguments = dict(report=dict(report_ref=report_id), summary="Observed result", checks=[], request_key="result")
         receipts.append(mcp_tools.dispatch(store, channel, "result_submit", arguments))
         # The server died while answering: the engine never saw the receipt.
         # An exact retry with the same key replays it and adds nothing.

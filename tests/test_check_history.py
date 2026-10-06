@@ -37,7 +37,7 @@ def _run(store, channel, key, argv=TOGGLE):
 def _submit(store, worker, checks):
     report = publish_fixture_report(store, worker)
     return mcp_tools.dispatch(store, worker, 'result_submit',
-                              dict(report_ref=report, summary='Observed', checks=checks, request_key='result'))
+                              dict(report=dict(report_ref=report), summary='Observed', checks=checks, request_key='result'))
 
 
 def _node(store, task, assignment):

@@ -61,3 +61,35 @@ def test_multiple_result_errors_are_named_without_replaying_one_at_a_time():
     fields = {item["field"] for item in caught.value.violations}
     assert {"arguments.verdict", "arguments.checks[0].blocker"} <= fields
     assert any("report" in field for field in fields)
+
+
+def test_observed_review_omission_is_named_by_the_plain_required_list():
+    """Session 973dbe54 (2026-10-06, amino-ai-app): a code reviewer sent exactly
+    the advertised required fields -- summary, checks, request_key, verdict --
+    and was refused, because the report rule lived only in a root
+    if/then/else that models do not follow. The report is now itself in the
+    required list, so the omission is visible without evaluating any
+    conditional."""
+    schema = _schema()
+    observed = dict(summary='APPROVE. The fix resolves the finding.', verdict='APPROVE',
+                    request_key='review2_final_verdict',
+                    checks=[dict(name='typecheck', outcome='passed', tool_call_ref='gateway:' + 'a' * 32),
+                            dict(name='device check', outcome='not_run', blocker='No USB device is attached.')])
+    assert set(schema['required']) == {'report', 'summary', 'checks', 'request_key', 'verdict'}
+    assert not {'if', 'then', 'else', 'oneOf', 'anyOf', 'allOf'} & set(schema)
+    assert set(schema['required']) - set(observed) == {'report'}
+    with pytest.raises(StoreError) as caught:
+        validate(schema, observed)
+    assert caught.value.field == 'arguments.report' and caught.value.received == 'missing'
+    assert 'summary, verdict and findings never replace it' in caught.value.expected
+    for report in (dict(title='Review', markdown='# Review\n\nObserved.'), dict(report_ref='r_' + 'a' * 12)):
+        payload = dict(observed, report=report)
+        assert not list(Draft202012Validator(schema).iter_errors(payload))
+        validate(schema, payload)
+
+
+@pytest.mark.parametrize('stage', ['review', 'execution'])
+def test_no_result_field_is_required_only_through_a_root_conditional(stage):
+    schema = _schema(stage)
+    assert schema['required'][0] == 'report'
+    assert not {'if', 'then', 'else'} & set(schema)

@@ -123,9 +123,10 @@ def _worker_publish_result(store, channel: ChannelContext, args: Mapping[str, An
         report = db.execute("SELECT task_id FROM reports WHERE id=?", (report_ref,)).fetchone()
     if report is None or report["task_id"] != channel.task_id:
         raise StoreError(
-            "unknown_report_ref", "arguments.report_ref", "well-formed id not published in this task",
+            "unknown_report_ref", "arguments.report.report_ref", "well-formed id not published in this task",
             "the report_id returned by this worker's write_report in this task",
-            "Publish this worker's filled draft with write_report, then copy its exact report_id into result_submit.report_ref.",
+            "Publish this worker's filled draft with write_report, then send its exact report_id as "
+            "result_submit report={report_ref: <report_id>}, or send the report inline as report={title, markdown}.",
         )
     # T019: report_ref must be a report this worker itself published from its
     # own draft (drafts.owner_thread_id == channel.principal_thread_id) --
@@ -137,10 +138,10 @@ def _worker_publish_result(store, channel: ChannelContext, args: Mapping[str, An
         ).fetchone()
     if draft is None or draft["owner_thread_id"] != channel.principal_thread_id:
         raise StoreError(
-            "report_not_own", "arguments.report_ref", "published report owned by another thread or attempt",
+            "report_not_own", "arguments.report.report_ref", "published report owned by another thread or attempt",
             "a report published from this worker's own draft in this attempt",
-            "Publish the result via write_report using this worker's own draft, "
-            "then copy that call's exact report_id into result_submit.report_ref.",
+            "Publish the result via write_report using this worker's own draft, then send that call's exact "
+            "report_id as result_submit report={report_ref: <report_id>}, or send the report inline as report={title, markdown}.",
         )
     assignment_ref = channel.attempt_id
     dedup_key = f"result_submit:{report_ref}"
@@ -471,7 +472,7 @@ _OPERATION_DESCRIPTIONS = dict(
     verification_submit="After the runtime verification failed and the work itself is fine: replace only the verification commands and verify again, without redoing the reviewed work.",
     synthesis_submit="Submit a final synthesis grounded in the retained reports and verification. Accepted only after every task, the review and the verification finished. Every retained not_run or unverified worker check must be verified first or listed in not_verified with its concrete blocker. The runtime then completes the task, so use it only when nothing is left for the user to decide; otherwise ask with user_question_request.",
     user_question_request="Always use this structured tool for user questions while planning or reconciling, never prose-only or native engine questions. Supply meaningful selectable options; group related questions with questions, instead of question/options. All batch answers are required; custom free text remains available. Write the details once in your message before this call; the question itself is one short line with short answer options. After the call end the turn without writing anything more. The runtime persists the question before elicitation and resumes only after a real answer. A question asked while reconciling (approve a proposed plan, choose how to continue) keeps the task open, and the answer returns it to planning: submit a plan for the chosen work, or answer_submit a short close when the user chose to finish. With skill_proposal it proposes one reusable project skill backed by retained report evidence. Use exactly one accepted action-matched pair, approval first: create: [Create the skill, Not now], [Создать навык, Не сейчас], [Approve creating the skill, Decline creating the skill], [Одобрить создание навыка, Отклонить создание навыка]; update: [Update the skill, Not now], [Обновить навык, Не сейчас], [Approve updating the skill, Decline updating the skill], [Одобрить обновление навыка, Отклонить обновление навыка]. Only an exact pair is accepted; 1 selects its approval label, 2 its decline label, and any other answer is unclear. An arbitrary first option never approves.",
-    result_submit="Submit this worker attempt's report, summary and observed checks. Exactly one report path: (1) send report={title,markdown} inline and omit report_ref; or (2) create_draft, draft_write, write_report, then copy write_report.report_id into report_ref and omit report. Before the first call, prepare one complete report form: summary and verdict do not replace a report, even when report/report_ref are absent from the unconditional required list. Pass a structured argument object; do not hand-concatenate Markdown into JSON. After a JSON parse error, correct serialization before retrying; for repeated inline serialization failures use create_draft, draft_write and write_report, then submit the acknowledged report_id as report_ref. This does not relax publication or receipt checks. Use checks=[] only if no automated command ran. Each checks item has name (a stable check name) and outcome (passed|failed|not_run|unverified; there is no status field); passed or failed needs tool_call_ref, not_run or unverified needs blocker, and command is optional as an argv array of strings. For a verified passed check, run command_run first, inspect its complete exit-0 result, and copy its tool_call_ref into one check. Engine-native shell calls and report ids are not command evidence. A checks[].command supplied with passed or failed is descriptive only and cannot verify the check; do not send closed_by, which the runtime derives. Every not_run or unverified check needs a concrete blocker. Use a fresh request_key for a new result; retry an uncertain call only with the identical key and payload. Reviewers must include verdict=APPROVE, REQUEST_CHANGES or BLOCK (lowercase forms normalize); other workers omit verdict. This cannot accept the task. Top-level write_report-only fields such as artifacts are ignored. "
+    result_submit="Submit this worker attempt's report, summary and observed checks. report is required in every call, a review included; summary, verdict and findings never replace it. Send report in exactly one form: inline report={title, markdown}, which the runtime publishes; or, after create_draft, draft_write and write_report, report={report_ref: <that write_report's report_id>}. Pass a structured argument object; do not hand-concatenate Markdown into JSON. After a JSON parse error, correct serialization before retrying; for repeated inline serialization failures use create_draft, draft_write and write_report, then send report={report_ref: <the acknowledged report_id>}. This does not relax publication or receipt checks. Use checks=[] only if no automated command ran. Each checks item has name (a stable check name) and outcome (passed|failed|not_run|unverified; there is no status field); passed or failed needs tool_call_ref, not_run or unverified needs blocker, and command is optional as an argv array of strings. For a verified passed check, run command_run first, inspect its complete exit-0 result, and copy its tool_call_ref into one check. Engine-native shell calls and report ids are not command evidence. A checks[].command supplied with passed or failed is descriptive only and cannot verify the check; do not send closed_by, which the runtime derives. Every not_run or unverified check needs a concrete blocker. Use a fresh request_key for a new result; retry an uncertain call only with the identical key and payload. Reviewers must include verdict=APPROVE, REQUEST_CHANGES or BLOCK (lowercase forms normalize); other workers omit verdict. This cannot accept the task. Top-level write_report-only fields such as artifacts are ignored. "
                   "The runtime compares the project with how it was when this attempt started: when the changes match a "
                   "situational skill's trigger ({gates}) and this attempt has not read that skill with read_skill, the "
                   "result is refused with situational_skill_required and nothing is recorded; read the skill, re-check "
@@ -679,8 +680,9 @@ def dispatch(store, channel: ChannelContext, operation: str, args: Mapping[str, 
             return runtime_mcp.dispatch(store, channel, operation, dict(args))
         except StoreError as error:
             if operation == "result_submit":
-                if (error.field == "arguments.report_ref, arguments.report"
-                        and error.received == "neither supplied"):
+                report_arg = args.get("report") if isinstance(args, Mapping) else None
+                if (error.field == "arguments.report"
+                        and not (isinstance(report_arg, Mapping) and "report_ref" in report_arg)):
                     with store.connection() as db:
                         rows = db.execute(
                             "SELECT r.id FROM reports r JOIN drafts d ON d.published_report_id=r.id "
@@ -696,7 +698,8 @@ def dispatch(store, channel: ChannelContext, operation: str, args: Mapping[str, 
                         }
                     candidates = [row["id"] for row in rows if row["id"] not in claimed]
                     if len(candidates) == 1:
-                        error.correction += f" This attempt published {candidates[0]}; send it as report_ref."
+                        error.correction += (f" This attempt published {candidates[0]}; send it as "
+                                             f"report={{report_ref: {candidates[0]}}}.")
                 # Retain only a code and safe field path, never rejected
                 # arguments, report bodies, receipts or raw error messages.
                 try:

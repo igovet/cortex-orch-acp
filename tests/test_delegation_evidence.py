@@ -115,7 +115,7 @@ def test_insufficient_evidence_keeps_a_passed_claim_unverified(tmp_path, case, g
                 db.commit()
     check=dict(name='unit tests',outcome='passed',**({'tool_call_ref':ref} if ref else {}))
     receipt=mcp_tools.dispatch(store,worker,'result_submit',
-                               dict(report_ref=report,summary='Observed',checks=[check],request_key='result'))
+                               dict(report=dict(report_ref=report),summary='Observed',checks=[check],request_key='result'))
     assert receipt['checks']==[dict(name='unit tests',outcome='unverified',claimed_outcome='passed',evidence_gap=gap,
                                     blocker=receipt['checks'][0]['blocker'])]
     assert receipt['checks'][0]['blocker'].startswith('Runtime kept this passed claim unverified: ')
@@ -136,7 +136,7 @@ def test_a_passed_claim_citing_a_nonzero_exit_stays_a_failure(tmp_path):
     store,task,_,worker,assignment=_fixture(tmp_path,'nonzero')
     report=publish_fixture_report(store,worker)
     ref=_run(store,worker,['python3','-B','-c','raise SystemExit(2)'])['tool_call_ref']
-    receipt=mcp_tools.dispatch(store,worker,'result_submit',dict(report_ref=report,summary='Observed',
+    receipt=mcp_tools.dispatch(store,worker,'result_submit',dict(report=dict(report_ref=report),summary='Observed',
         checks=[dict(name='unit tests',outcome='passed',tool_call_ref=ref)],request_key='result'))
     assert receipt['checks']==[dict(name='unit tests',outcome='failed',claimed_outcome='passed',evidence_gap='nonzero_exit')]
     node=_node(store,task,assignment)
@@ -149,7 +149,7 @@ def test_an_exact_complete_successful_command_verifies_a_pass(tmp_path):
     report=publish_fixture_report(store,worker)
     run=_run(store,worker,['env','PYTHONDONTWRITEBYTECODE=1','python3','-B','-c','print("2 passed")'])
     assert run['argv'][0]=='env' and run['exit_code']==0 and run['complete']
-    args=dict(report_ref=report,summary='Observed',request_key='result',
+    args=dict(report=dict(report_ref=report),summary='Observed',request_key='result',
               checks=[dict(name='unit tests',outcome='passed',tool_call_ref=run['tool_call_ref']),
                       dict(name='lint',outcome='not_run',blocker='The linter is not installed in this checkout.')])
     receipt=mcp_tools.dispatch(store,worker,'result_submit',args)
@@ -170,7 +170,7 @@ def test_one_command_verifies_one_check_only(tmp_path):
     store,task,_,worker,assignment=_fixture(tmp_path,'duplicate')
     report=publish_fixture_report(store,worker)
     ref=_run(store,worker)['tool_call_ref']
-    receipt=mcp_tools.dispatch(store,worker,'result_submit',dict(report_ref=report,summary='Observed',request_key='result',
+    receipt=mcp_tools.dispatch(store,worker,'result_submit',dict(report=dict(report_ref=report),summary='Observed',request_key='result',
         checks=[dict(name='unit tests',outcome='passed',tool_call_ref=ref),
                 dict(name='integration tests',outcome='passed',tool_call_ref=ref)]))
     assert [(c['outcome'],c.get('evidence_gap')) for c in receipt['checks']]==[
@@ -188,7 +188,7 @@ def test_a_failed_claim_is_never_softened(tmp_path, ref_kind):
         record_tool_result_observed(store,task.task_id,worker.attempt_id,'tc_shell','execute','pytest','completed')
         check['tool_call_ref']='tc_shell'
     receipt=mcp_tools.dispatch(store,worker,'result_submit',
-                               dict(report_ref=report,summary='Observed',checks=[check],request_key='result'))
+                               dict(report=dict(report_ref=report),summary='Observed',checks=[check],request_key='result'))
     assert receipt['checks']==[dict(name='unit tests',outcome='failed')]
     node=_node(store,task,assignment)
     assert node['status']=='failed'
@@ -209,7 +209,7 @@ def test_outside_command_receipt_supports_matching_check_outcome(tmp_path, monke
     receipt=mcp_tools.dispatch(store,worker,'outside_command',
         dict(argv=['python3','-B','-c',f'raise SystemExit({exit_code})'],cwd=str(tmp_path.parent),request_key='outside-check'))
     assert receipt['complete'] and receipt['exit_code']==exit_code and receipt['argv'][0]=='python3'
-    mcp_tools.dispatch(store,worker,'result_submit',dict(report_ref=report,summary='Observed',request_key='result',
+    mcp_tools.dispatch(store,worker,'result_submit',dict(report=dict(report_ref=report),summary='Observed',request_key='result',
         checks=[dict(name='outside check',outcome=outcome,tool_call_ref=receipt['tool_call_ref'])]))
     node=_node(store,task,assignment)
     assert (node['status'],node['result']['checks'][0]['outcome'])==(status,stored)
@@ -242,7 +242,7 @@ def test_result_recovery_records_the_accepted_checks(tmp_path):
     from cortex_runtime.orchestration.recovery import reconcile_results
     store,task,_,worker,assignment=_fixture(tmp_path,'recovery')
     report=publish_fixture_report(store,worker)
-    args=dict(report_ref=report,summary='Observed',request_key='result',
+    args=dict(report=dict(report_ref=report),summary='Observed',request_key='result',
               checks=[dict(name='unit tests',outcome='passed')])
     with patch.object(TaskMachine,'record_result',side_effect=RuntimeError('process interruption')):
         with pytest.raises(RuntimeError):
@@ -258,10 +258,10 @@ def test_blocker_rules_still_refuse_malformed_checks(tmp_path):
     store,task,_,worker,assignment=_fixture(tmp_path,'blockers')
     report=publish_fixture_report(store,worker)
     with pytest.raises(StoreError,match='invalid_arguments'):
-        mcp_tools.dispatch(store,worker,'result_submit',dict(report_ref=report,summary='Observed',request_key='r1',
+        mcp_tools.dispatch(store,worker,'result_submit',dict(report=dict(report_ref=report),summary='Observed',request_key='r1',
             checks=[dict(name='unit tests',outcome='unverified')]))
     with pytest.raises(StoreError,match='invalid_arguments'):
-        mcp_tools.dispatch(store,worker,'result_submit',dict(report_ref=report,summary='Observed',request_key='r2',
+        mcp_tools.dispatch(store,worker,'result_submit',dict(report=dict(report_ref=report),summary='Observed',request_key='r2',
             checks=[dict(name='unit tests',outcome='passed',blocker='none')]))
 
 

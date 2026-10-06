@@ -210,14 +210,17 @@ in the report body, not in `checks`. The advertised `result_submit` schema carri
 this contract in its property descriptions; `delegation.evidence.assess_check`
 enforces it.
 
-A worker result must contain exactly one report form: `report_ref` naming a report
-published for that worker attempt, or inline `report: {title, markdown}`; do not
-send both. When publishing a draft with `write_report`, pass its returned
-`report_id` as the later `result_submit.report_ref`. Without a draft, inline
-submission publishes the report as part of the result. If neither form is given,
-the correction may suggest a report only when exactly one eligible own published
+A worker result must contain `report`, a required field, in exactly one form:
+`report: {report_ref}` naming a report published for that worker attempt, or
+inline `report: {title, markdown}`; do not mix them. When publishing a draft with
+`write_report`, pass its returned `report_id` as the later `result_submit`
+`report: {report_ref}`. Without a draft, inline submission publishes the report
+as part of the result. The report is in the schema's plain `required` list, not
+only in a conditional: models fill that list, and with a root if/then/else alone
+reviewers sent just summary, checks and verdict. If the report is missing, the
+correction may suggest a report only when exactly one eligible own published
 report is available; this hint does not bind the report, and the worker must still
-submit an explicit `report_ref` or inline report. A report identifier is not a
+submit an explicit reference or inline report. A report identifier is not a
 check receipt.
 
 The advertised check object uses `name` and `outcome` (not `status`), with

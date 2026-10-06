@@ -388,7 +388,7 @@ def test_composed_runtime_executes_plan_review_verification_synthesis(tmp_path, 
                 with store.connection() as db:
                     provision = db.execute('SELECT role_id FROM delegation_provisioning WHERE attempt_id=?',
                                            (channel.attempt_id,)).fetchone()
-                args = dict(report_ref=report_id, summary='Observed result', checks=[], request_key='result')
+                args = dict(report=dict(report_ref=report_id), summary='Observed result', checks=[], request_key='result')
                 if provision['role_id'] == 'worker-code-reviewer' and scenario in {'elicitation', 'text_question', 'worker_question'}:
                     # The reviewer sees the user's answer, bound to the session it came from.
                     answers = mcp_tools.dispatch(store, channel, 'list_sources', {})['answered_questions']
