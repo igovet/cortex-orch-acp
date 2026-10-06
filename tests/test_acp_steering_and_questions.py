@@ -1304,6 +1304,163 @@ def test_paseo_captured_message_is_not_an_editable_queue_item(tmp_path, monkeypa
                           (task.task_id,)).fetchone()[0] == 1
 
 
+def test_queued_message_with_image_steering_carries_source_ref_and_kind(tmp_path, monkeypatch):
+    """A queued Paseo message with an image attachment must leave the
+    coordinator-facing USER_STEERING event (what TaskMachine.context /
+    task_get_context render) carrying the attachment descriptor and a
+    short English hint naming the source_ref/kind -- never only the plain
+    ``[image: ...]`` text marker a coordinator cannot act on."""
+    from cortex_runtime.orchestration.state import TaskMachine
+
+    agent, transport, environ = _agent_for_language_tests(tmp_path, monkeypatch)
+    project = tmp_path / "project"
+    project.mkdir()
+    session_id = agent._session_new(dict(cwd=str(project), mcpServers=[]))["sessionId"]
+    store = agent._store_for(str(project))
+    task = bootstrap_task(store, SourceEvent(origin="test", event_id=str(uuid.uuid4())),
+                          "Inspect", "owner-1")
+    session = agent.sessions[session_id]
+    session["task_id"], session["owner_epoch"] = task.task_id, task.owner_epoch
+    session["active"] = threading.Event()
+    acp_sessions.bind_task(store, session_id, task.task_id)
+    TaskMachine(store).create(task.task_id, "Inspect")
+    with store.connection() as db:
+        db.execute("INSERT INTO task_orchestration (task_id,state,updated_at,requirement_revision) "
+                   "VALUES (?,?,?,0)", (task.task_id, "running", "now"))
+        db.commit()
+    content = [dict(type="text", text="Look at this"),
+               dict(type="image", data="eA==", mimeType="image/png")]
+
+    agent._queue_paseo_message(201, session_id, session, json.dumps(dict(
+        clientMessageId="image-steer-1", content=content)))
+
+    with store.connection() as db:
+        block = db.execute(
+            "SELECT report_id, block_index FROM source_blocks WHERE task_id=? AND kind=\'image\'",
+            (task.task_id,),
+        ).fetchone()
+    expected_source_ref = f"{block['report_id']}:{block['block_index']}"
+
+    steering = TaskMachine(store).context(task.task_id)["steering"]
+    assert len(steering) == 1
+    entry = steering[0]
+    assert entry["text"] == "Look at this\n[image: image/png]"
+    assert entry["attachments"] == [dict(
+        source_ref=expected_source_ref, name=None, uri=None,
+        kind="image", availability="stored", reason=None,
+    )]
+    assert entry["attachment_hint"] == (
+        f"Attachments: image {expected_source_ref} ({expected_source_ref}) - open with read_source"
+    )
+
+
+def test_queued_text_only_message_steering_payload_unchanged(tmp_path, monkeypatch):
+    """A text-only queued message leaves the USER_STEERING payload exactly
+    as before: no attachments/attachment_hint keys at all."""
+    from cortex_runtime.orchestration.state import TaskMachine
+
+    agent, transport, environ = _agent_for_language_tests(tmp_path, monkeypatch)
+    project = tmp_path / "project"
+    project.mkdir()
+    session_id = agent._session_new(dict(cwd=str(project), mcpServers=[]))["sessionId"]
+    store = agent._store_for(str(project))
+    task = bootstrap_task(store, SourceEvent(origin="test", event_id=str(uuid.uuid4())),
+                          "Inspect", "owner-1")
+    session = agent.sessions[session_id]
+    session["task_id"], session["owner_epoch"] = task.task_id, task.owner_epoch
+    session["active"] = threading.Event()
+    acp_sessions.bind_task(store, session_id, task.task_id)
+    TaskMachine(store).create(task.task_id, "Inspect")
+    with store.connection() as db:
+        db.execute("INSERT INTO task_orchestration (task_id,state,updated_at,requirement_revision) "
+                   "VALUES (?,?,?,0)", (task.task_id, "running", "now"))
+        db.commit()
+
+    agent._queue_paseo_message(201, session_id, session, json.dumps(dict(
+        clientMessageId="text-steer-1", content=[dict(type="text", text="Just text")])))
+
+    entry = TaskMachine(store).context(task.task_id)["steering"][0]
+    assert entry["text"] == "Just text"
+    assert "attachments" not in entry and "attachment_hint" not in entry
+
+
+@pytest.mark.parametrize("interrupt_at", [None, "record_user_message_event", "record_steering"])
+def test_queued_image_message_replay_is_idempotent_and_keeps_one_steering_entry(
+    tmp_path, monkeypatch, interrupt_at,
+):
+    """A replayed (dedup) queued message with an image never produces a
+    second USER_STEERING entry or a second requirement_revision bump."""
+    from cortex_runtime.orchestration.state import TaskMachine
+
+    agent, transport, environ = _agent_for_language_tests(tmp_path, monkeypatch)
+    project = tmp_path / "project"
+    project.mkdir()
+    session_id = agent._session_new(dict(cwd=str(project), mcpServers=[]))["sessionId"]
+    store = agent._store_for(str(project))
+    task = bootstrap_task(store, SourceEvent(origin="test", event_id=str(uuid.uuid4())),
+                          "Inspect", "owner-1")
+    session = agent.sessions[session_id]
+    session["task_id"], session["owner_epoch"] = task.task_id, task.owner_epoch
+    session["active"] = threading.Event()
+    acp_sessions.bind_task(store, session_id, task.task_id)
+    TaskMachine(store).create(task.task_id, "Inspect")
+    with store.connection() as db:
+        db.execute("INSERT INTO task_orchestration (task_id,state,updated_at,requirement_revision) "
+                   "VALUES (?,?,?,0)", (task.task_id, "running", "now"))
+        db.commit()
+    content = [dict(type="text", text="Look"),
+               dict(type="image", data="eA==", mimeType="image/png"),
+               dict(type="resource_link", uri="https://example.invalid/reference", name="Reference")]
+
+    if interrupt_at:
+        target = acp_steering if interrupt_at == "record_steering" else acp_replay_store
+
+        def interrupt(*args, **kwargs):
+            raise RuntimeError("interrupted after durable capture")
+
+        with monkeypatch.context() as patch:
+            patch.setattr(target, interrupt_at, interrupt)
+            with pytest.raises(RuntimeError, match="interrupted after durable capture"):
+                agent._queue_paseo_message(201, session_id, session, json.dumps(dict(
+                    clientMessageId="image-replay-1", content=content)))
+        assert TaskMachine(store).context(task.task_id)["steering"] == []
+    else:
+        agent._queue_paseo_message(201, session_id, session, json.dumps(dict(
+            clientMessageId="image-replay-1", content=content)))
+    # Same clientMessageId, identical content -- a replay, not an edit.
+    agent._queue_paseo_message(202, session_id, session, json.dumps(dict(
+        clientMessageId="image-replay-1", content=content)))
+
+    # Retrying again after recovery must not duplicate the repaired event.
+    agent._queue_paseo_message(203, session_id, session, json.dumps(dict(
+        clientMessageId="image-replay-1", content=content)))
+
+    with store.connection() as db:
+        blocks = db.execute(
+            "SELECT report_id,block_index,name,uri,kind,availability,reason "
+            "FROM source_blocks WHERE task_id=? ORDER BY block_index", (task.task_id,),
+        ).fetchall()
+        steering_count = db.execute(
+            "SELECT COUNT(*) FROM runtime_events WHERE task_id=? AND type=\'USER_STEERING\'",
+            (task.task_id,),
+        ).fetchone()[0]
+        revision = db.execute(
+            "SELECT requirement_revision FROM task_orchestration WHERE task_id=?",
+            (task.task_id,),
+        ).fetchone()[0]
+    assert steering_count == 1
+    assert revision == 1
+    steering = TaskMachine(store).context(task.task_id)["steering"]
+    assert len(steering) == 1
+    assert len(blocks) == 2
+    descriptors = [dict(
+        source_ref=f"{b['report_id']}:{b['block_index']}", name=b["name"], uri=b["uri"],
+        kind=b["kind"], availability=b["availability"], reason=b["reason"],
+    ) for b in blocks]
+    assert steering[0]["attachments"] == descriptors
+    assert steering[0]["attachment_hint"] == acp_steering.describe_attachments(descriptors)
+
+
 def test_paseo_queued_message_after_loaded_turn_recovers_owner_epoch(tmp_path, monkeypatch):
     from cortex_runtime.acp.agent import Agent
     from cortex_runtime.acp.protocol import RpcError

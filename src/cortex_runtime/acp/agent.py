@@ -2828,17 +2828,30 @@ class Agent:
                 request_id, protocol.set_config_option_response(options),
             ))
             return
+        # Capture and steering commit separately. A retry may be the first
+        # call to record steering, so recover descriptors from durable capture,
+        # not the replay's staging files (which append_source_event cleans up).
+        with store.connection() as db:
+            captured_blocks = db.execute(
+                "SELECT b.report_id,b.block_index,b.name,b.uri,b.kind,b.availability,b.reason "
+                "FROM source_blocks b JOIN source_revisions sr "
+                "ON sr.task_id=b.task_id AND sr.report_id=b.report_id "
+                "WHERE sr.task_id=? AND sr.message_id=? ORDER BY b.block_index",
+                (task_id, f"{origin}:{message_id}"),
+            ).fetchall()
         attachment_descriptors = [
-            dict(source_ref=f"{result.report_id}:{b.capture.block_index}", name=b.capture.name, uri=b.capture.uri,
-                 kind=b.capture.kind, availability=b.capture.availability, reason=b.capture.reason)
-            for b in staged_blocks
-        ] if not result.replayed else []
+            dict(source_ref=f"{b['report_id']}:{b['block_index']}", name=b["name"], uri=b["uri"],
+                 kind=b["kind"], availability=b["availability"], reason=b["reason"])
+            for b in captured_blocks
+        ]
         acp_replay_store.record_user_message_event(
             store, task_id, f"user_message:{origin}:{message_id}", session_id,
             dict(content=text, session_id=session_id),
             ledger_origin=origin, ledger_event_id=message_id,
         )
-        acp_steering.record_steering(store, task_id, origin, message_id, text)
+        acp_steering.record_steering(
+            store, task_id, origin, message_id, text, attachments=attachment_descriptors,
+        )
         if acp_steering.is_stopped(store, task_id):
             acp_steering.supersede_undelivered_steering(store, task_id)
             raise RpcError(-32602, "The task has been stopped.")

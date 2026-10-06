@@ -100,6 +100,9 @@ def test_guarded_wrapper_is_only_explicit_start_optin(tmp_path, monkeypatch):
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
     monkeypatch.setenv(wire.OPT_IN, "1")
     monkeypatch.setenv(wire.HOME_MARKER, "inherited")
+    # This test may itself run inside a Cortex command sandbox.
+    (tmp_path / "mountinfo").write_text("")
+    monkeypatch.setenv(wrapper.MOUNTINFO_OVERRIDE, str(tmp_path / "mountinfo"))
     dev = tmp_path / ".paseo-dev"
     assert wire.OPT_IN not in wrapper.isolated_environment(dev)
     seen = []

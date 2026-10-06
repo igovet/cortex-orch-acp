@@ -762,17 +762,27 @@ def read_source(store, task_id: str, source_ref: str, offset: int = 0, limit: in
                     except BaseException:
                         db.rollback(); raise
                 else:
-                    window = data[offset: offset + limit]
                     total = len(data)
-                    try:
-                        chunk = window.decode("utf-8")
-                        encoding = "utf-8"
-                    except UnicodeDecodeError:
+                    if block["kind"] == "image":
+                        # Whole image, never char-paged: a partial image cannot
+                        # be rendered, and MAX_BLOCK_BYTES already bounds this
+                        # at capture time (resolve_prompt_blocks).
                         import base64
 
-                        chunk = base64.b64encode(window).decode("ascii")
+                        chunk = base64.b64encode(data).decode("ascii")
                         encoding = "base64"
-                    next_offset = offset + len(window) if offset + len(window) < total else None
+                        next_offset = None
+                    else:
+                        window = data[offset: offset + limit]
+                        try:
+                            chunk = window.decode("utf-8")
+                            encoding = "utf-8"
+                        except UnicodeDecodeError:
+                            import base64
+
+                            chunk = base64.b64encode(window).decode("ascii")
+                            encoding = "base64"
+                        next_offset = offset + len(window) if offset + len(window) < total else None
         elif availability == "reference_only" and block["uri"]:
             from urllib.parse import urlsplit
 
@@ -786,12 +796,17 @@ def read_source(store, task_id: str, source_ref: str, offset: int = 0, limit: in
                         db.commit()
                     except BaseException:
                         db.rollback(); raise
-        return dict(
+        result = dict(
             source_ref=source_ref, origin=origin, event_id=event_id, block_index=block_index, kind=block["kind"],
             trust_label=block["trust_label"], availability=availability, reason=reason,
             sha256=sha256_value, total_size=total, offset=offset, chunk=chunk, encoding=encoding,
             next_offset=next_offset, name=block["name"], uri=block["uri"], mime=block["mime"],
         )
+        if block["kind"] == "image" and availability == "stored" and encoding == "base64":
+            # The MCP server (server.py) renders this as a real image content
+            # block instead of duplicating it into the text/metadata block.
+            result["image_base64"] = chunk
+        return result
 
 
 # -- host transcript (session/load display-only replay) --------------------

@@ -240,3 +240,12 @@ from before the compaction, the attempt is `unmeasured` and only the frequency
 and immediate-refill checks apply. A task already blocked this way stays
 blocked; the fix applies to later compactions. See
 [the compaction-loop guard](../acp/summaries-and-budgets.md#5-compaction-loop-guard).
+
+A long-lived process started from a Cortex sandboxed command outlives the
+command but not its scratch. The dev Paseo daemon started through
+`command_run` kept the sandbox mount namespace, whose `/var/tmp` was the
+command's deleted scratch subdirectory; every engine jail it launched then
+failed in bubblewrap before ACP `initialize`, for Codex and Claude alike, and
+the agent showed only `engine_launch`. Read the engine's own `stderr.log`
+before blaming an engine version, and start daemons with `outside_command`. See
+[the dev Paseo environment](../acp/dev-paseo-environment.md).

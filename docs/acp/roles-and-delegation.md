@@ -90,10 +90,18 @@ draft/publication and result submission, questions and request tools. It is not
 offered `project_read`, `project_git` or `command_run`; attempts to read project
 source through those routes fail with `gateway_read_denied`. No external MCP
 servers are attached. This is not a complete native-tool sandbox: Claude's
-consultant profile disallows native file/search/edit tools, but Codex may still
-perform auto-approved native reads within its read-only engine jail. Therefore
-the packet/report-only rule is the Cortex tool and prompt boundary, not a claim
-that every engine is technically unable to inspect source.
+consultant profile disallows native file/search/edit tools, and Codex's own
+`shell_tool`/`view_image` features are likewise forced off for every Cortex-
+launched Codex session, including the consultant's (`engine.process`'s
+per-process launcher and session-config patch; verified against the installed
+Codex CLI 0.154.0's `features list`). Codex native `apply_patch` has no
+supported off switch and a separate `unified_exec` feature was found to have
+no supported off switch either (neither `-c features.unified_exec=false` nor
+`--disable unified_exec` had any effect against that same installed binary);
+whether either still offers Codex a residual native read path within its
+read-only engine jail is not established without a live qualification check.
+Therefore the packet/report-only rule is the Cortex tool and prompt boundary,
+not a claim that every engine is technically unable to inspect source.
 
 The runtime also enforces observable situational triggers at worker `result_submit` (`orchestration.skill_gate`), the same for both engines. Codex edits through its native `apply_patch`, Claude through native Edit/Write or Cortex `project_write`; the runtime sees none of those as changed paths, but it retains each shared-root attempt's pre-attempt tree manifest (`attempt_revisions` phase `worker_start:<attempt_id>`) and observes the tree again at submission. `SKILL_GATES` is the one table of these triggers; today it holds `documentation-sync`: documentation (`*.md` in a `docs` directory, any `README.md` or `SECURITY.md`) changed together with a behavior file (anything except prose formats, bytecode caches and verified engine housekeeping; directory entries alone never count). When the attempt's changes match and the attempt has no retained successful `read_skill` of that id (each worker read is recorded as a `skill_read` observability event for that attempt only), the result is refused with the recoverable code `situational_skill_required` before anything is recorded or published. The error names the skill and example paths and tells the worker to read it, re-check the edits and submit again; the refused `request_key` may be reused. The refusal counts in the existing `submission_rejection` events. A request already recorded replays without being gated again. Only roles whose situational catalogue names the skill are gated: read-only roles, review stages and the consultant are not. Limits: every direct worker shares the project root, so a change another concurrent writer made since the attempt started is in the same delta (a false match costs one `read_skill`); without a complete pre-attempt manifest the gate cannot attribute changes, does not fire, and records a `skill_gate`/`unobservable` event instead of passing silently. The gate makes the read observable and required; it does not prove the model applied the skill well.
 

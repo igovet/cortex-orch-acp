@@ -157,7 +157,7 @@ def test_runtime_wrapper_disables_native_agents_without_changing_codex_home(tmp_
     _write_executable(binary, ("#!/usr/bin/python3\n" +
         "import json,sys\n" +
         "a=sys.argv[1:]\n" +
-        "if a[-2:]==['features','list']: print('multi_agent stable false\\nmulti_agent_v2 stable false\\nplugins stable false')\n" +
+        "if a[-2:]==['features','list']: print('multi_agent stable false\\nmulti_agent_v2 stable false\\nplugins stable false\\nshell_tool stable false\\nview_image stable false')\n" +
         "elif a[-3:]==['mcp','list','--json']: print(json.dumps([{'name':'native','enabled':'mcp_servers.native.enabled=false' not in a}]))\n" +
         f"else: open({str(capture)!r},'w').write('\\n'.join(a))\n").encode())
     environ = isolated_environ(tmp_path)
@@ -173,10 +173,12 @@ def test_runtime_wrapper_disables_native_agents_without_changing_codex_home(tmp_
     actual=capture.read_text().splitlines()
     assert actual[-3:]==['-c','mcp_servers.native.enabled=false','app-server']
     for setting in ['agents.enabled=false','features.multi_agent=false','features.multi_agent_v2=false',
-                    'features.plugins=false','features.hooks=false','features.apps=false']:
+                    'features.plugins=false','features.hooks=false','features.apps=false',
+                    'features.shell_tool=false','features.view_image=false']:
         assert setting in actual
-    # Native action tools stay the engine's own: nothing disables or rewrites them.
-    assert not any(a.startswith(('features.shell_tool','web_search','model_catalog_json')) for a in actual)
+    # apply_patch (and unified_exec, which has no supported off switch at all)
+    # stay the engine's own: nothing here disables or rewrites them.
+    assert not any(a.startswith(('features.apply_patch','features.unified_exec','web_search','model_catalog_json')) for a in actual)
     assert native_home.exists()
     assert Path(wrapper).is_file() and not Path(wrapper).is_symlink()
     assert stat.S_IMODE(Path(wrapper).stat().st_mode) & 0o777 == 0o700
@@ -240,6 +242,8 @@ def test_installed_codex_app_server_reads_disabled_agents_and_features(tmp_path)
         assert config["features"]["multi_agent"] is False
         assert config["features"]["multi_agent_v2"] is False
         assert config["features"]["plugins"] is False
+        assert config["features"]["shell_tool"] is False
+        assert config["features"]["view_image"] is False
         assert all(not entry.get("enabled", True) for entry in config.get("mcp_servers", {}).values())
     finally:
         proc.terminate()
@@ -301,6 +305,14 @@ def test_pinned_private_codex_adapter_uses_manual_reviewer_and_preserves_origina
         _CODEX_HISTORY_CASE_BLOCK_SOURCE, _CODEX_HISTORY_CASE_BLOCK_PATCHED,
     )
     assert copied.read_bytes() == expected
+    # The patched session-config builder forces shell_tool/view_image off (App
+    # Server's own thread/start config can otherwise override the process-level
+    # -c flags), while apply_patch is never named here: it has no supported off
+    # switch in the installed Codex CLI and so is left for the engine's own
+    # config entirely.
+    assert b"shell_tool: false" in copied.read_bytes()
+    assert b"view_image: false" in copied.read_bytes()
+    assert b"apply_patch" not in _CODEX_SESSION_CONFIG_PATCHED
     assert copied.parent.parent.joinpath("node_modules").resolve() == package.parents[1].resolve()
     assert stat.S_IMODE(copied.stat().st_mode) == 0o600
     assert stat.S_IMODE(copied.parent.stat().st_mode) == 0o700

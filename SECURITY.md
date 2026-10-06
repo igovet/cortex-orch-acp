@@ -168,11 +168,25 @@ release, not permission to launch arbitrary future adapters. No native account
 or production Paseo installation is changed by the compatibility patch.
 
 Each channel-bound engine process runs in a Linux `bwrap` engine jail. Codex's
-native tools remain jail-bounded. In Claude Cortex sessions, adapter-level
-`disallowedTools` also disallows native Bash, file/search/edit, notebook edit and
-Skill alternatives so scoped Cortex MCP tools provide the corresponding workflow
-and command receipts; native subagents remain excluded. The jail remains a
-backstop for tools the engine still exposes. Effective exclusion in a real
+remaining native tools stay jail-bounded: the per-process launcher and the
+verified private adapter's session-config patch both force Codex's own
+`shell_tool` and `view_image` features off (`-c features.shell_tool=false -c
+features.view_image=false`, re-forced in every generated session config so
+App Server's own thread/start config cannot restore them), verified against
+the installed Codex CLI 0.154.0's `features list`; Codex then runs shell commands
+and reads images only through the scoped Cortex `command_run`/`project_read`/
+`read_source` tools. Native `apply_patch` remains on for file edits -- the installed Codex
+CLI exposes no supported off switch for it, and it is not even listed by
+`features list` -- and a separate `unified_exec` feature was found still
+enabled after this change, with neither `-c features.unified_exec=false` nor
+`--disable unified_exec` having any observed effect; whether it still offers a
+residual native exec/read path once `shell_tool` is off is not established
+without a live qualification check (not requested for this change). In Claude
+Cortex sessions, adapter-level `disallowedTools` also disallows native Bash,
+file/search/edit, notebook edit and Skill alternatives so scoped Cortex MCP
+tools provide the corresponding workflow and command receipts; native
+subagents remain excluded. The jail remains a backstop for tools the engine
+still exposes. Effective exclusion in a real
 Claude 0.81.2 turn still requires a new owner-authorized live check. The host is mounted read-only, but `/run/user` remains visible inside the
 engine jail (including session-bus, audio, display and keyring sockets); this
 is an accepted exposure, not a permission boundary. `/tmp` is explicitly bound
@@ -223,7 +237,8 @@ allows it unless it deletes (see [Access mode](#access-mode-guarded-and-auto)).
 Excluded regardless of the jail: native subagents (Claude `Agent`, `Task`,
 `Workflow` and team tools are disallowed and refused at the permission bridge;
 Codex agents and multi-agent features are forced off), user and project MCP
-servers (strict MCP config; native Codex MCP entries disabled), hooks and plugins.
+servers (strict MCP config; native Codex MCP entries disabled), hooks, plugins,
+and (Codex only) the `shell_tool` and `view_image` features described above.
 The host network is shared, which also exposes abstract Unix sockets of the host
 network namespace. The engine binary itself is trusted, runs as the owner and can
 read what the owner can read.
@@ -664,6 +679,10 @@ content, or unverifiable legacy capture metadata, is refused rather than silentl
 acknowledged as an edit. This is a replay-content guard, not client authentication
 or permission to mutate captured history. Native Edit remains pre-delivery only;
 the plugin notice describes that supported workflow without changing host settings.
+After capture-before-steering interruption, an identical retry recovers attachment
+descriptors only from the same task and exact captured source revision. The content
+checksum guard still runs first; recovery neither trusts replay staging metadata
+nor rewrites an existing steering event. Image bodies remain behind `read_source`.
 
 ## Dev qualification binding boundary
 

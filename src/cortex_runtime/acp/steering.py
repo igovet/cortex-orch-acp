@@ -134,12 +134,46 @@ def bump_requirement_revision(store, task_id: str) -> int:
     return revision
 
 
-def record_steering(store, task_id: str, origin: str, event_id: str, text: str) -> int:
+def describe_attachments(attachments) -> str | None:
+    """Render a short English hint naming every captured attachment
+    descriptor (the same ``source_ref``/``name``/``kind`` shape built by
+    ``acp.agent`` for both the ordinary and the Paseo-queued prompt path --
+    never the bytes/base64) so a coordinator reading plain steering text
+    still knows an attachment exists and how to open it, even where the
+    raw content blocks themselves are never forwarded (see
+    :func:`record_steering`). Returns ``None`` for an empty/falsy list.
+    """
+    if not attachments:
+        return None
+    parts = []
+    for item in attachments:
+        if not isinstance(item, dict) or not item.get("source_ref"):
+            continue
+        kind = item.get("kind") or "file"
+        label = item.get("name") or item.get("uri") or item["source_ref"]
+        parts.append(f"{kind} {item['source_ref']} ({label})")
+    if not parts:
+        return None
+    return "Attachments: " + "; ".join(parts) + " - open with read_source"
+
+
+def record_steering(store, task_id: str, origin: str, event_id: str, text: str, attachments=None) -> int:
     """Queue one source-identified steer and its revision in one transaction.
 
     The already-captured user_message remains the delivery event. The
     progress row records the requirement boundary; the runtime event is
     applied only when the controller reaches a safe planning boundary.
+
+    ``attachments`` (optional) is the same list-of-descriptor-dicts shape
+    ``acp.agent`` already builds for durable capture (``source_ref``,
+    ``name``, ``uri``, ``kind``, ``availability``, ``reason`` -- never the
+    bytes/base64). When present, both the stored ``USER_STEERING`` runtime
+    event (what the coordinator reads back through ``TaskMachine.context``/
+    ``task_get_context``) and the bookkeeping progress row carry the exact
+    descriptors plus a derived short English ``attachment_hint`` string, so
+    a queued message carrying an image is never silently reduced to plain
+    text for the coordinator. A text-only message leaves both keys absent,
+    unchanged from the previous payload shape.
     """
     from ..orchestration.policy import parse_denials
     from ..orchestration.state import event as runtime_event
@@ -147,6 +181,7 @@ def record_steering(store, task_id: str, origin: str, event_id: str, text: str) 
     actor = f"user:{origin}:{event_id}"
     dedup_key = f"user_steering:{origin}:{event_id}"
     denials = parse_denials(text)
+    hint = describe_attachments(attachments)
     with store.connection() as db:
         db.execute("BEGIN IMMEDIATE")
         try:
@@ -172,17 +207,23 @@ def record_steering(store, task_id: str, origin: str, event_id: str, text: str) 
                 db.commit()
                 return current
             if task:
-                runtime_event(db, task_id, "USER_STEERING",
-                              dict(text=text, deny_write=denials), actor)
+                steering_payload = dict(text=text, deny_write=denials)
+                if hint is not None:
+                    steering_payload["attachments"] = attachments
+                    steering_payload["attachment_hint"] = hint
+                runtime_event(db, task_id, "USER_STEERING", steering_payload, actor)
             revision = current + 1
             if row:
                 db.execute(
                     "UPDATE task_orchestration SET requirement_revision=? WHERE task_id=?",
                     (revision, task_id),
                 )
+            progress_payload = dict(kind="user_steering", requirement_revision=revision, text=text)
+            if hint is not None:
+                progress_payload["attachments"] = attachments
+                progress_payload["attachment_hint"] = hint
             delegation_events.append_event_tx(
-                db, task_id, "progress", dedup_key,
-                dict(kind="user_steering", requirement_revision=revision, text=text),
+                db, task_id, "progress", dedup_key, progress_payload,
                 origin="runtime",
             )
             db.commit()

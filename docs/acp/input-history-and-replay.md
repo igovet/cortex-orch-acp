@@ -163,9 +163,17 @@ returns `{source_ref, origin, event_id, block_index, kind, trust_label,
 availability, reason, sha256, total_size, offset, chunk, encoding,
 next_offset}`. `limit` is clamped to 64 KiB server-side; `chunk` is UTF-8
 text, or base64 (`encoding='base64'`) for a non-UTF-8 stored body.
+A stored `image` attachment is the one exception: it ignores `offset`/`limit`
+and always returns the whole image in `chunk`/`image_base64` (`kind='image'`),
+because a partial image cannot be rendered and the capture-time 10 MiB cap
+already bounds its size; the MCP server (`cortex_runtime.server`) renders that
+case as a real `image` content block instead of inlining the base64 in the
+result's text.
 `source_ref` is the opaque string `<report_id>:<block_index>`
-(`block_index=-1` is the main captured text; `list_sources` is the only
-place a caller learns a `source_ref`).
+(`block_index=-1` is the main captured text; `list_sources` and retained
+steering attachment descriptors expose these references). Queued-message retries
+recover descriptors from the exact task/source revision when capture committed
+before steering; they do not depend on replay staging files.
 
 A stored body file that has vanished since capture, or a `resource_link`
 whose target no longer resolves, is reported as `expired`/`inaccessible`

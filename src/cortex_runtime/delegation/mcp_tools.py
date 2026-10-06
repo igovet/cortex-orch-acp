@@ -494,12 +494,17 @@ _OPERATION_DESCRIPTIONS = dict(
                  "Every page also carries answered_questions: each question a real user answer resolved, with its "
                  "question_id, question as asked, the user's verbatim answer, timestamps and answering session.",
     read_source="Bounded, addressable read of one source_ref (text, attachment, or an answered question's "
-                "<question_id>:answer) with provenance and trust label.",
+                "<question_id>:answer) with provenance and trust label. A stored image attachment is "
+                "always returned whole as a real MCP image content block (offset/limit are ignored for it); "
+                "every other source stays a bounded, char-paged text/base64 read.",
     read_capsule="Read this channel's own deterministic recovery capsule: identity, applied config, exact "
                  "constraints with origins (including answered user questions), own assignments/pipeline, confirmed publications/checks, open/"
                  "uncertain actions, newer events, role/tool access, and continuation intent.",
     read_large_output="Page through an output too large to return inline (a command_run or project_git result), by its large_output_id, byte offset and limit.",
-    project_read="Read a project file (UTF-8 text, paged by offset/limit; returns its sha256 for a later write or delete) or list a directory. Read-only.",
+    project_read="Read a project file (UTF-8 text, paged by offset/limit; returns its sha256 for a later write or delete) "
+                 "or list a directory. A supported image (PNG, JPEG, GIF, WEBP; sniffed by content, not extension) "
+                 "returns a real MCP image content block plus sha256/size_bytes/mime/path as text, up to a 10 MiB cap. "
+                 "Read-only.",
     project_git="Read-only git evidence for the project: `status`, or the full working-tree `diff` against HEAD including edits that were already there. Large output is retained; page it with read_large_output.",
     project_write="Create or replace one project file with complete UTF-8 content. Pass the file's current sha256 from project_read, or \"absent\" for a new file; a mismatch changes nothing. Only for a worker whose assignment may write; paths the user protected are refused.",
     project_mkdir="Create one new project directory; its parent must already exist. Only for a worker whose assignment may write.",

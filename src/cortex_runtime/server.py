@@ -132,6 +132,25 @@ def _delegation_operation_names(role_kind):
         return set()
 
 
+# project_read/read_source signal a sniffed image with 'image_base64'+'mime'
+# (orchestration.gateway._read, acp.replay_store.read_source): render it as a
+# real MCP image content block instead of a giant base64 text block, which
+# already overflowed engine tool-result token limits. The duplicate-sized
+# 'chunk' field (read_source's own char-paged-read shape) is dropped from the
+# text/structuredContent side so the payload is never carried twice.
+_IMAGE_DUPLICATE_FIELDS = frozenset({'image_base64', 'chunk'})
+
+
+def _reply_content(data):
+    if (isinstance(data, dict) and isinstance(data.get('image_base64'), str)
+            and isinstance(data.get('mime'), str)):
+        metadata = {key: value for key, value in data.items() if key not in _IMAGE_DUPLICATE_FIELDS}
+        content = [dict(type='image', data=data['image_base64'], mimeType=data['mime']),
+                   dict(type='text', text=json.dumps(metadata, ensure_ascii=False))]
+        return dict(content=content, structuredContent=metadata, isError=False)
+    return dict(content=[dict(type='text',text=json.dumps(data,ensure_ascii=False))], structuredContent=data, isError=False)
+
+
 class ProtocolError(Exception):
     def __init__(self, code, message):
         self.code=code;self.message=message
@@ -259,7 +278,7 @@ class Server:
                     raise StoreError('invalid_arguments','arguments',str(type(arguments).__name__),'JSON object','Send one object matching the advertised inputSchema.')
                 data = delegation_mcp_tools.dispatch(self.store, channel, name, arguments)
                 observe(name,'success',False,None,arguments,data)
-                return dict(content=[dict(type='text',text=json.dumps(data,ensure_ascii=False))], structuredContent=data, isError=False)
+                return _reply_content(data)
             except StoreError as exc:
                 observe(name, str(exc), meta=params.get('_meta'), arguments=params.get('arguments'))
                 return self.error(exc)

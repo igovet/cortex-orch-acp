@@ -130,6 +130,44 @@ def _live_singleton_owner(user_data_dir: Path) -> int | None:
     return pid
 
 
+# A long-lived dev Paseo process started from a Cortex sandboxed command (a
+# worker's command_run, or a native shell inside an engine jail) keeps that
+# sandbox's mount namespace and TMPDIR. When the command ends, Cortex deletes
+# its scratch directory, including the per-run directory mounted over
+# /var/tmp, so every engine jail the daemon later launches fails in bwrap
+# ("Can't bind mount ... on /newroot/var/tmp: ... No such file or directory")
+# before the engine starts (live, 2026-10-06).
+_SANDBOX_VAR_TMP = re.compile(r"/cortex-(?:command|engine)-[^/]+/(?:tmp/)?var-tmp(?://deleted)?$")
+_DAEMON_LAUNCHES = (["start"], ["onboard"], ["daemon", "start"], ["daemon", "run"])
+# Tests only: an alternate mountinfo file to inspect.
+MOUNTINFO_OVERRIDE = "CORTEX_PASEO_DEV_MOUNTINFO"
+
+
+def _cortex_sandbox_var_tmp() -> str | None:
+    """The Cortex sandbox scratch directory mounted over /var/tmp, or ``None``
+    when this process does not run inside a Cortex sandbox."""
+    path = os.environ.get(MOUNTINFO_OVERRIDE) or "/proc/self/mountinfo"
+    try:
+        lines = Path(path).read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return None
+    # The last mount on /var/tmp is the one in effect.
+    roots = [fields[3].replace("\\040", " ") for line in lines
+             if len(fields := line.split(" ")) > 4 and fields[4] == "/var/tmp"]
+    return roots[-1] if roots and _SANDBOX_VAR_TMP.search(roots[-1]) else None
+
+
+def _refused_inside_cortex_sandbox(label: str) -> bool:
+    scratch = _cortex_sandbox_var_tmp()
+    if scratch is None:
+        return False
+    print(f"{label}: refusing to start a long-lived Paseo process inside a Cortex sandbox "
+          f"(/var/tmp is its scratch {scratch}, deleted when the command ends, after which every "
+          "engine jail the daemon launches fails in bwrap); run it through outside_command "
+          "or a normal terminal", file=sys.stderr)
+    return True
+
+
 def main(argv: list[str]) -> int:
     if argv and argv[0] == 'binding':
         parser = argparse.ArgumentParser(description='Read-only dev qualification binding; never start or mutate an agent.')
@@ -224,6 +262,9 @@ def _run_gui(args) -> int:
     if args.xvfb:
         flags.append("--ozone-platform=x11")
 
+    if _refused_inside_cortex_sandbox("cortex_paseo_dev gui"):
+        return 2
+
     env = isolated_environment(home)
     env["PASEO_HOME"] = str(home)
     env["PASEO_ELECTRON_USER_DATA_DIR"] = str(user_data_dir)
@@ -316,6 +357,11 @@ def _run_cli(args) -> int:
 
     if not command:
         print("cortex_paseo_dev: provide a Paseo command after --", file=sys.stderr)
+        return 2
+
+    words = command[next((i for i, item in enumerate(command) if not item.startswith("-")), len(command)):]
+    if (any(words[:len(launch)] == launch for launch in _DAEMON_LAUNCHES)
+            and _refused_inside_cortex_sandbox("cortex_paseo_dev")):
         return 2
 
     env = isolated_environment(home)

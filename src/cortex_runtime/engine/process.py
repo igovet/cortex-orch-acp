@@ -180,6 +180,8 @@ _CODEX_SESSION_CONFIG_PATCHED = b'''function forceGitRootTurnDiffPaths(config2) 
     ["features.hooks"]: ignoredHooks,
     ["features.apps"]: ignoredApps,
     ["features.plugins"]: ignoredPlugins,
+    ["features.shell_tool"]: ignoredShellTool,
+    ["features.view_image"]: ignoredViewImage,
     ...remainingConfig
   } = config2;
   return {
@@ -195,7 +197,9 @@ _CODEX_SESSION_CONFIG_PATCHED = b'''function forceGitRootTurnDiffPaths(config2) 
       multi_agent_v2: false,
       plugins: false,
       hooks: false,
-      apps: false
+      apps: false,
+      shell_tool: false,
+      view_image: false
     },
     tools: { experimental_request_user_input: { enabled: false } }
   };
@@ -643,9 +647,21 @@ def _prepare_codex_runtime_wrapper(binary_path: str, connection_id: str, environ
     ``codex-acp`` 1.12.0 invokes ``CODEX_PATH app-server`` and exposes no
     argument/config override of its own.  The verified bundled Codex release
     supports ``agents.enabled=false`` alongside the observed
-    ``features.multi_agent=false`` and ``features.multi_agent_v2=false``
-    switches. App Server's later thread/start config may override these flags;
+    ``features.multi_agent=false``, ``features.multi_agent_v2=false``,
+    ``features.shell_tool=false`` and ``features.view_image=false``
+    switches (the last two make Codex closer to Claude's own disallowed
+    native Bash/Read -- see ``claude_adapter_acp``'s own
+    ``CLAUDE_GATEWAY_ALTERNATIVES`` -- while native ``apply_patch`` stays on,
+    since the installed Codex CLI 0.154.0 exposes no supported off switch for
+    it: ``apply_patch`` is not even listed by ``features list``). App Server's
+    later thread/start config may override these flags;
     the private adapter forces them again in every generated session config.
+    A separate ``unified_exec`` feature was checked against the same
+    installed Codex CLI 0.154.0 and found to have no effect either via
+    ``-c features.unified_exec=false`` or ``--disable unified_exec``: both
+    silently leave it enabled (``features list`` still reports it ``true``),
+    so it is not set here -- there is currently no supported channel to turn
+    it off, the same situation as ``apply_patch``.
     This launcher is an additional process-level guard while leaving the
     user's production ``CODEX_HOME`` and credentials untouched.
     The inner binary has already passed the install hash check before this is
@@ -672,6 +688,7 @@ BINARY = __BINARY__
 BASE = ["-c", "agents.enabled=false", "-c", "features.multi_agent=false",
         "-c", "features.multi_agent_v2=false", "-c", "features.plugins=false",
         "-c", "features.hooks=false", "-c", "features.apps=false",
+        "-c", "features.shell_tool=false", "-c", "features.view_image=false",
         "-c", "tools.experimental_request_user_input.enabled=false"]
 
 def checked(args):
@@ -701,7 +718,7 @@ try:
     observed = {parts[0]: parts[-1] for line in features
                 if len(parts := line.split()) >= 3}
     if any(observed.get(name) != "false" for name in
-           ("multi_agent", "multi_agent_v2", "plugins")):
+           ("multi_agent", "multi_agent_v2", "plugins", "shell_tool", "view_image")):
         raise ValueError("Codex process features are not disabled")
     discovered = servers(BASE)
     overrides = [arg for item in discovered for arg in

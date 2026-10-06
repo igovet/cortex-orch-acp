@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -11,9 +12,20 @@ import socket
 import time
 from pathlib import Path
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "cortex_paseo_dev.py"
+
+
+@pytest.fixture(autouse=True)
+def _outside_cortex_sandbox(tmp_path_factory, monkeypatch):
+    """These tests may themselves run inside a Cortex command sandbox; the
+    daemon/GUI launch guard is exercised explicitly below."""
+    empty = tmp_path_factory.mktemp("mountinfo") / "mountinfo"
+    empty.write_text("")
+    monkeypatch.setenv("CORTEX_PASEO_DEV_MOUNTINFO", str(empty))
 
 
 def test_gui_validates_paseo_executable(tmp_path):
@@ -463,3 +475,109 @@ def test_gui_uses_private_cortex_xdg_paths_and_current_source_root(tmp_path):
     assert f"CORTEX_PASEO_SOURCE_ROOT={ROOT}" in result.stdout
     assert f"XDG_CONFIG_HOME={dev_home}/cortex-xdg/config" in result.stdout
     assert f"XDG_STATE_HOME={dev_home}/cortex-xdg/state" in result.stdout
+
+
+# /proc/self/mountinfo as seen inside a Cortex command sandbox: /var/tmp is
+# the command's own scratch subdirectory (orchestration.sandbox).
+SANDBOX_MOUNTINFO = (
+    "36 25 259:2 / / ro,relatime - ext4 /dev/nvme0n1p2 rw\n"
+    "52 36 259:2 /var/tmp /var/tmp rw,relatime - ext4 /dev/nvme0n1p2 rw\n"
+    "61 36 259:2 /tmp/cortex-command-ab12cd34/var-tmp /var/tmp rw,nosuid,nodev - ext4 /dev/nvme0n1p2 rw\n"
+)
+
+
+def _launch_recorder(tmp_path):
+    marker = tmp_path / "launched"
+    fake = tmp_path / "paseo"
+    fake.write_text(f'#!/bin/sh\necho "$@" >> {marker}\n')
+    fake.chmod(0o755)
+    return fake, marker
+
+
+@pytest.mark.parametrize("command", [["start", "--timeout", "60", "--json"], ["daemon", "start"],
+                                     ["daemon", "run"], ["onboard"], ["--json", "start"]])
+def test_cli_refuses_daemon_launch_inside_cortex_sandbox(tmp_path, monkeypatch, command):
+    """A daemon started there keeps the sandbox's /var/tmp mount, whose
+    scratch Cortex deletes when the command ends; every engine jail it
+    launches then fails in bwrap (live, 2026-10-06)."""
+    mountinfo = tmp_path / "mountinfo"
+    mountinfo.write_text(SANDBOX_MOUNTINFO)
+    monkeypatch.setenv("CORTEX_PASEO_DEV_MOUNTINFO", str(mountinfo))
+    fake, marker = _launch_recorder(tmp_path)
+    result = subprocess.run(
+        [sys.executable, str(SCRIPT), "--paseo", str(fake), "--home", str(tmp_path / "dev-home"), "--", *command],
+        capture_output=True, text=True, cwd=str(ROOT),
+    )
+    assert result.returncode == 2
+    assert "inside a Cortex sandbox" in result.stderr
+    assert "/tmp/cortex-command-ab12cd34/var-tmp" in result.stderr
+    assert not marker.exists()
+
+
+@pytest.mark.parametrize("command", [["status", "--json"], ["daemon", "stop"], ["ls", "--json"], ["logs", "start"]])
+def test_cli_keeps_short_lived_commands_inside_cortex_sandbox(tmp_path, monkeypatch, command):
+    mountinfo = tmp_path / "mountinfo"
+    mountinfo.write_text(SANDBOX_MOUNTINFO)
+    monkeypatch.setenv("CORTEX_PASEO_DEV_MOUNTINFO", str(mountinfo))
+    fake, marker = _launch_recorder(tmp_path)
+    result = subprocess.run(
+        [sys.executable, str(SCRIPT), "--paseo", str(fake), "--home", str(tmp_path / "dev-home"), "--", *command],
+        capture_output=True, text=True, cwd=str(ROOT),
+    )
+    assert result.returncode == 0
+    assert marker.read_text().split() == ["--home", str(tmp_path / "dev-home"), *command]
+
+
+def test_cli_refuses_daemon_launch_inside_an_engine_jail(tmp_path, monkeypatch):
+    """An engine's native shell sees its jail's scratch over /var/tmp, possibly
+    already deleted."""
+    mountinfo = tmp_path / "mountinfo"
+    mountinfo.write_text("36 25 0:41 / / rw - tmpfs tmpfs rw\n"
+                         "70 36 0:41 /cortex-engine-x1y2/tmp/var-tmp//deleted /var/tmp rw - tmpfs tmpfs rw\n")
+    monkeypatch.setenv("CORTEX_PASEO_DEV_MOUNTINFO", str(mountinfo))
+    fake, marker = _launch_recorder(tmp_path)
+    result = subprocess.run(
+        [sys.executable, str(SCRIPT), "--paseo", str(fake), "--home", str(tmp_path / "dev-home"), "--", "start"],
+        capture_output=True, text=True, cwd=str(ROOT),
+    )
+    assert result.returncode == 2
+    assert "inside a Cortex sandbox" in result.stderr
+    assert not marker.exists()
+
+
+def test_gui_refuses_launch_inside_cortex_sandbox(tmp_path, monkeypatch):
+    mountinfo = tmp_path / "mountinfo"
+    mountinfo.write_text(SANDBOX_MOUNTINFO)
+    monkeypatch.setenv("CORTEX_PASEO_DEV_MOUNTINFO", str(mountinfo))
+    fake, marker = _launch_recorder(tmp_path)
+    result = subprocess.run(
+        [sys.executable, str(SCRIPT), "gui", "--user-data-dir", str(tmp_path / "electron-profile"),
+         "--paseo", str(fake), "--home", str(tmp_path / "dev-home")],
+        capture_output=True, text=True, cwd=str(ROOT),
+    )
+    assert result.returncode == 2
+    assert "inside a Cortex sandbox" in result.stderr
+    assert not marker.exists()
+
+
+@pytest.mark.skipif(shutil.which("bwrap") is None, reason="bubblewrap is not installed")
+def test_cli_reads_the_real_sandbox_var_tmp_mount(tmp_path, monkeypatch):
+    """The real /proc/self/mountinfo of a bwrap namespace laid out like a Cortex
+    command sandbox is refused; the same command with a plain /var/tmp runs."""
+    monkeypatch.delenv("CORTEX_PASEO_DEV_MOUNTINFO")
+    scratch = tmp_path / "cortex-command-real1234" / "var-tmp"
+    scratch.mkdir(parents=True)
+    fake, marker = _launch_recorder(tmp_path)
+    wrapper = [sys.executable, str(SCRIPT), "--paseo", str(fake), "--home", str(tmp_path / "dev-home"), "--", "start"]
+    plain = subprocess.run(["bwrap", "--dev-bind", "/", "/", "--tmpfs", "/var/tmp", "--", *wrapper],
+                           capture_output=True, text=True, cwd=str(ROOT))
+    if plain.returncode != 0 and plain.stderr.startswith("bwrap:"):
+        pytest.skip("bubblewrap cannot create a namespace here: " + plain.stderr.strip())
+    assert plain.returncode == 0
+    assert marker.read_text().split() == ["--home", str(tmp_path / "dev-home"), "start"]
+    marker.unlink()
+    sandboxed = subprocess.run(["bwrap", "--dev-bind", "/", "/", "--bind", str(scratch), "/var/tmp", "--", *wrapper],
+                               capture_output=True, text=True, cwd=str(ROOT))
+    assert sandboxed.returncode == 2
+    assert str(scratch) in sandboxed.stderr
+    assert not marker.exists()

@@ -63,7 +63,7 @@ SCHEMAS = {
                                request_key=text('Unique action identity.',128))),
     'project_mkdir': obj(dict(path=text('New project-relative directory; its parent must exist. '+WORK_AREA,512),
                               request_key=text('Unique action identity.',128))),
-    'project_read': obj(dict(path=text('Project-relative regular file or directory; \'.\' is the project root. Never absolute, never containing \'..\' or a backslash, and never inside .cortex or .git. Under .claude/.codex only the exact project notes session-history.md and lessons-learned.md are allowed; create missing notes with project_write. UTF-8 files return text and SHA-256; non-UTF-8 files return only SHA-256, byte size and binary: true.',512),
+    'project_read': obj(dict(path=text('Project-relative regular file or directory; \'.\' is the project root. Never absolute, never containing \'..\' or a backslash, and never inside .cortex or .git. Under .claude/.codex only the exact project notes session-history.md and lessons-learned.md are allowed; create missing notes with project_write. UTF-8 files return text and SHA-256; a supported image (PNG, JPEG, GIF or WEBP, detected by content, not extension) returns an MCP image content block plus sha256/size_bytes/mime/path as text, up to a 10 MiB cap (gateway_image_too_large above it); any other non-UTF-8 file returns only SHA-256, byte size and binary: true.',512),
                              offset=integer('UTF-8 character offset for file reads.',1000000000),
                              limit=integer('Maximum characters or directory entries; response supplies the next offset.',65536)), required=['path']),
     'project_write': obj(dict(path=text('Project-relative file; symlinks are rejected. '+WORK_AREA,512),
@@ -184,6 +184,26 @@ def _file_sha256(root, path):
         os.close(fd)
 
 
+# Image sniffing is by magic bytes, not extension (a renamed/extensionless
+# screenshot must still be recognized). The cap matches the ACP prompt-image
+# cap (acp.protocol.MAX_IMAGE_BYTES) so a worker cannot read back more image
+# data through project_read than a user could ever send in through a prompt.
+MAX_PROJECT_READ_IMAGE_BYTES = 10 * 1024 * 1024
+
+
+def _detect_image_mime(data):
+    """Sniff a supported image format from its leading magic bytes."""
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return 'image/png'
+    if data.startswith(b"\xff\xd8\xff"):
+        return 'image/jpeg'
+    if data[:6] in (b'GIF87a', b'GIF89a'):
+        return 'image/gif'
+    if len(data) >= 12 and data[:4] == b'RIFF' and data[8:12] == b'WEBP':
+        return 'image/webp'
+    return None
+
+
 def _read(root, args):
     parts = _parts(args['path'])
     if not parts:
@@ -198,6 +218,15 @@ def _read(root, args):
             entries = sorted(n for n in os.listdir(fd) if n not in PRIVATE)
             return dict(entries=entries[offset:offset+limit],next_offset=offset+limit if offset+limit<len(entries) else None)
         data, digest = _read_regular_file(fd)
+        mime = _detect_image_mime(data)
+        if mime is not None:
+            if len(data) > MAX_PROJECT_READ_IMAGE_BYTES:
+                raise StoreError('gateway_image_too_large', 'path', args['path'],
+                    f'an image at or under {MAX_PROJECT_READ_IMAGE_BYTES} bytes',
+                    'This image exceeds the readable size cap. Read a smaller/cropped copy instead.')
+            import base64
+            return dict(image_base64=base64.b64encode(data).decode('ascii'),mime=mime,
+                        sha256=digest,size_bytes=len(data),path=args['path'])
         try:
             body = data.decode('utf-8')
         except UnicodeDecodeError:

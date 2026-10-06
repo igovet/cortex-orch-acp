@@ -115,6 +115,19 @@ queued `user_message` events unclaimed for that coordinator turn rather than
 consuming their text as a worker-card update. Repeated delivery of the same
 message identity does not create another requirement revision.
 
+When the queued message carries an image or uploaded-file attachment (its
+bytes/base64 never forwarded to the already-running turn), the retained
+steering carries the same `source_ref`/`name`/`uri`/`kind`/`availability`
+descriptor `acp.agent` already records for durable capture, plus a derived
+short English `attachment_hint` such as `Attachments: image r_xxx:1
+(screenshot.png) - open with read_source`, so the coordinator is never left
+with only the plain `[image: ...]` text marker and has to guess an attachment
+exists by calling `list_sources`. A text-only message leaves both keys absent.
+If capture commits before steering is recorded, an identical retry rebuilds the
+descriptors from that task's exact durable source revision, including the original
+availability/reason, before recording the missing steering event. Already-recorded
+steering remains idempotent: one event and one requirement revision.
+
 A message sent to a task that already reached `COMPLETED` reopens the task
 (`TASK_REOPENED`) and returns it to planning. If the message only asks about
 the finished work, the coordinator answers with `answer_submit` and the task

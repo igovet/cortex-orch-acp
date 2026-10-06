@@ -48,15 +48,37 @@ The current supported Codex CLI is 0.159.1 with codex-acp 2.0.1;
 codex-acp 1.12.0 and 1.13.0 remain supported. A verified private
 adapter and per-process launcher disable native agents, multi-agent, plugin,
 hook and app features and each inherited MCP server; only session-specific
-brokered servers are re-enabled. Every turn runs with `dangerFullAccess`
+brokered servers are re-enabled. The same two layers also force Codex's own
+`shell_tool` and `view_image` features off (`-c features.shell_tool=false -c
+features.view_image=false` at process launch, and the same two keys forced
+false again in every generated session config, since App Server's
+thread/start config can otherwise override the process-level flags) --
+verified against the installed Codex CLI 0.154.0's own `features list`. Codex then runs
+shell commands and reads images only through the scoped Cortex `command_run`/
+`project_read`/`read_source` tools, the same boundary Claude's own gateway-
+alternative policy already uses for its own disallowed Bash/Read. Native
+`apply_patch` stays on for file edits: the installed
+Codex CLI 0.154.0 exposes no supported off switch for it (it is not even
+listed by `features list`). A separate `unified_exec` feature was also found
+still enabled after this change; neither `-c features.unified_exec=false` nor
+`--disable unified_exec` had any observed effect against the same installed
+binary (both silently left it reporting `true`), so there is currently no
+supported channel to turn it off either, and whether it still offers Codex any
+exec/read path once `shell_tool` is off is not established without a live
+qualification check. Every turn runs with `dangerFullAccess`
 (Codex's own sandbox cannot start in the jail's user namespace, and the jail is
 the boundary) and approval `untrusted`, pinned by the adapter patch in
 `engine.process`, so each command still reaches the permission bridge. The user's account configuration and credentials
 are not rewritten.
 
-Claude ACP 0.78.0 keeps its native tools and `settingSources` default and
-receives `strictMcpConfig: true`, empty `plugins`, disabled hooks, and
-disallowed `Agent`, `Task`, `Workflow` and agent-team tools. A session with role
+Claude ACP 0.78.0 keeps its `settingSources` default and receives
+`strictMcpConfig: true`, empty `plugins`, disabled hooks, and disallowed
+`Agent`, `Task`, `Workflow` and agent-team tools -- but not its native file/
+shell tools: adapter-level `disallowedTools` also disallows native `Bash`,
+`Read`, `Edit`, `Write`, `Grep`, `Glob`, `NotebookEdit` and (outside native-
+skills mode) `Skill`, so Claude reaches files and commands only through the
+scoped Cortex gateway, the same boundary Codex's `shell_tool`/`view_image`
+feature switches above now approximate. A session with role
 instructions also receives the [unified system prompt](unified-system-prompt.md)
 in place of Claude Code's preset, with `skills: []` and attribution and git
 instructions switched off. The native adapter options are shared, while role-
@@ -166,7 +188,10 @@ old worker channels before its text is delivered to a model. Scope/replan/escala
 requests are proposals; the replacement plan is validated again.
 
 `project_read` is cursor-bounded. UTF-8 regular files return text and a SHA-256; a
-non-UTF-8 regular file returns only its SHA-256, byte size and `binary: true`.
+supported image (PNG, JPEG, GIF or WEBP, sniffed by content, not extension), up to a
+10 MiB cap, returns a real MCP `image` content block plus its SHA-256, byte size, MIME
+type and path as text (`gateway_image_too_large` above the cap); any other non-UTF-8
+regular file returns only its SHA-256, byte size and `binary: true`.
 `project_write` and `project_delete` require the exact existing SHA-256; creation
 requires `absent`. `project_delete` supports binary files and checks their raw-byte
 SHA-256 before unlinking. File operations use no-follow directory descriptors and

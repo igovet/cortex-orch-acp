@@ -49,12 +49,24 @@ check guidance; consultants evaluate the packet and retained reports.
 
 Native-tool guidance is emitted only when the launch adapter enables those
 tools: Claude's gateway-alternative policy disables native shell/file/search
-and omits that guidance, while Codex and OpenCode retain it. This changes prompt
-construction, not tool authority, sandbox permissions or routing. The
-consultant's prohibition on using remaining native tools appears only where
-those tools remain enabled. Consultant route selection follows normal policy;
-Codex native read tools cannot be disabled in the current adapter, so safe reads
-may expose source despite the prompt's reports-only boundary. Defaults on the standalone renderer preserve
+and omits that guidance, while Codex and OpenCode retain it (`native_tools=True`
+in `delegation.live_adapters._session_new_meta_for`). For Codex this is still
+accurate, not stale: `shell_tool` and `view_image` are now forced off for
+every Cortex-launched Codex session (the per-process launcher and the
+verified private adapter's session-config patch both set them, verified
+against the installed Codex CLI 0.154.0's `features list`), but native
+`apply_patch` remains Codex's own file-edit tool with no supported off switch,
+so the generic native-tool caveat (local workspace aid, never a report or a
+result) still applies to it. A separate `unified_exec` feature was found to
+have no supported off switch either (neither `-c features.unified_exec=false`
+nor `--disable unified_exec` changed its reported `true` state against the
+installed binary); whether it still offers Codex a residual native exec/read
+path once `shell_tool` is off is not established without a live qualification
+check. This changes prompt construction, not tool authority, sandbox
+permissions or routing. The consultant's prohibition on using remaining
+native tools appears only where those tools remain enabled. Consultant route
+selection follows normal policy; the same `apply_patch`/`unified_exec`
+limitation above applies to a Codex consultant session. Defaults on the standalone renderer preserve
 ordinary writing-worker callers; runtime launch seams supply the actual policy.
 
 A role-specific introduction (coordinator or worker), then sections on
