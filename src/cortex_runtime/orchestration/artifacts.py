@@ -34,6 +34,12 @@ def report_digest(store, task_id, filename):
         raise StoreError('assignment_report_unavailable') from error
 
 
+# F3: the same inline bound ``command_run`` uses (gateway.py's ``_command``),
+# so a small git status/diff never forces a second ``read_large_output`` call
+# just to see output that already fit in this one response.
+_INLINE_OUTPUT_BOUND = 65536
+
+
 def project_git_evidence(store, task_id, owner_scope, root, kind):
     """Observe fixed read-only git commands, outside the model's own sandbox.
 
@@ -51,7 +57,8 @@ def project_git_evidence(store, task_id, owner_scope, root, kind):
     # A .git directory, or a worktree's gitdir pointer and its common dir.
     metadata = git_metadata_dirs(str(root))
     if metadata is None:
-        return dict(available=False, diagnostic='git_directory_unavailable', kind=kind)
+        return dict(available=False, diagnostic='git_directory_unavailable', kind=kind,
+                    evidence='context only, not a check receipt')
     # Fixed executable and argv, no pager, hooks, fsmonitor, external diff or
     # text conversion. The child's root and project are read-only, with no home.
     argv = ['/usr/bin/git', '--no-optional-locks', '-c', 'core.fsmonitor=false',
@@ -79,6 +86,14 @@ def project_git_evidence(store, task_id, owner_scope, root, kind):
             output.seek(0); data = output.read()
     saved = persist_output(store, task_id=task_id, owner_scope=owner_scope, source_kind='tool_result',
                            source_ref='project_git:'+kind, data=data, exit_code=code, failure=failure)
-    return dict(available=code == 0 and failure is None, kind=kind, exit_code=code,
-                complete=failure is None, large_output_id=saved['id'], byte_count=len(data),
+    # Inline the output up to the same bound command_run uses; large_output_id
+    # always stays valid so a caller can still page the full retained bytes
+    # (the remainder past this bound, or the whole output again later).
+    output_truncated = len(data) > _INLINE_OUTPUT_BOUND
+    return dict(available=code == 0 and failure is None, kind=kind,
+                evidence='context only, not a check receipt',
+                diagnostic=failure or (f'git_exit_{code}' if code else None),
+                large_output_id=saved['id'], byte_count=len(data),
+                output=data[:_INLINE_OUTPUT_BOUND].decode('utf-8', errors='replace'),
+                output_truncated=output_truncated,
                 comparison='Current project against HEAD; includes pre-existing edits. Untracked content is not in diff.')

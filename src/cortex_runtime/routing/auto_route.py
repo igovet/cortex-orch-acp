@@ -1352,22 +1352,40 @@ def _governed_means(window: list[tuple[str, tuple[str, ...]]]) -> bool:
     return any(_request_form(WORK_VERBS, word, lead) for word, lead in window[:position])
 
 
-def requests_family(text: str, family: str, names: Sequence[str] | None = None) -> str | None:
+def requests_family(text: str, family: str, names: Sequence[str] | None = None,
+                    *, pattern: re.Pattern | None = None,
+                    exact_pattern: re.Pattern | None = None) -> str | None:
     """The first mention of ``family`` in ``text`` that is a request -- within
     :data:`REQUEST_WINDOW` words before it, in the same sentence, a
     :data:`REQUEST_WORDS` word in request form or a :data:`WORK_VERBS` verb
     governing a :data:`MEANS_WORDS` preposition right before it, and no
     :data:`NEGATION_WORDS` word within :data:`NEGATION_WINDOW` -- or ``None``
-    when every mention is bare, a remark or refused. ``names`` are the
-    family's extra spellings (see :func:`family_pattern`)."""
-    for match in family_pattern(family, names).finditer(text):
+    when every mention is bare, a remark or refused. An ``exact_pattern``
+    for enabled identities additionally accepts a direct на/on/via/with or a
+    non-negated request-form verb anywhere in the same message. Labels retain
+    local grammar. ``names`` are extra spellings (see :func:`family_pattern`)."""
+    # Only enabled exact identities get message-wide request governance and
+    # a direct means-preposition grant. Owner-configured labels keep the
+    # conservative local grammar; model-authored text never reaches this call.
+    exact_spans = {match.span() for match in exact_pattern.finditer(text)} if exact_pattern is not None else set()
+    message_request = False
+    for sentence in _SENTENCE_END.split(text.replace("’", "'")):
+        for word, lead in _clause_words(sentence):
+            if (_request_form(REQUEST_WORDS, word, lead)
+                    and not any(NEGATION_WORDS.fullmatch(prior) for prior in lead[-NEGATION_WINDOW:])):
+                message_request = True
+                break
+    for match in (pattern if pattern is not None else family_pattern(family, names)).finditer(text):
         before = _ATTACHED.sub("", text[: match.start()]).replace("’", "'")
         words = _clause_words(_SENTENCE_END.split(before)[-1])
         if any(NEGATION_WORDS.fullmatch(word) for word, _lead in words[-NEGATION_WINDOW:]):
             continue
         window = words[-REQUEST_WINDOW:]
         if (any(_request_form(REQUEST_WORDS, word, lead) for word, lead in window)
-                or _governed_means(window)):
+                or _governed_means(window)
+                or (match.span() in exact_spans and
+                    (message_request or (window and
+                     re.fullmatch(r"на|on|via|with", window[-1][0]))))):
             return match.group(0)
     return None
 
@@ -1407,6 +1425,51 @@ def request_names(model_hint: str, project_root=None, environ: Mapping[str, str]
     return model_policy.policy_for(engine, model, overrides).request_names
 
 
+def _enabled_model_identities(overrides: Mapping) -> tuple[str, ...]:
+    return tuple(f"{engine}/{model}" for engine, models in (overrides.get("enabled") or {}).items()
+                 for model in models)
+
+
+def _request_token_pattern(token: str, identities: Sequence[str]) -> str:
+    """Exact spelling, or one trailing prose mark unless it is a configured ID."""
+    spellings = {*identities, *(identity.partition("/")[2] for identity in identities)}
+    longer = [spelling for spelling in sorted(spellings) if spelling != token and spelling.startswith(token)]
+    excluded = "|".join(re.escape(spelling) + r"(?!\S)" for spelling in longer)
+    guard = rf"(?!{excluded})" if excluded else ""
+    # Paired quotes and whole tokens remain exact; only unquoted terminal
+    # punctuation gains a fallback, never suffixes/provider prefixes.
+    punctuated = rf"(?<!\S){guard}(?-i:{re.escape(token)})(?=[.,!?;:](?!\S))"
+    return family_pattern(token).pattern + "|" + punctuated
+
+
+def _source_request_pattern(family: str, names: Sequence[str], identities: Sequence[str]) -> re.Pattern:
+    model = family.partition("/")[2]
+    patterns = [family_pattern(family, names).pattern, _request_token_pattern(family, identities)]
+    matches = [identity for identity in identities if identity.partition("/")[2] == model]
+    if matches == [family]:
+        patterns.append(_request_token_pattern(model, identities))
+    return re.compile("|".join(patterns), re.IGNORECASE)
+
+
+def ambiguous_user_model_request(store, task_id: str, model_hint: str) -> dict | None:
+    """A retained request naming a bare ID shared by enabled engines; never consent."""
+    family = family_of(model_hint or "")
+    if family is None:
+        return None
+    identities = _enabled_model_identities(load_overrides(getattr(store, "project_root", None)))
+    model = family.partition("/")[2]
+    matches = [identity for identity in identities if identity.partition("/")[2] == model]
+    if family not in matches or len(matches) < 2:
+        return None
+    pattern = re.compile(_request_token_pattern(model, identities), re.IGNORECASE)
+    with store.connection() as db:
+        for source_ref, text in _user_texts(store, db, task_id):
+            matched = requests_family(text, family, pattern=pattern, exact_pattern=pattern)
+            if matched is not None:
+                return dict(source_ref=source_ref, matched=matched)
+    return None
+
+
 def user_model_request(store, task_id: str, model_hint: str, *, names: Sequence[str] | None = None) -> dict | None:
     """Match only retained user source text, never coordinator/report text."""
     family = family_of(model_hint or "")
@@ -1418,9 +1481,12 @@ def user_model_request(store, task_id: str, model_hint: str, *, names: Sequence[
     if names is not None and tuple(names) != configured_names:
         raise _policy_error("model_request_labels_changed", "Request labels must match current owner settings; reread routing.json.")
     names = configured_names
+    identities = _enabled_model_identities(overrides)
+    pattern = _source_request_pattern(family, names, identities)
+    exact_pattern = _source_request_pattern(family, (), identities) if family in identities else None
     with store.connection() as db:
         for source_ref, text in _user_texts(store, db, task_id):
-            matched = requests_family(text, family, names)
+            matched = requests_family(text, family, names, pattern=pattern, exact_pattern=exact_pattern)
             if matched is not None:
                 for engine, config in (overrides.get("models") or {}).items():
                     for model, policy in (config.get("policy") or {}).items():

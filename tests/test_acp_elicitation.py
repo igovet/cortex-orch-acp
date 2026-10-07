@@ -55,6 +55,53 @@ def test_paseo_question_bridge_uses_core_permission_choice_schema():
     _schema_validator("RequestPermissionRequest").validate(seen["params"])
 
 
+def test_elicit_sends_no_tool_call_update_for_the_never_announced_card():
+    """O2: the question card's toolCallId only ever appears inside
+    session/request_permission params, never as its own announced tool_call.
+    The host retires the form itself; a tool_call_update for it would be an
+    orphan update that the installed bridge turns into a stray generic
+    "Tool call" row (see docs/project/gotchas.md and provider.ts's
+    visibleTimeline defence in depth)."""
+    notifications = []
+
+    class Transport:
+        def send_notification(self, notif):
+            notifications.append(notif)
+            return True
+
+    class Requester:
+        _transport = Transport()
+
+        def request(self, method, params, timeout, cancelled=None, id_suffix=None):
+            return {"outcome": {"outcome": "selected", "optionId": "cortex-question-1"}}
+
+    elicitor = _PaseoQuestionElicitor(Requester(), session_id="sess-1", timeout=2.0)
+    assert elicitor.elicit("ignored", "Pick", ["one"]) == "one"
+    assert notifications == []
+
+
+def test_elicit_batch_sends_no_tool_call_update_for_the_never_announced_card():
+    notifications = []
+
+    class Transport:
+        def send_notification(self, notif):
+            notifications.append(notif)
+            return True
+
+    class Requester:
+        _transport = Transport()
+
+        def request(self, method, params, timeout, cancelled=None):
+            return {}
+
+    elicitor = _PaseoQuestionElicitor(Requester(), session_id="sess-1", timeout=2.0)
+    elicitor.elicit_batch("ignored", {
+        "batch_id": "b1", "question_id": "q1",
+        "questions": [{"question_id": "q1", "question": "Pick", "options": ["one", "two"]}],
+    })
+    assert notifications == []
+
+
 def test_paseo_free_text_question_exposes_a_card_without_inventing_an_answer():
     seen = {}
 
@@ -313,7 +360,7 @@ def test_elicitation_not_advertised_uses_text_fallback(tmp_path):
         assert final["result"]["stopReason"] == "end_turn"
         # Never an outbound elicitation/create request.
         assert not any(m.get("method") == "elicitation/create" for m in harness.stdout.lines)
-        chunk = harness.wait_for(lambda m: m.get("params", {}).get("update", {}).get("content", {}).get("text", "").startswith("Which environment?"))
+        chunk = harness.wait_for(lambda m: m.get("params", {}).get("update", {}).get("content", {}).get("text", "").startswith("1. Which environment?"))
         assert chunk is not None
 
         with harness.store.connection() as db:

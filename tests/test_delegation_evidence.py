@@ -137,7 +137,7 @@ def test_a_passed_claim_citing_a_nonzero_exit_stays_a_failure(tmp_path):
     report=publish_fixture_report(store,worker)
     ref=_run(store,worker,['python3','-B','-c','raise SystemExit(2)'])['tool_call_ref']
     receipt=mcp_tools.dispatch(store,worker,'result_submit',dict(report=dict(report_ref=report),summary='Observed',
-        checks=[dict(name='unit tests',outcome='passed',tool_call_ref=ref)],request_key='result'))
+        checks=[dict(name='unit tests',outcome='passed',tool_call_ref=ref)],request_key='result',assignment_outcome='failed'))
     assert receipt['checks']==[dict(name='unit tests',outcome='failed',claimed_outcome='passed',evidence_gap='nonzero_exit')]
     node=_node(store,task,assignment)
     assert node['status']=='failed'
@@ -188,7 +188,7 @@ def test_a_failed_claim_is_never_softened(tmp_path, ref_kind):
         record_tool_result_observed(store,task.task_id,worker.attempt_id,'tc_shell','execute','pytest','completed')
         check['tool_call_ref']='tc_shell'
     receipt=mcp_tools.dispatch(store,worker,'result_submit',
-                               dict(report=dict(report_ref=report),summary='Observed',checks=[check],request_key='result'))
+                               dict(report=dict(report_ref=report),summary='Observed',checks=[check],request_key='result',assignment_outcome='failed'))
     assert receipt['checks']==[dict(name='unit tests',outcome='failed')]
     node=_node(store,task,assignment)
     assert node['status']=='failed'
@@ -210,7 +210,8 @@ def test_outside_command_receipt_supports_matching_check_outcome(tmp_path, monke
         dict(argv=['python3','-B','-c',f'raise SystemExit({exit_code})'],cwd=str(tmp_path.parent),request_key='outside-check'))
     assert receipt['complete'] and receipt['exit_code']==exit_code and receipt['argv'][0]=='python3'
     mcp_tools.dispatch(store,worker,'result_submit',dict(report=dict(report_ref=report),summary='Observed',request_key='result',
-        checks=[dict(name='outside check',outcome=outcome,tool_call_ref=receipt['tool_call_ref'])]))
+        checks=[dict(name='outside check',outcome=outcome,tool_call_ref=receipt['tool_call_ref'])],
+        **({'assignment_outcome':'failed'} if status=='failed' else {})))
     node=_node(store,task,assignment)
     assert (node['status'],node['result']['checks'][0]['outcome'])==(status,stored)
     # A failure claim contradicted by exit 0 still fails; its evidence is weak.

@@ -11,13 +11,35 @@ path in this runtime already does). The explicitly gated developer wire trace
 uses scrub_wire_text plus its full-frame credential redactor; it is not normal
 production evidence or display logging.
 
-Three independent redaction passes, applied to every string value:
+Independent redaction passes, applied to every string value (see
+:func:`_scrub_credentials`):
 
 1. URL userinfo (``scheme://user:pass@host`` -> ``scheme://[REDACTED]@host``).
-2. ``Bearer``/``token``-prefixed credentials.
-3. ``key=value``/``key: value`` pairs whose key name looks credential-shaped
-   (reusing ``connections.environment.DENYLIST_PATTERN``'s vocabulary).
-4. Any remaining long opaque alphanumeric run (24+ base64/hex-alphabet
+2. Authorization-header rule (``_AUTH_HEADER``): any ``*authorization``-named
+   label followed by ``:``/``=`` and either a quoted value or an optional
+   HTTP auth-scheme word (``Bearer``, ``Token``, ``Basic``, ``Digest``,
+   ``Negotiate``, or any custom RFC 9110 scheme token) plus its credential
+   (and any ``, param=value`` continuation) -- the credential is always
+   dropped, whatever the scheme name. This is H2's fix: narrowing the old
+   ``_BEARER`` rule to the literal word ``bearer`` left every other scheme
+   (most commonly a bare ``Token`` header) leaking in full; this rule runs
+   first and covers the header shape regardless of scheme word.
+3. Bare-scheme rule (``_BEARER``): ``bearer``/``token`` directly followed by
+   a credential-shaped run (8+ chars, containing a digit) with no label --
+   e.g. ``Bearer <token>`` outside a header context. A bare ``token``
+   followed by an ordinary word, e.g. "token handling" or "token budget is
+   4096", is not credential-shaped (no digit in the 8+ character run) and is
+   never redacted by this rule; a real ``token``-named credential is still
+   caught by the key=value/key: value assignment shape or the "token is/was
+   X" claim shape below.
+4. ``key=value``/``key: value`` pairs (quoted or unquoted) whose key name
+   looks credential-shaped (reusing ``connections.environment
+   .DENYLIST_PATTERN``'s vocabulary).
+5. The "token is/was X"-shaped claim rule (``_SECRET_CLAIM``).
+6. Known credential-literal formats (``_KNOWN_TOKEN``: GitHub/GitLab/Slack/
+   OpenAI/AWS tokens, three-part JWTs) -- collapsed to a stable short digest
+   regardless of surrounding context.
+7. Any remaining long opaque alphanumeric run (24+ base64/hex-alphabet
    characters, containing at least one digit, and with no identifier
    separators) -- collapsed to a stable short digest.  Hyphenated and
    underscored names are ordinary project or business identifiers until an
@@ -41,15 +63,98 @@ MAX_TEXT_CHARS = 400
 MAX_DEPTH = 3
 
 _URL_CREDENTIALS = re.compile(r"([a-zA-Z][a-zA-Z0-9+.-]*://)[^/@\s]+@")
-_BEARER = re.compile(r"(?i)\b(?:bearer|token)\s+[A-Za-z0-9._~+/=-]{8,}")
-_KEY_VALUE_SECRET = re.compile(
-    r"(?i)\b([A-Za-z0-9_]*(?:api[_-]?key|token|secret|password|authorization)[A-Za-z0-9_]*)\s*[=:]\s*\S+"
+
+# Shared fragments for the authorization-header, bare-scheme and key/value
+# rules below (H2 fix specification S1-S5).
+_Q = r"[\"']"
+_AUTH_LABEL = r"\b[A-Za-z0-9_-]*authorization"
+_AUTH_SCHEME = r"[A-Za-z][A-Za-z0-9!#$%&*+.^_`|~-]*"
+_NOT_MARKER = r"(?!\[(?:REDACTED|HIDDEN_SECRET))"
+_AUTH_PARAM = r"[A-Za-z0-9_-]+=(?:\"[^\"\r\n]*\"|[^\s,;\"'{}\[\]]*)"
+_AUTH_CRED = r"(?:" + _AUTH_PARAM + r"|[^\s\"',;{}\[\]]+)"
+_CRED_CHARS = r"[A-Za-z0-9._~+/=_-]"
+_SECRET_KEY_WORD = r"[A-Za-z0-9_]*(?:api[_-]?key|token|secret|password|authorization)[A-Za-z0-9_]*"
+
+# S1 -- authorization-header rule: ANY scheme word (not just "bearer"), a
+# quoted value, or a scheme-less value, applied before every other credential
+# rule so a later rule can never re-split an already-redacted header.
+_AUTH_HEADER = re.compile(
+    r"(?i)(?P<head>" + _AUTH_LABEL + r"(?:" + _Q + r")?[ \t]*[:=][ \t]*)"
+    + _NOT_MARKER
+    + r"(?:(?P<q>" + _Q + r")[^\"'\r\n]*(?:(?P=q))?"
+    + r"|(?:" + _AUTH_SCHEME + r"[ \t]+" + _NOT_MARKER + r")?"
+    + _AUTH_CRED + r"(?:[ \t]*,[ \t]*" + _AUTH_PARAM + r")*)"
 )
+
+
+def _sub_auth_header(match: "re.Match[str]") -> str:
+    quote = match.group("q")
+    if quote:
+        return f"{match.group('head')}{quote}[REDACTED]{quote}"
+    return f"{match.group('head')}[REDACTED]"
+
+
+# S2 -- bare-scheme rule (replaces the old bearer-only ``_BEARER``): a bare
+# ``token`` is redacted only when its value is credential-shaped (8+ chars,
+# containing a digit), so ordinary prose ("token handling", "token budget is
+# 4096") is never touched by this rule.
+_BEARER = re.compile(
+    r"(?i)\b(?:bearer\s+" + _CRED_CHARS + r"{8,}"
+    r"|token\s+(?=" + _CRED_CHARS + r"*\d)" + _CRED_CHARS + r"{8,})"
+)
+
+# S3 -- key/value rule: unquoted form unchanged from HEAD (``key=[REDACTED]``
+# still holds) plus a guard so S1's already-redacted header is never
+# reprocessed; quoted-key form (new) so ``{"token": "X"}``/``{'authorization':
+# 'X'}`` are also caught.
+_KEY_VALUE_SECRET = re.compile(
+    r"(?i)\b(" + _SECRET_KEY_WORD + r")\s*[=:]\s*" + _NOT_MARKER + r"\S+"
+)
+_KEY_VALUE_QUOTED = re.compile(
+    r"(?i)\b(?P<key>" + _SECRET_KEY_WORD + r")(?P<kq>" + _Q + r")(?P<sep>[ \t]*[:=][ \t]*)"
+    + _NOT_MARKER
+    + r"(?:(?P<vq>" + _Q + r")[^\"'\r\n]*(?:(?P=vq))?|[^\s,;}\]]+)"
+)
+
+
+def _sub_key_value_quoted(match: "re.Match[str]") -> str:
+    value_quote = match.group("vq") or ""
+    return f"{match.group('key')}{match.group('kq')}{match.group('sep')}{value_quote}[REDACTED]{value_quote}"
+
+
+# S4 -- claim rule, unchanged.
 _SECRET_CLAIM = re.compile(
     r"(?i)\b((?:api[_ -]?key|token|secret|password|authorization|credential)\s+(?:is|was))\s+\S+"
 )
+
+# S5 -- known credential-literal formats, redacted regardless of context.
+_KNOWN_TOKEN = re.compile(
+    r"\b(?:gh[pousr]_[A-Za-z0-9]{20,}"
+    r"|github_pat_[A-Za-z0-9_]{20,}"
+    r"|glpat-[A-Za-z0-9_-]{20,}"
+    r"|xox[abposr]-[A-Za-z0-9-]{10,}"
+    r"|sk-(?=[A-Za-z0-9_-]*\d)[A-Za-z0-9_-]{20,}"
+    r"|AKIA[0-9A-Z]{16}"
+    r"|eyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,})"
+)
+
 _LONG_OPAQUE_TOKEN = re.compile(r"\b(?=[A-Za-z0-9]*\d)[A-Za-z0-9]{24,}\b")
 _LONG_LEXICAL_FIELD = re.compile(r"\S{4097,}")
+
+# Open-context patterns for the streaming holdback (S7): a release boundary
+# must never fall inside, or at the open end of, a span any rule above could
+# still match once more text arrives.
+_OPEN_HEADER = re.compile(
+    r"(?i)" + _AUTH_LABEL + r"(?:" + _Q + r")?[ \t]*(?:[:=][ \t]*(?:"
+    + _Q + r"[^\"'\r\n]*|[^\"'\r\n][^\r\n]*)?)?$"
+)
+_OPEN_CLAIM = re.compile(
+    r"(?i)\b(?:api[_ -]?key|token|secret|password|authorization|credential)(?:\s+(?:i|is|w|wa|was)?)?\s*$"
+)
+_OPEN_KEY = re.compile(
+    r"(?i)\b(?:" + _SECRET_KEY_WORD + r")(?:" + _Q + r")?\s*(?:[=:]\s*(?:" + _Q + r")?)?$"
+)
+_OPEN_SCHEME = re.compile(r"(?i)\b(?:bearer|token)\s*$")
 
 
 class StreamingRedactor:
@@ -78,7 +183,7 @@ class StreamingRedactor:
         self._overflow_has_digit = False
 
     @staticmethod
-    def _hold_start(text: str) -> int:
+    def _hold_start_base(text: str) -> int:
         # Keep the entire current whitespace-delimited lexical field. A
         # secret may be split at every possible character boundary, so no
         # prefix of that field is safe to emit until its delimiter arrives.
@@ -139,6 +244,30 @@ class StreamingRedactor:
         ):
             start = prefix.rfind(" ") + 1
         return start
+
+    @staticmethod
+    def _hold_start(text: str) -> int:
+        """S7: tighten the base holdback so a release boundary never falls
+        inside, or at the open end of, a span any credential rule could
+        still match -- the invariant that makes streaming output equal
+        ``scrub_text``/``scrub_display_text`` of the whole text, whatever the
+        chunk partition.
+        """
+        hold = StreamingRedactor._hold_start_base(text)
+        length = len(text)
+        for pattern in (_AUTH_HEADER, _BEARER, _KEY_VALUE_SECRET, _KEY_VALUE_QUOTED, _SECRET_CLAIM):
+            for found in pattern.finditer(text):
+                if found.start() < hold and (found.end() > hold or found.end() == length):
+                    hold = found.start()
+        last_line_start = text.rfind("\n") + 1
+        tail = text[last_line_start:]
+        for open_pattern in (_OPEN_HEADER, _OPEN_CLAIM, _OPEN_KEY, _OPEN_SCHEME):
+            found = open_pattern.search(tail)
+            if found is not None:
+                candidate = last_line_start + found.start()
+                if candidate < hold:
+                    hold = candidate
+        return hold
 
     def push(self, value: Any) -> str:
         text = value if isinstance(value, str) else str(value)
@@ -295,6 +424,23 @@ def _digest(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8", errors="replace")).hexdigest()[:16]
 
 
+def _scrub_credentials(text: str) -> str:
+    """Shared S1-S5 credential redaction passes (H2 fix specification).
+
+    Order matters: the authorization-header rule runs first so no later
+    rule can re-split an already-redacted header; the quoted and unquoted
+    key/value rules carry an idempotency guard (``_NOT_MARKER``) so they
+    never reprocess a header the first rule already redacted.
+    """
+    text = _AUTH_HEADER.sub(_sub_auth_header, text)
+    text = _BEARER.sub("[REDACTED_TOKEN]", text)
+    text = _KEY_VALUE_SECRET.sub(lambda m: f"{m.group(1)}=[REDACTED]", text)
+    text = _KEY_VALUE_QUOTED.sub(_sub_key_value_quoted, text)
+    text = _SECRET_CLAIM.sub(lambda m: f"{m.group(1)} [REDACTED]", text)
+    text = _KNOWN_TOKEN.sub(lambda m: f"[HIDDEN_SECRET:{_digest(m.group(0))}]", text)
+    return text
+
+
 def scrub_text(value: Any, *, max_chars: int = MAX_TEXT_CHARS) -> str:
     """Redact credential-shaped substrings from one free-text value and
     bound its length. Idempotent: scrubbing already-scrubbed text is a
@@ -302,9 +448,7 @@ def scrub_text(value: Any, *, max_chars: int = MAX_TEXT_CHARS) -> str:
     text = value if isinstance(value, str) else str(value)
     original_len = len(text)
     text = _URL_CREDENTIALS.sub(r"\1[REDACTED]@", text)
-    text = _BEARER.sub("[REDACTED_TOKEN]", text)
-    text = _KEY_VALUE_SECRET.sub(lambda m: f"{m.group(1)}=[REDACTED]", text)
-    text = _SECRET_CLAIM.sub(lambda m: f"{m.group(1)} [REDACTED]", text)
+    text = _scrub_credentials(text)
     text = _LONG_OPAQUE_TOKEN.sub(lambda m: f"[HIDDEN_SECRET:{_digest(m.group(0))}]", text)
     if len(text) > max_chars:
         text = text[:max_chars] + f"...[truncated_from:{original_len}_chars]"
@@ -327,17 +471,16 @@ def scrub_display_text(value: Any, *, max_chars: int = MAX_TEXT_CHARS) -> str:
 
     The narrowing is deliberate and bounded: a path in the user's own
     project, shown back to that same user, is not a credential, and the
-    other three rules (URL userinfo, bearer tokens, key=value secrets)
-    still apply to the path and to everything around it. Never use this
-    for anything durable, exported, or sent anywhere but this user's own
-    client -- that is what :func:`scrub_text` is for.
+    other credential rules (URL userinfo, authorization header, bare-scheme,
+    key=value/claim secrets, known token formats) still apply to the path
+    and to everything around it. Never use this for anything durable,
+    exported, or sent anywhere but this user's own client -- that is what
+    :func:`scrub_text` is for.
     """
     text = value if isinstance(value, str) else str(value)
     original_len = len(text)
     text = _URL_CREDENTIALS.sub(r"\1[REDACTED]@", text)
-    text = _BEARER.sub("[REDACTED_TOKEN]", text)
-    text = _KEY_VALUE_SECRET.sub(lambda m: f"{m.group(1)}=[REDACTED]", text)
-    text = _SECRET_CLAIM.sub(lambda m: f"{m.group(1)} [REDACTED]", text)
+    text = _scrub_credentials(text)
 
     pieces: list[str] = []
     last = 0

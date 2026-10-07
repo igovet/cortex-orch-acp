@@ -37,6 +37,10 @@ from ..store import private_directory, regular, sync_directory
 
 DEFAULT_CHUNK_SIZE = 64 * 1024
 _LARGE_OUTPUTS_DIRNAME = "large_outputs"
+#: How many of a scope's own most-recent ids a refused read's correction
+#: offers (F3: a mistyped id gets a short list of real ones to compare
+#: against, instead of only an instruction to retype it exactly).
+_RECENT_IDS_LIMIT = 5
 
 
 class LargeOutputError(Exception):
@@ -160,6 +164,23 @@ def _row(store, db, task_id: str, owner_scope: str, record_id: str):
     if row is None:
         raise LargeOutputError("unknown_large_output_for_scope")
     return row
+
+
+def recent_ids(store, *, task_id: str, owner_scope: str, limit: int = _RECENT_IDS_LIMIT) -> list[str]:
+    """This scope's own most-recently persisted ids, newest first.
+
+    F3: a caller that mistyped a ``large_output_id`` gets a short, cheap
+    list of its own real ids to compare against, instead of only an
+    instruction to retype the id exactly. Scoped identically to
+    :func:`read_output` -- never another owner_scope's ids.
+    """
+    with store.connection() as db:
+        rows = db.execute(
+            "SELECT id FROM large_outputs WHERE task_id=? AND owner_scope=? "
+            "ORDER BY created_at DESC, id DESC LIMIT ?",
+            (task_id, owner_scope, max(0, int(limit))),
+        ).fetchall()
+    return [row["id"] for row in rows]
 
 
 def read_output(

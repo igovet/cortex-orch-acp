@@ -1,7 +1,7 @@
 import { strict as assert } from "node:assert";
 import {
-  contextSummary, resolveDurableWorkerCardStatus, resolveWorkerCardStatus, workerAssignmentLine, workerCardMetadata, workerDisplayName,
-  workerModelDisplay, workerStatusPresentation,
+  contextSummary, resolveDurableWorkerCardStatus, resolveWorkerCardStatus, tokensAccessibilityLabel, tokensSummaryLabel,
+  workerAssignmentLine, workerCardMetadata, workerDisplayName, workerModelDisplay, workerStatusPresentation,
 } from "./worker-display.ts";
 
 assert.equal(workerDisplayName({ role: "explorer", title: "delegate:b2c3d4e5-f6a7-4b8c-9d0e-234567890abc", nodeKey: "worker" }), "explorer");
@@ -104,3 +104,35 @@ assert.deepEqual(workerStatusPresentation("cancelled"), { label: "cancelled", to
 assert.deepEqual(workerStatusPresentation("canceled"), { label: "cancelled", tone: "muted", icon: "CircleSlash" });
 assert.deepEqual(workerStatusPresentation(null), { label: "working", tone: "active", icon: "Loader2" });
 console.log("worker status presentation tests passed");
+
+
+// F1 fix: a known call renders its counts with no alarm; a genuine unknown
+// call still shows the "call unavailable" alarm; and an attempt whose only
+// calls were released_after_result (excluded entirely by sum_tokens, see
+// server/worker-history.ts) never reaches this component with tokens at
+// all, so null input renders nothing -- never the "Tokens unavailable"
+// alarm a genuinely unaccounted-for call shows.
+assert.equal(tokensSummaryLabel(null), null);
+assert.equal(tokensSummaryLabel(undefined), null);
+assert.equal(
+  tokensSummaryLabel({ input: 657, output: 97, cachedRead: 107000, cachedWrite: 50, knownCalls: 1, unknownCalls: 0 }),
+  "\u2191 657  \u2193 97  \u00b7 107k cache read  \u00b7 50 cache write",
+);
+assert.equal(
+  tokensSummaryLabel({ input: 10, output: 5, cachedRead: 0, cachedWrite: 0, knownCalls: 1, unknownCalls: 1 }),
+  "\u2191 10  \u2193 5  \u00b7 1 call unavailable",
+);
+assert.equal(
+  tokensSummaryLabel({ input: 0, output: 0, cachedRead: 0, cachedWrite: 0, knownCalls: 0, unknownCalls: 2 }),
+  "Tokens unavailable  \u00b7 2 calls unavailable",
+);
+assert.equal(tokensAccessibilityLabel(null), null);
+assert.equal(
+  tokensAccessibilityLabel({ input: 1, output: 2, cachedRead: 3, cachedWrite: 4, knownCalls: 1, unknownCalls: 0 }),
+  "1 uncached input, 2 output, 3 cache read, 4 cache write tokens",
+);
+assert.equal(
+  tokensAccessibilityLabel({ input: 0, output: 0, cachedRead: 0, cachedWrite: 0, knownCalls: 0, unknownCalls: 1 }),
+  "Token usage unavailable",
+);
+console.log("usage meter token label tests passed");

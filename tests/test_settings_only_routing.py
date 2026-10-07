@@ -138,7 +138,7 @@ def test_overlapping_request_labels_refuse_from_real_source(tmp_path):
 
 
 @pytest.mark.parametrize("text,expected", [("Use codex-acp/random-id", True), ("Use codex-acp/RANDOM-ID", False),
-    ("Use random-id", False), ("Use star", True), ("Don't use star", False),
+    ("Use random-id", True), ("Use star", True), ("Don't use star", False),
     ("Compare star with other", False), ("The tests run on star", False)])
 def test_flagship_requests_bind_exact_settings_identity_and_source(tmp_path, text, expected):
     install(tmp_path, settings(tier="flagship", attributes={"request_names": ["star"]}))

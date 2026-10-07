@@ -95,3 +95,51 @@ def test_non_flagship_plan_preview_carries_recorded_source(tmp_path, monkeypatch
     hint = machine.submit_plan(channel, proposal, "requested-plan")["model_hints"][0]
     assert hint["preview_status"] == "pending_dispatch:user_request"
     assert hint["user_request"] == f"{task.report_id}:-1"
+
+
+@pytest.mark.parametrize("ambiguous", [False, True])
+def test_plan_preview_explains_bare_user_model_and_ambiguity(tmp_path,monkeypatch,ambiguous):
+    from types import SimpleNamespace
+    from cortex_runtime.orchestration.state import TaskMachine
+    from test_runtime_task_machine import plan
+    data=settings("requested",tier="deep")
+    if ambiguous:
+        data["enabled"]["claude-agent-acp"]=["requested"]
+        data["models"]["claude-agent-acp"]={"auto":["requested"],"tiers":{"requested":"deep"}}
+    install(tmp_path,data)
+    store=Store(tmp_path/".cortex",project_root=tmp_path)
+    task=bootstrap_task(store,SourceEvent(origin="test",event_id="bare-preview"),
+                        "Use requested.", "owner")
+    machine=TaskMachine(store)
+    machine.create(task.task_id,"Build")
+    monkeypatch.setattr(auto_route,"route_menu",lambda *_: {
+        "tiers":{"deep":[{"route":"codex-acp/requested"}]}})
+    proposal=plan()
+    proposal["tasks"][0].update(model="codex-acp/requested",model_reason="User choice.")
+    channel=SimpleNamespace(task_id=task.task_id,channel_id="coordinator",role="coordinator")
+    hint=machine.submit_plan(channel,proposal,"bare-plan")["model_hints"][0]
+    if ambiguous:
+        assert hint["preview_status"] == "ignored:tier_mismatch"
+        assert "user_request" not in hint
+        assert hint["ambiguous_user_request"] == f"{task.report_id}:-1"
+        assert "ambiguously without its engine" in hint["user_request_diagnostic"]
+        assert "engine/model" in hint["user_request_diagnostic"]
+    else:
+        assert hint["preview_status"] == "pending_dispatch:user_request"
+        assert hint["user_request"] == f"{task.report_id}:-1"
+        assert "without its engine" in hint["user_request_diagnostic"]
+        assert "uniquely matches" in hint["user_request_diagnostic"]
+
+
+def test_bare_recorded_choice_still_precedes_automatic_routing(tmp_path,monkeypatch):
+    data=settings("gpt-6.1-sol",tier="deep")
+    data["models"]["codex-acp"]["auto"]=[]
+    env=install(tmp_path,data)
+    fake_catalog(monkeypatch,[entry("codex-acp","gpt-6.1-sol")])
+    store=Store(tmp_path/".cortex",project_root=tmp_path)
+    task=bootstrap_task(store,SourceEvent(origin="test",event_id="bare-choice"),
+                        "Use gpt-6.1-sol.", "owner")
+    target="codex-acp/gpt-6.1-sol"
+    request=auto_route.user_model_request(store,task.task_id,target)
+    choice=auto_route.choose("worker-backend-dev",tmp_path,env,model_hint=target,user_request=request)
+    assert (choice.model,choice.basis) == ("gpt-6.1-sol","auto:user_request")

@@ -3241,9 +3241,22 @@ class OrchestratingRuntime:
                 detail = event.payload.get("detail")
                 if detail:
                     text += f" {detail}"
+                fields: dict[str, Any] = {"status": "failed"}
+                # A provisioning failure can still have picked a route (an
+                # engine session open failed, e.g. unsafe_storage, after
+                # dispatch chose one) even though assignment_ready never
+                # fired to promote the card's title with it. Show it when
+                # the record carries one, so the card never implies no
+                # route was ever resolved.
+                base_title = self._worker_base_title(task_id, event.assignment_ref)
+                if base_title:
+                    fields["title"] = base_title
+                    with self._lock:
+                        self._worker_card_title[event.assignment_ref] = base_title
                 self._emit_worker_card(
-                    emit_tool_call, event.assignment_ref, status="failed",
+                    emit_tool_call, event.assignment_ref,
                     entry=_compact_text(text, _ASSIGNMENT_FAILED_DETAIL_MAX_CHARS),
+                    **fields,
                 )
             elif event.event_type == "assignment_cancelled" and event.assignment_ref:
                 self._close_assignment(task_id, event.assignment_ref)
@@ -4309,15 +4322,18 @@ class OrchestratingRuntime:
         if shown_body:
             # The body is already in the chat; repeat only the choices.
             decision = dict(decision, question=acp_messages.render("question_card_title", language))
+        open_questions = questions_store.list_open(self._store, task_id)
+        number = next((index for index, pending in enumerate(open_questions, start=1)
+                       if pending.id == question.id), None)
+        body = f"{number}. {decision['question']}" if number is not None else decision["question"]
         if isinstance(options, list) and options:
             choices = "\n".join(
                 f"{index}. {choice}" for index, choice in enumerate(options, start=1)
                 if isinstance(choice, str) and choice
             )
             label = acp_messages.render("question_options_label", language)
-            emit_update(f"{decision['question']}\n\n{label}\n{choices}" if choices else decision["question"])
-        else:
-            emit_update(decision["question"])
+            body = f"{body}\n\n{label}\n{choices}" if choices else body
+        emit_update(body + "\n\n")
         # A host callback can deliver the user's text synchronously while the
         # fallback update is being emitted. Re-read the row before returning;
         # otherwise the caller would overwrite the answered state with

@@ -221,7 +221,13 @@ export function presentToolSemantics(input: ToolPresentationInput): ToolPresenta
   return {
     ...mapped,
     target,
-    label: target ? `${mapped.action} — ${target}` : mapped.action,
+    // Keep-verbatim form: the installed Paseo client humanizes (strips `-`,
+    // `_`, lowercases) any tool row name that contains none of `:` `.` `/`
+    // and no `__`. A target without a dot or slash (a bare argv, a report
+    // id) used to trip that rule through the old "Action — target" em-dash
+    // separator (O1). The colon here guarantees the host's keep-verbatim
+    // test (`/[:./]/`) matches, so every label renders exactly as sent.
+    label: target ? `${mapped.action}: ${target}` : mapped.action,
     expandable: !(name === "project_read" || name === "read_skill" || (!ACTIONS[name] && native === NATIVE_READ)),
     systemOperation: false,
     visible: true,

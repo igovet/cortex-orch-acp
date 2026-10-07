@@ -61,7 +61,14 @@ See [route authorization](docs/acp/routing-and-fallback.md#pre-dispatch-enforcem
 An explicit model requested by the user is the first routing priority, but it
 never overrides authorization, availability, or supported parameters. If that
 exact route cannot be used, Cortex reports the refusal instead of silently
-substituting another model. Usage-based ranking switches only at observed usage
+substituting another model. Recorded requests also recognize an exact bare model
+ID unique across enabled configured engines, with terminal prose punctuation.
+Exact enabled IDs also accept direct `на/on/via/with` phrasing (for example
+`Часть 2 на gpt-6-luna:`); a request verb in the same user message governs all
+exact identities, while negations and hard policy still apply.
+Shared bare IDs grant neither engine and the plan preview explains the ambiguity;
+see [identity rules](docs/acp/routing-and-fallback.md#settings-only-routing).
+Usage-based ranking switches only at observed usage
 of at least 95%; unknown usage remains unavailable, not assumed below threshold.
 
 Initial host model/provider echoes preserve the configured native effort/mode;
@@ -83,21 +90,48 @@ only a code and safe field path for diagnostics, not the submitted content.
 Review workers must send a verdict (`APPROVE`, `REQUEST_CHANGES` or `BLOCK`;
 lowercase forms normalize). A supplied `command` on a passed or failed check is
 descriptive only; it never replaces the same-attempt `tool_call_ref` evidence.
+Open failed checks return `open_failed_check` before publication or channel
+revocation. Keep the failure and cite an exact later passing rerun, or explicitly
+submit `assignment_outcome: "failed"`; changing argv does not close it. Accepted
+receipts include `node_status`, not task acceptance.
 Prepare the complete report before the first submission; a summary or verdict
 alone is insufficient. Pass structured arguments, not hand-concatenated JSON.
-If inline JSON serialization repeatedly fails, use the owned-draft publication
-route and submit its acknowledged report identity. This guidance does not
+For code blocks or reports larger than about 3 KB, prefer the owned-draft
+publication route up front and submit its acknowledged report identity. Decision-
+brief items (including contradictions) are Markdown sections inside `markdown`,
+never separate report fields. After an inline JSON failure, correct serialization
+or use that draft route. This guidance does not
 guarantee model compliance; see [publication rules](docs/acp/publications-and-consistency.md).
 A worker whose own changes pair documentation (`docs/**.md`, `README.md`,
 `SECURITY.md`) with source or other behavior files must have read
 `documentation-sync` through Cortex `read_skill` first; otherwise the result is
-refused with `situational_skill_required` and nothing is recorded.
+refused with `situational_skill_required` and nothing is recorded. Gateway writes
+provide early shared-tree skill reminders; submission attributes only this node's
+reserved paths or successful channel writes, excluding sibling writers' paths.
+Native edits remain checked where authorship is attributable.
+If a reminder's database lookup or observation fails after a write commits,
+the successful write receipt carries `skill_hint_unavailable` instead of a write error.
+
+A missing permitted `project_read` path succeeds with `sha256: "absent"` for
+creation and `parent_exists`; private/link/read-error boundaries remain enforced.
+Creating a file (`expected_sha256: "absent"`) also creates its missing parent
+directories, no-follow; `project_mkdir` likewise creates missing parents and
+returns `created: false` for an existing directory. A file or symlink in the parent
+chain is refused with `gateway_parent_not_directory`; a non-`absent` hash under a
+missing parent is a `gateway_write_conflict`.
+Project write/mkdir/delete keys may be omitted: identical keyless retries reuse
+their effect receipt, but a precondition refusal before any effect is not replayed
+under its derived key. After correcting the precondition, retry the same keyless
+write; explicit-key refusals still need a fresh key. `project_git` is context only,
+not a check receipt. Plan scopes reserve writes, not reads. Worker capsules
+separate the task/coordinator configuration from the attempt's confirmed route.
+See [file operations](docs/acp/permissions-and-containment.md).
 
 Cortex is an ACP v1 stdio agent. Its runtime coordinates Codex and Claude ACP workers in the project you opened, and owns task scheduling, review, verification, and completion. Task records and Markdown reports are stored in that project’s `.cortex/` directory. Workers can ask assignment-local questions and request additional exact paths: the runtime parks only that worker and resumes its same healthy session after a real answer or validated access decision, without a replacement plan. A recovered channel without retained session metadata keeps its ordinary tools; questions use task-global recovery instead of promising same-session continuation. Access requests retry writer conflicts automatically with bounded delays, then grant or refuse without a user question; path, owner-policy and read-only refusals are immediate runtime decisions. Worker questions are reserved for genuine user decisions and require question text plus every option in the selected chat language (English or Russian); worker briefs and reports stay English. The runtime relays those strings verbatim, without automatic translation or a guarantee of model compliance. Answers never override policy or widen the OS jail; see [orchestration](docs/acp/orchestration.md#worker-questions-and-additional-access). Worker briefs keep objectives, scope and dependency report references complete; long task goals and review evidence use marked previews with links to the full source. Plan verification commands are literal argv from documented project commands or scripts; shell syntax is rejected before work starts. The runtime runs them once after review, each until it exits, so the project's whole suite belongs there; workers run only the tests covering their own change. A worker check is marked passed only when its exact same-attempt `command_run` or user-confirmed `outside_command` receipt proves a complete, nontrivial command exited 0. Engine shell calls, reads and incomplete output cannot verify a check; older reports remain intact and weak historic evidence is marked separately when read.
 
 To close a task immediately at your own decision, send `/cortex-finish` with no arguments, even while a Paseo turn is active. Cortex stops its owned work and records the closure as terminal `CANCELLED`, **not** verified `COMPLETED`; unfinished review, checks, and synthesis are not claimed as passed. An explicit close-as-is answer to a task-closure question has the same effect. See [completion and lifecycle](docs/acp/completion-and-lifecycle.md).
 
-Questions from coordinator, worker, or runtime fallback flows use the same structured question contract: worker cards require meaningful selectable choices, and Paseo presents an answer form with an "Other..." field. Related questions can be grouped into one paginated form and submitted together; every member must be answered. Free-text answers and chat replies remain available, and dismissing a form does not answer or close the pending question. Hosts without the required structured-question UI may present the prompt and choices as chat text instead. This is a runtime/UI contract, not proof that a model will always recognize when it should ask or that every ACP host renders a form. See [questions and steering](docs/acp/steering-and-questions.md).
+Questions from coordinator, worker, or runtime fallback flows use the same structured question contract: worker cards require meaningful selectable choices, and Paseo presents an answer form with an "Other..." field. Related questions can be grouped into one paginated form and submitted together; every member must be answered. Tabs use short topics rather than ids; colliding labels gain a bounded numeric suffix, and header-keyed answers map back to exact question identities. Text fallback numbers follow the current open-question order used by `/cortex-answer`, with blank lines between questions; remaining questions renumber after an answer. Free-text answers and chat replies remain available, and dismissing a form does not answer or close the pending question. Hosts without the required structured-question UI may present the prompt and choices as chat text instead. This is a runtime/UI contract, not proof that a model will always recognize when it should ask or that every ACP host renders a form. See [questions and steering](docs/acp/steering-and-questions.md).
 
 A real answer to a runtime recovery question starts a fresh bounded planning
 cycle, including when answered within the same host turn. The three-prompt
@@ -228,6 +262,10 @@ paseo plugin reload cortex-acp
 Git installs run their declared preparation hook. Local directory installs use the checkout directly; use the setup helper for a managed local Paseo installation when needed. See [Paseo onboarding and diagnostics](docs/acp/packaging-and-onboarding.md).
 
 The Paseo plugin shows per-worker context and token usage on worker cards. It does not add a separate provider plan-usage button.
+Post-result releases with no reported tokens use existing usage-record columns,
+so existing stores need no schema migration. Paseo omits their false token alarm;
+genuine unknown/failed calls remain visible. Missing usage is not zero/free.
+See [usage attribution](docs/acp/observability.md#2-usagecost-attribution-observabilityusage).
 
 ### Other ACP clients
 

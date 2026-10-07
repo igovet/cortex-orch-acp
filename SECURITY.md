@@ -122,7 +122,7 @@ task-closure question is required. The runtime records the source and unfinished
 work, fences assignments and owned sessions, and uses terminal `CANCELLED`, not
 verified `COMPLETED`. A model claim that the user wants to finish is not an
 authorization or a passing review/verification receipt.
-Paseo's structured question path is role-neutral across coordinator, worker and runtime fallback requests. For grouped questions it uses one paginated form and submits the complete set together; incomplete submissions are rejected. The "Other..." field and a chat reply are valid free-text answers. Dismissing or cancelling the form does not create an answer, and a declined or timed-out host elicitation leaves the durable question pending. Where an ACP host lacks the structured UI, Cortex can only fall back to a text prompt; it does not enforce that a model asks every question or that every host renders options. A free-text legacy card's instructional action is not an answer.
+Paseo's structured question path is role-neutral across coordinator, worker and runtime fallback requests. For grouped questions it uses one paginated form and submits the complete set together; incomplete submissions are rejected. Unique, bounded topic headers are presentation keys mapped back to exact member identities; a complete legacy id-keyed answer map is also accepted, but mixed or foreign key sets fail closed. Numeric text-fallback selection uses the same current-open creation/batch order as the displayed numbers, not random ids. None of these mappings grants access. The "Other..." field and a chat reply are valid free-text answers. Dismissing or cancelling the form does not create an answer, and a declined or timed-out host elicitation leaves the durable question pending. Where an ACP host lacks the structured UI, Cortex can only fall back to a text prompt; it does not enforce that a model asks every question or that every host renders options. A free-text legacy card's instructional action is not an answer.
 Plan verification commands execute as literal argv without a shell. Submission rejects command substitution, backticks, redirection, pipes, shell operators and standalone parentheses, so a plan cannot defer that syntax error until verification. Structural validation does not prove semantic correctness of a plan, review or implementation.
 
 Worker briefs preserve the assignment objective, scope and dependency report references. The original task goal and review git evidence are shortened only when needed to fit the provisioning limit, and every shortened field identifies the worker-readable capsule or git-output source. These references use tools already available to the worker and do not change its assignment authority. A recovery capsule whose critical sections exceed their byte budget is compacted deterministically, never refused: each truncated field carries its sha256, size, a fenced preview with its original trust label and the tool that returns the full text (`read_source` for user messages and answers). Each trimmed list names its omitted entries, so recovery never silently loses required context.
@@ -140,6 +140,28 @@ reader blocked on still-open stdin. SIGTERM records the disconnect synchronously
 For `result_submit`, a model-supplied `checks[].command` on a completed check
 is descriptive, never evidence. Only the runtime derives `closed_by` from real
 same-attempt command receipts; malformed fields get path-specific corrections.
+A new result with an open failure is refused with `open_failed_check` before
+publication, request recording or channel revocation. Only an explicit
+`assignment_outcome: "failed"` intentionally submits that failed assignment;
+there is no changed-command supersession or waiver of review/verification.
+Accepted receipts disclose `node_status`, not task acceptance.
+
+Missing permitted project reads return `sha256: "absent"` for the existing CAS
+creation path, never an access grant. Private paths, links and real read errors
+stay refused. Keyless project write/mkdir/delete actions use operation/payload
+hashes scoped to their channel; identical retries retain effect receipts and never
+repeat a deletion or its confirmation. A pre-effect refusal keeps its rejection
+event but no replayable derived-key receipt; an identical retry after fixing the
+precondition can run. Explicit keys retain the full structured refusal. Unknown outcomes still fence retries.
+Gateway situational-skill hints are advisory and do not replace the result gate.
+Failures in the hint's connection, node lookup or observation do not turn an
+already-committed write into a rejection; the retained success receipt records
+`skill_hint_unavailable`. Result gating attributes only own reserved paths or
+successful channel writes, excluding siblings' reserved paths (ambiguous native
+edits yield no authorship assertion). This does not bypass mutation authorization.
+`project_git` is context only, never check evidence; command receipt rules stay
+unchanged. Worker recovery separates the task/coordinator snapshot from the exact
+attempt's dispatch audit and native configuration confirmation.
 
 ACP events sent to a host are bounded display projections. Worker cards omit
 transcript bodies and raw inputs; timeline tool details are capped, and
@@ -156,6 +178,26 @@ task, and avoid retransmitting cumulative content; durable task history and
 work remain proportional to the task.
 
 The Paseo client wraps its rendered panels, composer popover, and timeline card in per-surface error boundaries. If reading or coercing a thrown value fails while formatting the fallback, it uses `unknown error`. This is a UI recovery boundary, not an execution sandbox or a root-cause diagnosis.
+
+Connection-registry owner-only reads retry a detached regular inode
+(`st_nlink == 0`) by path for at most eight attempts after an atomic replace;
+each open still checks no-follow, ownership and private modes. Hardlinks,
+symlinks and unsafe replacements remain refused. Unchanged registry transactions
+do not rewrite the file. This avoids validation-only inode churn, not a grant to
+unsafe storage.
+
+Recorded user requests may name an exact bare model ID unique across enabled
+configured engines; shared bare IDs grant neither route and receive a plan
+preview diagnostic. Terminal prose punctuation cannot truncate another enabled
+configured ID. For enabled exact identities, direct `на/on/via/with` naming or a
+request-form verb in the same user message supplies request grammar; negations
+still apply. Configured labels retain conservative local grammar.
+Model prose and hints remain non-consent, and hard route
+authorization checks are unchanged. See [routing](docs/acp/routing-and-fallback.md#settings-only-routing).
+Creating a project file creates its missing parent directories only after the
+private-path, write-grant and user deny-write checks passed for the full path;
+each component is created and reopened no-follow, and a file or symlink component
+is refused (`gateway_parent_not_directory`) without following it.
 
 ## Tool access and containment
 
@@ -612,7 +654,10 @@ JSON Schema and the advertised property description. Length counts Unicode code
 points, not encoded bytes or UTF-16 units. Preflight guidance never raises bounds,
 silently truncates requirements or grants authority.
 Submission guidance requires a complete report and valid argument serialization;
-the owned-draft route is an alternative transport, not an acceptance bypass.
+the owned-draft route is recommended up front for code blocks or reports larger
+than about 3 KB, and is an alternative transport, not an acceptance bypass.
+Decision-brief items are Markdown sections within `markdown`, never additional
+report fields.
 Missing reports remain rejected. An engine-side JSON parse failure is not a
 runtime submission receipt and never establishes publication or completion.
 In one retained Claude review session, some attempts omitted both report forms
@@ -711,63 +756,12 @@ child-authored reason; local process observations remain distinguishable without
 copying the output. Unknown exception codes are redacted, not accepted by prefix.
 Zero exit requires a complete canonical exact-identity/digest binding envelope;
 missing evidence or extra fields never become success. Diagnostics never return a binding or authorize another read, retry,
-checkpoint or migration; earlier generic refusals cannot be retrospectively
-attributed to busy storage or any other condition. See [the binding procedure](docs/acp/dev-paseo-environment.md#read-only-dev-binding).
+checkpoint or migra
+## Usage-record compatibility
 
-## Runtime store ignore protection
-
-Cortex protects the task project root `.gitignore` through the normal safe-file
-writer, preserving digest checks, live write authority and user deny-write paths.
-It appends a final `/.cortex/` directory rule so earlier negations cannot expose
-store contents. Consented deletion of that ignore file retains the required rule.
-Command completion reconciles a changed ignore file (also after a nonzero exit);
-a failed repair cannot produce a successful command receipt. Fresh writable
-worker result submission reconciles observed ignore-file changes before publication,
-recreating a removed file. When a complete baseline is unavailable it ensures
-the rule conservatively, creating the file if absent. Unchanged observed tasks
-do not create an ignore file. Read-only roles and replayed results do not repair files.
-
-Native edits are not intercepted per call: protection is restored at submission,
-not continuously during a native turn. An interrupted native turn that never
-submits may leave an unsafe ignore file. Neither ignoring nor this guard removes
-already tracked store content, prevents a deliberate `git add -f`, or undoes a
-commit made before reconciliation. The guard never untracks, deletes store data,
-stages or commits files. See [permissions](docs/acp/permissions-and-containment.md#runtime-store-ignore-protection).
-
-## Metadata-only orchestration timing
-
-The [timeline reader](docs/acp/observability.md#orchestration-phase-measurement)
-uses a guarded SQLite read-only immutable snapshot; it never initializes,
-migrates, checkpoints or repairs storage. Busy locks and nonempty WALs refuse.
-Runtime startup/first-update milestones and scheduler wait diagnostics carry
-only identities, timestamps and safe reason labels, never prompts, reports or
-tool bodies. These observations do not establish acceptance or native-action
-receipts and do not enable full wire logging in production.
-
-## Developer wire-trace boundary
-
-Full [wire tracing](docs/acp/observability.md#developer-only-wire-tracing)
-is disabled by default, with no file creation on the disabled path.
-Only an explicit guarded `~/.paseo-dev` daemon-start opt-in supplies its
-launch markers; inherited opt-ins are stripped from ordinary wrapper calls.
-The runtime checks the exact dev source/config/state combination and refuses
-installed production payloads/state even with opt-in. Environment/source
-checks are not authentication against the account owner forging their own
-environment.
-
-The fixed dev-only trace directory is outside all Git repositories and project
-`.cortex` stores. Owned private directories/files, no-follow descriptor opens,
-hardlink checks, a cross-process lock and 64 MiB rotation cap constrain retention.
-Unsafe paths, redaction exhaustion and write failures stop tracing without
-changing runtime authority or protocol outcomes. Credentials are redacted
-before writing, including headers, secret-looking environment values, relay
-tokens, argv and embedded JSON; unfamiliar/fragmented secrets remain a risk.
-Traces deliberately include confidential prompts, report/file bodies and
-engine thought traffic, so never commit or publish them or paste raw traces
-into reports.
-
-Lifecycle traces label uncommitted event insert attempts, not successful
-transactions. Malformed/oversized frames, record-size gaps, rotation and
-unavailable identity mappings are explicit limitations. The read-only viewer
-does not validate acceptance, establish complete native-action receipts or
-repair storage. Normal production metadata logging is unchanged.
+Post-result releases retain the original closed SQLite basis vocabulary and
+use existing `failed`/`stop_reason` columns; no table rebuild or format change
+is needed. Paseo hides only the token alarm for non-failed, explicitly marked
+release calls. It does not infer missing usage as zero/free or suppress genuine
+unknown/failed calls. Diagnostic token availability remains honest. See
+[usage attribution](docs/acp/observability.md#2-usagecost-attribution-observabilityusage).

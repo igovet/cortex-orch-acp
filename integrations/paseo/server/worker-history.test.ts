@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { loadServerModuleForTest } from "./test-bundle.ts";
 import { execSqlite, sqlValues } from "./test-fixture-db.ts";
+import { tokensSummaryLabel } from "../client/worker-display.ts";
 
 const { getWorkerHistory, parsePaseoRuntimeSessionId, resolveAgentTask } = await loadServerModuleForTest<typeof import("./worker-history.ts")>(resolve("server/worker-history.ts"));
 
@@ -320,6 +321,51 @@ function makeHostLossFixture(): { root: string; cleanup: () => void } {
     // The chat card polls this exact assignment and settles on it.
     const card = await getWorkerHistory({ workspaceId: WORKSPACE_ID, agentId: AGENT_ID, assignmentRef: "req-owner-lost", cursor: Number.MAX_SAFE_INTEGER, limit: 1 }, context);
     assert.equal(card.assignments[0]?.attempts.at(-1)?.status, "interrupted");
+  } finally {
+    cleanup();
+  }
+}
+
+// Historical usage CHECK accepts the post-result marker in existing columns;
+// the actual card projection suppresses only that marker, not genuine misses.
+{
+  const { root, cleanup } = makeFixture();
+  const dbPath = join(root, ".cortex", "cortex.sqlite3");
+  try {
+    execSqlite(dbPath, `
+      create table delegation_provisioning (idempotency_key text primary key, task_id text, attempt_id text);
+      create table usage_records (task_id text, attempt_id text,
+        basis text check(basis in ('observed','engine_reported','derived','estimated','unknown')),
+        tokens_json text, stop_reason text, failed integer);
+      insert into delegation_provisioning values ${sqlValues(["req-usage", TASK_ID, "exec-usage"])};
+      insert into task_events (task_id,event_type,assignment_ref,payload_json,created_at) values
+        ${sqlValues([TASK_ID, "delegation_requested", "req-usage", JSON.stringify({ work_attempt_ref: "xa_1" }), "now"])};
+      insert into usage_records values ${sqlValues([TASK_ID, "exec-usage", "unknown", "{}", "released_after_result", 0])};
+    `);
+    const context = mockContext(WORKSPACE_ID, AGENT_ID, root, SESSION_ID);
+    const card = async () => {
+      const history = await getWorkerHistory({ workspaceId: WORKSPACE_ID, agentId: AGENT_ID, assignmentRef: "req-usage" }, context);
+      assert.equal(history.available, true);
+      assert.equal(history.assignments.length, 1);
+      return history.assignments[0].attempts.at(-1)!;
+    };
+    assert.equal((await card()).tokens, undefined);
+    assert.equal(tokensSummaryLabel((await card()).tokens), null);
+    execSqlite(dbPath, `
+      insert into usage_records values ${sqlValues([TASK_ID, "exec-usage", "engine_reported", '{"inputTokens":10,"outputTokens":5}', "released_after_result", 0])};
+    `);
+    assert.equal((await card()).tokens?.knownCalls, 1);
+    assert.equal((await card()).tokens?.unknownCalls, 0);
+    assert.doesNotMatch(tokensSummaryLabel((await card()).tokens)!, /unavailable/);
+    execSqlite(dbPath, `
+      insert into usage_records values ${sqlValues([TASK_ID, "exec-usage", "unknown", "{}", "end_turn", 0])};
+      insert into usage_records values ${sqlValues([TASK_ID, "exec-usage", "unknown", "{}", "released_after_result", 1])};
+    `);
+    const tokens = (await card()).tokens;
+    assert.equal(tokens?.total, 15);
+    assert.equal(tokens?.knownCalls, 1);
+    assert.equal(tokens?.unknownCalls, 2);
+    assert.match(tokensSummaryLabel(tokens)!, /2 calls unavailable/);
   } finally {
     cleanup();
   }

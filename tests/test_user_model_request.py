@@ -217,3 +217,168 @@ def test_a_grant_never_crosses_tasks(task):
     other = bootstrap_task(store, SourceEvent(origin="test", event_id="other"), "Use Astra everywhere", "owner")
     assert auto_route.user_model_request(store, other.task_id, "codex-acp/gpt-6-astra") is not None
     assert auto_route.user_model_request(store, task_id, "codex-acp/gpt-6-astra") is None
+
+
+@pytest.mark.parametrize('engine,model', [
+    ('claude-agent-acp','claude-sonnet-5'), ('codex-acp','gpt-6.1-sol'),
+    ('codex-acp','gpt-6-luna'), ('claude-agent-acp','opus[1m]'),
+])
+@pytest.mark.parametrize('suffix', ['', '.', ',', '!', '?', ';', ':'])
+def test_unique_enabled_bare_model_request_binds_exact_source(tmp_path,engine,model,suffix):
+    from test_settings_only_routing import install, settings
+    data=settings(model)
+    data['enabled']={engine:[model]}
+    data['models']={engine:data['models']['codex-acp']}
+    install(tmp_path,data)
+    store=Store(tmp_path/'.cortex',project_root=tmp_path)
+    task=bootstrap_task(store,SourceEvent(origin='test',event_id='bare'),
+                        f'Use {model}{suffix}', 'owner')
+    grant=auto_route.user_model_request(store,task.task_id,f'{engine}/{model}')
+    assert grant == dict(source_ref=f'{task.report_id}:-1',family=f'{engine}/{model}',matched=model)
+    assert auto_route.ambiguous_user_model_request(store,task.task_id,f'{engine}/{model}') is None
+
+
+@pytest.mark.parametrize('engine,model', [
+    ('codex-acp','gpt-6.1-sol'), ('claude-agent-acp','opus[1m]'),
+    ('opencode','vendor/Unit,7[wide]'),
+])
+def test_full_model_request_accepts_terminal_punctuation(tmp_path,engine,model):
+    from test_settings_only_routing import install, settings
+    data=settings(model)
+    data['enabled']={engine:[model]}
+    data['models']={engine:data['models']['codex-acp']}
+    install(tmp_path,data)
+    store=Store(tmp_path/'.cortex',project_root=tmp_path)
+    identity=f'{engine}/{model}'
+    task=bootstrap_task(store,SourceEvent(origin='test',event_id='full'),f'Use {identity}.','owner')
+    assert auto_route.user_model_request(store,task.task_id,identity) == dict(
+        source_ref=f'{task.report_id}:-1',family=identity,matched=identity)
+
+
+@pytest.mark.parametrize('suffix',['','.'])
+def test_ambiguous_bare_id_never_grants_either_engine(tmp_path,suffix):
+    from test_settings_only_routing import install, settings
+    data=settings('shared')
+    data['enabled']['claude-agent-acp']=['shared']
+    data['models']['claude-agent-acp']={'auto':['shared'],'tiers':{'shared':'standard'}}
+    install(tmp_path,data)
+    store=Store(tmp_path/'.cortex',project_root=tmp_path)
+    task=bootstrap_task(store,SourceEvent(origin='test',event_id='ambiguous'),f'Use shared{suffix}','owner')
+    for identity in ('codex-acp/shared','claude-agent-acp/shared'):
+        assert auto_route.user_model_request(store,task.task_id,identity) is None
+        assert auto_route.ambiguous_user_model_request(store,task.task_id,identity) == dict(
+            source_ref=f'{task.report_id}:-1',matched='shared')
+    append_source_event(store,SourceEvent(origin='test',event_id='qualified'),
+                        'Use claude-agent-acp/shared.',task.task_id)
+    assert auto_route.user_model_request(store,task.task_id,'claude-agent-acp/shared')['matched'] == 'claude-agent-acp/shared'
+    assert auto_route.user_model_request(store,task.task_id,'codex-acp/shared') is None
+
+
+def test_disabled_duplicate_does_not_make_bare_id_ambiguous(tmp_path):
+    from test_settings_only_routing import install, settings
+    data=settings('shared')
+    data['models']['claude-agent-acp']={'auto':[],'tiers':{'shared':'standard'}}
+    install(tmp_path,data)
+    store=Store(tmp_path/'.cortex',project_root=tmp_path)
+    task=bootstrap_task(store,SourceEvent(origin='test',event_id='enabled'),'Use shared','owner')
+    assert auto_route.user_model_request(store,task.task_id,'codex-acp/shared') is not None
+    assert auto_route.user_model_request(store,task.task_id,'claude-agent-acp/shared') is None
+
+
+@pytest.mark.parametrize('text', [
+    'gpt-6-luna', 'Do not use gpt-6-luna.',
+    'Use gpt-6-luna-extended', 'Use gpt-6-luna.v2', 'Use gpt-6-luna[wide]',
+    'Use vendor/gpt-6-luna', 'Use GPT-6-LUNA', 'Use gpt-6-luna,next',
+])
+def test_bare_ids_keep_exact_boundaries_and_request_grammar(tmp_path,text):
+    from test_settings_only_routing import install, settings
+    install(tmp_path,settings('gpt-6-luna'))
+    store=Store(tmp_path/'.cortex',project_root=tmp_path)
+    task=bootstrap_task(store,SourceEvent(origin='test',event_id='negative'),text,'owner')
+    assert auto_route.user_model_request(store,task.task_id,'codex-acp/gpt-6-luna') is None
+
+
+@pytest.mark.parametrize('qualified',[False,True])
+def test_terminal_dot_that_is_a_configured_id_is_not_stripped(tmp_path,qualified):
+    from test_settings_only_routing import install, settings
+    data=settings('unit')
+    data['enabled']['codex-acp'].append('unit.')
+    data['models']['codex-acp']['tiers']['unit.']='standard'
+    install(tmp_path,data)
+    store=Store(tmp_path/'.cortex',project_root=tmp_path)
+    spelling='codex-acp/unit.' if qualified else 'unit.'
+    task=bootstrap_task(store,SourceEvent(origin='test',event_id='opaque'),f'Use {spelling}','owner')
+    assert auto_route.user_model_request(store,task.task_id,'codex-acp/unit') is None
+    assert auto_route.user_model_request(store,task.task_id,'codex-acp/unit.')['matched'] == spelling
+
+
+def test_bare_model_consent_uses_only_recorded_user_answer(task):
+    store,task_id=task
+    _publish_model_report(store,task_id,'Use gpt-6-luna.')
+    question=questions_store.create_if_absent(store,task_id,'q-bare','Use gpt-6-luna?')
+    assert auto_route.user_model_request(store,task_id,'codex-acp/gpt-6-luna') is None
+    assert questions_store.answer(store,question.id,'Use gpt-6-luna.','text')
+    assert auto_route.user_model_request(store,task_id,'codex-acp/gpt-6-luna') == dict(
+        source_ref=questions_store.answer_ref(question.id),family='codex-acp/gpt-6-luna',matched='gpt-6-luna')
+
+
+@pytest.mark.parametrize('qualified',[False,True])
+@pytest.mark.parametrize('template', [
+    'Часть 2 на {model}: исправь подсчёт',
+    'Part 2 on {model}: fix counting',
+    'Step 2 via {model}: fix counting',
+    'Part 2 with {model}: fix counting',
+    'на {model}', 'on {model}', 'via {model}', 'with {model}',
+])
+def test_exact_enabled_identity_after_means_preposition_is_an_owner_request(tmp_path,qualified,template):
+    from test_settings_only_routing import install, settings
+    install(tmp_path,settings('gpt-6-luna'))
+    store=Store(tmp_path/'.cortex',project_root=tmp_path)
+    model='codex-acp/gpt-6-luna' if qualified else 'gpt-6-luna'
+    task=bootstrap_task(store,SourceEvent(origin='test',event_id='means'),template.format(model=model),'owner')
+    assert auto_route.user_model_request(store,task.task_id,'codex-acp/gpt-6-luna') == dict(
+        source_ref=f'{task.report_id}:-1',family='codex-acp/gpt-6-luna',matched=model)
+
+
+@pytest.mark.parametrize('request_text', ['Используй именно указанные модели.', 'Use exactly the named models.'])
+@pytest.mark.parametrize('position',['before','after'])
+def test_message_wide_request_governs_every_exact_enabled_identity(tmp_path,request_text,position):
+    from test_settings_only_routing import install, settings
+    data=settings('gpt-6-luna')
+    data['enabled']['codex-acp'].append('gpt-6.1-sol')
+    data['models']['codex-acp']['tiers']['gpt-6.1-sol']='standard'
+    data['enabled']['claude-agent-acp']=['claude-sonnet-5']
+    data['models']['claude-agent-acp']={'auto':['claude-sonnet-5'],'tiers':{'claude-sonnet-5':'standard'}}
+    install(tmp_path,data)
+    store=Store(tmp_path/'.cortex',project_root=tmp_path)
+    listing='Часть 1: claude-agent-acp/claude-sonnet-5\nЧасть 2: gpt-6-luna\nЧасть 3: gpt-6.1-sol'
+    text=request_text+'\n'+listing if position=='before' else listing+'\n'+request_text
+    task=bootstrap_task(store,SourceEvent(origin='test',event_id='message'),text,'owner')
+    for identity in ['claude-agent-acp/claude-sonnet-5','codex-acp/gpt-6-luna','codex-acp/gpt-6.1-sol']:
+        assert auto_route.user_model_request(store,task.task_id,identity)['source_ref']==f'{task.report_id}:-1'
+
+
+@pytest.mark.parametrize('text', [
+    'Часть 2 не на gpt-6-luna: исправь',
+    'Part 2 not on gpt-6-luna: fix',
+    'Use the named models. Part 2: not gpt-6-luna',
+    'Do not use these models. Part 2: gpt-6-luna',
+    'Не используй эти модели. Часть 2: gpt-6-luna',
+    'Use these models. Without gpt-6-luna',
+    'Part 2 on GPT-6-LUNA', 'Part 2 on gpt-6-luna-extended',
+])
+def test_expanded_identity_request_grammar_keeps_negations_and_exact_case(tmp_path,text):
+    from test_settings_only_routing import install, settings
+    install(tmp_path,settings('gpt-6-luna'))
+    store=Store(tmp_path/'.cortex',project_root=tmp_path)
+    task=bootstrap_task(store,SourceEvent(origin='test',event_id='negative-means'),text,'owner')
+    assert auto_route.user_model_request(store,task.task_id,'codex-acp/gpt-6-luna') is None
+
+
+def test_message_wide_grant_does_not_cross_user_messages_or_apply_to_labels(task):
+    store,task_id=task
+    append_source_event(store,SourceEvent(origin='test',event_id='request'),'Use exactly the named models.',task_id)
+    append_source_event(store,SourceEvent(origin='test',event_id='listing'),'Part 2: gpt-6-luna',task_id)
+    assert auto_route.user_model_request(store,task_id,'codex-acp/gpt-6-luna') is None
+    append_source_event(store,SourceEvent(origin='test',event_id='label'),'Astra. Use the default model.',task_id)
+    assert auto_route.user_model_request(store,task_id,'codex-acp/gpt-6-astra') is None

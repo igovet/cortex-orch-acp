@@ -282,6 +282,7 @@ ERROR_HELP = {
     "reviewer_only_verdict": "Only a review assignment gives a verdict. Remove verdict and resubmit.",
     "review_verdict_required": "A review assignment must give a verdict: APPROVE, REQUEST_CHANGES or BLOCK.",
     "review_project_revision_changed": "The project changed while you reviewed it, so this verdict was not recorded. The review is now bound to the current project revision: re-check what changed (project_git diff), then submit your verdict again with a new request_key.",
+    "open_failed_check": "Refused before recording or publishing: a check remains failed. Retain its history and cite a verified later rerun of exactly the receipt argv (and outside_command cwd), or send assignment_outcome=failed to intentionally submit a failed assignment. A different command does not close it. The channel remains active; the same request_key may be reused.",
     "situational_skill_required": "Refused before anything was recorded: this attempt's observed project changes match a situational skill's trigger and the attempt has not read that skill. Call the cortex MCP read_skill tool with the skill id named in expected/correction, re-check your edits against it, then call result_submit again (the same request_key may be reused).",
     "review_resubmit_required": "This request_key was refused because the project changed during the review; it never records a verdict. Re-check the changes, then submit with a new request_key.",
     "review_project_revision_unstable": "The project kept changing during this review (another writer is editing the same checkout), so no verdict can be bound to one revision. Nothing was recorded; report that in your final message and end your turn.",
@@ -487,4 +488,6 @@ def error_help(code: str) -> str:
         return (f"The outcome of this action is uncertain ({code}). Do not repeat it; "
                 "check whether it took effect first.")
     return (f"Refused ({code}); nothing was changed. Read error, and field, received and "
-            "expected when present, and change the request: an identical retry fails the same way.")
+            "expected when present. Correct the request or the stated precondition before retrying. "
+            "A keyless precondition refusal may be retried identically after correction; an explicit "
+            "request_key retains the refusal, so use a new key for that corrected action.")

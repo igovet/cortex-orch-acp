@@ -330,3 +330,65 @@ def test_all_23_profiles_require_structured_questions_and_preserve_free_text():
         assert 'native engine question tool' in normalized
         assert 'meaningful selectable' in normalized
         assert 'free text' in body
+
+
+@pytest.mark.parametrize('tied_timestamps', [False, True])
+def test_displayed_batch_numbers_bind_command_answers_in_creation_order(planning, monkeypatch, tied_timestamps):
+    from cortex_runtime.acp.orchestrating_runtime import OrchestratingRuntime
+    from cortex_runtime.acp.production_runtime import ProductionOrchestratingRuntime
+    from cortex_runtime.portable.engine_contract import StopReason
+    from acp_fakes import FakeRuntime
+
+    store, _, coordinator = planning
+    older = questions_store.create_if_absent(store, coordinator.task_id, 'older', 'Earlier question?')
+    # Force random identities to sort opposite to the immutable member order.
+    ids = iter(['pq_zfirst', 'pq_asecond', 'qb_order'])
+    monkeypatch.setattr(question_batches, 'new_id', lambda _: next(ids))
+    receipt = request(store, coordinator, dict(questions=FORMS, request_key='ordered'))
+    with store.connection() as db:
+        db.execute("UPDATE pending_questions SET created_at=? WHERE id=?", ('2026-01-01T00:00:00', older.id))
+        for index, question_id in enumerate(receipt['question_ids']):
+            created = f"2026-01-02T00:00:0{0 if tied_timestamps else index}"
+            db.execute("UPDATE pending_questions SET created_at=? WHERE id=?", (created, question_id))
+        db.commit()
+
+    runtime = OrchestratingRuntime.__new__(OrchestratingRuntime)
+    runtime._store = store
+    runtime.transport_lost = lambda *_: False
+    facade = ProductionOrchestratingRuntime.__new__(ProductionOrchestratingRuntime)
+    facade._runtime_for_project = lambda _: runtime
+    expected = [older.id, *receipt['question_ids']]
+    assert [q.id for q in facade.list_open_questions(coordinator.task_id, project_root=str(store.project_root))] == expected
+    reopened = Store(store.directory, project_root=store.project_root)
+    assert [q.id for q in questions_store.list_open(reopened, coordinator.task_id)] == expected
+
+    shown = []
+    assert not runtime._handle_question_batch(coordinator.task_id, 'incoming', shown.append, 'en',
+                                             pending(store, coordinator.task_id), None)
+    assert shown[0].startswith('2. Which target?')
+    assert shown[1].startswith('3. Which format?')
+    assert all(block.endswith('\n\n') for block in shown)
+    assert '\n\n3. Which format?' in ''.join(shown)
+
+    # Exercise the real ACP command's current-open index lookup and durable
+    # source capture, without starting a paid engine or an orchestration turn.
+    fake = FakeRuntime()
+    fake.list_open_questions = facade.list_open_questions
+    def apply(task_id, session_id, question, text, emit_update, cancel_event):
+        assert questions_store.answer(store, question.id, text, 'text', session_id=session_id)
+        return StopReason.END_TURN
+    fake.answer_question = apply
+    agent = Agent(fake)
+    agent.stores[str(store.project_root)] = store
+    agent.transport = SimpleNamespace(send_response=lambda _: None, send_notification=lambda _: True)
+    session = dict(project=str(store.project_root), task_id=coordinator.task_id)
+    agent._run_cortex_answer('first', 'incoming', session, '2 first answer', threading.Event(), lambda _: None)
+    assert questions_store.get(store, receipt['question_ids'][0]).answer_text == 'first answer'
+    assert questions_store.get(store, receipt['question_ids'][1]).status == 'open'
+    shown.clear()
+    runtime._handle_question_batch(coordinator.task_id, 'incoming', shown.append, 'en',
+                                   pending(store, coordinator.task_id), None)
+    assert len(shown) == 1 and shown[0].startswith('2. Which format?')
+    agent._run_cortex_answer('second', 'incoming', session, '2 second answer', threading.Event(), lambda _: None)
+    assert questions_store.get(store, receipt['question_ids'][1]).answer_text == 'second answer'
+    assert questions_store.get(store, older.id).status == 'open'

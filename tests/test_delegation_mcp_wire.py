@@ -177,12 +177,18 @@ def test_worker_gateway_publication_and_result_cross_real_mcp_process(tmp_path):
           (reserved['assignment_ref'],task,'a_wire1',attempt,'worker-backend-dev','ready','ready','shared_project_root',worker,None,None,None,'qualified',None,coordinator.owner_epoch,stamp,stamp))
         db.commit()
     def call(name,**args):return _data(_call(project,worker,wsecret,_init_and('tools/call',dict(name=name,arguments=args)),tmp_path))
+    missing=call('project_read',path='new.txt')
+    assert missing == dict(exists=False,path='new.txt',sha256='absent',parent_exists=True)
+    assert call('project_read',path='missing-parent/new.txt')['parent_exists'] is False
+    written=call('project_write',path='new.txt',content='new',expected_sha256=missing['sha256'])
+    assert call('project_write',path='new.txt',content='new',expected_sha256=missing['sha256']) == written
+    assert (project/'new.txt').read_text() == 'new'
     draft=call('create_draft',template='general',request_key='draft')
     call('draft_write',draft_id=draft['draft_id'],content=draft['required_first_line']+'\n\n# Report\n\nCompleted fixture.\n',request_key='body')
     report=call('write_report',draft_id=draft['draft_id'],title='Report',summary='Observed',author='worker',request_key='publish')
     args=dict(report=dict(report_ref=report['report_id']),summary='Observed',checks=[],request_key='result')
     result=call('result_submit',**args)
-    assert result['recorded']
+    assert result['recorded'] and result['node_status']=='completed'
     # Accepted result revokes the channel even while its engine lingers.
     # A new authenticated wire call, including a replay, cannot reactivate it;
     # runtime recovery reads the durable receipt instead of republishing.

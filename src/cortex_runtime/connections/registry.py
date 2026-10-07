@@ -491,28 +491,33 @@ def _safe_existing_file(path: Path) -> os.stat_result | None:
 def read_owner_file(path: Path) -> bytes | None:
     """O_NOFOLLOW read of one owner-only regular single-link file, or None."""
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
-    try:
-        descriptor = os.open(path, flags)
-    except FileNotFoundError:
-        return None
-    except OSError:
-        raise _fail_closed("unsafe_storage", f"{path} is an unsafe link or cannot be opened safely.")
-    try:
-        info = os.fstat(descriptor)
-        if (
-            stat.S_ISLNK(info.st_mode)
-            or not stat.S_ISREG(info.st_mode)
-            or info.st_nlink != 1
-            or info.st_uid != os.getuid()
-            or info.st_mode & 0o077
-        ):
-            raise _fail_closed("unsafe_storage", f"{path} is an unsafe link/hardlink/mode file.")
-        with os.fdopen(descriptor, "rb") as handle:
-            descriptor = -1
-            return handle.read()
-    finally:
-        if descriptor != -1:
-            os.close(descriptor)
+    for _attempt in range(8):
+        try:
+            descriptor = os.open(path, flags)
+        except FileNotFoundError:
+            return None
+        except OSError:
+            raise _fail_closed("unsafe_storage", f"{path} is an unsafe link or cannot be opened safely.")
+        try:
+            info = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(info.st_mode)
+                or info.st_nlink > 1
+                or info.st_uid != os.getuid()
+                or info.st_mode & 0o077
+            ):
+                raise _fail_closed("unsafe_storage", f"{path} is an unsafe link/hardlink/mode file.")
+            if info.st_nlink == 0:
+                # An atomic replace unlinked the opened inode before fstat.
+                # Reopen by path, validating the replacement just as strictly.
+                continue
+            with os.fdopen(descriptor, "rb") as handle:
+                descriptor = -1
+                return handle.read()
+        finally:
+            if descriptor != -1:
+                os.close(descriptor)
+    raise _fail_closed("unsafe_storage", f"{path} kept changing during the bounded safe read.")
 
 
 def atomic_write_private(path: Path, data: bytes, *, directory: Path) -> None:
@@ -672,8 +677,8 @@ def write_registry(state: RegistryState, environ: dict[str, str] | None = None) 
 def transaction(environ: dict[str, str] | None = None) -> Iterator[RegistryState]:
     """Lock, read, yield a mutable :class:`RegistryState`, then write back.
 
-    Writing back only happens if the ``with`` block exits without raising,
-    so a failed onboarding/validation step never partially commits.
+    Writing back only happens if serialized state changed and the ``with``
+    block exits without raising, so failed validation never partially commits.
     """
     lock_path = registry_lock_path(environ)
     ensure_private_dir(lock_path.parent, root=config_root(environ), environ=environ)
@@ -687,8 +692,10 @@ def transaction(environ: dict[str, str] | None = None) -> Iterator[RegistryState
         fcntl.flock(descriptor, fcntl.LOCK_EX)
         try:
             state = read_registry(environ)
+            before = state.to_json_bytes()
             yield state
-            write_registry(state, environ)
+            if state.to_json_bytes() != before:
+                write_registry(state, environ)
         finally:
             fcntl.flock(descriptor, fcntl.LOCK_UN)
     finally:

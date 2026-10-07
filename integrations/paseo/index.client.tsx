@@ -36,6 +36,11 @@ const workerTimelineSchema = z.object({
   // the first time a session is opened. `undefined` for a running card or
   // an older item that predates this field -- see `useFallbackWorkerResult`.
   result: workerResult.nullable().optional(),
+  // The host's own bounded, server-redacted ACP tool-call error (see
+  // `_emit_worker_card`'s `raw_output`): the route/reason for a
+  // provisioning failure, a cancellation/interruption reason, or a
+  // worker's own short failure line. Absent for a running/completed card.
+  failureReason: z.string().optional(),
 });
 
 const CORTEX_PROVIDER = "cortex";
@@ -129,6 +134,12 @@ function WorkerTimelineRow({ theme, layout, agentId, item, workspaceId, onOpen }
         </View>
         <Text numberOfLines={2} ellipsizeMode="tail" style={{ color: theme.colors.foreground, fontSize: 14, fontWeight: "600" }}>{metadata.workerName}</Text>
         <Text numberOfLines={1} ellipsizeMode="tail" style={{ color: theme.colors.foregroundMuted, fontSize: 12 }}>{metadata.subtitle}</Text>
+        {/* The sanitized failure line itself (a provisioning failure's code
+            and reason, a cancellation/interruption reason, or a worker's
+            own crash line): the subtitle above never carries more than the
+            role and status, and this is the one place in the collapsed
+            card that shows why, without opening the Workers panel. */}
+        {!isWorking && item.data.failureReason && <Text numberOfLines={3} ellipsizeMode="tail" style={{ color: statusColor, fontSize: 12 }}>{item.data.failureReason}</Text>}
         <UsageMeter context={usage?.context} tokens={usage?.tokens} theme={theme} />
         {!isWorking && result && <View style={{ marginTop: 2, paddingTop: 8, borderTopWidth: 1, borderColor: theme.colors.border }}>
           <WorkerResultDetail body={result.summary ?? undefined} items={workerResultItems(result.checks)} theme={theme} />
@@ -163,6 +174,8 @@ export default function contribute(client: PluginClientContext) {
       // completed card's result the *first* time a session is opened, not
       // just after a live update -- the result no longer needs its own RPC.
       const result = parseWorkerResult(item.metadata?.cortexWorkerResult);
+      const failureReason = item.status === "failed" && typeof item.error === "string" && item.error.trim()
+        ? item.error.trim() : undefined;
       return {
         items: [{
           type: "plugin",
@@ -175,7 +188,8 @@ export default function contribute(client: PluginClientContext) {
           kind: "worker-row",
           version: 1,
           data: { callId: item.callId, assignmentRef: item.callId.slice("worker:".length), title: item.name, status: item.status,
-            ...(result !== undefined ? { result } : {}) },
+            ...(result !== undefined ? { result } : {}),
+            ...(failureReason !== undefined ? { failureReason } : {}) },
         }],
       };
     },

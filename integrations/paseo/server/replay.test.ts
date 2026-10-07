@@ -146,7 +146,7 @@ try {
   const cards = codeMode.filter(e => e.type === "timeline.item" && e.item.type === "tool_call");
   const final = (id: string) => cards.filter(e => e.item.callId === id).at(-1).item;
   assert.equal(cards[0].item.name, "Shell", "title-only pending snapshot is ambiguous after the bridge");
-  assert.equal(final("raw-read").name, "Read report — r_abc");
+  assert.equal(final("raw-read").name, "Read report: r_abc");
   assert.equal(final("raw-read").status, "failed");
   assert.equal(final("raw-read").detail.output, null, "ACP content is not available after the installed bridge");
   assert.deepEqual({ ...final("raw-shell").detail }, { type: "shell", command: "pwd" });

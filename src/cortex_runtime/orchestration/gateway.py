@@ -5,6 +5,7 @@ File operations use no-follow directory descriptors. Commands get a read-only
 project with only explicitly granted directories/files mounted writable.
 """
 from contextlib import contextmanager
+import errno
 import fnmatch
 import hashlib
 import json
@@ -51,25 +52,31 @@ def timeout(description):
 
 # What a write tool's path may name (gateway._authority): a writing worker holds
 # the whole project; the plan's declared scope coordinates writers only.
+AUTO_KEY = ('Optional unique action identity. Omit to derive a stable identity from the operation and payload; '
+            'an identical keyless retry reuses a retained effect receipt, and a different payload is a new action. '
+            'A precondition refusal before any possible effect has no replayable derived-key receipt: fix the '
+            'precondition, then retry identically. An explicit key retains its structured refusal; use a new '
+            'key after correction.')
+
 WORK_AREA = ("A writing worker may change any project path except private storage and paths the user protected. "
              "The assignment's declared scope is the agreed work area that coordinates parallel writers, not an "
              "enforced boundary: reserve any other path with access_request before changing it.")
 
 
 SCHEMAS = {
-    'project_git': obj(dict(kind=dict(type='string',enum=['status','diff'],description='Read-only project status or complete working-tree diff against HEAD, including pre-existing edits. Returns an exact retained output for read_large_output. Untracked file content is read through project_read.'),request_key=text('Unique observation identity; retries return the same retained snapshot.',128))),
+    'project_git': obj(dict(kind=dict(type='string',enum=['status','diff'],description='Read-only project status or complete working-tree diff against HEAD, including pre-existing edits. Inlines output up to 64 KiB (same bound as command_run), with output_truncated marking the rest; large_output_id always pages the complete retained bytes with read_large_output. Untracked file content is read through project_read.'),request_key=text('Unique observation identity; retries return the same retained snapshot.',128))),
     'project_delete': obj(dict(path=text('Existing project-relative regular file. '+WORK_AREA+' Binary files are supported; no directory recursion. Root .gitignore deletion retains only the required /.cortex/ rule and returns deleted: false.',512),
                                expected_sha256=text('Lowercase hex SHA-256 of the file raw bytes as they are now (project_read returns it as sha256). A mismatch refuses the deletion.',64),
-                               request_key=text('Unique action identity.',128))),
-    'project_mkdir': obj(dict(path=text('New project-relative directory; its parent must exist. '+WORK_AREA,512),
-                              request_key=text('Unique action identity.',128))),
-    'project_read': obj(dict(path=text('Project-relative regular file or directory; \'.\' is the project root. Never absolute, never containing \'..\' or a backslash, and never inside .cortex or .git. Under .claude/.codex only the exact project notes session-history.md and lessons-learned.md are allowed; create missing notes with project_write. UTF-8 files return text and SHA-256; a supported image (PNG, JPEG, GIF or WEBP, detected by content, not extension) returns an MCP image content block plus sha256/size_bytes/mime/path as text, up to a 10 MiB cap (gateway_image_too_large above it); any other non-UTF-8 file returns only SHA-256, byte size and binary: true.',512),
+                               request_key=text(AUTO_KEY,128)), required=['path','expected_sha256']),
+    'project_mkdir': obj(dict(path=text('Project-relative directory; missing parent directories are created too, and an existing directory returns created: false. '+WORK_AREA,512),
+                              request_key=text(AUTO_KEY,128)), required=['path']),
+    'project_read': obj(dict(path=text('Project-relative regular file or directory; \'.\' is the project root. Never absolute, never containing \'..\' or a backslash, and never inside .cortex or .git. Under .claude/.codex only the exact project notes session-history.md and lessons-learned.md are allowed; create missing notes with project_write. Missing paths return exists: false, sha256: "absent" (pass directly to project_write.expected_sha256), and parent_exists (informational: project_write creates missing parent directories). UTF-8 files return text and SHA-256; a supported image (PNG, JPEG, GIF or WEBP, detected by content, not extension) returns an MCP image content block plus sha256/size_bytes/mime/path as text, up to a 10 MiB cap (gateway_image_too_large above it); any other non-UTF-8 file returns only SHA-256, byte size and binary: true.',512),
                              offset=integer('UTF-8 character offset for file reads.',1000000000),
                              limit=integer('Maximum characters or directory entries; response supplies the next offset.',65536)), required=['path']),
-    'project_write': obj(dict(path=text('Project-relative file; symlinks are rejected. '+WORK_AREA,512),
+    'project_write': obj(dict(path=text('Project-relative file; missing parent directories are created (never through a symlink or file); symlinks are rejected. '+WORK_AREA,512),
                               content=text('Complete new UTF-8 file content. Root .gitignore writes retain a final /.cortex/ rule; returned hash describes the protected bytes.',1000000),
-                              expected_sha256=text('Lowercase hex SHA-256 of the file as it is now (project_read returns it as sha256), or the literal string "absent" to create a new file. A mismatch refuses the write and changes nothing.',64),
-                              request_key=text('Unique action identity. Exact retries reuse the retained result.',128))),
+                              expected_sha256=text('Lowercase hex SHA-256 of the file as it is now (project_read returns it as sha256), or the literal string "absent" returned by project_read for a missing path; pass that value directly to create a new file. A mismatch refuses the write and changes nothing.',64),
+                              request_key=text(AUTO_KEY,128)), required=['path','content','expected_sha256']),
     'project_skill_link': obj(dict(action=dict(type='string',enum=['link','unlink'],description='link: make .claude/skills/<name> the relative symlink ../../.agents/skills/<name>, creating .claude/skills when absent; an exact existing link is left unchanged. unlink: remove only that exact link (the skill in .agents/skills stays).'),
                                    name=text('Skill directory name under .agents/skills: 1-64 lowercase letters, digits and single hyphens. For link, .agents/skills/<name> must be a real directory holding a regular SKILL.md.',64),
                                    replace_symlink_target=text('link only, and only to replace an existing symlink at .claude/skills/<name> with a different target: its exact current link text (a refusal names it). The user confirms the replacement. Omit otherwise; a file or directory there is never replaced.',4096),
@@ -103,15 +110,51 @@ def _parts(value):
     return path.parts
 
 
+_DIRECTORY = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+
+
+def _open_directory(fd, part, component, precise):
+    try:
+        return os.open(part, _DIRECTORY, dir_fd=fd)
+    except OSError as error:
+        if not precise or error.errno not in (errno.ENOTDIR, errno.ELOOP):
+            raise
+        raise StoreError('gateway_parent_not_directory', 'path', component,
+                         'a real directory (not a file or symbolic link)',
+                         f'{component} is a file or symbolic link; project tools never follow links or '
+                         'write through a file. Choose a path under a real directory.') from None
+
+
 @contextmanager
-def _parent(root, value):
+def _parent(root, value, *, create_parents=None):
+    """Open the parent directory of a project path without following links.
+
+    With ``create_parents`` (project_write and project_mkdir), each missing
+    directory component is created no-follow after the callable accepted it
+    (it may refuse with a StoreError and marks the possible effect); a file
+    or link component is a precise refusal. Without it a missing component
+    raises FileNotFoundError for the caller to interpret.
+    """
     parts = _parts(value)
     if not parts:
         raise StoreError('gateway_file_required')
-    fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    precise = create_parents is not None
+    fd = os.open(root, _DIRECTORY)
     try:
-        for part in parts[:-1]:
-            child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+        for index, part in enumerate(parts[:-1]):
+            component = '/'.join(parts[:index+1])
+            try:
+                child = _open_directory(fd, part, component, precise)
+            except FileNotFoundError:
+                if not precise:
+                    raise
+                create_parents(component)
+                try:
+                    os.mkdir(part, 0o755, dir_fd=fd)
+                    os.fsync(fd)
+                except FileExistsError:
+                    pass  # created concurrently: still opened no-follow below
+                child = _open_directory(fd, part, component, precise)
             os.close(fd)
             fd = child
         yield fd, parts[-1]
@@ -237,11 +280,19 @@ def _read(root, args):
         os.close(fd)
 
 
-def _write(root,args):
+def _write(root,args,effects=None):
     from .ignore_guard import protected_content
     content = protected_content(args['content']) if _parts(args['path']) == ('.gitignore',) else args['content']
     data = content.encode('utf-8')
-    with _parent(root,args['path']) as (parent,leaf):
+    def create_parent(component):
+        # A missing parent means the file is absent: only a creation may add it.
+        if args['expected_sha256'] != 'absent':
+            raise StoreError('gateway_write_conflict', 'expected_sha256', args['expected_sha256'], 'absent',
+                             f'{component} does not exist, so the file is absent. Pass expected_sha256 "absent" '
+                             'to create it; project_write creates missing parent directories.')
+        if effects is not None:
+            effects['possible']=True
+    with _parent(root,args['path'],create_parents=create_parent) as (parent,leaf):
         mode = 0o600
         try:
             fd = os.open(leaf,os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,dir_fd=parent)
@@ -257,6 +308,8 @@ def _write(root,args):
         if observed != args['expected_sha256']:
             raise StoreError('gateway_write_conflict')
         temporary='.cortex-write-'+uuid.uuid4().hex
+        if effects is not None:
+            effects['possible']=True
         fd=os.open(temporary,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,mode,dir_fd=parent)
         try:
             with os.fdopen(fd,'wb') as stream:
@@ -398,6 +451,9 @@ def dispatch(store,channel,operation,args):
     validate(SCHEMAS[operation],args)
     digest=hashlib.sha256(encoded(args).encode()).hexdigest()
     key=args.get('request_key')
+    auto_key=key is None and operation in {'project_write','project_mkdir','project_delete'}
+    if auto_key:
+        key='auto:'+hashlib.sha256(encoded(dict(operation=operation, payload=args)).encode()).hexdigest()
     with store.connection() as db:
         db.execute('BEGIN IMMEDIATE')
         scopes,owner=_authority(db,channel)
@@ -411,10 +467,17 @@ def dispatch(store,channel,operation,args):
             raise StoreError('gateway_read_denied')
         if operation=='project_read':
             try: return _read(root,args)
-            except FileNotFoundError as error:
-                raise StoreError('gateway_path_not_found', 'path', args['path'],
-                    'an existing project-relative file or directory',
-                    'The requested path does not exist. List its existing parent with project_read and select an observed path.') from error
+            except FileNotFoundError:
+                # _read validated the path and traversed it without following links.
+                # Observe the parent with the same no-follow policy, never Path.exists().
+                try:
+                    with _parent(root,args['path']):
+                        parent_exists=True
+                except FileNotFoundError:
+                    parent_exists=False
+                except OSError as error:
+                    raise StoreError('gateway_read_failure', 'path', args['path']) from error
+                return dict(exists=False,path=args['path'],sha256='absent',parent_exists=parent_exists)
             except (OSError,UnicodeError) as error:
                 raise StoreError('gateway_read_failure', 'path', args['path'],
                     'a readable regular file or directory',
@@ -452,8 +515,15 @@ def dispatch(store,channel,operation,args):
             receipt=json.loads(row['result_json'])
             if not receipt.get('complete'):
                 raise StoreError('gateway_action_outcome_unknown')
-            if receipt.get('error'): raise StoreError(receipt['error'])
-            return receipt['receipt']
+            if auto_key and receipt.get('error'):
+                # Retire pre-effect auto refusals written by an older runtime
+                # too. Its existing TOOL_REJECTED event remains the audit.
+                db.execute('DELETE FROM runtime_requests WHERE task_id=? AND actor=? AND request_key=?',
+                           (channel.task_id,channel.channel_id,key))
+            else:
+                if receipt.get('error'):
+                    raise StoreError(receipt['error'], **receipt.get('error_detail', {}))
+                return receipt['receipt']
         ref='gateway:'+uuid.uuid4().hex
         db.execute('INSERT INTO runtime_requests VALUES(?,?,?,?,?,?)',
                    (channel.task_id,key,channel.channel_id,operation,digest,encoded(dict(complete=False,tool_call_ref=ref))))
@@ -504,25 +574,56 @@ def dispatch(store,channel,operation,args):
                     if observed!=args['expected_sha256']:
                         raise StoreError('gateway_write_conflict')
                     if _parts(args['path']) == ('.gitignore',):
-                        result = _write(root, dict(args, content=''))
+                        result = _write(root, dict(args, content=''), effects)
                         result['deleted'] = False
                         result['gitignore_guard'] = True
                     else:
                         with _parent(root,args['path']) as (parent,leaf):
+                            effects['possible']=True
                             os.unlink(leaf,dir_fd=parent); os.fsync(parent)
                         result=dict(deleted=True)
                 elif operation=='project_mkdir':
-                    with _parent(root,args['path']) as (parent,leaf):
-                        os.mkdir(leaf,0o755,dir_fd=parent)
-                        os.fsync(parent)
-                    result=dict(created=True)
+                    def create_parent(component):
+                        effects['possible']=True
+                    with _parent(root,args['path'],create_parents=create_parent) as (parent,leaf):
+                        try:
+                            info=os.stat(leaf,dir_fd=parent,follow_symlinks=False)
+                        except FileNotFoundError:
+                            effects['possible']=True
+                            os.mkdir(leaf,0o755,dir_fd=parent)
+                            os.fsync(parent)
+                            result=dict(created=True)
+                        else:
+                            if not stat.S_ISDIR(info.st_mode):
+                                raise StoreError('gateway_path_exists','path',args['path'],'a directory or a missing path',
+                                                 'A file or symbolic link already occupies this path; nothing was '
+                                                 'created. Choose another directory path.')
+                            # Already a real directory: the requested state holds.
+                            result=dict(created=False)
                 elif operation=='project_write':
-                    result=_write(root,args)
+                    result=_write(root,args,effects)
                 elif operation=='project_skill_link':
                     result=skill_links.apply(root,args,effects)
                 else:
                     result=write_draft(store,db,channel,args['draft_id'],args['content'])
                 db.commit()
+            if operation in {'project_write','project_mkdir'}:
+                try:
+                    from .skill_gate import required_before_result_submit
+                    with store.connection() as db:
+                        node=db.execute('SELECT n.stage,n.role FROM runtime_nodes n JOIN delegation_provisioning p '
+                                        'ON n.assignment_ref=p.idempotency_key AND n.task_id=p.task_id '
+                                        'WHERE n.task_id=? AND p.attempt_id=?',
+                                        (channel.task_id,channel.attempt_id)).fetchone()
+                    hints=required_before_result_submit(store,channel,stage=node['stage'],
+                                                       role_ids=(node['role'],role['role_id'] if role else None), advisory=True)
+                except Exception:
+                    # The write already committed. An advisory observation failure
+                    # must never pretend the mutation failed or invite a new write.
+                    result['skill_hint_unavailable']='observation_failed; result_submit still enforces the gate'
+                else:
+                    if hints:
+                        result['required_before_result_submit']=hints
             if operation=='project_skill_link' and args['action']=='link':
                 # Observed after the commit: a git subprocess never runs
                 # under the store's write lock. Read-only and never raises.
@@ -535,8 +636,17 @@ def dispatch(store,channel,operation,args):
         # These explicit preconditions run before the operation's side effect.
         with store.connection() as db:
             db.execute('BEGIN IMMEDIATE')
-            db.execute('UPDATE runtime_requests SET result_json=? WHERE task_id=? AND actor=? AND request_key=?',
-                       (encoded(dict(complete=True,error=str(error))),channel.task_id,channel.channel_id,key))
+            if auto_key:
+                # A keyless precondition refusal has no effect to replay. Keep
+                # its rejection event, but let correction + identical retry run.
+                db.execute('DELETE FROM runtime_requests WHERE task_id=? AND actor=? AND request_key=?',
+                           (channel.task_id,channel.channel_id,key))
+            else:
+                detail={name:getattr(error,name) for name in
+                        ('field','received','expected','correction','violations')}
+                db.execute('UPDATE runtime_requests SET result_json=? WHERE task_id=? AND actor=? AND request_key=?',
+                           (encoded(dict(complete=True,error=str(error),error_detail=detail)),
+                            channel.task_id,channel.channel_id,key))
             event(db,channel.task_id,'TOOL_REJECTED',dict(operation=operation,tool_call_ref=ref,error=str(error)),channel.channel_id)
             db.commit()
         raise
@@ -549,7 +659,9 @@ def dispatch(store,channel,operation,args):
         db.execute('BEGIN IMMEDIATE')
         db.execute('UPDATE runtime_requests SET result_json=? WHERE task_id=? AND actor=? AND request_key=?',
                     (encoded(dict(complete=True,receipt=result)),channel.task_id,channel.channel_id,key))
-        event(db,channel.task_id,'TOOL_COMPLETED',dict(operation=operation,tool_call_ref=ref,result=result),channel.channel_id)
+        event(db,channel.task_id,'TOOL_COMPLETED',dict(operation=operation,tool_call_ref=ref,result=result,
+                                               **({'path':args['path']} if operation in
+                                                  {'project_write','project_delete','project_mkdir'} else {})),channel.channel_id)
         db.commit()
     return result
 

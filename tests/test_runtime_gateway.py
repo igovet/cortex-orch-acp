@@ -255,7 +255,8 @@ def test_readonly_git_diff_is_retained_and_never_runs_repository_helpers(context
     subprocess.run(['git','-C',str(root),'config','core.fsmonitor',f'touch {trap}'],check=True)
     args=dict(kind='diff',request_key='snapshot')
     result=dispatch(store,ch,'project_git',args)
-    assert result['available'] and result['complete']
+    assert result['available'] and result['evidence'] == 'context only, not a check receipt'
+    assert 'complete' not in result and 'exit_code' not in result and 'tool_call_ref' not in result
     assert dispatch(store,ch,'project_git',args)==result
     output=read_output(store,task_id=ch.task_id,owner_scope='coordinator',record_id=result['large_output_id'])
     assert not trap.exists()
@@ -263,12 +264,61 @@ def test_readonly_git_diff_is_retained_and_never_runs_repository_helpers(context
     with pytest.raises(StoreError): dispatch(store,ch,'project_read',dict(path='.git/config'))
 
 
-def test_missing_path_is_read_failure_not_uncertain_publication(context):
-    store, channel, _, _ = context
-    with pytest.raises(StoreError, match='gateway_path_not_found') as error:
-        dispatch(store, channel, 'project_read', {'path': 'absent/notes.md'})
-    assert error.value.field == 'path'
-    assert 'does not exist' in error.value.correction
+def test_missing_path_read_round_trips_into_write(tmp_path):
+    store,worker,root=_role_worker(tmp_path,'backend-dev')
+    observed=mcp_tools.dispatch(store,worker,'project_read',dict(path='notes.md'))
+    assert observed == dict(exists=False,path='notes.md',sha256='absent',parent_exists=True)
+    receipt=mcp_tools.dispatch(store,worker,'project_write',dict(path='notes.md',content='new',
+                                                              expected_sha256=observed['sha256']))
+    assert receipt['sha256'] == hashlib.sha256(b'new').hexdigest()
+    assert (root/'notes.md').read_text() == 'new'
+
+
+def test_missing_parent_is_reported_without_a_read_error(context):
+    store,channel,_,_=context
+    assert dispatch(store,channel,'project_read',dict(path='absent/notes.md')) == dict(
+        exists=False,path='absent/notes.md',sha256='absent',parent_exists=False)
+
+
+@pytest.mark.parametrize('path',['.cortex/absent','.git/absent','../absent','/absent'])
+def test_missing_path_does_not_bypass_private_or_escape_checks(context,path):
+    store,channel,_,_=context
+    with pytest.raises(StoreError,match='gateway_path_denied'):
+        dispatch(store,channel,'project_read',dict(path=path))
+
+
+def test_missing_path_behind_symlink_is_still_a_real_read_failure(context):
+    store,channel,_,root=context
+    (root/'linked').symlink_to(root,target_is_directory=True)
+    with pytest.raises(StoreError,match='gateway_read_failure'):
+        dispatch(store,channel,'project_read',dict(path='linked/absent'))
+
+
+def test_keyless_write_replays_before_cas_and_different_content_is_a_new_action(tmp_path):
+    store,worker,root=_role_worker(tmp_path,'backend-dev')
+    args=dict(path='new',content='first',expected_sha256='absent')
+    first=dispatch(store,worker,'project_write',args)
+    assert dispatch(store,worker,'project_write',args) == first
+    with pytest.raises(StoreError,match='gateway_write_conflict'):
+        dispatch(store,worker,'project_write',dict(args,content='different'))
+    second=dispatch(store,worker,'project_write',dict(args,content='second',expected_sha256=first['sha256']))
+    assert second['sha256'] != first['sha256'] and (root/'new').read_text() == 'second'
+    with store.connection() as db:
+        assert db.execute("SELECT COUNT(*) FROM runtime_requests WHERE operation='project_write'").fetchone()[0] == 2
+
+
+def test_keyless_mkdir_and_delete_replay_without_repeating_side_effects(tmp_path,monkeypatch):
+    from cortex_runtime.orchestration import consent
+    calls=[]
+    monkeypatch.setattr(consent,'request',lambda *a,**kw: calls.append(a) or True)
+    store,worker,root=_role_worker(tmp_path,'backend-dev')
+    mkdir=dict(path='new-dir')
+    assert dispatch(store,worker,'project_mkdir',mkdir) == dispatch(store,worker,'project_mkdir',mkdir)
+    written=dispatch(store,worker,'project_write',dict(path='new-dir/file',content='x',expected_sha256='absent'))
+    delete=dict(path='new-dir/file',expected_sha256=written['sha256'])
+    assert dispatch(store,worker,'project_delete',delete) == dict(deleted=True)
+    assert dispatch(store,worker,'project_delete',delete) == dict(deleted=True)
+    assert len(calls) == 1 and not (root/'new-dir/file').exists()
 
 
 def _role_worker(tmp_path,role):
@@ -373,3 +423,184 @@ def test_outside_actions_follow_the_tasks_access_mode(tmp_path,tmp_path_factory,
         assert len(cards)==(1 if answer else 0)
     assert [row['kind'] for row in access_mode.history(store,worker.task_id)]==(
         ['switched','auto_approved'] if mode=='auto' else ['switched'])
+
+
+@pytest.mark.parametrize('path,existing,missing', [
+    ('missing/deeper/file', None, 'missing'),
+    ('exists/missing/deeper/file', 'exists', 'exists/missing'),
+])
+def test_write_missing_parent_creates_it_or_returns_precise_conflict(tmp_path,path,existing,missing):
+    store,worker,root=_role_worker(tmp_path,'backend-dev')
+    if existing:
+        (root/existing).mkdir()
+    # A hash for a file under a missing parent cannot match: a precise conflict, nothing created.
+    args=dict(path=path,content='new',expected_sha256='0'*64,request_key='missing-parent')
+    with pytest.raises(StoreError,match='gateway_write_conflict') as error:
+        dispatch(store,worker,'project_write',args)
+    assert error.value.field == 'expected_sha256'
+    assert error.value.received == '0'*64
+    assert error.value.expected == 'absent'
+    assert error.value.correction.startswith(f'{missing} does not exist')
+    assert not (root/missing).exists()
+    assert not list(root.rglob('.cortex-write-*'))
+    # A pre-effect refusal is a completed rejection, not an uncertain effect.
+    with store.connection() as db:
+        receipt=db.execute('SELECT result_json FROM runtime_requests WHERE task_id=? AND actor=? AND request_key=?',
+                           (worker.task_id,worker.channel_id,args['request_key'])).fetchone()
+    import json
+    saved=json.loads(receipt[0])
+    assert saved['complete'] and saved['error']=='gateway_write_conflict'
+    assert saved['error_detail']['field']=='expected_sha256'
+    # Explicit keys still replay a refusal, with the complete structured help.
+    with pytest.raises(StoreError) as replay:
+        dispatch(store,worker,'project_write',args)
+    for field in ('field','received','expected','correction','violations'):
+        assert getattr(replay.value,field)==getattr(error.value,field)
+    # A creation makes its missing parents (session e37b655d: docs/project/index.md).
+    result=dispatch(store,worker,'project_write',dict(args,expected_sha256='absent',request_key='create'))
+    assert result['sha256'] == hashlib.sha256(b'new').hexdigest()
+    assert (root/path).read_text() == 'new'
+
+
+def test_keyless_precondition_retry_succeeds_after_correction(tmp_path):
+    import json
+    store,worker,root=_role_worker(tmp_path,'backend-dev')
+    (root/'newdir').mkdir()
+    (root/'newdir/file.py').write_text('old')
+    args=dict(path='newdir/file.py',content='X=1',expected_sha256='absent')
+    with pytest.raises(StoreError,match='gateway_write_conflict'):
+        dispatch(store,worker,'project_write',args)
+    with store.connection() as db:
+        assert db.execute("SELECT COUNT(*) FROM runtime_requests WHERE actor=? AND operation='project_write'",
+                          (worker.channel_id,)).fetchone()[0]==0
+        rejected=db.execute("SELECT payload_json FROM runtime_events WHERE actor=? AND type='TOOL_REJECTED'",
+                            (worker.channel_id,)).fetchall()
+        assert len(rejected)==1 and json.loads(rejected[0][0])['error']=='gateway_write_conflict'
+    (root/'newdir/file.py').unlink()
+    receipt=dispatch(store,worker,'project_write',args)
+    assert receipt['sha256']==hashlib.sha256(b'X=1').hexdigest()
+    assert (root/'newdir/file.py').read_text()=='X=1'
+    assert dispatch(store,worker,'project_write',args)==receipt
+
+
+def test_keyless_refusal_after_possible_effect_remains_pending(tmp_path,monkeypatch):
+    import json
+    from cortex_runtime.orchestration import gateway
+    store,worker,root=_role_worker(tmp_path,'backend-dev')
+    def partial(root,args,effects):
+        effects['possible']=True
+        (Path(root)/args['path']).write_text('effect')
+        raise StoreError('storage_error','cause','failure')
+    monkeypatch.setattr(gateway,'_write',partial)
+    args=dict(path='effect.py',content='X=1',expected_sha256='absent')
+    with pytest.raises(StoreError,match='storage_error'):
+        dispatch(store,worker,'project_write',args)
+    with store.connection() as db:
+        row=db.execute("SELECT result_json FROM runtime_requests WHERE actor=? AND operation='project_write'",
+                       (worker.channel_id,)).fetchone()
+        assert json.loads(row[0])['complete'] is False
+    with pytest.raises(StoreError,match='gateway_action_outcome_unknown'):
+        dispatch(store,worker,'project_write',args)
+    assert (root/'effect.py').read_text()=='effect'
+
+
+def test_project_git_is_context_only_not_a_check_receipt(tmp_path):
+    from cortex_runtime.delegation.evidence import assess_check
+    store,worker,root=_role_worker(tmp_path,'backend-dev')
+    subprocess.run(['git','init','-q',str(root)],check=True)
+    result=dispatch(store,worker,'project_git',dict(kind='status',request_key='context-status'))
+    assert result['available'] and result['evidence']=='context only, not a check receipt'
+    assert not {'complete','exit_code','tool_call_ref'} & result.keys()
+    with store.connection() as db:
+        import json
+        payload=json.loads(db.execute("SELECT payload_json FROM runtime_events WHERE actor=? "
+                                     "AND type='TOOL_AUTHORIZED' ORDER BY id DESC LIMIT 1",
+                                     (worker.channel_id,)).fetchone()[0])
+        assert assess_check(db,worker.task_id,worker.attempt_id,'passed',payload['tool_call_ref'])['gap']=='not_a_command'
+    # A retained output identity must never be invented into a check receipt.
+    assert result['large_output_id'].startswith('lo_')
+
+
+def test_project_git_inlines_small_output_without_a_second_read(tmp_path):
+    """F3: a small status/diff carries its output inline (same bound as
+    command_run), so a worker never needs read_large_output just to see
+    output that already fit in this one response."""
+    store,worker,root=_role_worker(tmp_path,'backend-dev')
+    subprocess.run(['git','init','-q',str(root)],check=True)
+    (root/'untracked').write_text('hello')
+    result=dispatch(store,worker,'project_git',dict(kind='status',request_key='inline-status'))
+    assert result['available']
+    assert result['output_truncated'] is False
+    assert 'untracked' in result['output']
+    assert len(result['output'].encode('utf-8'))==result['byte_count']
+    retained=mcp_tools.dispatch(store,worker,'read_large_output',dict(large_output_id=result['large_output_id']))
+    assert retained['chunk']==result['output']
+
+
+def test_project_git_truncates_inline_output_over_the_bound_and_pages_the_rest(tmp_path):
+    """F3: output beyond the 64 KiB inline bound is marked truncated; the
+    complete bytes stay retained and readable through read_large_output."""
+    store,worker,root=_role_worker(tmp_path,'backend-dev')
+    subprocess.run(['git','init','-q',str(root)],check=True)
+    source=root/'large.txt'
+    source.write_text('baseline\n')
+    subprocess.run(['git','-C',str(root),'add','large.txt'],check=True)
+    subprocess.run(['git','-C',str(root),'-c','user.name=Test','-c','user.email=test@example.invalid',
+                    'commit','-qm','baseline'],check=True)
+    source.write_text(''.join(f'line-{i:06d}-'+'x'*90+'\n' for i in range(2_000)))
+    result=dispatch(store,worker,'project_git',dict(kind='diff',request_key='inline-diff'))
+    assert result['available']
+    assert result['byte_count']>65536
+    assert result['output_truncated'] is True
+    assert len(result['output'].encode('utf-8'))==65536
+    chunks=[]
+    offset=0
+    while True:
+        chunk=mcp_tools.dispatch(store,worker,'read_large_output',
+                                 dict(large_output_id=result['large_output_id'],offset=offset))
+        chunks.append(chunk['chunk'])
+        if chunk['next_offset'] is None:
+            break
+        offset=chunk['next_offset']
+    full=''.join(chunks)
+    assert full.encode('utf-8')[:65536].decode('utf-8')==result['output']
+    assert len(full.encode('utf-8'))==result['byte_count']
+
+
+def test_explicit_auto_prefix_is_not_a_derived_key(tmp_path):
+    store,worker,root=_role_worker(tmp_path,'backend-dev')
+    (root/'parent').mkdir()
+    (root/'parent/new.py').write_text('old')
+    args=dict(path='parent/new.py',content='X=1',expected_sha256='absent',request_key='auto:owner-key')
+    with pytest.raises(StoreError,match='gateway_write_conflict'):
+        dispatch(store,worker,'project_write',args)
+    (root/'parent/new.py').unlink()
+    with pytest.raises(StoreError,match='gateway_write_conflict'):
+        dispatch(store,worker,'project_write',args)
+    assert not (root/'parent/new.py').exists()
+    assert dispatch(store,worker,'project_write',dict(args,request_key='corrected'))['sha256']
+
+
+def test_legacy_auto_refusal_does_not_poison_corrected_keyless_retry(tmp_path):
+    import json
+    from cortex_runtime.orchestration.state import encoded
+    store,worker,root=_role_worker(tmp_path,'backend-dev')
+    (root/'legacy').mkdir()
+    (root/'legacy/new.py').write_text('old')
+    args=dict(path='legacy/new.py',content='X=1',expected_sha256='absent')
+    with pytest.raises(StoreError,match='gateway_write_conflict'):
+        dispatch(store,worker,'project_write',dict(args,request_key='legacy-refusal'))
+    # Model the prior runtime's stored auto-key, code-only pre-effect refusal.
+    auto_key='auto:'+hashlib.sha256(encoded(dict(operation='project_write',payload=args)).encode()).hexdigest()
+    digest=hashlib.sha256(encoded(args).encode()).hexdigest()
+    with store.connection() as db:
+        db.execute("UPDATE runtime_requests SET request_key=?,digest=?,result_json=? WHERE actor=? AND request_key=?",
+                   (auto_key,digest,json.dumps(dict(complete=True,error='gateway_write_conflict')),
+                    worker.channel_id,'legacy-refusal'))
+        db.commit()
+    (root/'legacy/new.py').unlink()
+    assert dispatch(store,worker,'project_write',args)['sha256']==hashlib.sha256(b'X=1').hexdigest()
+    assert (root/'legacy/new.py').read_text()=='X=1'
+    with store.connection() as db:
+        assert db.execute("SELECT COUNT(*) FROM runtime_events WHERE actor=? AND type='TOOL_REJECTED'",
+                          (worker.channel_id,)).fetchone()[0]==1

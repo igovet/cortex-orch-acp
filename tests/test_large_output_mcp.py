@@ -1,5 +1,6 @@
 """T024: read_large_output MCP tool -- owner-scoped, chunked, and the real
-``EngineSessionManagerAdapter`` persist-sink binding."""
+``EngineSessionManagerAdapter`` persist-sink binding.
+"""
 from __future__ import annotations
 
 import pytest
@@ -54,6 +55,27 @@ def test_unknown_large_output_id_is_refused_not_leaked(tmp_path):
     store, task_id, coordinator = _task(tmp_path)
     with pytest.raises(StoreError, match="unknown_large_output_ref"):
         mcp_tools.dispatch(store, coordinator, "read_large_output", dict(large_output_id="lo_" + "0" * 12))
+
+
+def test_unknown_large_output_id_correction_lists_this_scopes_recent_ids(tmp_path):
+    """F3: a mistyped id's correction offers this channel's own real ids to
+    compare against, cheaply, instead of only an instruction to retype it."""
+    store, task_id, coordinator = _task(tmp_path)
+    first = persist_output(
+        store, task_id=task_id, owner_scope="coordinator", source_kind="terminal", data=b"first",
+    )
+    second = persist_output(
+        store, task_id=task_id, owner_scope="coordinator", source_kind="terminal", data=b"second",
+    )
+    with pytest.raises(StoreError) as caught:
+        mcp_tools.dispatch(store, coordinator, "read_large_output", dict(large_output_id="lo_" + "0" * 12))
+    assert first["id"] in caught.value.correction
+    assert second["id"] in caught.value.correction
+    # Never another owner_scope's ids, even as a correction hint.
+    worker_only = persist_output(
+        store, task_id=task_id, owner_scope="some-other-assignment", source_kind="terminal", data=b"not mine",
+    )
+    assert worker_only["id"] not in caught.value.correction
 
 
 # --- EngineSessionManagerAdapter real persist-sink binding ------------------

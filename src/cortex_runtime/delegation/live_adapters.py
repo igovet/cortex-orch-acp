@@ -2989,7 +2989,7 @@ class EngineSessionManagerAdapter:
         from ..acp.orchestrating_runtime import EngineTurnFailed, PromptOutcome
         from ..engine import failure_classification
         from ..engine.client import EngineProtocolError
-        from ..portable.engine_contract import EngineEventKind, StopReason
+        from ..portable.engine_contract import EngineEventKind, StopReason, UsageBasis
         from ..portable.errors import PortableError
 
         with self._lock:
@@ -3300,9 +3300,33 @@ class EngineSessionManagerAdapter:
             if self._store is not None and task_id is not None:
                 from ..observability import usage as observability_usage
 
+                # H3 fix: a call that raised (e.g. EngineTurnFailed from a
+                # transport closed by the runtime's own post-acceptance
+                # release) after this exact attempt already published its
+                # worker_result is the runtime ending an already-successful
+                # call, not a failed one -- retain its distinct stop reason
+                # even when the engine never supplied a usage figure.
+                recorded_failed = call_failed
+                recorded_stop_reason = stop_reason.value if not call_failed else None
+                if call_failed and attempt_id is not None:
+                    with self._store.connection() as db:
+                        already_reported = db.execute(
+                            "SELECT 1 FROM task_events WHERE task_id=? AND assignment_ref=? "
+                            "AND event_type='worker_result' LIMIT 1",
+                            (task_id, attempt_id),
+                        ).fetchone() is not None
+                    if already_reported:
+                        recorded_failed = False
+                        recorded_stop_reason = "released_after_result"
+                        # Keep the original closed basis vocabulary so existing
+                        # stores need no CHECK-constraint migration. The stop
+                        # reason and failed=False distinguish this release;
+                        # real reported usage is kept, never overwritten.
+                        if usage_basis != UsageBasis.ENGINE_REPORTED:
+                            usage_basis = UsageBasis.UNKNOWN
                 observability_usage.record_call_usage(
                     self._store, task_id=task_id, attempt_id=attempt_id, engine_session_ref=session_ref,
                     usage_basis=usage_basis, usage_values=usage_values,
-                    stop_reason=stop_reason.value if not call_failed else None, failed=call_failed,
+                    stop_reason=recorded_stop_reason, failed=recorded_failed,
                 )
         return PromptOutcome(stop_reason, "".join(text_parts))

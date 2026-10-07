@@ -1049,3 +1049,84 @@ def test_small_capsule_is_verbatim_level_zero(tmp_path):
     assert cap["compaction"]["level"] == 0
     assert cap["compaction"]["referenced_fields"] == 0
     assert cap["compaction"]["omitted_entries"] == 0
+
+
+def test_worker_route_section_separates_coordinator_snapshot_from_own_confirmation(tmp_path):
+    import json
+    from cortex_runtime.routing.store import record_attempt_audit
+    from cortex_runtime.delegation.events import append_event
+    store,task_id,coordinator=_task(tmp_path)
+    delegated=_delegate(store,coordinator)
+    ref=delegated['assignment_ref']
+    _provision_worker(store,task_id,coordinator,ref,attempt_id='xa_sol')
+    with store.connection() as db:
+        db.execute("INSERT INTO configuration_revisions "
+                   "(id,task_id,revision,route_id,route_engine,route_connection_id,parameters,ceiling_snapshot,"
+                   "state,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                   ('cfg_opus',task_id,1,'route_opus','claude-agent-acp','conn_opus',
+                    json.dumps({'model':'opus[1m]','thought_level':'medium'}),'{}','active',store._now(),store._now()))
+        db.execute("UPDATE delegation_provisioning SET config_revision=? WHERE attempt_id=?",
+                   ('cfg_opus','xa_sol'))
+        db.commit()
+    record_attempt_audit(store,attempt_id='xa_sol',task_id=task_id,role='worker-backend-dev',
+                         engine='codex-acp',connection_id='conn_sol',model='gpt-6.1-sol',
+                         params_fingerprint='f'*64,config_revision_id='cfg_opus',decision='authorized',
+                         detail={'effort':'high'})
+    confirmation=append_event(
+        store,task_id,'progress','confirmed-sol',
+        dict(kind='worker_configuration_confirmed',attempt_id='xa_sol',engine_session_ref='sess_sol',
+             engine='codex-acp',connection_id='conn_sol',model='gpt-6.1-sol',
+             parameters={'effort':'high','mode':'agent-full-access'},confirmation_evidence_ref='wire-sol'),
+        'engine_configuration',assignment_ref=ref)
+    # A newer confirmation for a different attempt of this assignment is not ours.
+    append_event(store,task_id,'progress','confirmed-other',
+                 dict(kind='worker_configuration_confirmed',attempt_id='xa_other',model='wrong-model'),
+                 'engine_configuration',assignment_ref=ref)
+    cap=build_capsule(store,task_id,dict(role='worker',assignment_ref=ref,attempt_id='xa_sol'))
+    section=cap['sections']['route_and_config']
+    assert 'route_engine' not in section and 'source' not in section
+    assert section['task_configuration']['source']=='task_coordinator_route_snapshot'
+    assert section['task_configuration']['parameters']['model']=='opus[1m]'
+    own=section['own_worker_route']
+    assert own['attempt_id']=='xa_sol'
+    assert own['dispatch_audit']['model']=='gpt-6.1-sol'
+    confirmed=own['worker_configuration_confirmed']
+    assert confirmed['event_id']==confirmation.id and confirmed['confirmation_evidence_ref']=='wire-sol'
+    assert confirmed['model']=='gpt-6.1-sol' and confirmed['parameters']['effort']=='high'
+    assert 'own_provisioning_snapshot' not in render_capsule(cap)
+    assert 'wrong-model' not in json.dumps(section)
+
+
+def test_worker_dispatch_audit_without_confirmation_is_not_claimed_confirmed(tmp_path):
+    from cortex_runtime.routing.store import record_attempt_audit
+    store,task_id,coordinator=_task(tmp_path)
+    delegated=_delegate(store,coordinator)
+    ref=delegated['assignment_ref']
+    _provision_worker(store,task_id,coordinator,ref,attempt_id='xa_wait')
+    record_attempt_audit(store,attempt_id='xa_wait',task_id=task_id,role='worker-backend-dev',
+                         engine='codex-acp',connection_id='conn_luna',model='gpt-6-luna',
+                         params_fingerprint='f'*64,config_revision_id=None,decision='authorized',detail={})
+    own=build_capsule(store,task_id,dict(role='worker',assignment_ref=ref,attempt_id='xa_wait'))[
+        'sections']['route_and_config']['own_worker_route']
+    assert own['dispatch_audit']['model']=='gpt-6-luna'
+    assert own['worker_configuration_confirmed']==dict(
+        status='unavailable',reason='no_worker_configuration_confirmed_for_attempt')
+
+
+def test_broken_worker_snapshot_reference_does_not_inherit_a_different_active_revision(tmp_path):
+    from test_recovery_coordinator import _insert_revision
+    store,task_id,coordinator=_task(tmp_path)
+    delegated=_delegate(store,coordinator)
+    ref=delegated['assignment_ref']
+    _provision_worker(store,task_id,coordinator,ref,attempt_id='xa_missing')
+    _insert_revision(store,task_id,'cfg_active',1,'claude-agent-acp','conn_coordinator',
+                     parameters={'model':'opus[1m]'})
+    with store.connection() as db:
+        db.execute("UPDATE delegation_provisioning SET config_revision=? WHERE attempt_id=?",
+                   ('cfg_missing','xa_missing'))
+        db.commit()
+    section=build_capsule(store,task_id,dict(role='worker',assignment_ref=ref,attempt_id='xa_missing'))[
+        'sections']['route_and_config']
+    assert section['task_configuration']==dict(status='unavailable',
+                                               reason='worker_config_revision_reference_not_found')
+    assert section['own_worker_route']['worker_configuration_confirmed']['status']=='unavailable'

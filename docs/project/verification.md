@@ -233,6 +233,26 @@ npm --prefix integrations/paseo run test:settings      # client/settings-model.t
 npm --prefix integrations/paseo run test:client-bundle  # includes settings screen render-walk
 ```
 
+For question transport or tab-label changes, run `test:installed-questions`
+alongside `test:steer`, not just the mock provider tests. The installed helper
+returns **header-keyed** answers; the tests include colliding topics and
+all-member custom-answer submission. This is no-paid, read-only bundle
+execution with component stand-ins, not a rendered Desktop qualification.
+The script requires an explicit bundle path and does not discover an installation
+itself. On this Linux installation, discover the current file read-only with:
+
+```
+find /opt/Paseo/resources/app-dist/_expo/static/js/web -maxdepth 1 -name 'index-*.js' -print
+npm --prefix integrations/paseo run test:installed-questions -- /absolute/path/from/discovery/index-HASH.js
+PYTHONDONTWRITEBYTECODE=1 python3 -B -m pytest -q tests/test_question_batches.py tests/test_acp_steering_and_questions.py tests/test_question_recovery_continuation.py tests/test_worker_wait_continuation.py
+```
+
+Select the observed installed bundle explicitly; report an absent/ambiguous
+bundle or incompatible helper as a blocker, not a skipped pass. The Python
+regressions bind reverse-sorting random ids and tied timestamps to the displayed
+batch order, blank-line separators, ACP `/cortex-answer` selection, persisted
+answers and remaining-question renumbering after restart.
+
 A local sibling import must use its real `.ts` extension (e.g. `./pipeline.ts`),
 never a `.js` specifier standing in for it: `tsc`/esbuild remap `.js` to the
 sibling `.ts` file, but `node --experimental-strip-types` does not, and a

@@ -19,7 +19,14 @@ MAX_BYTES = 16 * 1024 * 1024
 FILE_COUNT = 4
 REDACTED = "[REDACTED]"
 _SECRET_KEY = re.compile(r"secret|password|passwd|authorization|(?:^|[-_])auth(?:$|[-_])|cookie|api[_.-]?key|credential|(?:^|[_-])(?:access[_-]?|refresh[_-]?)?token$", re.I)
-_ASSIGNMENT = re.compile(r"""(?ix)(\b(?:[\w.-]*(?:secret|password|passwd|api[_-]?key|access[_-]?token|refresh[_-]?token|token)|authorization|cookie|token)\b\s*["']?\s*[:=]\s*["']?)([^\s"',;}]+)""")
+# "Authorization"/"Proxy-Authorization" etc. are handled by _AUTH_ASSIGNMENT
+# below (H2 fix S6), which skips an optional scheme word (Token, Basic, ...)
+# before capturing the real credential; a bare "token"/"secret"/... key is
+# still handled here.
+_ASSIGNMENT = re.compile(r"""(?ix)(\b(?:[\w.-]*(?:secret|password|passwd|api[_-]?key|access[_-]?token|refresh[_-]?token|token)|cookie|token)\b\s*["']?\s*[:=]\s*["']?)([^\s"',;}]+)""")
+_AUTH_ASSIGNMENT = re.compile(
+    r"""(?i)(\b[\w.-]*authorization\b\s*["']?\s*[:=]\s*["']?)(?:([A-Za-z][\w.+/=~!#$%&*^`|-]*)\s+)?([^\s"',;}]+)"""
+)
 _AUTH = re.compile(r"(?i)\b(Bearer|Basic)\s+[A-Za-z0-9+/_.=-]+")
 _KEY = re.compile(r"\b(?:sk-[A-Za-z0-9_-]{12,}|gh[pousr]_[A-Za-z0-9]{12,}|AKIA[A-Z0-9]{16})\b")
 _PEM = re.compile(r"-----BEGIN [^-]*PRIVATE KEY-----.*?-----END [^-]*PRIVATE KEY-----", re.S)
@@ -65,6 +72,11 @@ class Redactor:
                         self._remember(value[index + 1])
                 self._learn(item)
         elif isinstance(value, str):
+            # H2 fix (S6): learn the real credential for an authorization
+            # header -- never the bare scheme word ("token", "Basic", ...) --
+            # so an ordinary later use of that word is not globally redacted.
+            for match in _AUTH_ASSIGNMENT.finditer(value):
+                self._remember(match[3])
             for match in _ASSIGNMENT.finditer(value):
                 self._remember(match[2])
             for match in _AUTH.finditer(value):
@@ -100,7 +112,11 @@ class Redactor:
         value = _PEM.sub(REDACTED, value)
         value = _AUTH.sub(lambda m: m[1] + " " + REDACTED, value)
         value = _KEY.sub(REDACTED, value)
-        return self._scrub_wire_text(_ASSIGNMENT.sub(lambda m: m[1] + REDACTED, value))
+        # Authorization-header rule (S1-equivalent) runs before the generic
+        # assignment rule so a scheme word is never mistaken for the value.
+        value = _AUTH_ASSIGNMENT.sub(lambda m: m[1] + REDACTED, value)
+        value = _ASSIGNMENT.sub(lambda m: m[1] + REDACTED, value)
+        return self._scrub_wire_text(value)
 
     def _clean(self, value):
         if isinstance(value, dict):
@@ -136,6 +152,21 @@ class Redactor:
         return self._clean(value)
 
 
+def _ancestors_up_to(path, root):
+    """``path`` and each ancestor up to and including ``root`` (inclusive).
+
+    ``root`` must be ``path`` or one of its ancestors; a .git/.cortex marker
+    anywhere *above* ``root`` (e.g. a developer's $HOME or an enclosing
+    checkout) is therefore never consulted -- see W2.
+    """
+    current = path
+    while True:
+        yield current
+        if current == root:
+            return
+        current = current.parent
+
+
 def _gate(environ, runtime_root):
     home = Path.home()
     dev = home / ".paseo-dev"
@@ -154,7 +185,13 @@ def _gate(environ, runtime_root):
             or root.is_relative_to(home / ".paseo")):
         raise ValueError("dev_wire_trace_refused")
     directory = dev / "cortex-xdg/state/cortex/wire-traces"
-    for parent in (directory, *directory.parents):
+    # The .git/.cortex ancestor check is scoped to the subtree from the
+    # trace directory up to and including the guarded dev home itself
+    # (W2): walking further up would reach $HOME, which the developer's own
+    # checkout(s) may legitimately make a Git repository, and that must
+    # never disable tracing. A .git/.cortex anywhere inside the dev home's
+    # own subtree still refuses.
+    for parent in _ancestors_up_to(directory, dev):
         if (parent / ".git").exists() or parent.name == ".cortex":
             raise ValueError("dev_wire_trace_refused")
         if parent.exists() and parent.resolve() != parent:
@@ -174,9 +211,11 @@ class WireTrace:
     def _directory_fd(self):
         # Every descendant of the fixed dev home must be a private, owned
         # directory. No chmod of an existing target, no symlink traversal.
+        # Same W2 scoping as _gate: only the trace directory's own subtree
+        # up to and including the dev home is checked for .git/.cortex.
         dev = self.directory.parents[3]
         if any((p / ".git").exists() or p.name == ".cortex"
-               for p in (self.directory, *self.directory.parents)):
+               for p in _ancestors_up_to(self.directory, dev)):
             raise ValueError("unsafe_trace_directory")
         if dev.parent.resolve() != dev.parent:
             raise ValueError("unsafe_trace_directory")

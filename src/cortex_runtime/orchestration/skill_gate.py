@@ -8,8 +8,9 @@ the skill is not a substitute; the model must load it when its case arises.
 
 So the runtime checks at a boundary it owns for both engines. Codex edits
 through its native ``apply_patch`` and Claude through native Edit/Write or
-Cortex ``project_write``; none of those is visible to the runtime as a
-changed path, but the project tree is. A shared-root worker's pre-attempt
+Cortex ``project_write``; the project tree is the shared observation boundary.
+Successful gateway writes also return an early, non-error skill reminder.
+A shared-root worker's pre-attempt
 tree manifest is retained as ``attempt_revisions`` phase
 ``worker_start:<attempt_id>`` (see ``delegation.provisioning``). At
 ``result_submit`` the runtime observes the tree again and derives the paths
@@ -21,9 +22,11 @@ once the skill was read.
 
 Limits, stated rather than hidden:
 
-* The shared project root is shared: a change another concurrent writer made
-  since this attempt started is in the same delta. A false match costs one
-  ``read_skill`` call and a re-check, never a lost result.
+* The tree delta is shared, but a refusal uses only this node's declared
+  write reservation or its own successful gateway writes. Paths reserved by
+  sibling nodes are excluded unless this attempt wrote them through the gateway.
+  The early non-error hint uses the same attribution and stays silent
+  when attribution is unavailable.
 * Without a complete pre-attempt manifest (isolated workspaces, a capture
   that was unavailable) nothing can be attributed; the gate does not fire
   and records a ``skill_gate``/``unobservable`` observability event instead
@@ -167,28 +170,78 @@ def _examples(paths: Iterable[str]) -> str:
     return shown + (f" (+{len(paths) - _EXAMPLE_LIMIT} more)" if len(paths) > _EXAMPLE_LIMIT else "")
 
 
-def enforce(store, channel, *, stage: str | None, role_ids: Iterable[str | None]) -> None:
-    """Refuse a worker result whose observed changes match an unread
-    situational skill's trigger. Returns quietly when nothing applies."""
+def attributable_changed_paths(store, channel, changed: set[str]) -> set[str] | None:
+    """Conservatively attribute a shared-tree delta; never charge sibling work.
+
+    Declared scopes are coordination reservations, not write grants. Explicit
+    successful channel writes therefore count even outside the reservation.
+    Native edits in overlapping reservations cannot be attributed safely.
+    """
+    from .gateway import _matches
+    from .contracts import READ_ONLY
+
+    with store.connection() as db:
+        own = db.execute(
+            "SELECT n.scope_json,n.revision FROM runtime_nodes n JOIN delegation_provisioning p "
+            "ON n.assignment_ref=p.idempotency_key AND n.task_id=p.task_id "
+            "WHERE p.task_id=? AND p.attempt_id=?",
+            (channel.task_id, channel.attempt_id),
+        ).fetchone()
+        if own is None:
+            return None
+        scopes = json.loads(own["scope_json"])
+        other_scopes = [scope for row in db.execute(
+            "SELECT scope_json,role,stage FROM runtime_nodes WHERE task_id=? AND revision=? AND assignment_ref != "
+            "(SELECT idempotency_key FROM delegation_provisioning WHERE task_id=? AND attempt_id=?)",
+            (channel.task_id, own["revision"], channel.task_id, channel.attempt_id),
+        ) if row["role"] not in READ_ONLY and row["stage"] != "review"
+            for scope in json.loads(row["scope_json"])]
+        writes = set()
+        for row in db.execute(
+            "SELECT e.payload_json FROM runtime_events e JOIN trusted_channels c ON c.channel_id=e.actor "
+            "WHERE e.task_id=? AND c.attempt_id=? AND e.type='TOOL_COMPLETED'",
+            (channel.task_id, channel.attempt_id),
+        ):
+            payload = json.loads(row["payload_json"])
+            if payload.get("operation") in {"project_write", "project_delete"} and isinstance(payload.get("path"), str):
+                writes.add(payload["path"])
+        other_writes = set()
+        for row in db.execute(
+            "SELECT e.payload_json FROM runtime_events e JOIN trusted_channels c ON c.channel_id=e.actor "
+            "JOIN delegation_provisioning p ON p.attempt_id=c.attempt_id AND p.task_id=e.task_id "
+            "JOIN runtime_nodes n ON n.assignment_ref=p.idempotency_key AND n.task_id=p.task_id "
+            "WHERE e.task_id=? AND n.revision=? AND c.attempt_id!=? AND e.type='TOOL_COMPLETED'",
+            (channel.task_id, own["revision"], channel.attempt_id),
+        ):
+            payload = json.loads(row["payload_json"])
+            if payload.get("operation") in {"project_write", "project_delete"} and isinstance(payload.get("path"), str):
+                other_writes.add(payload["path"])
+    return {path for path in changed if path in writes or
+            (_matches(path, scopes) and not _matches(path, other_scopes) and path not in other_writes)}
+
+
+def required_before_result_submit(store, channel, *, stage: str | None,
+                                  role_ids: Iterable[str | None], advisory: bool = False) -> list[dict]:
+    """Observe unread triggered skills for a gateway hint or the result gate."""
     from ..portable.roles import situational_skill_triggers
     from .contracts import READ_ONLY
 
     if channel is None or channel.role != "worker" or not channel.attempt_id or stage == "review":
-        return
+        return []
     role_ids = [role_id for role_id in role_ids if role_id]
     if any(role_id in READ_ONLY for role_id in role_ids):
-        return
+        return []
     # A role excluded from a skill under any of its names is not gated on it.
     catalogues = [{skill_id for skill_id, _ in situational_skill_triggers("worker", role_id)}
                   for role_id in role_ids or [None]]
     named = set.intersection(*catalogues)
     pending = [gate for gate in SKILL_GATES if gate.skill_id in named]
     if not pending:
-        return
+        return []
     read = skills_read(store, channel.task_id, channel.attempt_id)
     pending = [gate for gate in pending if gate.skill_id not in read]
     if not pending:
-        return
+        return []
     changed, reason = observed_changed_paths(store, channel.task_id, channel.attempt_id)
     if changed is None:
         try:
@@ -199,18 +252,44 @@ def enforce(store, channel, *, stage: str | None, role_ids: Iterable[str | None]
                          detail=dict(reason=reason, skills=[gate.skill_id for gate in pending]))
         except Exception:
             pass
-        return
+        return []
+    # F2 fix: attribution narrows ``changed`` to this attempt's own paths in
+    # *both* modes now, not only the hard result_submit gate -- an advisory
+    # write-receipt hint must never charge a code-only worker for a
+    # sibling's unrelated docs/** edit just because the shared-tree delta
+    # includes it (see this module's own docstring on attribution limits).
+    attributed = attributable_changed_paths(store, channel, changed)
+    if attributed is None:
+        if not advisory:
+            from ..observability.events import append_event
+
+            append_event(store, channel.task_id, SKILL_GATE_CATEGORY, "unobservable", "observed",
+                         attempt_id=channel.attempt_id,
+                         detail=dict(reason="no_declared_scope", skills=[gate.skill_id for gate in pending]))
+        # Advisory mode emits no hint at all when attribution is unavailable
+        # (never a hint built from the whole shared-tree delta instead).
+        return []
+    changed = attributed
+    requirements = []
     for gate in pending:
         matched = gate.match(changed)
-        if matched is None:
-            continue
-        docs, behavior = matched
+        if matched is not None:
+            docs, behavior = matched
+            requirements.append(dict(skill=gate.skill_id,
+                                     reason=f"{gate.condition}; documentation: {_examples(docs)}; "
+                                            f"behavior: {_examples(behavior)}"))
+    return requirements
+
+
+def enforce(store, channel, *, stage: str | None, role_ids: Iterable[str | None]) -> None:
+    """Refuse before publishing when an observed trigger requires an unread skill."""
+    for requirement in required_before_result_submit(store, channel, stage=stage, role_ids=role_ids):
+        skill = requirement['skill']
         raise StoreError(
-            ERROR_CODE, "read_skill.skill",
-            f"documentation: {_examples(docs)}; behavior: {_examples(behavior)}",
-            f"a successful read_skill(skill='{gate.skill_id}') by this attempt before result_submit",
-            f"This attempt changed {gate.condition} and has not read '{gate.skill_id}'. Call the cortex MCP "
-            f"read_skill tool with skill='{gate.skill_id}', re-check your documentation and source edits against "
+            ERROR_CODE, "read_skill.skill", requirement['reason'],
+            f"a successful read_skill(skill='{skill}') by this attempt before result_submit",
+            f"This attempt changed {requirement['reason']} and has not read '{skill}'. Call the cortex MCP "
+            f"read_skill tool with skill='{skill}', re-check your documentation and source edits against "
             f"its procedure (fix what it shows is wrong), then call result_submit again. This refusal recorded "
             f"nothing, so the same request_key may be reused.",
         )

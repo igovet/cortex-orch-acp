@@ -308,3 +308,118 @@ def test_paseo_totals_keep_cache_separate_and_mark_unknown_calls():
         "input": 658, "output": 99, "cachedRead": 107003, "cachedWrite": 54,
         "total": 107814, "knownCalls": 2, "unknownCalls": 1,
     }
+
+
+def test_sum_tokens_excludes_released_after_result_without_the_unavailable_alarm():
+    """F1 fix: a released_after_result call is the runtime's own
+    post-acceptance release pre-empting an already-successful call, never a
+    genuinely unaccounted-for one -- sum_tokens must skip it entirely
+    (neither knownCalls nor unknownCalls), so the card never renders its
+    "call unavailable" alarm for it."""
+    source = (Path(__file__).resolve().parents[1] / "integrations/paseo/server/worker-history.ts").read_text()
+    helper = source.split("export const STORE_PYTHON_HELPERS = String.raw`", 1)[1].split("`;", 1)[0]
+    namespace = {"json": json, "re": re}
+    exec(helper, namespace)
+    sum_tokens = namespace["sum_tokens"]
+
+    # Every call for this attempt was released_after_result: nothing is
+    # known or unknown, so the caller must render nothing at all.
+    assert sum_tokens([{"basis": "unknown", "tokens_json": "{}", "failed": 0, "stop_reason": "released_after_result"}]) is None
+
+    # Mixed with a genuinely unknown call: only the real unknown is counted.
+    mixed_unknown = sum_tokens([
+        {"basis": "unknown", "tokens_json": "{}", "failed": 0, "stop_reason": "released_after_result"},
+        {"basis": "unknown", "tokens_json": "{}"},
+    ])
+    assert mixed_unknown == {
+        "input": 0, "output": 0, "cachedRead": 0, "cachedWrite": 0,
+        "total": 0, "knownCalls": 0, "unknownCalls": 1,
+    }
+
+    # Mixed with a known call: the released_after_result row contributes
+    # nothing and raises no alarm alongside the real figures.
+    mixed_known = sum_tokens([
+        {"basis": "unknown", "tokens_json": "{}", "failed": 0, "stop_reason": "released_after_result"},
+        {"basis": "engine_reported", "tokens_json": json.dumps({"inputTokens": 10, "outputTokens": 5})},
+    ])
+    assert mixed_known == {
+        "input": 10, "output": 5, "cachedRead": 0, "cachedWrite": 0,
+        "total": 15, "knownCalls": 1, "unknownCalls": 0,
+    }
+
+
+def test_release_usage_reopens_pre_fix_store_without_schema_migration(tmp_path, monkeypatch):
+    """Frozen pre-fix CHECK vocabulary must accept release records on reopen."""
+    from cortex_runtime.observability import store as usage_store
+    from cortex_runtime.observability.usage import list_usage, record_call_usage
+
+    # Create the table from the historical SQL, independent of the current
+    # OBSERVABILITY_SCHEMA (so broadening that constant cannot hide a regression).
+    legacy_usage_sql = """
+CREATE TABLE IF NOT EXISTS usage_records (
+ id TEXT PRIMARY KEY,
+ task_id TEXT NOT NULL REFERENCES tasks(id),
+ attempt_id TEXT, engine_session_ref TEXT NOT NULL,
+ call_sequence INTEGER NOT NULL,
+ basis TEXT NOT NULL CHECK(basis IN ('observed','engine_reported','derived','estimated','unknown')),
+ tokens_json TEXT NOT NULL DEFAULT '{}',
+ stop_reason TEXT,
+ failed INTEGER NOT NULL DEFAULT 0 CHECK(failed IN (0,1)),
+ created_at TEXT NOT NULL
+);
+"""
+    historical_schema = re.sub(
+        r"CREATE TABLE IF NOT EXISTS usage_records \([\s\S]*?\);",
+        lambda _: legacy_usage_sql.strip(),
+        usage_store.OBSERVABILITY_SCHEMA,
+    )
+    with monkeypatch.context() as patch:
+        patch.setattr(usage_store, "OBSERVABILITY_SCHEMA", historical_schema)
+        store = Store(tmp_path / ".cortex", project_root=tmp_path)
+        task = bootstrap_task(store, SourceEvent(origin="cli", event_id=str(uuid.uuid4())),
+                              "Legacy usage compatibility", "owner")
+    record_call_usage(
+        store, task_id=task.task_id, attempt_id="att", engine_session_ref="session",
+        usage_basis="engine_reported", usage_values={"totalTokens": 12},
+        stop_reason="end_turn", failed=False,
+    )
+    with store.connection() as db:
+        original_sql = db.execute(
+            "SELECT sql FROM sqlite_master WHERE name='usage_records'"
+        ).fetchone()[0]
+        version = db.execute("PRAGMA user_version").fetchone()[0]
+    assert "'released_after_result'" not in original_sql
+
+    store = Store(tmp_path / ".cortex", project_root=tmp_path)
+    for stop_reason, failed in [
+        ("released_after_result", False), ("end_turn", False),
+        ("released_after_result", True),
+    ]:
+        record_call_usage(
+            store, task_id=task.task_id, attempt_id="att", engine_session_ref="session",
+            usage_basis="unknown", usage_values={"totalTokens": 999},
+            stop_reason=stop_reason, failed=failed,
+        )
+    with store.connection() as db:
+        assert db.execute("SELECT sql FROM sqlite_master WHERE name='usage_records'").fetchone()[0] == original_sql
+        assert db.execute("PRAGMA user_version").fetchone()[0] == version
+        rows = db.execute("SELECT basis,tokens_json,failed,stop_reason FROM usage_records ORDER BY call_sequence").fetchall()
+        # The real Paseo helper consumes the actual rows from the legacy store.
+        source = (Path(__file__).resolve().parents[1] / "integrations/paseo/server/worker-history.ts").read_text()
+        helper = source.split("export const STORE_PYTHON_HELPERS = String.raw`", 1)[1].split("`;", 1)[0]
+        namespace = {"json": json, "re": re}
+        exec(helper, namespace)
+        assert namespace["sum_tokens"]([rows[1]]) is None
+        assert namespace["sum_tokens"](rows) == {
+            "input": 0, "output": 0, "cachedRead": 0, "cachedWrite": 0,
+            "total": 12, "knownCalls": 1, "unknownCalls": 2,
+        }
+    assert [r["call_sequence"] for r in list_usage(store, task.task_id)] == [1, 2, 3, 4]
+    assert all(r["tokens"] == {} for r in list_usage(store, task.task_id)[1:])
+    summary = usage_summary(store, task.task_id)
+    assert summary["total_calls"] == 4
+    assert summary["released_after_result_calls"] == 1
+    assert summary["unknown_basis_calls"] == 2
+    assert summary["failed_calls"] == 1
+    assert summary["by_connection"]["unattributed"]["tokens_reported"] == {"totalTokens": 12}
+    assert not (tmp_path / ".cortex" / ".migration-backups").exists()

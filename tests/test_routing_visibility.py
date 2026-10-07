@@ -1,3 +1,4 @@
+import threading
 import uuid
 
 import pytest
@@ -9,6 +10,7 @@ from cortex_runtime.orchestration import pipeline
 from cortex_runtime.portable.identity import SourceEvent
 from cortex_runtime.routing import store as routing_store
 from cortex_runtime.store import Store
+from types import SimpleNamespace
 
 
 OLD_ROW = {
@@ -167,3 +169,36 @@ def test_old_and_neutral_policy_audits_render_without_rewriting(tmp_path, audit_
     assert detail == original
     audit = routing_store.list_audit_for_attempt(store, "attempt")[-1]
     assert audit["decision_detail"] == original
+
+
+
+def test_provisioning_failure_card_title_includes_the_resolved_route(tmp_path):
+    """A provisioning failure (e.g. an engine session open refusal such as
+    unsafe_storage) can still have picked a route before it failed. The
+    worker card's title must show it, not just the role and "failed" --
+    the owner-reported gap this closes."""
+    from cortex_runtime.delegation import events as delegation_events
+
+    store, task_id, runtime = _audited_worker(tmp_path, NEW_ROW)
+    delegation_events.append_event(
+        store, task_id, "delegation_requested", "delegation-requested:assignment",
+        dict(title="Audit", role="worker-debugger"), origin="runtime", assignment_ref="assignment",
+    )
+    runtime._lock = threading.RLock()
+    runtime._worker_action_log = {}
+    runtime._worker_action_refs = {}
+    runtime._worker_card_sent = {}
+    runtime._worker_card_terminal = {}
+    runtime._emitted_worker_cards = set()
+    runtime._worker_card_title = {}
+    runtime._close_assignment = lambda task_id, assignment: None
+    cards = []
+    event = SimpleNamespace(
+        event_type="assignment_failed", assignment_ref="assignment",
+        payload={"error": "unsafe_storage", "detail": "the worker could not be started"},
+    )
+    runtime._emit_assignment_tool_calls(task_id, cards.append, [event])
+    assert len(cards) == 1
+    assert cards[0]["status"] == "failed"
+    assert cards[0]["title"] == "Worker: debugger · claude · Opus 5.5 (1M) · high · deep · hint ignored · by usage · usage 42% — Audit"
+    assert "unsafe_storage" in cards[0]["raw_output"]

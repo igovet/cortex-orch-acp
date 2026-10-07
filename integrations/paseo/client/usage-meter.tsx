@@ -2,7 +2,7 @@ import { useRpc, type PluginHostProps } from "@getpaseo/plugin/client";
 import { useEffect, useState } from "react";
 import { Text, View } from "react-native";
 import { readWorkerHistory, type WorkerHistory } from "../shared/worker-history.js";
-import { contextSummary, formatTokens, isSettledWorkerStatus } from "./worker-display.ts";
+import { contextSummary, formatTokens, isSettledWorkerStatus, tokensAccessibilityLabel, tokensSummaryLabel } from "./worker-display.ts";
 
 type Attempt = WorkerHistory["assignments"][number]["attempts"][number];
 type Theme = PluginHostProps["theme"];
@@ -21,11 +21,8 @@ export function UsageMeter({ context, tokens, theme }: { context?: Attempt["cont
       </View>
       <Text style={muted}>{summary.percent}% · {summary.detail}</Text>
     </View>}
-    {tokens && <Text accessibilityLabel={tokens.knownCalls
-      ? `${tokens.input} uncached input, ${tokens.output} output, ${tokens.cachedRead} cache read, ${tokens.cachedWrite} cache write tokens`
-      : "Token usage unavailable"} style={muted}>
-      {tokens.knownCalls ? `↑ ${formatTokens(tokens.input)}  ↓ ${formatTokens(tokens.output)}${tokens.cachedRead ? `  · ${formatTokens(tokens.cachedRead)} cache read` : ""}${tokens.cachedWrite ? `  · ${formatTokens(tokens.cachedWrite)} cache write` : ""}` : "Tokens unavailable"}
-      {tokens.unknownCalls ? `  · ${tokens.unknownCalls} call${tokens.unknownCalls === 1 ? "" : "s"} unavailable` : ""}
+    {tokens && <Text accessibilityLabel={tokensAccessibilityLabel(tokens) ?? undefined} style={muted}>
+      {tokensSummaryLabel(tokens)}
     </Text>}
   </View>;
 }

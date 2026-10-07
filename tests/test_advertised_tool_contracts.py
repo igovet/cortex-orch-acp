@@ -309,3 +309,73 @@ def test_access_contract_promises_runtime_decision_not_user_question():
                 if t["name"] == "access_request")
     assert "without a user question" in tool["description"]
     assert "grant" in tool["description"] and "refuse" in tool["description"]
+
+
+def test_missing_path_absent_round_trip_and_keyless_mutations_are_advertised():
+    tools={t['name']:t for t in mcp_tools.tool_definitions('worker',role_id='worker-backend-dev',stage='execution')}
+    assert 'sha256: "absent"' in tools['project_read']['description']
+    assert 'project_write.expected_sha256' in tools['project_read']['description']
+    props=tools['project_write']['inputSchema']['properties']
+    assert 'returned by project_read' in props['expected_sha256']['description']
+    assert 'pass that value directly' in props['expected_sha256']['description']
+    for name in ('project_write','project_mkdir','project_delete'):
+        schema=tools[name]['inputSchema']
+        assert 'request_key' not in schema['required']
+        assert 'identical keyless retry' in schema['properties']['request_key']['description']
+
+
+def test_result_advertises_open_failure_remedies_and_explicit_failed_assignment():
+    tool=next(t for t in mcp_tools.tool_definitions('worker',role_id='worker-backend-dev',stage='execution')
+              if t['name']=='result_submit')
+    assert 'open_failed_check' in tool['description'] and 'node_status' in tool['description']
+    prop=tool['inputSchema']['properties']['assignment_outcome']
+    assert prop['enum']==['failed'] and 'assignment_outcome' not in tool['inputSchema']['required']
+    assert 'open_failed_check' in prop['description']
+
+
+def test_inline_serialization_recovery_keeps_the_owned_reference_route():
+    tool=next(t for t in mcp_tools.tool_definitions('worker',role_id='worker-backend-dev',stage='execution')
+              if t['name']=='result_submit')
+    description=tool['description']
+    assert 'do not hand-concatenate Markdown into JSON' in description
+    assert 'JSON parse error' in description
+    assert 'create_draft, draft_write and write_report' in description
+    assert 'report={report_ref: <the acknowledged report_id>}' in description
+
+
+def test_report_brief_sections_and_upfront_owned_draft_advice():
+    tool=next(t for t in mcp_tools.tool_definitions('worker',role_id='worker-backend-dev',stage='execution')
+              if t['name']=='result_submit')
+    report=tool['inputSchema']['properties']['report']
+    assert set(report['properties']) == {'title','markdown','report_ref'}
+    assert report['additionalProperties'] is False
+    for description in (tool['description'],report['description'],
+                        report['properties']['markdown']['description']):
+        assert 'Markdown sections inside markdown, never separate report fields' in description
+        assert 'code blocks or larger than about 3 KB' in description
+        assert 'create_draft, draft_write and write_report' in description
+        assert 'report={report_ref: <the acknowledged report_id>}' in description
+        for section in ('conclusion','evidence','checks','contradictions','limits','next action'):
+            assert section in description
+    description=tool['description']
+    assert description.index('prefer create_draft') < description.index('JSON parse error')
+
+
+def test_plan_scope_is_a_write_reservation_not_read_access():
+    tools={t['name']:t for t in mcp_tools.tool_definitions('coordinator')}
+    scope=tools['plan_submit']['inputSchema']['properties']['plan']['properties']['tasks']['items']['properties']['scope']
+    description=scope['description']
+    assert 'Write reservation' in description and 'scheduling overlap' in description
+    assert 'Reading needs no scope' in description and 'do not list read-only paths' in description
+    assert 'needs to read or change' not in description
+    assert 'minItems' in scope and scope['minItems']==1  # existing plan shape is preserved
+
+
+def test_project_git_context_only_is_explicit_on_result_check_surfaces():
+    tools={t['name']:t for t in mcp_tools.tool_definitions('worker',role_id='worker-backend-dev',stage='execution')}
+    assert 'context only, not a check receipt' in tools['project_git']['description']
+    result=tools['result_submit']
+    checks=result['inputSchema']['properties']['checks']
+    for description in (result['description'],checks['description'],
+                        checks['items']['properties']['tool_call_ref']['description']):
+        assert 'project_git' in description and 'context only' in description

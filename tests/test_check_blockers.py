@@ -78,7 +78,7 @@ def test_gap_command_is_retained_but_passed_and_failed_commands_are_not(tmp_path
         dict(name='blocked check', outcome='not_run', blocker='Test environment unavailable', command=command),
     ]
     receipt = mcp_tools.dispatch(store, worker, 'result_submit', dict(
-        report=dict(report_ref=report), summary='Observed', checks=checks, request_key='command-retention'))
+        report=dict(report_ref=report), summary='Observed', checks=checks, request_key='command-retention', assignment_outcome='failed'))
     assert receipt['recorded']
     node = next(n for n in TaskMachine(store).context(task.task_id)['nodes']
                 if n['assignment_ref'] == assignment)

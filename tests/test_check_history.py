@@ -34,10 +34,10 @@ def _run(store, channel, key, argv=TOGGLE):
     return mcp_tools.dispatch(store, channel, 'command_run', dict(argv=argv, request_key=key))
 
 
-def _submit(store, worker, checks):
+def _submit(store, worker, checks, **extra):
     report = publish_fixture_report(store, worker)
     return mcp_tools.dispatch(store, worker, 'result_submit',
-                              dict(report=dict(report_ref=report), summary='Observed', checks=checks, request_key='result'))
+                              dict(report=dict(report_ref=report), summary='Observed', checks=checks, request_key='result', **extra))
 
 
 def _node(store, task, assignment):
@@ -60,7 +60,7 @@ def test_an_exact_later_rerun_closes_the_failure_and_keeps_it_as_history(tmp_pat
     assert receipt['checks'] == [dict(name='unit tests', outcome='failed', closed_by=passed),
                                  dict(name='unit tests', outcome='passed')]
     node = _node(store, task, assignment)
-    assert node['status'] == 'completed'
+    assert node['status'] == receipt['node_status'] == 'completed'
     # The failure is retained, visible and still verified as a real failed run.
     assert [(c['outcome'], c.get('closed_by'), c['evidence_strength']) for c in node['result']['checks']] == [
         ('failed', passed, 'verified'), ('passed', None, 'verified')]
@@ -117,7 +117,8 @@ def test_anything_short_of_an_exact_latest_rerun_keeps_the_failure(tmp_path, cas
             # could be the same command: ambiguity keeps the failure open.
             unrecorded = _run(store, worker, 'unrecorded', ['python3', '-B', '-c', 'print(1)'])['tool_call_ref']
             _tamper(store, unrecorded, lambda saved: saved['receipt'].pop('argv'))
-    receipt = _submit(store, worker, [dict(name='unit tests', outcome='failed', tool_call_ref=failed), pass_check])
+    receipt = _submit(store, worker, [dict(name='unit tests', outcome='failed', tool_call_ref=failed), pass_check],
+                      assignment_outcome='failed')
     assert receipt['checks'][0] == dict(name='unit tests', outcome='failed')
     assert (receipt['checks'][1]['outcome'], receipt['checks'][1].get('evidence_gap')) == expected_pass
     node = _node(store, task, assignment)
@@ -131,7 +132,8 @@ def test_a_later_failure_of_a_cited_pass_fails_it_even_uncited(tmp_path):
     passed = _run(store, worker, 'pass')['tool_call_ref']
     (tmp_path / 'fixed.flag').unlink()
     assert _run(store, worker, 'fail')['exit_code'] == 1
-    receipt = _submit(store, worker, [dict(name='unit tests', outcome='passed', tool_call_ref=passed)])
+    receipt = _submit(store, worker, [dict(name='unit tests', outcome='passed', tool_call_ref=passed)],
+                      assignment_outcome='failed')
     assert receipt['checks'] == [dict(name='unit tests', outcome='failed', claimed_outcome='passed',
                                       evidence_gap='later_run_failed')]
     assert _node(store, task, assignment)['status'] == 'failed'
@@ -166,7 +168,8 @@ def test_outside_command_identity_includes_its_cwd(tmp_path, monkeypatch):
     elsewhere = outside('elsewhere', second)
     assert (failed['exit_code'], elsewhere['exit_code'], elsewhere['cwd']) == (1, 0, str(second))
     receipt = _submit(store, worker, [dict(name='deploy check', outcome='failed', tool_call_ref=failed['tool_call_ref']),
-                                      dict(name='deploy check', outcome='passed', tool_call_ref=elsewhere['tool_call_ref'])])
+                                      dict(name='deploy check', outcome='passed', tool_call_ref=elsewhere['tool_call_ref'])],
+                      assignment_outcome='failed')
     assert receipt['checks'][0] == dict(name='deploy check', outcome='failed')
     assert _node(store, task, assignment)['status'] == 'failed'
 
@@ -241,3 +244,49 @@ def test_a_stop_question_lists_only_current_failures(tmp_path):
     context = dict(nodes=[dict(node_id='N0', status='failed', result=result)])
     question = _stop_question(dict(blocker='worker_failed', question_id='q'), context, 'en')['question']
     assert 'lint: failed' in question and 'unit tests: failed' not in question
+
+
+@pytest.mark.parametrize('intentional',[False,True])
+def test_open_failed_check_refuses_before_recording_or_intentionally_fails(tmp_path,intentional):
+    from cortex_runtime.contracts import StoreError
+    store,task,worker,assignment=_fixture(tmp_path,'open-failure')
+    failed=_run(store,worker,'wrong-check')['tool_call_ref']
+    other=_run(store,worker,'corrected-check',['python3','-B','-c','print("corrected assertion")'])['tool_call_ref']
+    args=dict(report=dict(title='Result',markdown='# Result\n\nObserved.'),summary='Observed',request_key='result',
+              checks=[dict(name='unit tests',outcome='failed',tool_call_ref=failed),
+                      dict(name='unit tests',outcome='passed',tool_call_ref=other)])
+    with store.connection() as db:
+        reports_before=db.execute("SELECT COUNT(*) FROM reports").fetchone()[0]
+    if not intentional:
+        with pytest.raises(StoreError,match='open_failed_check') as caught:
+            mcp_tools.dispatch(store,worker,'result_submit',args)
+        error=caught.value
+        assert error.field == 'arguments.checks[0]'
+        assert failed in error.received and 'unit tests' in error.received
+        assert json.dumps(TOGGLE,ensure_ascii=False,separators=(',',':')) in error.correction
+        assert 'assignment_outcome="failed"' in error.correction
+        with store.connection() as db:
+            assert db.execute("SELECT COUNT(*) FROM runtime_requests WHERE operation='result_submit'").fetchone()[0] == 0
+            assert db.execute("SELECT COUNT(*) FROM task_events WHERE event_type='worker_result'").fetchone()[0] == 0
+            assert db.execute("SELECT COUNT(*) FROM reports").fetchone()[0] == reports_before
+            assert db.execute("SELECT revoked_at FROM trusted_channels WHERE channel_id=?",
+                              (worker.channel_id,)).fetchone()[0] is None
+        assert _node(store,task,assignment)['status'] == 'running'
+        (tmp_path/'fixed.flag').write_text('fixed')
+        rerun=_run(store,worker,'exact-rerun')['tool_call_ref']
+        args['checks'].append(dict(name='unit tests',outcome='passed',tool_call_ref=rerun))
+        receipt=mcp_tools.dispatch(store,worker,'result_submit',args)
+        assert receipt['checks'][0]['closed_by'] == rerun
+        assert receipt['node_status'] == 'completed'
+    else:
+        receipt=mcp_tools.dispatch(store,worker,'result_submit',dict(args,assignment_outcome='failed'))
+        assert receipt['recorded'] and receipt['node_status'] == 'failed'
+        assert _node(store,task,assignment)['status'] == 'failed'
+        with store.connection() as db:
+            assert db.execute("SELECT COUNT(*) FROM runtime_events WHERE type='WORKER_FAILED'").fetchone()[0] == 1
+
+
+def test_intentional_assignment_failure_without_a_command_failure_is_explicit(tmp_path):
+    store,task,worker,assignment=_fixture(tmp_path,'intentional')
+    receipt=_submit(store,worker,[],assignment_outcome='failed')
+    assert receipt['node_status'] == _node(store,task,assignment)['status'] == 'failed'

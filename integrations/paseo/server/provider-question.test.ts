@@ -98,4 +98,22 @@ card("permission:q5", "pq_5");
 await wrapped.send({ type: "session.permission", sessionId: "s", permissionId: "permission:q5",
   response: { behavior: "allow", selectedActionId: "cortex-question-1" } } as any);
 assert.equal(JSON.parse(sent.filter((input) => input.type === "session.configure").at(-1).changes.settings[QUESTION_ANSWER_CONFIG_ID]).answer, "Approve");
+
+// O2 defence in depth: a stray tool_call update for the never-announced
+// question-card toolCallId must never surface as a generic "Tool call" row.
+seen.length = 0;
+emit({ type: "session.opened", sessionId: "s", capabilities: [] });
+emit({
+  type: "timeline.item", sessionId: "s",
+  item: { type: "tool_call", id: "normal-1", callId: "normal-1", name: "Read", status: "completed",
+    detail: { type: "unknown", input: null, output: null } },
+});
+emit({
+  type: "timeline.item", sessionId: "s",
+  item: { type: "tool_call", id: "orphan-1", callId: "cortex-question-batch:b1", status: "completed",
+    detail: { type: "unknown", input: null, output: null } },
+});
+assert.ok(seen.some((event) => event.type === "timeline.item" && event.item.callId === "normal-1"), "control event should reach the timeline");
+assert.equal(seen.some((event) => event.type === "timeline.item" && event.item.callId === "cortex-question-batch:b1"), false, "orphan question-batch update must be hidden");
+
 console.log("ok");

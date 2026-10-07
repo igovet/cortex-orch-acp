@@ -161,7 +161,7 @@ def dispatch(store, channel, operation, args):
             if previous and json.loads(previous['result_json']).get('complete'):
                 return json.loads(previous['result_json'])['receipt']
             if previous is None:
-                from ..delegation.evidence import accept_checks
+                from ..delegation.evidence import accept_checks, current_outcomes, assess_checks
                 _authority(db, channel)
                 for index, check in enumerate(args['checks']):
                     gap = check['outcome'] in {'not_run', 'unverified'}
@@ -177,6 +177,24 @@ def dispatch(store, channel, operation, args):
                 # structured gap; a failure an exact later rerun closed keeps
                 # closed_by. The original claim stays in the digest.
                 accepted_checks = accept_checks(db, channel.task_id, channel.attempt_id, args['checks'])
+                if args.get('assignment_outcome') != 'failed':
+                    outcomes=current_outcomes(db,channel.task_id,channel.attempt_id,accepted_checks)
+                    assessments=assess_checks(db,channel.task_id,channel.attempt_id,accepted_checks)
+                    for index,(check,current,assessment) in enumerate(zip(accepted_checks,outcomes,assessments)):
+                        if current['outcome'] != 'failed':
+                            continue
+                        identity=assessment.get('identity')
+                        command=(f" argv={encoded(list(identity[1]))}"
+                                 + (f" cwd={encoded(identity[2])}" if identity[2] else '')) if identity else ''
+                        raise StoreError('open_failed_check',f'arguments.checks[{index}]',
+                                         f"{check['name']} ({check.get('tool_call_ref') or 'no receipt'})",
+                                         'a later passed check citing a rerun of exactly this argv, or assignment_outcome="failed"',
+                                         f"This check remains failed.{command} Rerun exactly the receipt's argv "
+                                         "(and outside_command cwd), retain the failed check and cite the later passed "
+                                         "receipt in this result; a different argv does not close it. Or explicitly send "
+                                         'assignment_outcome="failed" to submit an intentional failed assignment. '
+                                         "Nothing was recorded or published and your channel remains active; the same "
+                                         "request_key may be reused.")
                 # A supplied argv on a completed check is descriptive, never
                 # evidence. Do not echo it in the retained result as if trusted.
                 for check in accepted_checks:
@@ -213,8 +231,11 @@ def dispatch(store, channel, operation, args):
             machine.check_review_binding(channel.task_id, provision['idempotency_key'], args['request_key'])
         result = _worker_publish_result(store, channel, {key: value for key, value in accepted.items() if key not in {'verdict', 'findings'}})
         machine.record_result(channel.task_id, provision['idempotency_key'], accepted, args['request_key'])
+        with store.connection() as db:
+            node_status=db.execute('SELECT status FROM runtime_nodes WHERE task_id=? AND assignment_ref=?',
+                                   (channel.task_id,provision['idempotency_key'])).fetchone()[0]
         # The receipt shows the worker every check the runtime did not accept as claimed.
-        result = dict(result, report_ref=accepted['report_ref'], checks=[{key: check[key] for key in ('name', 'outcome', 'claimed_outcome', 'evidence_gap', 'blocker', 'closed_by')
+        result = dict(result, node_status=node_status, report_ref=accepted['report_ref'], checks=[{key: check[key] for key in ('name', 'outcome', 'claimed_outcome', 'evidence_gap', 'blocker', 'closed_by')
                                        if key in check} for check in accepted['checks']])
         with store.connection() as db:
             db.execute('BEGIN IMMEDIATE')

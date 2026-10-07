@@ -192,8 +192,30 @@ supported image (PNG, JPEG, GIF or WEBP, sniffed by content, not extension), up 
 10 MiB cap, returns a real MCP `image` content block plus its SHA-256, byte size, MIME
 type and path as text (`gateway_image_too_large` above the cap); any other non-UTF-8
 regular file returns only its SHA-256, byte size and `binary: true`.
+`project_read` of a permitted missing path succeeds with `exists: false`,
+`sha256: "absent"` and `parent_exists`. This is an observation, never permission:
+all private-path and no-follow checks still apply, and real OS read failures
+remain `gateway_read_failure`. Pass that SHA value directly to `project_write`
+for creation; `parent_exists` is informational. A creation also creates every
+missing parent directory (mode 0755): each component is created and reopened
+through no-follow directory descriptors only after the private-path, write-grant
+and user deny-write checks passed for the full path, and a file or symlink
+component is refused with `gateway_parent_not_directory` naming it. A non-`absent`
+`expected_sha256` under a missing parent is a `gateway_write_conflict` (field
+`expected_sha256`, expected `absent`) and creates nothing. `project_mkdir` also
+creates missing parents; an existing real directory returns `created: false`, and
+a file or symlink at the path is `gateway_path_exists`. A refusal before any
+possible side effect keeps its TOOL_REJECTED event but not a replayable auto-key
+receipt, so an identical keyless retry can succeed after correction. An explicit
+key retains the refusal with its full structured field/expected/correction; use a
+new explicit key for the corrected action.
 `project_write` and `project_delete` require the exact existing SHA-256; creation
-requires `absent`. `project_delete` supports binary files and checks their raw-byte
+requires `absent`. These two tools and `project_mkdir` accept an omitted
+`request_key`: the runtime derives a stable operation/payload hash scoped to the
+channel. Identical keyless retries of actual effects reuse the retained result before checking CAS,
+creating a directory or asking for deletion confirmation. Different payloads
+are different actions; an intentional repeat of the same payload after other
+changes needs a fresh explicit key. A pending/unknown receipt still refuses replay. `project_delete` supports binary files and checks their raw-byte
 SHA-256 before unlinking. File operations use no-follow directory descriptors and
 reject symlinks, hardlinks and private components `.cortex`, `.git`, `.codex`,
 `.claude`. A private path is refused before anything else, so a deletion there

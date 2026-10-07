@@ -66,7 +66,7 @@ def test_disabled_never_checks_paths_or_creates_files(tmp_path, monkeypatch):
     assert list(tmp_path.iterdir()) == []
 
 
-@pytest.mark.parametrize("production", ["payload", "state", "source_mismatch", "dev_symlink", "git_trace"])
+@pytest.mark.parametrize("production", ["payload", "state", "source_mismatch", "dev_symlink", "dev_home_git"])
 def test_gate_refuses_production_and_unsafe_optin(tmp_path, monkeypatch, production):
     home = tmp_path / "home"
     home.mkdir()
@@ -89,10 +89,29 @@ def test_gate_refuses_production_and_unsafe_optin(tmp_path, monkeypatch, product
         target.mkdir()
         (home / ".paseo-dev").symlink_to(target, target_is_directory=True)
     else:
-        (home / ".git").mkdir()
+        # W2: a .git *inside* the guarded dev home's own subtree still refuses.
+        (home / ".paseo-dev").mkdir()
+        (home / ".paseo-dev/.git").mkdir()
     with pytest.raises(ValueError, match="dev_wire_trace_refused"):
         wire._gate(env, root)
     assert not (home / ".paseo-dev/cortex-xdg/state/cortex/wire-traces").exists()
+
+
+def test_gate_ignores_a_git_repository_above_the_dev_home(tmp_path, monkeypatch):
+    """W2: $HOME (or any ancestor above the guarded dev home) may itself be
+    a Git checkout -- that must never disable tracing, only a .git/.cortex
+    marker inside the dev home's own subtree does."""
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / ".git").mkdir()
+    root = tmp_path / "source"
+    (root / ".git").mkdir(parents=True)
+    (root / "scripts").mkdir()
+    (root / "scripts/cortex_paseo_dev.py").write_text("source marker")
+    env = dev_env(home, root)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    directory = wire._gate(env, root)
+    assert directory == home / ".paseo-dev/cortex-xdg/state/cortex/wire-traces"
 
 
 def test_guarded_wrapper_is_only_explicit_start_optin(tmp_path, monkeypatch):
@@ -121,6 +140,28 @@ def test_guarded_wrapper_is_only_explicit_start_optin(tmp_path, monkeypatch):
         args.command, args.home = command, str(home)
         assert wrapper._run_cli(args) == 2
     assert len(seen) == 1
+
+
+def test_wrapper_wire_trace_preflight_fails_visibly_without_launching(tmp_path, monkeypatch, capsys):
+    """W2: the wrapper's --wire-trace start preflights the same gate the
+    runtime enforces and fails visibly (non-zero exit, stderr message)
+    instead of silently launching Paseo with tracing that can never
+    activate."""
+    wrapper = module("scripts/cortex_paseo_dev.py", "trace_wrapper_preflight")
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+    # This test may itself run inside a Cortex command sandbox.
+    (tmp_path / "mountinfo").write_text("")
+    monkeypatch.setenv(wrapper.MOUNTINFO_OVERRIDE, str(tmp_path / "mountinfo"))
+    dev = tmp_path / ".paseo-dev"
+    dev.mkdir()
+    (dev / ".git").mkdir()  # W2: a .git inside the dev home's own subtree refuses.
+    launched = []
+    monkeypatch.setattr(wrapper.subprocess, "run", lambda *a, **k: launched.append((a, k)))
+    args = SimpleNamespace(home=str(dev), paseo="/bin/true", check=False,
+                           wire_trace=True, command=["--", "start", "--json"])
+    assert wrapper._run_cli(args) == 2
+    assert launched == []
+    assert "--wire-trace preflight refused" in capsys.readouterr().err
 
 
 def test_upstream_stdio_captures_actual_both_directions_and_identity(trace):
@@ -257,6 +298,22 @@ def test_redaction_structured_embedded_json_argv_env_headers_and_echo(trace):
         assert value not in raw
     assert rows(trace)[0]["payload"]["token_budget"] == 4096
     assert rows(trace)[0]["payload"]["url"] == "https://[REDACTED]@host.example/path"
+
+
+def test_redaction_authorization_token_header_free_text_preserves_ordinary_token_word(trace):
+    """H2 fix (S6, spec r_84e20c5ca0a6/T8): an ``Authorization: token X``
+    free-text line must not leak its credential, and must not cause every
+    later literal "token" word in the same payload to be redacted (F8:
+    the old ``_ASSIGNMENT``-only learn path treated the bare scheme word
+    ``token`` itself as the remembered secret)."""
+    payload = {
+        "text": "Authorization: token dummy-secret-credential-12345 then token handling",
+    }
+    trace.record("mcp", "in", payload)
+    raw = (trace.directory / "trace.jsonl").read_text()
+    assert "dummy-secret-credential-12345" not in raw
+    event = rows(trace)[0]
+    assert event["payload"]["text"] == "Authorization: [REDACTED] then token handling"
 
 
 def _write_process(directory, index):
@@ -476,3 +533,22 @@ def test_fifo_viewer_input_refuses_without_blocking(trace, name):
     assert stat.S_ISFIFO(after.st_mode)
     assert (after.st_ino, after.st_mode, after.st_size) == (
         before.st_ino, before.st_mode, before.st_size)
+
+
+def test_viewer_ignores_a_git_repository_above_the_dev_home_but_refuses_one_inside_it(tmp_path, monkeypatch):
+    """W3: scripts/cortex_trace_view.py applies wire_trace.py's own W2 scoping
+    rule -- a Git checkout at or above $HOME must never refuse the real
+    (``~/.paseo-dev``) trace directory, but a .git/.cortex marker inside the
+    dev home's own subtree still refuses."""
+    viewer = module("scripts/cortex_trace_view.py", "trace_viewer")
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / ".git").mkdir()
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    directory = home / ".paseo-dev/cortex-xdg/state/cortex/wire-traces"
+    tracer = wire.WireTrace(directory, {})
+    tracer.record("mcp", "in", {"a": 1})
+    assert not tracer.failed
+    assert viewer.main(["--directory", str(directory)]) == 0
+    (home / ".paseo-dev/.git").mkdir()
+    assert viewer.main(["--directory", str(directory)]) == 1

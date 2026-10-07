@@ -24,24 +24,24 @@ test("maps every advertised Cortex MCP operation to a human semantic row", () =>
 
 test("uses native Read/Edit/Shell/Skill/Governance action and target", () => {
   assert.deepEqual(presentToolSemantics({ title: "Read — src/greeting.py", input: {} }), {
-    kind: "read", icon: "FileText", action: "Read", target: "src/greeting.py", label: "Read — src/greeting.py", expandable: false, systemOperation: false, visible: true,
+    kind: "read", icon: "FileText", action: "Read", target: "src/greeting.py", label: "Read: src/greeting.py", expandable: false, systemOperation: false, visible: true,
   });
   assert.deepEqual(presentToolSemantics({ title: "Edit seed.txt", input: { file_path: "/project/seed.txt" } }), {
-    kind: "edit", icon: "FilePenLine", action: "Edit", target: "/project/seed.txt", label: "Edit — /project/seed.txt", expandable: true, systemOperation: false, visible: true,
+    kind: "edit", icon: "FilePenLine", action: "Edit", target: "/project/seed.txt", label: "Edit: /project/seed.txt", expandable: true, systemOperation: false, visible: true,
   });
   assert.equal(presentToolSemantics({ title: "Preparing file…", toolKind: "edit", input: {} }).target, null);
   assert.equal(presentToolSemantics({ title: "Editing files", toolKind: "edit", input: {} }).label, "Edit");
   assert.deepEqual(presentToolSemantics({ title: "Terminal", input: { command: "pwd" } }), {
-    kind: "shell", icon: "Terminal", action: "Shell", target: "pwd", label: "Shell — pwd", expandable: true, systemOperation: false, visible: true,
+    kind: "shell", icon: "Terminal", action: "Shell", target: "pwd", label: "Shell: pwd", expandable: true, systemOperation: false, visible: true,
   });
-  assert.equal(presentToolSemantics({ title: "Skill", input: { skill: "knowledge-harvest" } }).label, "Skill — knowledge-harvest");
+  assert.equal(presentToolSemantics({ title: "Skill", input: { skill: "knowledge-harvest" } }).label, "Skill: knowledge-harvest");
   assert.equal(presentToolSemantics({ title: "Skill", input: { skill: "knowledge-harvest" } }).expandable, true);
-  assert.equal(presentToolSemantics({ title: "Governance", input: { mode: "light" } }).label, "Governance — light");
-  assert.equal(presentToolSemantics({ name: "mcp__cortex__read_report", input: { report_id: "r_abc", author: "worker-backend" } }).label, "Read report — by worker-backend");
+  assert.equal(presentToolSemantics({ title: "Governance", input: { mode: "light" } }).label, "Governance: light");
+  assert.equal(presentToolSemantics({ name: "mcp__cortex__read_report", input: { report_id: "r_abc", author: "worker-backend" } }).label, "Read report: by worker-backend");
   assert.equal(presentToolSemantics({ name: "mcp__cortex__read_report", input: { report_id: "r_abc" } }).systemOperation, false);
   assert.equal(presentToolSemantics({ name: "mcp__cortex__write_report", title: "Edit report", input: { report_ref: "r_abc" } }).expandable, true);
-  assert.equal(presentToolSemantics({ name: "mcp__cortex__set_governance", input: { mode: "light" } }).label, "Set governance — light");
-  assert.equal(presentToolSemantics({ name: "mcp__cortex__read_report", input: { report_id: "r_abc" } }).label, "Read report — r_abc");
+  assert.equal(presentToolSemantics({ name: "mcp__cortex__set_governance", input: { mode: "light" } }).label, "Set governance: light");
+  assert.equal(presentToolSemantics({ name: "mcp__cortex__read_report", input: { report_id: "r_abc" } }).label, "Read report: r_abc");
 });
 
 test("retains coordinator capsule and report reads", () => {
@@ -68,18 +68,18 @@ test("humanizes unknown names and keeps expanded payload out of the collapsed la
   const row = presentToolSemantics({ name: "mcp__other__search_code", input: { query: "secret" } });
   assert.equal(row.label, "Search Code");
   assert.equal(row.target, null);
-  assert.equal(presentToolSemantics({ name: "mcp.cortex.result_submit", input: { report: { report_ref: "r_abc" } } }).label, "Submit result — r_abc");
+  assert.equal(presentToolSemantics({ name: "mcp.cortex.result_submit", input: { report: { report_ref: "r_abc" } } }).label, "Submit result: r_abc");
   assert.equal(presentToolSemantics({ name: "mcp.cortex.result_submit", input: { report: { title: "Review", markdown: "# secret body" } } }).label, "Submit result");
   assert.equal(presentToolSemantics({ name: "mcp__other__search_code", input: { query: "{\"secret\":true}" } }).label, "Search Code");
 });
 
 test("gateway labels override generic adapter execution kinds", () => {
-  assert.equal(presentToolSemantics({ name: "mcp.cortex.project_read", toolKind: "execute", rawInput: { server: "cortex", tool: "project_read", arguments: { path: "calc.py" } } }).label, "Read — calc.py");
-  assert.equal(presentToolSemantics({ name: "mcp__cortex__command_run", rawInput: { argv: ["python3", "-B", "-m", "unittest", "-q"] } }).label, "Shell — python3 -B -m unittest -q");
+  assert.equal(presentToolSemantics({ name: "mcp.cortex.project_read", toolKind: "execute", rawInput: { server: "cortex", tool: "project_read", arguments: { path: "calc.py" } } }).label, "Read: calc.py");
+  assert.equal(presentToolSemantics({ name: "mcp__cortex__command_run", rawInput: { argv: ["python3", "-B", "-m", "unittest", "-q"] } }).label, "Shell: python3 -B -m unittest -q");
 });
 
 test("unwraps Codex tool envelopes and hides only protocol/wait operations", () => {
-  assert.equal(presentToolSemantics({ name: "mcp.cortex.read_skill", rawInput: { server: "cortex", tool: "read_skill", arguments: { skill: "tool-discipline" } } }).label, "Read skill — tool-discipline");
+  assert.equal(presentToolSemantics({ name: "mcp.cortex.read_skill", rawInput: { server: "cortex", tool: "read_skill", arguments: { skill: "tool-discipline" } } }).label, "Read skill: tool-discipline");
   for (const name of ["agent_thought_chunk", "mcp__claude__wait", "Wait", "thinking", "usage_update"]) {
     assert.equal(presentToolSemantics({ name }).visible, false, name);
   }
@@ -101,7 +101,7 @@ test("unwraps Codex tool envelopes and hides only protocol/wait operations", () 
 
 test("a call titled with its own command line shows that command, not its first word", () => {
   const loop = "for f in services/*/service; do grep -c intent \"$f\"/*.py; done";
-  assert.equal(presentToolSemantics({ name: loop, rawInput: { command: loop } }).label, `Shell — ${loop}`);
+  assert.equal(presentToolSemantics({ name: loop, rawInput: { command: loop } }).label, `Shell: ${loop}`);
   assert.equal(presentToolSemantics({ name: 'grep -rn "stop" services/trading-engine' }).label,
     'grep -rn "stop" services/trading-engine');
   const long = presentToolSemantics({ name: `grep -rn "${"x".repeat(200)}" src` }).label;
@@ -125,7 +125,7 @@ test("normalized OpenCode Code Mode calls render like the Codex and Claude calls
     name: "mcp.cortex.read_report", toolKind: "other",
     rawInput: { server: "cortex", tool: "read_report", arguments: { report_id: "r_abc" }, code: "return 1" },
   });
-  assert.equal(read.label, "Read report — r_abc");
+  assert.equal(read.label, "Read report: r_abc");
   const unresolved = presentToolSemantics({ name: "Code Mode", toolKind: "other", rawInput: { code: "return 1" } });
   assert.notEqual(unresolved.kind, "shell");
   assert.equal(unresolved.label, "Code Mode");
@@ -139,9 +139,32 @@ test("raw OpenCode replay uses authoritative inner names and provisional code hi
   assert.equal(presentToolSemantics({ name: "execute", toolKind: "other", rawInput,
     rawOutput: { metadata: { toolCalls: [
       { tool: "search", input: {} }, { tool: "cortex.read_report", input: { report_id: "r_abc" } },
-    ] } } }).label, "Read report — r_abc");
+    ] } } }).label, "Read report: r_abc");
   assert.equal(presentToolSemantics({ name: "execute", toolKind: "other", rawInput: {} }).label, "Code Mode");
   assert.equal(presentToolSemantics({ name: "execute", rawInput: { code: "return 1" } }).kind, "generic");
-  assert.equal(presentToolSemantics({ name: "execute", toolKind: "execute", rawInput: { command: "pwd" } }).label, "Shell — pwd");
-  assert.equal(presentToolSemantics({ name: "execute", rawInput: { command: "pwd" } }).label, "Shell — pwd");
+  assert.equal(presentToolSemantics({ name: "execute", toolKind: "execute", rawInput: { command: "pwd" } }).label, "Shell: pwd");
+  assert.equal(presentToolSemantics({ name: "execute", rawInput: { command: "pwd" } }).label, "Shell: pwd");
+});
+
+test("every targeted label survives the installed Paseo client's humanizer verbatim (O1)", () => {
+  // JS port of the installed client's tool-display rule (module 4613,
+  // function u(name)): return the name unchanged only if it contains one of
+  // `:` `.` `/`, or the substring `__`; otherwise strip `.`/`_`/`-`,
+  // lowercase, and capitalize the first letter.
+  const hostHumanize = (value: string): string => {
+    if (/[:./]/.test(value) || value.includes("__")) return value;
+    const humanized = value.replace(/[._-]+/g, " ").trim().toLowerCase();
+    return humanized.replace(/^(.)/, (char) => char.toUpperCase());
+  };
+  const targetedLabels = [
+    presentToolSemantics({ name: "mcp__cortex__command_run", rawInput: { argv: ["python3", "-m", "pytest", "-q"] } }).label,
+    presentToolSemantics({ name: "mcp__cortex__read_report", input: { report_id: "r_21f9bba72f15" } }).label,
+    presentToolSemantics({ title: "Terminal", input: { command: "pwd" } }).label,
+    presentToolSemantics({ name: "mcp.cortex.result_submit", input: { report: { report_ref: "r_abc" } } }).label,
+    presentToolSemantics({ name: "mcp__cortex__set_governance", input: { mode: "light" } }).label,
+  ];
+  for (const label of targetedLabels) {
+    assert.ok(label.length > 0 && label.includes(":"), label);
+    assert.equal(hostHumanize(label), label, label);
+  }
 });

@@ -121,4 +121,28 @@ function mockContext(workspaceId: string, agentId: string, directory: string, se
   }
 }
 
+// Task/coordinator totals use the same schema-compatible release derivation.
+{
+  const { root, cleanup } = makeFixture();
+  try {
+    execSqlite(join(root, ".cortex", "cortex.sqlite3"), `
+      create table usage_records (task_id text, attempt_id text, basis text, tokens_json text, stop_reason text, failed integer);
+      insert into usage_records values ${sqlValues([TASK_ID, "co_test", "unknown", "{}", "released_after_result", 0])};
+    `);
+    const context = mockContext(WORKSPACE_ID, AGENT_ID, root, SESSION_ID);
+    const input = { workspaceId: WORKSPACE_ID, agentId: AGENT_ID };
+    assert.deepEqual((await getPipeline(input, context)).tokens, { total: null, coordinator: null });
+    execSqlite(join(root, ".cortex", "cortex.sqlite3"), `
+      insert into usage_records values ${sqlValues([TASK_ID, "co_test", "unknown", "{}", "released_after_result", 1])};
+      insert into usage_records values ${sqlValues([TASK_ID, "worker_test", "unknown", "{}", "end_turn", 0])};
+    `);
+    const pipeline = await getPipeline(input, context);
+    assert.equal(pipeline.available, true);
+    assert.equal(pipeline.tokens.total?.unknownCalls, 2);
+    assert.equal(pipeline.tokens.coordinator?.unknownCalls, 1);
+  } finally {
+    cleanup();
+  }
+}
+
 console.log("pipeline: ok");

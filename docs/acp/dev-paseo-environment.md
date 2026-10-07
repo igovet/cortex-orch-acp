@@ -411,6 +411,20 @@ with the existing checkout-source/XDG isolation. Ordinary wrapper invocations
 discard inherited trace opt-ins. The runtime refuses installed production
 payloads or non-dev state even if these variables are supplied.
 
+The gate's `.git`/`.cortex` ancestor check is scoped to the trace
+directory's own subtree, from it up to and including the guarded
+`~/.paseo-dev` home itself (W2); your own checkout living under `$HOME`
+being a Git repository never disables tracing, but a `.git`/`.cortex`
+marker *inside* `~/.paseo-dev` itself still refuses. `--wire-trace start`
+preflights this same gate before launching Paseo and fails visibly
+(`cortex_paseo_dev: --wire-trace preflight refused (...)`, exit 2) instead
+of starting a daemon whose tracing can never activate.
+
+`scripts/cortex_trace_view.py` (the read-only viewer invoked below) shares
+that same `_ancestors_up_to` scoping (W3): it only treats a `.git`/`.cortex`
+marker inside the guarded dev home as unsafe, never a Git checkout at
+`$HOME` itself or above it.
+
 Traces are confined to
 `~/.paseo-dev/cortex-xdg/state/cortex/wire-traces/`, outside Git and project
 storage, with private ownership/modes and capped rotation. Existing permissive

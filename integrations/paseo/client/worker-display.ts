@@ -176,6 +176,36 @@ export function formatTokens(n: number): string {
   return String(n);
 }
 
+type TokenTotals = { input: number; output: number; cachedRead: number; cachedWrite: number; knownCalls: number; unknownCalls: number };
+
+/**
+ * The token-count text a worker card shows for one attempt, or `null` to
+ * render nothing at all. F1 fix: a `released_after_result` call (the
+ * runtime released the worker right after its accepted result_submit,
+ * before the engine's own usage for that exact call arrived -- see
+ * observability.usage) is excluded entirely by server/worker-history.ts's
+ * `sum_tokens`, so an attempt whose only calls were that kind has
+ * `knownCalls === 0` and `unknownCalls === 0` here, and renders nothing --
+ * never the "Tokens unavailable" / "call unavailable" alarm a genuinely
+ * unaccounted-for call shows.
+ */
+export function tokensSummaryLabel(tokens: TokenTotals | null | undefined): string | null {
+  if (!tokens) return null;
+  const known = tokens.knownCalls
+    ? `\u2191 ${formatTokens(tokens.input)}  \u2193 ${formatTokens(tokens.output)}${tokens.cachedRead ? `  \u00b7 ${formatTokens(tokens.cachedRead)} cache read` : ""}${tokens.cachedWrite ? `  \u00b7 ${formatTokens(tokens.cachedWrite)} cache write` : ""}`
+    : "Tokens unavailable";
+  const unavailable = tokens.unknownCalls ? `  \u00b7 ${tokens.unknownCalls} call${tokens.unknownCalls === 1 ? "" : "s"} unavailable` : "";
+  return known + unavailable;
+}
+
+/** The accessibility label paired with {@link tokensSummaryLabel}'s text. */
+export function tokensAccessibilityLabel(tokens: TokenTotals | null | undefined): string | null {
+  if (!tokens) return null;
+  return tokens.knownCalls
+    ? `${tokens.input} uncached input, ${tokens.output} output, ${tokens.cachedRead} cache read, ${tokens.cachedWrite} cache write tokens`
+    : "Token usage unavailable";
+}
+
 /** The latest attempt's context fill, as the chat's context indicator shows it. */
 export function contextSummary(context: { used: number; size: number } | null | undefined) {
   if (!context || context.size <= 0) return null;

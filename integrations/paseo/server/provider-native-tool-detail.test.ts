@@ -335,7 +335,7 @@ test("raw Code Mode replay has MCP detail/status parity without inventing droppe
   });
   const raw = event("execute", { code }, rawOutput);
   const projected: any = presentTimeline(raw);
-  assert.equal(projected.item.name, "Shell — pwd");
+  assert.equal(projected.item.name, "Shell: pwd");
   assert.deepEqual({ ...projected.item.detail }, { type: "shell", command: "pwd" });
   assert.deepEqual(raw.item.detail.output, rawOutput, "presentation never mutates source");
   const withResult = { ...rawOutput, result: { content: [{ type: "text", text: "/project" }] } };
@@ -369,5 +369,5 @@ test("raw Code Mode replay has MCP detail/status parity without inventing droppe
   const unresolved: any = presentTimeline(event("execute", {}, null, "running"));
   assert.equal(unresolved.item.name, "Shell", "the bridge has not retained kind or code yet");
   const shell: any = presentTimeline(event("execute", { command: "pwd" }, "/project"));
-  assert.equal(shell.item.name, "Shell — pwd");
+  assert.equal(shell.item.name, "Shell: pwd");
 });

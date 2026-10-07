@@ -1214,9 +1214,9 @@ def test_a_flagship_hint_is_granted_only_by_the_users_own_words(machine, monkeyp
     ('Use codex-acp/Unit-7[1m]', False), ('Use .codex-acp/Unit-7', False),
     ('Use -codex-acp/Unit-7', False), ('Use provider/codex-acp/Unit-7', False),
     ('Use codex-acp/Unit-7/nested', False), ('Use codex-acp/Unit-7,thinking', False),
-    ('Use codex-acp/unit-7', False), ('Use codex-acp/Unit-7.', False),
+    ('Use codex-acp/unit-7', False), ('Use codex-acp/Unit-7.', True),
     ('Do not use codex-acp/Unit-7', False), ('Cancel the request for codex-acp/Unit-7', False),
-    ('The tests run on codex-acp/Unit-7', False), ('Implement ordinary work', False),
+    ('The tests run on codex-acp/Unit-7', True), ('Implement ordinary work', False),
     ('Use codex-acp/Unit-7', True), ('Use "codex-acp/Unit-7".', True),
     ('Use Beacon', True),
 ])

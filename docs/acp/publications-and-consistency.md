@@ -6,7 +6,9 @@ Markdown bodies live alongside it under `.cortex/`. Each task has one real
 publishes pipeline editions. Worker reports are immutable independent Markdown
 files, selected using bounded catalogue and content cursors.
 
-Workers submit a result with its report in one of two forms. Inline:
+Workers submit a result with its report in one of two forms. For reports with
+code blocks or larger than about 3 KB, the advertised descriptions recommend the
+owned-draft/reference route before the first submission. Inline for short plain reports:
 `result_submit.report` carries the title and complete Markdown, and the runtime
 publishes it through the same `create_draft`/`write_report` path as the worker's own
 draft before recording the result. By reference: the worker creates an owned
@@ -14,7 +16,9 @@ draft, fills it through `draft_write`, publishes using `write_report`, and submi
 the exact returned `report_id` as `result_submit.report.report_ref`. `report` is
 required and exactly one form is accepted (`invalid_arguments` on
 `arguments.report` identifies a missing report, an incomplete inline form or a
-mixed form). The channel binds the task, owner epoch and attempt.
+mixed form). Decision-brief items (conclusion, evidence, checks, contradictions,
+limits, next action) are Markdown sections inside `markdown`, never separate
+report fields. The channel binds the task, owner epoch and attempt.
 
 The advertised `result_submit` JSON schema lists `report` in its plain `required`
 list, expresses the exclusive choice of forms inside it, and states
@@ -27,7 +31,8 @@ the draft id or a command receipt. New rejected `result_submit` calls attempt
 to retain only their error code and safe field path in `submission_rejection`
 observability events, never the rejected arguments or report body. That
 includes `situational_skill_required`: a worker whose observed changes pair
-documentation with behavior files without a retained `read_skill` of
+attributable documentation with behavior files (own declared scope or successful
+channel writes, excluding siblings' reserved paths) without a retained `read_skill` of
 `documentation-sync` is refused before any request, report or result is
 recorded, and may retry with the same key after reading it (see
 [roles and delegation](roles-and-delegation.md)).
@@ -75,7 +80,15 @@ failed, for a cited nonzero exit) with its `evidence_gap`, as described in
 [check evidence](orchestration.md#check-evidence). A failed check stays failed
 in the published result; only an exact later rerun of the same command closes it
 (`closed_by`, see [check history](orchestration.md#check-history-and-current-outcome)),
-and publication and recovery preserve that closure. A not_run or unverified
+and publication and recovery preserve that closure. Before recording a new
+submission, an open failure returns `open_failed_check` with the check, receipt
+and its observed argv when available. No result request, inline report or result
+is published, and the channel stays active. Retain the failed check and cite a
+verified later rerun of exactly that command, or explicitly submit
+`assignment_outcome: "failed"` for an intentional failed assignment. Changing
+argv does not close it. The refusal leaves its key reusable. Accepted receipts
+include `node_status` (`completed` or `failed`), not task acceptance; the runtime
+still re-derives check outcomes on recording and recovery. A not_run or unverified
 check must include its concrete blocker in the structured result; publication
 and recovery preserve that blocker. Chat text cannot publish
 or accept a task. Review additionally binds the project digest and an explicit

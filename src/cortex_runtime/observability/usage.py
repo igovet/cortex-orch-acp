@@ -30,7 +30,9 @@ def record_call_usage(
     reported at all during this call, e.g. an adapter that emits no
     ``usage_update`` events) or ``UsageBasis.UNKNOWN`` -- both are stored
     as ``basis='unknown'`` with empty ``tokens_json``, distinct from an
-    engine that reported and the figure happened to be ``0``."""
+    engine that reported and the figure happened to be ``0``. A runtime
+    release after an accepted result uses the existing ``stop_reason`` and
+    ``failed`` columns, never a new persisted basis."""
     basis = usage_basis.value if isinstance(usage_basis, UsageBasis) else usage_basis
     if basis is None:
         basis = UsageBasis.UNKNOWN.value
@@ -112,16 +114,22 @@ def usage_summary(store, task_id: str) -> dict:
     """Aggregate call counts and (only where reported) summed token
     figures, grouped by whether the engine actually reported usage for
     that call. Unknown-basis calls are counted separately and are never
-    folded into ``tokens_reported`` as zero."""
+    folded into ``tokens_reported`` as zero. F1 fix: a call released right
+    after its already-accepted result (``released_after_result``) is also
+    never folded into ``tokens_reported`` as zero, but it is kept distinct
+    from ``unknown_basis_calls`` too -- it is not a genuine unknown/failed
+    call, just one the runtime's own post-acceptance release pre-empted
+    before the engine's usage for it could arrive."""
     # The public list read is deliberately bounded, but a task total must
     # include every call. Aggregate from the complete task cursor.
     by_connection: dict[str, dict[str, Any]] = {}
     total_calls = 0
     unknown_calls = 0
+    released_after_result_calls = 0
     failed_calls = 0
     with store.connection() as db:
         for row in db.execute(
-            "SELECT attempt_id, basis, tokens_json, failed FROM usage_records "
+            "SELECT attempt_id, basis, tokens_json, failed, stop_reason FROM usage_records "
             "WHERE task_id=? ORDER BY created_at, id", (task_id,),
         ):
             total_calls += 1
@@ -129,12 +137,17 @@ def usage_summary(store, task_id: str) -> dict:
                 failed_calls += 1
             connection_key = _route_for_attempt(db, row["attempt_id"])["connection_id"] or "unattributed"
             bucket = by_connection.setdefault(
-                connection_key, dict(calls=0, failed_calls=0, unknown_basis_calls=0, tokens_reported={}),
+                connection_key, dict(calls=0, failed_calls=0, unknown_basis_calls=0,
+                                     released_after_result_calls=0, tokens_reported={}),
             )
             bucket["calls"] += 1
             if row["failed"]:
                 bucket["failed_calls"] += 1
-            if row["basis"] == "unknown":
+            if (row["basis"] == "unknown" and not row["failed"]
+                    and row["stop_reason"] == "released_after_result"):
+                released_after_result_calls += 1
+                bucket["released_after_result_calls"] += 1
+            elif row["basis"] == "unknown":
                 unknown_calls += 1
                 bucket["unknown_basis_calls"] += 1
             else:
@@ -142,9 +155,13 @@ def usage_summary(store, task_id: str) -> dict:
                     bucket["tokens_reported"][token_key] = bucket["tokens_reported"].get(token_key, 0) + token_value
     return dict(
         task_id=task_id, total_calls=total_calls, unknown_basis_calls=unknown_calls,
+        released_after_result_calls=released_after_result_calls,
         failed_calls=failed_calls, by_connection=by_connection,
         note=(
             "unknown_basis_calls are calls this engine reported no usage_update for; they are "
-            "never summed into tokens_reported as zero -- see docs/acp/observability.md."
+            "never summed into tokens_reported as zero -- see docs/acp/observability.md. "
+            "released_after_result_calls are calls the runtime released right after an already-"
+            "accepted result_submit, before the engine's own usage for that exact call arrived -- "
+            "also never summed as zero, and never counted as unknown_basis_calls."
         ),
     )

@@ -9,6 +9,7 @@ in-process ``manager`` whose ``prompt_turn`` yields portable
 """
 from __future__ import annotations
 
+import re
 import threading
 import uuid
 
@@ -211,6 +212,94 @@ def test_retry_calls_are_each_attributed_separately(tmp_path):
     assert [row["call_sequence"] for row in records] == [1, 2]
     assert records[0]["failed"] is True and records[0]["basis"] == "unknown"
     assert records[1]["failed"] is False and records[1]["basis"] == "engine_reported"
+
+
+@pytest.mark.parametrize("legacy_schema", [False, True])
+def test_release_after_accepted_result_is_not_recorded_as_failed(tmp_path, monkeypatch, legacy_schema):
+    """H3: once this exact attempt already published its worker_result, a
+    later EngineTurnFailed on the same call (e.g. the transport closed by
+    the runtime's own post-acceptance release) is the runtime ending an
+    already-successful call, not a failed one -- the usage row must not
+    carry failed=True just because the teardown itself
+    raised (see delegation.live_adapters.EngineSessionManagerAdapter.prompt
+    finally block)."""
+    from cortex_runtime.acp.orchestrating_runtime import EngineTurnFailed
+    from cortex_runtime.delegation import events as delegation_events
+
+    from cortex_runtime.observability import store as usage_store
+
+    if legacy_schema:
+        # Freeze the old CHECK before creation; then use the real adapter
+        # against a normal reopened store, not a direct fabricated usage row.
+        old_constraint = "basis TEXT NOT NULL CHECK(basis IN ('observed','engine_reported','derived','estimated','unknown'))"
+        historical_schema = re.sub(
+            r"basis TEXT NOT NULL CHECK\(basis IN \([^)]*\)\)",
+            lambda _: old_constraint, usage_store.OBSERVABILITY_SCHEMA,
+        )
+        with monkeypatch.context() as patch:
+            patch.setattr(usage_store, "OBSERVABILITY_SCHEMA", historical_schema)
+            store, task_id = _task(tmp_path)
+        store = Store(tmp_path / ".cortex", project_root=tmp_path)
+        with store.connection() as db:
+            assert "'released_after_result'" not in db.execute(
+                "SELECT sql FROM sqlite_master WHERE name='usage_records'"
+            ).fetchone()[0]
+    else:
+        store, task_id = _task(tmp_path)
+    adapter = _adapter(store)
+    delegation_events.append_event(
+        store, task_id, "worker_result", "result_submit:report-1",
+        dict(report_ref="report-1", summary="Observed result", checks=[]),
+        origin="ch_worker", assignment_ref="att-7",
+    )
+    released = _FakeManager([EngineEvent(kind=EngineEventKind.ERROR, error_message="released_mid_turn")])
+    _register(adapter, task_id, "att-7", "sess-7", released)
+    with pytest.raises(EngineTurnFailed):
+        adapter.prompt("sess-7", "hello", threading.Event())
+
+    records = observability_usage.list_usage(store, task_id)
+    assert len(records) == 1
+    assert records[0]["failed"] is False
+    assert records[0]["stop_reason"] == "released_after_result"
+    assert records[0]["basis"] == "unknown"
+    summary = observability_usage.usage_summary(store, task_id)
+    assert summary["released_after_result_calls"] == 1
+    assert summary["unknown_basis_calls"] == 0
+    from cortex_runtime.observability.metrics import diagnostics_summary
+    assert diagnostics_summary(store, task_id)["tokens"]["availability"] == "unavailable_reason"
+    assert records[0]["tokens"] == {}
+
+
+def test_release_after_accepted_result_keeps_a_real_reported_basis(tmp_path):
+    """F1 fix: if the engine already reported real usage before the
+    runtime's post-acceptance release raised, that real basis/tokens must
+    never be overwritten by the release-after-result marker."""
+    from cortex_runtime.acp.orchestrating_runtime import EngineTurnFailed
+    from cortex_runtime.delegation import events as delegation_events
+
+    store, task_id = _task(tmp_path)
+    adapter = _adapter(store)
+    delegation_events.append_event(
+        store, task_id, "worker_result", "result_submit:report-2",
+        dict(report_ref="report-2", summary="Observed result", checks=[]),
+        origin="ch_worker", assignment_ref="att-8",
+    )
+    released = _FakeManager([
+        EngineEvent(
+            kind=EngineEventKind.USAGE_UPDATE, usage_basis=UsageBasis.ENGINE_REPORTED,
+            usage_values=dict(input_tokens=12, output_tokens=3),
+        ),
+        EngineEvent(kind=EngineEventKind.ERROR, error_message="released_mid_turn"),
+    ])
+    _register(adapter, task_id, "att-8", "sess-8", released)
+    with pytest.raises(EngineTurnFailed):
+        adapter.prompt("sess-8", "hello", threading.Event())
+
+    records = observability_usage.list_usage(store, task_id)
+    assert len(records) == 1
+    assert records[0]["failed"] is False
+    assert records[0]["basis"] == "engine_reported"
+    assert records[0]["tokens"] == dict(input_tokens=12, output_tokens=3)
 
 
 def test_route_is_derived_from_attempt_route_audit_join(tmp_path):

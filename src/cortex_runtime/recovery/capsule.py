@@ -306,18 +306,42 @@ def _section_route_and_config(db, task_id: str, recipient: dict) -> dict:
             return dict(_config_public(latest), applied=False, note="No revision has reached 'active'; this is the latest proposed/selected revision only.")
         return dict(_config_public(active), applied=True)
     provisioning = db.execute(
-        "SELECT config_revision FROM delegation_provisioning WHERE idempotency_key=?",
-        (recipient["assignment_ref"],),
+        "SELECT config_revision FROM delegation_provisioning WHERE task_id=? AND idempotency_key=? AND attempt_id=?",
+        (task_id, recipient["assignment_ref"], recipient["attempt_id"]),
     ).fetchone()
-    if provisioning is not None and provisioning["config_revision"]:
-        row = _config_row(db, provisioning["config_revision"])
-        if row is not None:
-            return dict(_config_public(row), applied=True, source="own_provisioning_snapshot")
-        return _unavailable("worker_config_revision_reference_not_found")
-    if active is not None:
-        return dict(_config_public(active), applied=True, source="inherited_coordinator_active_no_explicit_snapshot")
-    return _unavailable("no_configuration_revision_recorded")
-
+    row = _config_row(db, provisioning["config_revision"]) if provisioning is not None else None
+    if row is not None:
+        task_config = dict(_config_public(row), source="task_coordinator_route_snapshot")
+    elif provisioning is not None and provisioning["config_revision"]:
+        task_config = _unavailable("worker_config_revision_reference_not_found")
+    elif active is not None:
+        task_config = dict(_config_public(active), source="task_coordinator_active_no_explicit_snapshot")
+    else:
+        task_config = _unavailable("no_configuration_revision_recorded")
+    # A dispatch audit is not engine confirmation. Retain both, and never
+    # label the coordinator configuration revision as this worker's route.
+    confirmation = _unavailable("no_worker_configuration_confirmed_for_attempt")
+    for event_row in db.execute(
+        "SELECT id, payload_json FROM task_events WHERE task_id=? AND assignment_ref=? "
+        "AND event_type='progress' ORDER BY id DESC",
+        (task_id, recipient["assignment_ref"]),
+    ):
+        payload = json.loads(event_row["payload_json"])
+        if (payload.get("kind") == "worker_configuration_confirmed"
+                and payload.get("attempt_id") == recipient["attempt_id"]):
+            confirmation = {key: payload.get(key) for key in
+                            ("attempt_id", "engine_session_ref", "engine", "connection_id",
+                             "model", "parameters", "confirmation_evidence_ref")}
+            confirmation["event_id"] = event_row["id"]
+            break
+    return dict(
+        task_configuration=task_config,
+        own_worker_route=dict(
+            attempt_id=recipient["attempt_id"],
+            dispatch_audit=_attempt_route(db, task_id, recipient["attempt_id"]),
+            worker_configuration_confirmed=confirmation,
+        ),
+    )
 
 # --------------------------------------------------------------------
 # section 3: exact user constraints with origins

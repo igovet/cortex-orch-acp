@@ -206,13 +206,34 @@ recovery calls are never collapsed into, or dropped in favor of, only the
 final successful attempt.
 
 `portable.engine_contract.UsageBasis` (`OBSERVED`/`ENGINE_REPORTED`/
-`ESTIMATED`/`UNKNOWN`) is the wire vocabulary; `engine.session_manager`
-already translates a `usage_update` wire event into
-`EngineEvent(usage_basis=UsageBasis.ENGINE_REPORTED, usage_values={...})`
-for both pinned adapters. `delegation.live_adapters.prompt()` now consumes
-those events (previously dropped entirely) and, when the engine reported
-nothing during the call, persists `basis='unknown'` with empty
-`tokens_json` — never `0`/free.
+`ESTIMATED`/`UNKNOWN`) is the wire vocabulary;
+`engine.session_manager` already translates a `usage_update` wire event
+into `EngineEvent(usage_basis=UsageBasis.ENGINE_REPORTED,
+usage_values={...})` for both pinned adapters. `delegation.live_adapters
+.prompt()` now consumes those events (previously dropped entirely) and,
+when the engine reported nothing during the call, persists
+`basis='unknown'` with empty `tokens_json` — never `0`/free.
+
+The runtime can release a worker after its accepted `result_submit`,
+interrupting the in-flight engine turn before its own per-call usage
+arrives. When teardown raises and the exact attempt already has a
+`worker_result`, `prompt()` records `failed=False` and
+`stop_reason='released_after_result'`. Without a real figure the basis
+stays `unknown` with empty tokens; an already-observed `engine_reported`
+figure is kept. This uses only existing columns and the original closed
+basis vocabulary, so existing stores need no CHECK-constraint migration,
+format change or recreation.
+
+`usage_summary` derives `released_after_result_calls` from non-failed
+unknown rows with that exact stop reason, distinct from
+`unknown_basis_calls`. Token metrics remain unavailable when neither
+group has a real reported figure. Paseo's worker-history and pipeline
+totals omit only those marked release rows from `knownCalls` and
+`unknownCalls`, preventing a false "call unavailable" alarm on successful
+worker cards. Genuine unknown calls and failed rows still count, even if
+a failed row has that stop reason. Historical unmarked rows remain
+unknown; no usage or cost is inferred, and missing figures are never
+zero/free.
 
 Automatic worker routing writes its full choice into the existing
 `attempt_route_audit.decision_detail_json` field. The `route_decision` object

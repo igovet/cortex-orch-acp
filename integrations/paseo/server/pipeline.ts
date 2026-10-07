@@ -102,7 +102,7 @@ if task is not None:
                     'stage': r['stage'] or '', 'status': r['status'] or 'pending', 'assignmentRef': r['assignment_ref'], 'waiting': waiting, 'result': node_result})
             out['plan'] = {'state': runtime['state'], 'blocker': clip(runtime['blocker'], 600), 'nodes': nodes}
     if 'usage_records' in tables:
-        rows = db.execute('select attempt_id, basis, tokens_json from usage_records where task_id=?', (task_id,)).fetchall()
+        rows = db.execute('select attempt_id, basis, tokens_json, stop_reason, failed from usage_records where task_id=?', (task_id,)).fetchall()
         out['tokens'] = {'total': sum_tokens(rows), 'coordinator': sum_tokens([r for r in rows if (r['attempt_id'] or '').startswith('co_')])}
 print(json.dumps(out, ensure_ascii=False))
 `;

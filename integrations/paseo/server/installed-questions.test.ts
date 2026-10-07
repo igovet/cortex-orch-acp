@@ -18,10 +18,11 @@ function load(marker: string, dependencies: any[]) {
 }
 const helper = load("e.parseQuestionFormQuestions=function", []);
 const batch = parseQuestionBatch({ batchId: "qb_test", questionId: "pq_a", questions: [
-  { questionId: "pq_a", question: "Layout?", options: ["Compact", "Spacious"] },
-  { questionId: "pq_b", question: "Theme?", options: ["Light", "Dark"] },
+  { questionId: "pq_a", question: "Layout?", topic: "Interface", options: ["Compact", "Spacious"] },
+  { questionId: "pq_b", question: "Theme?", topic: "Interface", options: ["Light", "Dark"] },
 ] });
 const input = batchForm(batch);
+assert.deepEqual(input.questions.map((q) => q.header), ["Interface", "Interface 2"]);
 const parsed = helper.parseQuestionFormQuestions(input);
 assert.equal(parsed.length, 2);
 assert.equal(helper.areQuestionsAnswered(parsed, { 0: new Set([0]) }, {}), false);

@@ -25,7 +25,8 @@ def forms(args):
     else:
         questions = [dict(question=args.get('question'), options=args.get('options'))]
     for question in questions:
-        if (not isinstance(question, dict) or set(question) != {'question', 'options'}
+        if (not isinstance(question, dict) or not {'question', 'options'} <= set(question)
+                or not set(question) <= {'question', 'options', 'topic'}
                 or not isinstance(question['question'], str) or not question['question'].strip()
                 or len(question['question']) > 4000):
             raise StoreError('question_invalid')
@@ -37,6 +38,14 @@ def forms(args):
         labels = [o.strip().casefold() for o in options]
         if len(set(labels)) != len(labels) or any(o in _PLACEHOLDERS for o in labels):
             raise StoreError('question_options_invalid')
+        # The tab/topic label a batch UI shows instead of the raw question
+        # id (T-topic). Optional: a client without it derives its own
+        # fallback from the question text, never the id.
+        if 'topic' in question:
+            topic = question['topic']
+            if not isinstance(topic, str) or not topic.strip() or len(topic) > 24:
+                raise StoreError('question_topic_invalid', 'topic', None,
+                                 '1 to 24 characters naming this question\'s subject in one or two words')
     return questions
 
 

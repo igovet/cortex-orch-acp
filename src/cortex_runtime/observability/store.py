@@ -22,9 +22,11 @@ it was an initial attempt, a retry/fallback hop, a recovery-capsule
 delivery, or a coordinator continuation: every call gets its own row, so
 retries are never collapsed into (or dropped in favor of) only the final
 successful attempt. ``basis`` is ``engine_reported`` when the engine
-emitted at least one ``usage_update`` event during the call, otherwise
-``unknown`` (never ``0``/free). Route/connection/config-revision are not
-duplicated here -- read access joins ``attempt_route_audit`` on
+emitted at least one ``usage_update`` event during the call, ``unknown``
+when no usage was ever reported. A post-result release is identified by
+``failed=0`` and ``stop_reason='released_after_result'`` using existing
+columns, not a new basis value (existing stores retain their CHECK constraints).
+Route/connection/config-revision are not duplicated here -- read access joins ``attempt_route_audit`` on
 ``attempt_id`` (see :mod:`observability.metrics`).
 """
 from __future__ import annotations

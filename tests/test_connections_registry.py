@@ -381,3 +381,153 @@ def test_absolute_home_and_xdg_still_work_after_the_f1_fix(tmp_path):
     environ = dict(HOME=str(home), XDG_CONFIG_HOME=str(config_home), XDG_STATE_HOME=str(state_home))
     assert registry.config_root(environ) == config_home / "cortex"
     assert registry.state_root(environ) == state_home / "cortex"
+
+
+def test_noop_transaction_preserves_inode_and_missing_registry(tmp_path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    with registry.transaction():
+        pass
+    assert not registry.registry_path().exists()
+    registry.write_registry(registry.RegistryState({}, {}))
+    before = registry.registry_path().stat()
+    with registry.transaction() as state:
+        assert state.connections == {}
+    after = registry.registry_path().stat()
+    assert (after.st_ino, after.st_mtime_ns) == (before.st_ino, before.st_mtime_ns)
+
+
+def test_concurrent_noop_transactions_and_readers_are_safe(tmp_path, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+    _isolate(tmp_path, monkeypatch)
+    registry.write_registry(registry.RegistryState({}, {}))
+    barrier = Barrier(4)
+    before = registry.registry_path().stat()
+    def transact():
+        barrier.wait(timeout=5)
+        for _ in range(100):
+            with registry.transaction() as state:
+                assert state.connections == {}
+    def read():
+        barrier.wait(timeout=5)
+        for _ in range(300):
+            assert registry.read_registry().connections == {}
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        futures = [pool.submit(operation) for operation in (transact, transact, read, read)]
+        for future in futures:
+            future.result(timeout=20)
+    assert registry.registry_path().stat().st_ino == before.st_ino
+
+
+def test_owner_read_reopens_an_inode_unlinked_by_atomic_replace(tmp_path, monkeypatch):
+    path = tmp_path / "private"
+    path.write_bytes(b"old")
+    path.chmod(0o600)
+    original_open = os.open
+    descriptors = []
+    def replacing_open(target, flags, *args, **kwargs):
+        fd = original_open(target, flags, *args, **kwargs)
+        descriptors.append(fd)
+        if len(descriptors) == 1:
+            replacement = tmp_path / "replacement"
+            replacement.write_bytes(b"new")
+            replacement.chmod(0o600)
+            os.replace(replacement, path)
+        return fd
+    monkeypatch.setattr(registry.os, "open", replacing_open)
+    assert registry.read_owner_file(path) == b"new"
+    assert len(descriptors) == 2
+    for fd in descriptors:
+        with pytest.raises(OSError):
+            os.fstat(fd)
+
+
+def test_owner_read_replacement_retry_is_bounded(tmp_path, monkeypatch):
+    path = tmp_path / "private"
+    path.write_bytes(b"initial")
+    path.chmod(0o600)
+    original_open = os.open
+    opened = []
+    def replacing_open(target, flags, *args, **kwargs):
+        fd = original_open(target, flags, *args, **kwargs)
+        opened.append(fd)
+        replacement = tmp_path / "replacement"
+        replacement.write_bytes(b"new")
+        replacement.chmod(0o600)
+        os.replace(replacement, path)
+        return fd
+    monkeypatch.setattr(registry.os, "open", replacing_open)
+    with pytest.raises(PortableError, match="unsafe_storage"):
+        registry.read_owner_file(path)
+    assert len(opened) == 8
+    for fd in opened:
+        with pytest.raises(OSError):
+            os.fstat(fd)
+
+
+def test_registry_rejects_hardlinked_file(tmp_path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    registry.write_registry(registry.RegistryState({}, {}))
+    os.link(registry.registry_path(), tmp_path / "hardlink")
+    assert registry.registry_path().stat().st_nlink == 2
+    with pytest.raises(PortableError, match="unsafe_storage"):
+        registry.read_registry()
+
+
+@pytest.mark.parametrize("unsafe", ["mode", "owner"])
+def test_unlinked_inode_never_bypasses_other_safety_checks(tmp_path, monkeypatch, unsafe):
+    from types import SimpleNamespace
+    path = tmp_path / "private"
+    path.write_bytes(b"untrusted")
+    path.chmod(0o600)
+    original_fstat = os.fstat
+    def unsafe_fstat(fd):
+        info = original_fstat(fd)
+        return SimpleNamespace(st_nlink=0,
+                               st_mode=info.st_mode | (0o044 if unsafe == "mode" else 0),
+                               st_uid=info.st_uid + (1 if unsafe == "owner" else 0))
+    monkeypatch.setattr(registry.os, "fstat", unsafe_fstat)
+    with pytest.raises(PortableError, match="unsafe_storage"):
+        registry.read_owner_file(path)
+
+
+@pytest.mark.parametrize("unsafe", ["symlink", "hardlink", "mode"])
+def test_reopened_replacement_is_validated_not_trusted(tmp_path, monkeypatch, unsafe):
+    path = tmp_path / "private"
+    path.write_bytes(b"old")
+    path.chmod(0o600)
+    target = tmp_path / "untrusted"
+    target.write_bytes(b"untrusted")
+    target.chmod(0o600)
+    original_open = os.open
+    opens = []
+    def replacing_open(name, flags, *args, **kwargs):
+        fd = original_open(name, flags, *args, **kwargs)
+        opens.append(fd)
+        if len(opens) == 1:
+            replacement = tmp_path / "replacement"
+            if unsafe == "symlink":
+                replacement.symlink_to(target)
+            elif unsafe == "hardlink":
+                os.link(target, replacement)
+            else:
+                replacement.write_bytes(b"untrusted")
+                replacement.chmod(0o644)
+            os.replace(replacement, path)
+        return fd
+    monkeypatch.setattr(registry.os, "open", replacing_open)
+    with pytest.raises(PortableError, match="unsafe_storage"):
+        registry.read_owner_file(path)
+
+
+def test_changed_transaction_commits_but_exception_never_commits(tmp_path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    with registry.transaction() as state:
+        state.override_history["test"] = []
+    assert registry.read_registry().override_history == {"test": []}
+    before = registry.registry_path().read_bytes()
+    with pytest.raises(RuntimeError, match="abort"):
+        with registry.transaction() as state:
+            state.override_history["other"] = []
+            raise RuntimeError("abort")
+    assert registry.registry_path().read_bytes() == before

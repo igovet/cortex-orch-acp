@@ -128,7 +128,14 @@ def list_open(store, task_id: str) -> list[PendingQuestion]:
             "SELECT q.* FROM pending_questions q WHERE q.task_id=? AND q.status='open' "
             "AND NOT EXISTS (SELECT 1 FROM runtime_events e WHERE e.task_id=q.task_id "
             "AND e.type='WORKER_WAIT_CHANGED' AND json_extract(e.payload_json,'$.kind')='access' "
-            "AND json_extract(e.payload_json,'$.question_id')=q.id) ORDER BY q.id", (task_id,),
+            "AND json_extract(e.payload_json,'$.question_id')=q.id) "
+            # Random identities must not reorder a displayed batch. The
+            # immutable event array breaks tied creation timestamps.
+            "ORDER BY q.created_at, COALESCE((SELECT CAST(member.key AS INTEGER) "
+            "FROM runtime_events batch, json_each(batch.payload_json,'$.questions') member "
+            "WHERE batch.task_id=q.task_id AND batch.type='QUESTION_BATCH_CREATED' "
+            "AND json_extract(member.value,'$.question_id')=q.id ORDER BY batch.id LIMIT 1),0), q.id",
+            (task_id,),
         ).fetchall()
     return [PendingQuestion._from_row(row) for row in rows]
 

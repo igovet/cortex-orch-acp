@@ -239,8 +239,9 @@ def test_two_hundred_kilobyte_diff_from_real_project_git_is_marked_and_provision
         for kind in ("status", "diff")
     ]
     status_evidence, diff_evidence = evidence
-    assert status_evidence["available"] and status_evidence["complete"]
-    assert diff_evidence["available"] and diff_evidence["complete"]
+    for observed in evidence:
+        assert observed["available"] and observed["evidence"] == "context only, not a check receipt"
+        assert not {"complete", "exit_code", "tool_call_ref"} & observed.keys()
     assert diff_evidence["byte_count"] >= 200_000
     assert status_evidence["large_output_id"]
     assert diff_evidence["large_output_id"]

@@ -178,6 +178,21 @@ def test_code_index_project_name_uses_the_observed_absolute_path_convention():
 def test_code_index_project_name_falls_back_when_the_convention_does_not_apply(workspace_root):
     assert code_index_project_name(workspace_root) is None
 
+def test_session_manager_never_guesses_the_code_index_project_from_path(tmp_path):
+    """H1: a worker's first codebase-memory-mcp call against a guessed
+    project name failed on an unindexed workspace (live, 2026-10-07) --
+    this runtime has no way to observe whether the attached server
+    actually has the workspace indexed, so engine.session_manager must
+    never derive ``code_index_project`` from the path convention; it
+    always passes ``None`` and lets the prompt's list_projects-first
+    instruction (attached_servers_section) stand."""
+    import pathlib
+
+    source = (pathlib.Path(__file__).resolve().parents[1]
+              / "src" / "cortex_runtime" / "engine" / "session_manager.py").read_text()
+    assert "code_index_project_name(" not in source
+    assert source.count("code_index_project=None") == 2
+
 
 def test_attached_server_section_uses_a_resolved_code_index_project_directly():
     section = attached_servers_section(

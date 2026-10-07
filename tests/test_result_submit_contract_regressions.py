@@ -93,3 +93,12 @@ def test_no_result_field_is_required_only_through_a_root_conditional(stage):
     schema = _schema(stage)
     assert schema['required'][0] == 'report'
     assert not {'if', 'then', 'else'} & set(schema)
+
+
+@pytest.mark.parametrize('stage',['execution','review'])
+def test_assignment_outcome_is_optional_and_only_accepts_intentional_failure(stage):
+    args=_args(assignment_outcome='failed',**({'verdict':'APPROVE'} if stage=='review' else {}))
+    validate(_schema(stage),args)
+    with pytest.raises(StoreError) as caught:
+        validate(_schema(stage),dict(args,assignment_outcome='completed'))
+    assert caught.value.field=='arguments.assignment_outcome'

@@ -1,5 +1,337 @@
 # Gotchas
 
+## O1/O2/W2: installed-client label humanizing, orphan question-card update, and an over-broad wire-trace .git gate (2026-10-07)
+
+- **O1: the installed Paseo client humanizes any tool-row name lacking
+  `:`/`.`/`/`/`__`, stripping a bare argv or report id's dashes and
+  lowercasing it (`Shell — python3 -m pytest -q` rendered as
+  `Shell python3 m pytest q`).** The plugin's own targeted label
+  (`presentToolSemantics` in `integrations/paseo/shared/tool-presentation.ts`)
+  built `${action} — ${target}` with an em dash; a target with no dot or
+  slash (a bare shell argv, a report id like `r_21f9bba72f15`) left the
+  whole string without any of the host's keep-verbatim characters. The
+  label now uses `${action}: ${target}`; the colon guarantees the host's
+  `/[:./]/` rule matches, so every targeted label renders exactly as sent.
+  Regression: `integrations/paseo/shared/tool-presentation.test.ts`
+  (including a JS port of the host's own humanizing rule asserting every
+  targeted label -- a bare argv, a report id -- survives verbatim),
+  `integrations/paseo/server/provider-native-tool-detail.test.ts`,
+  `integrations/paseo/server/replay.test.ts`.
+- **O2: a generic "Tool call" row appeared right after an answered
+  question/question-batch card and never went away.** The question
+  card's `toolCallId` (`cortex-question:*`, `cortex-question-batch:*`) is
+  only ever carried inside `session/request_permission` params -- it is
+  never announced as its own `session/update` `tool_call`. `agent.py`'s
+  `_PaseoQuestionElicitor.elicit`/`elicit_batch` nonetheless sent a
+  best-effort `tool_call_update(status="completed")` for that same
+  unannounced id once the card closed; an update for an unknown id gets
+  turned into a new synthetic timeline item (title/name falls back to the
+  raw id) by the ACP bridge, which the host then renders as a bare
+  "Tool call" row. Both call sites now skip that update entirely -- the
+  host retires the form itself once its permission is denied. Defence in
+  depth: `integrations/paseo/server/provider.ts`'s `visibleTimeline` also
+  drops any `tool_call` item whose `callId` starts with `cortex-question`,
+  whatever produced it. Regression: `tests/test_acp_elicitation.py
+  ::test_elicit_sends_no_tool_call_update_for_the_never_announced_card`
+  and `::test_elicit_batch_sends_no_tool_call_update_for_the_never_announced_card`,
+  `integrations/paseo/server/provider-question.test.ts`.
+- **`--wire-trace` never activated when `$HOME` itself was a Git
+  checkout.** `wire_trace.py`'s `_gate`/`WireTrace._directory_fd` walked
+  *every* ancestor of the trace directory for a `.git`/`.cortex` marker,
+  including `$HOME` and everything above it -- a developer's own checkout
+  living under their home directory silently disabled tracing with no
+  daemon-log trace of why (the refusal went only to the runtime's own
+  stderr). The ancestor check is now scoped (`_ancestors_up_to`) to the
+  subtree from the trace directory up to and including the guarded dev
+  home (`~/.paseo-dev`/`CORTEX_DEV_TRACE_HOME`) itself; a `.git`/`.cortex`
+  *inside* that subtree still refuses. `scripts/cortex_paseo_dev.py`'s
+  `--wire-trace start` now preflights the same gate before ever launching
+  Paseo, failing visibly (`--wire-trace preflight refused (...)`, exit 2)
+  instead of launching a daemon whose tracing can never activate.
+  Regression: `tests/test_dev_wire_trace.py
+  ::test_gate_ignores_a_git_repository_above_the_dev_home`,
+  the renamed `::test_gate_refuses_production_and_unsafe_optin[dev_home_git]`
+  case (a `.git` inside `~/.paseo-dev` itself still refuses), and
+  `::test_wrapper_wire_trace_preflight_fails_visibly_without_launching`.
+
+## O3/W3: a mandatory `server/discover` probe and an over-broad trace-viewer `.git` gate (2026-10-07)
+
+- **O3: Claude Code 2.1.285 sends a `server/discover` JSON-RPC request on
+  every Cortex MCP channel before `initialize`, and MCP protocol revision
+  2026-07-28 (`modelcontextprotocol.io/specification/2026-07-28`) makes
+  implementing it mandatory for every server.** `server.py`'s
+  `_dispatch` answered it with the generic -32601 "Unknown method", which
+  the installed client read as legacy evidence and fell back to the
+  ordinary `initialize` handshake -- functionally fine, but a protocol
+  error on every connection and non-conformant with the mandatory RPC.
+  Cortex still speaks only the pre-2026-07-28 (stateful, per-connection
+  `initialize`) wire protocol, so the handler must never claim a
+  2026-07-28+ entry in `supportedVersions` (that would tell a modern
+  client it can skip `initialize` and address this server statelessly,
+  which it cannot do). `server/discover` now answers a valid
+  `DiscoverResult` (`resultType: "complete"`, `supportedVersions:
+  ["2025-11-25"]` -- the exact version `initialize` negotiates,
+  `capabilities` identical to `initialize`'s, `_meta["io.modelcontextprotocol/serverInfo"]`
+  carrying the same `name`/`version` as `initialize`'s own `serverInfo`,
+  and `ttlMs`/`cacheScope` caching hints): "no modern evidence", so the
+  client's own fallback logic proceeds straight to `initialize` exactly as
+  before, without round-tripping a protocol error. Session/auth semantics
+  are unchanged: the reply carries no channel state and grants nothing by
+  itself. Regression: `tests/test_stdio.py
+  ::test_server_discover_answers_before_initialize_without_an_error`,
+  `::test_server_discover_is_advertised_in_the_unknown_method_message`.
+- **W3: `scripts/cortex_trace_view.py`'s `records()` had the same
+  over-broad `.git`/`.cortex` ancestor walk W2 fixed in `wire_trace.py`
+  -- it refused the real trace directory whenever `$HOME` itself was a
+  Git checkout.** It now imports and reuses `wire_trace.py`'s own
+  `_ancestors_up_to` helper and applies the identical scoping: when the
+  requested `--directory` sits inside the guarded dev home
+  (`~/.paseo-dev`), the `.git`/`.cortex` check is scoped to that subtree,
+  stopping at the dev home itself; a directory outside the dev home (an
+  explicit override) keeps the original full-ancestor walk, since there
+  is no fixed, guarded root to stop at. Regression: `tests/test_dev_wire_trace.py
+  ::test_viewer_ignores_a_git_repository_above_the_dev_home_but_refuses_one_inside_it`.
+
+## F1/F2: schema-compatible post-result release and attributed advisory skill hints (2026-10-07)
+
+- **A post-result release must not require recreating an existing store.**
+  The first F1 patch added a `released_after_result` usage basis, which
+  existing SQLite CHECK constraints reject. That approach is removed:
+  `EngineSessionManagerAdapter.prompt` keeps `basis='unknown'` when no
+  real engine figure arrived, and records `failed=0` plus
+  `stop_reason='released_after_result'` when the exact attempt already
+  published its result before teardown raised. Real `engine_reported`
+  counts remain intact. Both fresh and existing stores use the original
+  basis vocabulary; no table rebuild, format bump or manual recreation is
+  needed. `usage_summary` derives `released_after_result_calls` separately
+  from genuine unknown calls using these existing columns; token metrics
+  still report unavailable when no call supplied a real figure.
+  Paseo's worker-history and pipeline readers fetch both columns and skip
+  only non-failed unknown rows with that exact stop reason. Release-only
+  cards render no token alarm, but normal unknown calls and failed rows
+  (even with the same stop reason) still count as unavailable. This is a
+  presentation distinction, not evidence that the call was free.
+  Historical unmarked rows remain unchanged and unknown.
+  Regressions: `tests/test_usage_accounting.py
+  ::test_release_usage_reopens_pre_fix_store_without_schema_migration`
+  creates the table from frozen pre-fix SQL, reopens it, preserves earlier
+  real usage and records the release successfully without changing the
+  table SQL or format. `tests/test_observability_usage.py` exercises the
+  adapter's release branch and real-reported preservation.
+  `integrations/paseo/server/worker-history.test.ts` exercises the actual
+  card reader plus UsageMeter label helpers, including genuine unknown and
+  failed calls; `server/pipeline.test.ts` covers task/coordinator totals.
+- **An advisory skill-gate hint on a `project_write`/`project_mkdir` receipt
+  ignored attribution, charging a code-only worker for a sibling's
+  unrelated docs edit.** `orchestration/gateway.py` calls
+  `skill_gate.required_before_result_submit(..., advisory=True)` on every
+  successful gateway write to build its early, non-error hint;
+  `skill_gate.py`'s own `if not advisory:` guard only ever narrowed the
+  observed shared-tree delta to this attempt's own paths
+  (`attributable_changed_paths`) for the hard `result_submit` gate, so the
+  advisory hint always used the *whole* shared-tree delta -- a parallel
+  worker that only ever touched code still got hinted about
+  `documentation-sync` the moment any sibling wrote `docs/**`/`README.md`/
+  `SECURITY.md`, observed live on 2026-10-07 (report `r_e037854b97f0`:
+  `luna`/`sonnet` each made one extra `read_skill` call after `sol` wrote
+  `docs/project/index.md`). `required_before_result_submit` now calls
+  `attributable_changed_paths` in both modes, and advisory mode emits no
+  hint at all (rather than one built from the unattributed delta) when
+  attribution itself is unavailable (`no_declared_scope`) -- the
+  `unobservable` observability event is still recorded only for the hard
+  gate, not for a silent advisory skip. Regression:
+  `tests/test_situational_skill_gate.py
+  ::test_parallel_workers_do_not_inherit_each_others_documentation_gate`
+  (flipped to assert no hint) and the new
+  `::test_advisory_hint_is_attributed_like_the_hard_gate`.
+
+## G1-G8 fix-cycle low findings H1-H3, and two test-text drifts (2026-10-07)
+
+- **A worker's first codebase-memory-mcp call failed on an unindexed
+  workspace because the Cortex prompt asserted an unobserved fact.**
+  `engine.unified_system_prompt.code_index_project_name` derives a plausible
+  index project name from the workspace path convention alone, with no way
+  for this runtime to observe whether that external server actually has the
+  workspace indexed. `engine.session_manager.create_session` and
+  `_opencode_prompt` used to call it and assert the guessed name as fact
+  ("The index project for this workspace is `X`; use it directly"); when the
+  workspace was not indexed, a worker's first `search_graph`/`get_architecture`
+  call against that guessed project failed. Both call sites now always pass
+  `code_index_project=None`, so the prompt instead always leads with the
+  `list_projects`-first instruction (`attached_servers_section` still accepts
+  an explicit, truly-confirmed name from a future caller that can observe
+  one -- see its existing unit tests). Regression:
+  `tests/test_unified_system_prompt.py::test_session_manager_never_guesses_the_code_index_project_from_path`.
+- **H2's narrowed bare-scheme rule left every non-"bearer" authorization
+  scheme leaking in full, and its own fix regressed into a worse leak.**
+  The original narrowing of `observability.redact._BEARER` from
+  `(?:bearer|token)\s+<8+ chars>` down to `bearer`-only stopped the "token
+  handling" false positive, but a real `Authorization: token <credential>`
+  header (or `Basic`/`Digest`/`Custom`/any other RFC 9110 scheme word) then
+  leaked: `scrub_text`/`scrub_display_text` redacted only the scheme word
+  (`Authorization=[REDACTED] <credential>`), and `StreamingRedactor` leaked
+  the header completely (31 of 31 two-way chunk cuts), because its holdback
+  only ever recognized the literal words `bearer`/`token`. The fix adds a
+  dedicated, scheme-agnostic authorization-header rule (`_AUTH_HEADER`,
+  S1 in the fix spec) that runs before every other credential rule: any
+  `*authorization`-labelled key followed by `:`/`=` and either a quoted
+  value or an optional scheme word plus its credential (with any
+  `, param=value` continuation, e.g. `Digest`/AWS-style) is redacted as a
+  whole, regardless of the scheme name -- `Authorization: Token X`,
+  `Authorization: Basic X`, `Authorization: Digest a="b", c="d"` and a
+  quoted `{"Authorization": "Token X"}` are all now fully redacted. The
+  bare-scheme rule (`_BEARER`, S2) still narrows `token` to only a
+  credential-shaped value (8+ chars containing a digit, no label needed),
+  so "token handling"/"the token budget is 4096" remain untouched; a real
+  `token`-named credential is still also caught by the `key=value`/
+  `key: value` assignment rule (`_KEY_VALUE_SECRET`, extended with a quoted-
+  key form so `{"token": "X"}` is caught too) or the "token is/was X" claim
+  rule (`_SECRET_CLAIM`). A new known-token-format rule (`_KNOWN_TOKEN`)
+  redacts GitHub/GitLab/Slack/OpenAI/AWS tokens and three-part JWTs
+  regardless of context. `StreamingRedactor._hold_start` now also holds a
+  release point back whenever a completed match of any of these rules
+  straddles it, or an open header/claim/key/scheme context extends to the
+  end of the current line -- the streaming result is now identical to the
+  whole-text result for every tested two-way chunk cut, char-by-char
+  partition, and the one-chunk case, with `preserve_paths` both on and off.
+  The gated developer wire trace (`observability.wire_trace.Redactor`) had
+  its own instance of the same regression for free text: its `_ASSIGNMENT`
+  pattern treated the authorization header's own scheme word (`token`) as
+  the "value" to remember, so every later literal "token" in the same
+  payload was globally redacted too; a dedicated `_AUTH_ASSIGNMENT` pattern
+  now skips an optional scheme word and remembers only the real credential.
+  Regression: `tests/test_observability_redaction.py` (`test_t1_*` through
+  `test_t9_*`, plus the retained
+  `test_scrub_text_never_redacts_the_ordinary_word_token_followed_by_prose`
+  and `test_scrub_text_still_redacts_a_token_assignment_or_claim`),
+  `tests/test_streaming_redaction.py::test_t7_streaming_partition_invariance_for_h2_cases`,
+  and `tests/test_dev_wire_trace.py
+  ::test_redaction_authorization_token_header_free_text_preserves_ordinary_token_word`.
+- **Every worker card showed "Tokens unavailable · 1 call unavailable"
+  even for a fully successful attempt.** When this exact attempt had
+  already published its `worker_result` (its `result_submit` was accepted)
+  and the runtime then tore the engine session down mid-turn (the
+  surviving in-flight `prompt()` call sees the resulting `EngineTurnFailed`,
+  e.g. `released_mid_turn`/`transport_eof`), `delegation.live_adapters
+  .EngineSessionManagerAdapter.prompt`'s `finally` block always recorded
+  that call as `failed=True`/`basis=unknown` -- the runtime ending an
+  already-successful call is not the same thing as that call failing. The
+  `finally` block now checks `task_events` for a `worker_result` row
+  matching this exact `attempt_id` before writing the usage row, and
+  records `failed=False`/`stop_reason="end_turn"` when one is already
+  there. Regression:
+  `tests/test_observability_usage.py::test_release_after_accepted_result_is_not_recorded_as_failed`.
+- **Two tests asserted stale text instead of the behavior a prior fix cycle
+  intentionally changed.** `tests/test_error_help.py
+  ::test_an_uncertain_outcome_is_never_reported_as_rejected` still asserted
+  the old generic storage-failure wording ("identical retry fails the same
+  way") that G2 deliberately replaced with the precise keyless-vs-keyed
+  retry semantics in `contracts.error_help` (see that function's own
+  docstring); the test now asserts the new wording. `tests/
+  test_acp_elicitation.py::test_elicitation_not_advertised_uses_text_fallback`
+  asserted the text fallback's first chunk started with the bare question
+  text; G6 added the numbering the client's own `/cortex-answer` command
+  uses (`"1. Which environment?"`), so the test now matches on the
+  numbered prefix.
+
+## Paseo UI: question-batch tabs and provisioning-failure cards (2026-10-07)
+
+- **Batch question tabs show a topic, never the raw question id.** The
+  advertised `user_question_request`/`ask_question` batch item schema
+  (`QUESTION_FORM` in `orchestration/contracts.py`) now carries an optional
+  bounded `topic` (<=24 characters); `question_batches.forms` validates it.
+  It flows through the existing `QUESTION_BATCH_CREATED` event payload (no
+  storage migration) to `agent.py` `_PaseoQuestionElicitor.elicit_batch`
+  and into the Paseo elicitation `rawInput`. Paseo `question-batch.ts`
+  (`batchForm`) uses it verbatim as each tab label (`header`); a batch
+  member with no topic (an older runtime, or a model that omitted it) gets
+  a client-side fallback (`fallbackTopic`) derived from the question text
+  own first words, bounded and punctuation-stripped -- never the id.
+- **A provisioning failure worker card showed only "role status" with no
+  reason.** `orchestrating_runtime._emit_worker_card` already redacted the
+  failure line (error code plus detail) into the ACP tool call `rawOutput`
+  (`item.error` on the client), but Paseo `worker-tool-call-row` timeline
+  transformer (`index.client.tsx`) never read it, so the collapsed chat card
+  showed only the role/status subtitle (`workerCardMetadata`). The
+  transformer now carries `item.error` through as `failureReason` and the
+  card renders it under the subtitle for any non-running card that reports
+  one (a genuine failure, a cancellation or an interruption). Separately,
+  the generic `assignment_failed` branch in `_emit_assignment_tool_calls`
+  now also tries `_worker_base_title` (the helper `assignment_ready` uses)
+  so the title carries the resolved route when provisioning had already
+  picked one before failing, e.g. during engine session open
+  (`unsafe_storage`).
+
+## Paid desktop follow-up: registry, reports and routing (2026-10-07)
+
+- **A detached registry inode is not a hardlink.** An atomic replace between
+  open and fstat can produce `st_nlink == 0`. Owner-only regular-file reads now
+  reopen by path up to eight attempts, validating each replacement. Hardlinks
+  (`nlink > 1`), symlinks, wrong owner and unsafe modes still fail closed.
+  Registry transactions compare serialized state and skip unchanged writes;
+  merely validating a connection must not churn `connections.json`.
+- **Report structure belongs in Markdown.** Conclusion, evidence, checks,
+  contradictions, limits and next action are sections inside `report.markdown`,
+  not invented report fields. The advertised schema recommends the owned-draft
+  route up front for code blocks or reports larger than about 3 KB. This reduces
+  fragile inline transport; it cannot repair engine-side malformed JSON.
+- **Bare model IDs require uniqueness, not guesswork.** Recorded user requests
+  can name an exact bare ID only when it is unique across enabled configured
+  engines. One terminal prose mark is supported unless the longer token itself
+  is a configured ID. Shared bare IDs grant neither route; plan previews explain
+  the missing-engine ambiguity. Exact enabled identities now also accept direct
+  means prepositions and a request verb anywhere in the same user message;
+  labels keep local grammar, and negations/hard routing checks remain. See [routing identity rules](../acp/routing-and-fallback.md#settings-only-routing).
+- **A missing write parent is created, not refused.** Production session
+  e37b655d (2026-10-07) refused `project_write docs/project/index.md` twice with
+  an opaque `gateway_io_failure` (field `operation`) because `docs/project` did
+  not exist; the worker only succeeded after guessing `project_mkdir`. Creating a
+  file (`expected_sha256: "absent"`) and `project_mkdir` now create missing
+  parents no-follow, after the private-path/grant/deny-write checks. Remaining
+  refusals are precise: `gateway_parent_not_directory` (a file or symlink in the
+  chain), `gateway_write_conflict` (a hash for a file under a missing parent),
+  `gateway_path_exists` (mkdir onto a file or link). Regression:
+  `tests/test_project_docs_write_access.py`.
+
+## MCP error classes from session 471edd44 (2026-10-07)
+
+- **Missing-path probes are observations, not failed actions.** A permitted missing
+  path now returns `exists: false`, `sha256: "absent"` and `parent_exists` from
+  `project_read`. Pass that SHA value directly to `project_write`, which creates
+  missing parents itself. Private/escaping paths, links and real OS read
+  failures remain refused. Do not turn a denied path into a creation attempt.
+- **Keyless project mutations have stable identities.** `project_write`,
+  `project_mkdir` and `project_delete` accept an omitted `request_key`; the runtime
+  hashes operation plus payload, scoped to the channel, and identical retries
+  reuse the retained effect receipt before CAS or deletion confirmation. Pre-effect
+  refusals retain only their rejection event, allowing corrected keyless retry. A different
+  payload is a new action. To intentionally repeat the same payload after an
+  intervening change, use a fresh explicit key. Unknown effects still block replay.
+- **Honest failed-check history must not silently end the worker.** An open failure
+  now refuses `result_submit` with `open_failed_check` before publishing a report,
+  recording a request/result or revoking the channel. The correction names the
+  check/receipt and its observed argv when available. Keep the failed check and
+  cite an exact later passing rerun, or intentionally submit
+  `assignment_outcome: "failed"`. Correcting the check command itself changes its
+  identity and does not close the original failure. Accepted receipts include
+  `node_status`; this is not task acceptance. No `supersedes` policy was introduced.
+- **Situational skills are still gated at submission.** Successful gateway writes
+  and mkdir calls give early `required_before_result_submit` skill/reason hints
+  from the shared-tree trigger as non-error reminders; only attributable paths
+  in this node's declared scope or successful channel writes can refuse a result.
+  Reading the skill clears later hints;
+  native edits still rely on the result gate. Missing manifests remain explicitly
+  unobservable, and advisory observation failure cannot reject a committed write.
+- **Engine JSON parse failures happen before Cortex.** The runtime cannot repair
+  malformed inline-report arguments it never receives. Use structured serialization
+  or the existing owned-draft/reference route; a schema recovery regression is not
+  proof that a live model will serialize correctly. The retained incident input
+  was truncated, so no exact malformed-byte reproducer is available.
+
+See [file boundaries](../acp/permissions-and-containment.md),
+[publications](../acp/publications-and-consistency.md) and
+[check history](../acp/orchestration.md#check-history-and-current-outcome).
+
 Quota window labels are exact evidence, not model-family names. An unmapped exhausted window conservatively blocks all models until an explicit association distinguishes it. A scoped `models: []` is an intentional exclusion, not unknown usage. Older profiles without mappings remain untouched and use conservative semantics when activated; never fill them silently from current settings. See [quota fields and migration](../configuration.md#exact-quota-window-associations).
 
 Owner model preferences are rank inputs, not route grants. They only decide
@@ -249,3 +581,38 @@ failed in bubblewrap before ACP `initialize`, for Codex and Claude alike, and
 the agent showed only `engine_launch`. Read the engine's own `stderr.log`
 before blaming an engine version, and start daemons with `outside_command`. See
 [the dev Paseo environment](../acp/dev-paseo-environment.md).
+
+
+## Paid desktop rerun runtime findings (2026-10-07)
+
+- **Auto-key refusals are not effect receipts.** Before any possible side effect,
+  a keyless precondition refusal keeps `TOOL_REJECTED`, but removes its
+  replayable derived-key request row. Creating the missing parent allows the
+  identical keyless write to succeed. Explicit keys retain complete structured
+  errors; actual/pending effects still fence identical retries.
+- **Shared deltas are not worker authorship.** The skill gate excludes sibling
+  writers' reserved paths unless this attempt has a successful gateway write
+  for them. Unattributed or overlapping native work may yield only an advisory
+  hint. Read-only/review scopes are not writers; prior plan revisions do not
+  claim this revision's paths.
+- **Git observations are context, not checks.** `project_git` explicitly returns
+  `evidence: "context only, not a check receipt"`; its `large_output_id` is never
+  a command receipt. Put inspected status/diff in the report body. Meaningful
+  Git checks must use `command_run` with an exit-status assertion. F3 (2026-10-07):
+  `project_git` now inlines `output` up to 64 KiB (the same bound `command_run`
+  uses), with `output_truncated` marking when the retained bytes go further;
+  only an oversize result needs a `read_large_output` follow-up at all.
+- **Honor exact owner-named models.** `Часть 2 на gpt-6-luna:` is a request when
+  that exact enabled ID is bare-unique; qualified IDs also work. A request-form
+  verb in the same user message governs every exact identity, not labels.
+  Negation, exact case/boundaries, source provenance and hard routing checks
+  remain. See [routing](../acp/routing-and-fallback.md#settings-only-routing).
+- **Scope is a write reservation.** Do not list read-only dependencies in a
+  writing node's scope: they unnecessarily serialize parallel writers.
+- **Worker capsule routes have separate evidence.** `task_configuration` is the
+  task/coordinator snapshot. `own_worker_route` contains only this attempt's
+  dispatch audit and engine-confirmed event/reference; missing confirmation
+  stays unavailable. See [capsule shape](../acp/recovery-capsules.md#nine-sections).
+
+These are implementation contracts, not proof of zero errors in a later paid
+desktop workload. Qualification still requires real retained run evidence.

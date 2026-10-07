@@ -371,7 +371,6 @@ class _PaseoQuestionElicitor:
             # Tagged with its question: a late click on another question's
             # stale card must never answer this one.
             self._register((self._question_id, deliver))
-        answered_by_card = False
         try:
             result = self._host_requester.request(
                 "session/request_permission", params,
@@ -384,13 +383,13 @@ class _PaseoQuestionElicitor:
             )
         except (HostRequestTimeout, HostRequestClosed, HostRequestError):
             return typed[0] if typed else None
-        else:
-            answered_by_card = not typed
         finally:
             if self._register is not None:
                 self._register(None)
-            if not answered_by_card:
-                self._close_card(params["toolCall"]["toolCallId"])
+            # O2: this toolCallId is never announced as its own tool_call --
+            # only inside session/request_permission params above -- so the
+            # host retires the form itself; a tool_call_update for it would be
+            # an orphan update that surfaces as a generic "Tool call" row.
         if typed:
             return typed[0]
         if not isinstance(result, dict):
@@ -402,7 +401,8 @@ class _PaseoQuestionElicitor:
 
     def elicit_batch(self, session_id, batch):
         del session_id
-        members = [dict(questionId=q['question_id'], question=q['question'], options=q['options'])
+        members = [dict(questionId=q['question_id'], question=q['question'], options=q['options'],
+                        **({'topic': q['topic']} if q.get('topic') else {}))
                    for q in batch['questions']]
         tool_id = f"cortex-question-batch:{batch['batch_id']}"
         params = dict(
@@ -425,19 +425,11 @@ class _PaseoQuestionElicitor:
             # Only the validated complete config submission resolves it.
         except (HostRequestTimeout, HostRequestClosed, HostRequestError):
             pass
-        finally:
-            self._close_card(tool_id)
-
-    def _close_card(self, tool_call_id):
-        """Best effort: mark the card's tool call finished so the host can
-        retire a card that was answered in chat or abandoned."""
-        transport = getattr(self._host_requester, "_transport", None)
-        send = getattr(transport, "send_notification", None)
-        if callable(send):
-            try:
-                send(protocol.tool_call_update(self._session_id, tool_call_id, status="completed"))
-            except Exception:
-                pass
+        # O2: the batch's toolCallId is never announced as its own tool_call --
+        # only inside session/request_permission params above -- so the host
+        # retires the form itself; a tool_call_update here would be an orphan
+        # update that surfaces as a generic "Tool call" row (see agent.py's
+        # fix spec and provider.ts's visibleTimeline defence in depth).
 
 
 class Agent:

@@ -496,14 +496,17 @@ class EngineSessionManager:
         if not isinstance(self._engine_instructions, str) or not self._engine_instructions.strip():
             raise _fail("opencode_instructions_required",
                         "An OpenCode session needs its role prompt at launch (engine_instructions).")
-        from .unified_system_prompt import CODE_INDEX_SERVER, attached_servers_section, code_index_project_name
+        from .unified_system_prompt import attached_servers_section
 
         servers = host_mcp_servers(self._host_mcp_servers, role=self._mcp_role, engine=self._record.engine,
                                     role_id=self._mcp_role_id)
+        # H1 fix: never guess the code-index project name from the path
+        # convention -- this runtime has no observation that the attached
+        # server actually has this workspace indexed (see the matching
+        # comment in create_session).
         note = attached_servers_section(
             servers, self._workspace_root, role=self._mcp_role or "worker",
-            code_index_project=(code_index_project_name(self._workspace_root)
-                                if any(server.get("name") == CODE_INDEX_SERVER for server in servers) else None),
+            code_index_project=None,
         )
         return self._engine_instructions.rstrip() + ("\n\n" + note + "\n" if note else "\n")
 
@@ -816,16 +819,20 @@ class EngineSessionManager:
                 raise _fail("invalid_field", "session_new_meta must be a dict.", field="session_new_meta")
             params["_meta"] = session_new_meta
         if external_servers and session_new_meta is not None:
-            # Resolve the index name once from the installed server's observed
-            # path convention; absent or unrecognized servers keep the fallback.
-            from .unified_system_prompt import CODE_INDEX_SERVER, code_index_project_name, with_attached_servers
+            # H1 fix: this runtime never observes whether the attached
+            # external code-index server actually has this workspace
+            # indexed -- naming a project from the path convention alone
+            # asserted an unconfirmed fact and a worker's first call against
+            # that guessed name failed on an unindexed workspace (live,
+            # 2026-10-07). Never guess the project name here; the prompt
+            # instead always tells the model to confirm it with
+            # list_projects first (see with_attached_servers/
+            # attached_servers_section).
+            from .unified_system_prompt import with_attached_servers
 
-            code_index_project = (code_index_project_name(self._workspace_root)
-                                  if any(server.get("name") == CODE_INDEX_SERVER for server in external_servers)
-                                  else None)
             params["_meta"] = with_attached_servers(
                 session_new_meta, external_servers, self._workspace_root, role=self._mcp_role,
-                code_index_project=code_index_project,
+                code_index_project=None,
                 native_search=self._record.engine != "claude-agent-acp")
         with self._lock:
             result = self._client.call("session/new", params, timeout=self._call_timeout)

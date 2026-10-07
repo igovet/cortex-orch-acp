@@ -695,7 +695,7 @@ class TaskMachine:
                 raise StoreError('unknown_model_hint', 'model', ', '.join(exact_hints),
                                  'an exact route from list_route_options',
                                  'Call list_route_options and copy an offered route.')
-        from ..routing.auto_route import user_model_request
+        from ..routing.auto_route import ambiguous_user_model_request, user_model_request
 
         def preview(n):
             model, role = n.get('model', 'auto'), resolve_role(n['role'])
@@ -719,6 +719,14 @@ class TaskMachine:
                 item['preview_status'] = 'ignored:tier_mismatch'
             else:
                 item['preview_status'] = 'pending_dispatch'
+            if request is not None and request['matched'] == model.partition('/')[2]:
+                item['user_request_diagnostic'] = (
+                    'User text names the model without its engine; it uniquely matches this enabled configured route.')
+            elif request is None:
+                ambiguous = ambiguous_user_model_request(self.store, channel.task_id, model)
+                if ambiguous is not None:
+                    item.update(ambiguous_user_request=ambiguous['source_ref'], user_request_diagnostic=(
+                        'User text names a model ambiguously without its engine; ask the user to name engine/model.'))
             return item
 
         previews = [preview(n) for n in plan['tasks']]
@@ -1087,7 +1095,7 @@ class TaskMachine:
             # evidence steps are rarely runtime command_run receipts, and
             # failing on them stopped every one. They stay in the result for
             # review, verification and synthesis.
-            failed = open_failure(db, task_id, provision['attempt_id'], checks)
+            failed = result.get('assignment_outcome') == 'failed' or open_failure(db, task_id, provision['attempt_id'], checks)
             status = 'failed' if failed else 'completed'
             if node['stage'] == 'review' and result.get('verdict') not in {'APPROVE', 'REQUEST_CHANGES', 'BLOCK'}:
                 raise StoreError('review_verdict_required')

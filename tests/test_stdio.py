@@ -336,3 +336,52 @@ def test_route_menu_policy_diagnostic_survives_tools_call(tmp_path, monkeypatch,
     assert path.exists() == (policy is not None)
     if policy is not None:
         assert path.read_text() == policy
+
+
+def test_server_discover_answers_before_initialize_without_an_error(tmp_path):
+    """O3: the installed Claude Code 2.1.285 client sends a server/discover
+    probe before initialize on every channel. It must get a valid
+    DiscoverResult (MCP protocol revision 2026-07-28), never a -32601
+    protocol error, and the ordinary initialize handshake must still
+    negotiate exactly as before."""
+    store, channel = bootstrap(tmp_path)
+    replies = exchange(tmp_path, [
+        dict(jsonrpc='2.0', id=1, method='server/discover', params=dict(_meta={
+            'io.modelcontextprotocol/protocolVersion': '2026-07-28',
+            'io.modelcontextprotocol/clientInfo': dict(name='test-client', version='1.0.0'),
+            'io.modelcontextprotocol/clientCapabilities': {},
+        })),
+        dict(jsonrpc='2.0', id=2, method='initialize',
+             params=dict(protocolVersion='2025-11-25', capabilities={},
+                        clientInfo=dict(name='test', version='1'))),
+        dict(jsonrpc='2.0', method='notifications/initialized'),
+        dict(jsonrpc='2.0', id=3, method='tools/list'),
+    ], channel=channel)
+    assert len(replies) == 3
+    discover, initialize, tools = replies
+    assert discover['id'] == 1 and 'error' not in discover
+    result = discover['result']
+    assert result['resultType'] == 'complete'
+    assert result['supportedVersions'] == ['2025-11-25']
+    assert result['capabilities'] == dict(tools=dict(listChanged=False))
+    assert result['_meta']['io.modelcontextprotocol/serverInfo']['name'] == 'cortex'
+    assert isinstance(result['_meta']['io.modelcontextprotocol/serverInfo']['version'], str)
+    assert isinstance(result['ttlMs'], int) and result['ttlMs'] >= 0
+    assert result['cacheScope'] in ('public', 'private')
+    assert initialize['result']['protocolVersion'] == '2025-11-25'
+    assert initialize['result']['serverInfo']['name'] == 'cortex'
+    assert initialize['result']['serverInfo']['version'] == result['_meta']['io.modelcontextprotocol/serverInfo']['version']
+    assert initialize['result']['capabilities'] == result['capabilities']
+    assert len(tools['result']['tools']) >= 7
+
+
+def test_server_discover_is_advertised_in_the_unknown_method_message(tmp_path):
+    from cortex_runtime.server import Server, ProtocolError
+    store, channel = bootstrap(tmp_path)
+    server = Server(channel_credentials=(channel.channel_id, channel.secret, str(tmp_path)))
+    try:
+        server.dispatch('not/a/real/method', {})
+        assert False, 'expected ProtocolError'
+    except ProtocolError as error:
+        assert error.code == -32601
+        assert 'server/discover' in error.message

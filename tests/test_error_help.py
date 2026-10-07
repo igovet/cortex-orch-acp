@@ -49,4 +49,7 @@ def test_an_uncertain_outcome_is_never_reported_as_rejected():
     assert "Do not repeat it" in reply["message"]
     plain = json.loads(Server.error(StoreError("some_future_refusal"))["content"][0]["text"])
     assert plain["write_state"] == "rejected"
-    assert "identical retry fails the same way" in plain["message"]
+    # A keyless precondition refusal may be retried identically after correction;
+    # an explicit request_key retains the refusal for that same corrected action.
+    assert "retried identically after correction" in plain["message"]
+    assert "request_key retains the refusal" in plain["message"]

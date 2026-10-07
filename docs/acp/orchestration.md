@@ -8,6 +8,13 @@ and its automated evidence limits.
 
 ## Plan submission and coordinator polling
 
+Plan task `scope` is a write reservation used to schedule overlapping writers,
+not a read-access list. Reading needs no scope; writing tasks must not list
+read-only dependencies there. Read-only/investigation roles retain the required
+non-empty context scope, but it neither reserves writes nor serializes writers.
+The existing access policy, not scope wording, decides mutation authority.
+
+
 The advertised `plan_submit` contract requires `plan.tasks` to contain 1–64 items and
 `plan.verification` to contain 1–16 items; empty arrays are rejected. A
 verification command is required for every plan, including an investigation-only
@@ -206,7 +213,12 @@ The result receipt retains a content digest.
 
 `result_submit` `checks` are automated checks: each one is an executed command
 with an exit code. Qualitative review remarks, read files and inspected code belong
-in the report body, not in `checks`. The advertised `result_submit` schema carries
+in the report body, not in `checks`. `project_git` status/diff is context
+only, not a check receipt: its retained `large_output_id` is an output identity,
+not a `tool_call_ref`. The response does not expose command-receipt
+`exit_code`/`complete` fields. To check a Git invariant, run a meaningful
+exit-status check such as `git diff --check` through `command_run`.
+The advertised `result_submit` schema carries
 this contract in its property descriptions; `delegation.evidence.assess_check`
 enforces it.
 
@@ -224,8 +236,8 @@ submit an explicit reference or inline report. A report identifier is not a
 check receipt.
 
 The advertised check object uses `name` and `outcome` (not `status`), with
-`passed`, `failed`, `not_run` or `unverified`. Non-passing checks require a
-concrete `blocker`; a `passed` check requires same-attempt receipt evidence as
+`passed`, `failed`, `not_run` or `unverified`. Only `not_run`/`unverified` require a
+concrete `blocker`; `passed`/`failed` omit it. A `passed` check requires same-attempt receipt evidence as
 described below. Optional argv-form `command` is descriptive, not proof. Malformed
 submissions return field-path corrections where available.
 For a verified pass, copy `tool_call_ref` from a completed, exit-0
@@ -286,9 +298,13 @@ verify a check; run checks through `command_run`.
 `claimed_outcome: "passed"`, the structured `evidence_gap` code and a runtime
 blocker; it is a disclosed gap that synthesis must list in `not_verified` unless
 a later result closes it under the check identity rule below. A `passed`
-claim whose cited command exited nonzero is recorded as `failed` (an observed
+claim whose cited command exited nonzero is treated as `failed` (an observed
 failure is never softened) with `evidence_gap: "nonzero_exit"`. A claimed `failed`
-check is always kept as `failed`. The result receipt returned to the worker lists
+check is always kept as `failed`. A new submission containing an open failure
+is refused with `open_failed_check` before anything is recorded or published,
+unless the worker explicitly sends `assignment_outcome: "failed"` to submit an
+intentional failed assignment. The refusal leaves the channel active and its
+request key reusable. The result receipt returned to the worker includes `node_status` and lists
 every check's recorded `outcome` with its `claimed_outcome`/`evidence_gap`, and
 `closed_by` for a closed failure (below).
 `evidence_gap` codes: `tool_call_ref_missing`, `tool_call_ref_unknown`,
@@ -364,8 +380,9 @@ matches nothing. A run the gateway rejected before executing it
 - **Ambiguity keeps it open.** A rerun with a different `argv` or `cwd`, a
   weak or uncited pass, a failure without its own verified receipt, a later
   run of the same command that failed or has no established result, or an
-  unrecorded later run all leave the failure open, and the node fails as
-  before. A current failure is never turned into a warning.
+  unrecorded later run all leave the failure open. New submissions are refused
+  with `open_failed_check` before publication/channel revocation unless
+  `assignment_outcome: "failed"` intentionally submits a failed node. A current failure is never turned into a warning.
 - **The latest run decides for a pass too.** A cited, verified pass whose
   command ran again later in the same attempt is recorded `failed` with
   `evidence_gap: "later_run_failed"` when that later run exited nonzero, or

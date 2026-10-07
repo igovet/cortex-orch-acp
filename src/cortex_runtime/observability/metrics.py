@@ -148,7 +148,11 @@ def _base_prompt(store, task_id: str) -> dict:
 
 def _tokens(store, task_id: str) -> dict:
     summary = observability_usage.usage_summary(store, task_id)
-    availability = "available" if summary["total_calls"] > summary["unknown_basis_calls"] else "unavailable_reason"
+    # F1 fix: a released_after_result call never carries a real reported
+    # count either (see observability.usage.usage_summary), so it must not
+    # make this metric falsely claim availability on its own.
+    never_reported = summary["unknown_basis_calls"] + summary["released_after_result_calls"]
+    availability = "available" if summary["total_calls"] > never_reported else "unavailable_reason"
     result = dict(unit="tokens (per provider-reported field name)", availability=availability, **summary)
     if availability == "unavailable_reason":
         result["reason"] = "no engine reported usage_update for any recorded call on this task"

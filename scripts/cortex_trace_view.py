@@ -9,10 +9,34 @@ from pathlib import Path
 import stat
 import sys
 
+SCRIPTS = Path(__file__).resolve().parent
+sys.path.insert(0, str(SCRIPTS.parent / "src"))
+
+from cortex_runtime.observability.wire_trace import _ancestors_up_to  # noqa: E402
+
+
+def _git_ancestors(directory):
+    """Ancestors of ``directory`` to check for a ``.git``/``.cortex`` marker.
+
+    W3 (same scoping as wire_trace.py's own W2 fix): when ``directory``
+    sits inside the guarded dev home (``~/.paseo-dev``, the real trace
+    location every caller actually uses), the check is scoped to that
+    subtree, stopping at the dev home itself. Walking further up would
+    reach $HOME, which the developer's own checkout(s) may legitimately
+    make a Git repository, and that must never make this script refuse the
+    real trace directory. A directory outside the dev home (an explicit
+    ``--directory`` override) keeps the original full-ancestor walk, since
+    there is no fixed, guarded root to stop at.
+    """
+    dev = Path.home() / ".paseo-dev"
+    if directory == dev or directory.is_relative_to(dev):
+        return _ancestors_up_to(directory, dev)
+    return (directory, *directory.parents)
+
 
 def records(directory):
     if directory.resolve() != directory or any((p / ".git").exists() or p.name == ".cortex"
-                                                for p in (directory, *directory.parents)):
+                                                for p in _git_ancestors(directory)):
         raise ValueError("unsafe_trace_directory")
     fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:

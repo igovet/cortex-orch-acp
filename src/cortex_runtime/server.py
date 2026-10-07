@@ -34,6 +34,12 @@ PLUGIN = Path(__file__).resolve().parents[2]
 VERSION = json.loads((PLUGIN / 'package-identity.json').read_text())['version']
 CATALOGUE_DIGEST = hashlib.sha256(json.dumps(TOOLS, sort_keys=True).encode()).hexdigest()
 
+# MCP protocol revision 2025-11-25, the version this server's `initialize`
+# negotiates below. Shared with the `server/discover` handler so the two
+# never drift: `server/discover` must describe the exact same server this
+# process's `initialize` already is, never a separate or aspirational one.
+NEGOTIATED_PROTOCOL_VERSION = '2025-11-25'
+
 # Tools that mutate task-owned state and therefore require the caller's
 # trusted channel to carry the task's current ownership epoch. Reads
 # (list_reports, read_report, read_draft) never require ownership.
@@ -234,7 +240,40 @@ class Server:
             if not isinstance(params,dict) or not isinstance(params.get('protocolVersion'),str) or not isinstance(params.get('capabilities'),dict) or not isinstance(params.get('clientInfo'),dict) or any(not isinstance(params['clientInfo'].get(k),str) for k in ('name','version')):
                 raise ProtocolError(-32602,'Invalid initialize parameters. Supply protocolVersion (string), capabilities (object), and clientInfo with name and version strings.')
             observe('initialize','success')
-            return dict(protocolVersion='2025-11-25', capabilities=dict(tools=dict(listChanged=False)), serverInfo=dict(name='cortex',version=VERSION), instructions='Cortex provides channel-bound reports, structured proposals and scoped project operations; advertised schemas are authoritative. The runtime owns scheduling, permissions, verification and completion. Published Markdown stays in the project while SQLite retains metadata, relationships, revisions and receipts. Native user source capture reports completeness explicitly, and unavailable new host input does not hide already saved reports.')
+            return dict(protocolVersion=NEGOTIATED_PROTOCOL_VERSION, capabilities=dict(tools=dict(listChanged=False)), serverInfo=dict(name='cortex',version=VERSION), instructions='Cortex provides channel-bound reports, structured proposals and scoped project operations; advertised schemas are authoritative. The runtime owns scheduling, permissions, verification and completion. Published Markdown stays in the project while SQLite retains metadata, relationships, revisions and receipts. Native user source capture reports completeness explicitly, and unavailable new host input does not hide already saved reports.')
+        if method == 'server/discover':
+            # MCP protocol revision 2026-07-28 (the stateless era; see
+            # modelcontextprotocol.io/specification/2026-07-28) makes
+            # `server/discover` a mandatory RPC: clients MAY send it before
+            # any other request, including "as a backward-compatibility
+            # probe on STDIO". The installed Claude Code 2.1.285 client
+            # does exactly that on every Cortex channel (confirmed from its
+            # bundled strings: `server/discover`, `_discoverAfterRejectedInitialize`,
+            # `_anthropicProbeLegacyEvidence`, `clientModernVersions`,
+            # `fallbackAvailable`) and, before this handler existed, read
+            # this method's -32601 as "legacy evidence" and fell back to
+            # the ordinary `initialize` handshake below.
+            #
+            # Cortex itself still speaks only the pre-2026-07-28 (stateful,
+            # per-connection `initialize`) wire protocol: it does not carry
+            # per-request `_meta` protocol-version/capability envelopes, so
+            # it must never claim a 2026-07-28+ entry in `supportedVersions`
+            # -- that would be a lie that tells a modern client it can skip
+            # `initialize` and address this server statelessly. Declaring
+            # only NEGOTIATED_PROTOCOL_VERSION (exactly what `initialize`
+            # above negotiates) is "no modern evidence": the client's own
+            # fallback logic then proceeds to call `initialize` exactly as
+            # it already does today, just without round-tripping a protocol
+            # error for a method the spec now requires every server to
+            # answer. Session/auth semantics are unchanged: this reply
+            # carries no channel state and grants nothing by itself.
+            observe('server/discover','success')
+            return dict(resultType='complete',
+                        supportedVersions=[NEGOTIATED_PROTOCOL_VERSION],
+                        capabilities=dict(tools=dict(listChanged=False)),
+                        _meta={'io.modelcontextprotocol/serverInfo': dict(name='cortex', version=VERSION)},
+                        ttlMs=3600000,
+                        cacheScope='public')
         if method == 'ping':
             return {}
         if method == 'tools/list':
@@ -250,7 +289,7 @@ class Server:
             return dict(tools=[always_load(tool) for tool in list(channeled_base_tools()) + delegation_mcp_tools.tool_definitions(
                 channel.role, role_id=role_id, stage=stage)])
         if method != 'tools/call':
-            raise ProtocolError(-32601,'Unknown method. Use initialize, ping, tools/list or tools/call; discover tool names through tools/list.')
+            raise ProtocolError(-32601,'Unknown method. Use initialize, server/discover, ping, tools/list or tools/call; discover tool names through tools/list.')
         if not isinstance(params, dict) or set(params)-{'name','arguments','_meta'} or not isinstance(params.get('name'), str) or ('arguments' in params and not isinstance(params['arguments'],dict)):
             observe('tools/call','invalid_arguments')
             raise ProtocolError(-32602,'Malformed tools/call parameters. Supply name as a string and arguments as an object; only name, arguments and _meta are allowed.')

@@ -193,7 +193,12 @@ export function nativeToolDetail(event: ProviderEvent): ProviderEvent {
 
 function visibleTimeline(event: ProviderEvent): boolean {
   return !(event.type === "timeline.item" && (event.item.type === "reasoning"
-    || event.item.type === "tool_call" && isHiddenOperation(event.item.name)));
+    || event.item.type === "tool_call" && (isHiddenOperation(event.item.name)
+      // Defence in depth (O2): an elicited question card's toolCallId is never
+      // announced as its own tool_call -- only inside session/request_permission
+      // params (see agent.py's _PaseoQuestionElicitor). A stray update for it must
+      // never surface in the timeline as a generic "Tool call" row.
+      || event.item.callId.startsWith("cortex-question"))));
 }
 
 const TIMELINE_DETAIL_MAX_BYTES = 16 * 1024;

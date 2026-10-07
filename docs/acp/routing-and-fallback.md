@@ -420,11 +420,13 @@ task (`routing.auto_route.user_model_request`):
 
 Coordinator prose, model reasons, question text, reports and worker output are
 never read for consent. A source must request the complete, case-sensitive
-configured engine/model identity or an owner-configured request label.
+configured engine/model identity, a bare model ID unique across enabled configured
+engines, or an owner-configured request label.
 No model family or version is inferred from the ID. Paired quotes separate
 opaque IDs from prose punctuation (see [settings-only routing](#settings-only-routing)).
-The existing conservative request/negation grammar still applies, in the same
-sentence:
+Owner-configured labels keep the conservative request/negation grammar below.
+Enabled exact identities also support the broader owner-naming forms documented
+in [settings-only routing](#settings-only-routing). For labels, in the same sentence:
 
 - within the four words before it, either an explicit request word stands
   (`REQUEST_WORDS`: `use`, `run`, `switch`, `prefer`, `choose`, `request`,
@@ -848,24 +850,44 @@ concurrent allocation at a connection's own limit).
 
 Routing decisions consume only effective settings and current engine-confirmed catalogs; first-existing project, $CORTEX_ROUTING, then user precedence remains non-merging. The required version-2 marker binds exact per-engine enabled/automatic identities, tier placement and optional policy attributes. Absence or invalidity is a visible migration/repair error, never a reason to use built-in model names, families, list position, or the installation template at runtime. Unlisted and renamed identities are not automatically eligible. A coordinator recommendation is limited to options generated from the same effective settings and current catalog; final dispatch revalidates eligibility. Preferences rank only inside eligibility. Role tier/complexity fallback is generic policy and cannot infer a model's quality from its name.
 
-An explicit user request authorizes only the complete, case-sensitive configured
+An explicit user request authorizes the complete, case-sensitive configured
 `engine/model` identity, including provider nesting and punctuation in the ID.
-It must be a whole whitespace-delimited token, or isolated inside paired double
-or single quotes, backticks, `«…»` or `“…”`. After a closing quote, one prose
-punctuation character (`. , ! ? ; :`) is supported before whitespace/end.
-Unquoted attached punctuation is conservatively treated as identity data: a
-request for `engine/unit.v2`, `engine/unit-extended` or `engine/unit[wide]`
-cannot authorize `engine/unit`, and even `Use engine/unit.` is ambiguous. Use
-`Use "engine/unit".` or `Use engine/unit` instead. Prefixes, suffixes, case
-changes and partial provider paths grant nothing for a different identity.
+A bare model token also matches when that exact model ID belongs to exactly one
+enabled engine in the effective settings; no built-in family or name inference
+is used. A shared bare ID grants neither engine. The plan preview retains an
+ambiguity diagnostic asking the coordinator to obtain an explicit `engine/model`;
+a unique bare match is explained as naming the model without its engine.
+
+Whole whitespace-delimited tokens and isolated paired double or single quotes,
+backticks, `«…»` or `“…”` are supported. One terminal prose punctuation character
+(`. , ! ? ; :`) is accepted for a recorded request, including an unquoted
+`Use engine/unit.`, unless the longer token itself names another enabled
+configured ID (for example `unit.`). In that case it is identity data, never
+consent for `unit`. Quote the intended exact ID when punctuation is ambiguous.
+A request for `engine/unit.v2`, `engine/unit-extended` or `engine/unit[wide]`
+cannot authorize `engine/unit`. Prefixes, suffixes, case changes and partial
+provider paths grant nothing for a different identity.
+
+For enabled exact identities (qualified or bare-unique), a means preposition
+directly before the token (`на`, `on`, `via`, `with`) is a request, including
+`Часть 2 на gpt-6-luna:` and `Part 2 with codex-acp/gpt-6-luna:`.
+A request-form verb anywhere in the same retained user message governs every
+exact identity in it, even when the model list precedes the request or spans
+sentences. These deliberate owner-naming rules can include an exact token in
+an otherwise descriptive sentence; there is no inferred model-family grant.
+Negation/comparison/substitution guards still apply around each mention, and a
+negated request verb does not govern a later list. A verb in a different user
+message cannot authorize a bare list.
+
 Separately configured `request_names` retain their existing case-insensitive
-label/ending matching; no label is inferred from an ID. The existing request,
-negation and same-sentence grammar still applies. Only retained user sources
-and user answers supply grants, never plan hints, questions or model output;
-source references and exact matched text are retained. A grant does not bypass
-enabled/deny/provider, observed-catalog, availability,
-hard authorization and exhausted-quota checks. Confirmed user requests override automatic membership and role tiers, but never those hard checks. These current identity rules supersede the historical family
-recognition examples above.
+label/ending and conservative local request matching; no label is inferred from
+an ID, and message-wide/direct-preposition grants do not apply to labels.
+Only retained user sources and user answers supply grants, never plan hints,
+questions or model output; source references and exact matched text are retained. A grant does not
+bypass enabled/deny/provider, observed-catalog, availability, hard authorization
+and exhausted-quota checks. Confirmed user requests override automatic membership
+and role tiers, but never those hard checks. These current identity rules
+supersede the historical family recognition examples above.
 
 The public policy/model-settings-default.json is validated install-only data. Fresh installation creates only missing owner settings without replacement. Existing settings/profiles require explicit preview/apply migration against exact checked revisions and profile-specific candidate data; see [model-policy migration](packaging-and-onboarding.md#model-policy-installation-and-explicit-migration). Unknown or ambiguous portable coordinator bindings remain unavailable diagnostics; no substitute account or route is selected.
 

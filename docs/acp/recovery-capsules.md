@@ -72,11 +72,16 @@ an explicit `{"status": "unavailable"|"unknown", "reason": "..."}` marker
    `stale_owner_epoch` (`True` when the channel's own issuance epoch no
    longer matches the task's current owner epoch — a capsule for a
    superseded owner is flagged, never silently served as current).
-2. **route_and_config** — the coordinator's active `configuration_revisions`
-   row, or (worker) the exact revision recorded at that assignment's own
-   `delegation_provisioning.config_revision`, falling back to the
-   coordinator's active revision with `source="inherited..."` when no
-   explicit per-worker snapshot exists.
+2. **route_and_config** — for a coordinator, its active
+   `configuration_revisions` row. For a worker, `task_configuration` labels
+   the revision captured by provisioning as `task_coordinator_route_snapshot`
+   (or the task's active coordinator revision when no snapshot exists).
+   It is not the worker's route. `own_worker_route` separately contains the
+   exact attempt's `dispatch_audit` and `worker_configuration_confirmed`
+   event id, engine/model/connection, parameters and native confirmation
+   reference. Dispatch without a retained engine confirmation stays explicitly
+   unavailable, never inferred as confirmed; sibling/retry confirmations
+   cannot stand in for this attempt.
 3. **constraints** — every durable `source_revisions` row (initial bootstrap
    input plus every accepted steering message) in revision order, each with
    its exact verbatim text read from its published report body (never a

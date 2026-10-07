@@ -18,6 +18,12 @@ def sum_tokens(rows):
     totals = {'input': 0, 'output': 0, 'cachedRead': 0, 'cachedWrite': 0,
               'total': 0, 'knownCalls': 0, 'unknownCalls': 0}
     for row in rows:
+        if (row['basis'] == 'unknown' and 'failed' in row.keys()
+                and row['failed'] == 0 and 'stop_reason' in row.keys()
+                and row['stop_reason'] == 'released_after_result'):
+            # Existing columns distinguish runtime post-result release from
+            # genuinely unknown/failed calls without a persisted-schema change.
+            continue
         try: t = json.loads(row['tokens_json'] or '{}')
         except (ValueError, TypeError): t = {}
         if row['basis'] == 'unknown' or not isinstance(t, dict) or not t:
@@ -464,7 +470,7 @@ try:
                         attempt_result['context'] = {'used': content['used'], 'size': content['size']}
                 if 'usage_records' in tables and execution_attempt_refs:
                     usage_refs = usage_fallback_refs(db, task['id'], execution_attempt_refs) if has_route_audit else execution_attempt_refs
-                    tokens = sum_tokens(db.execute('select basis,tokens_json from usage_records where task_id=? and attempt_id in (%s)' % ','.join('?' for _ in usage_refs), (task['id'], *usage_refs)).fetchall())
+                    tokens = sum_tokens(db.execute('select basis,tokens_json,stop_reason,failed from usage_records where task_id=? and attempt_id in (%s)' % ','.join('?' for _ in usage_refs), (task['id'], *usage_refs)).fetchall())
                     if tokens is not None:
                         attempt_result['tokens'] = tokens
                 if completed_at is not None:

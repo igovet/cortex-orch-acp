@@ -368,6 +368,17 @@ def _run_cli(args) -> int:
     if args.wire_trace:
         env["CORTEX_DEV_WIRE_TRACE"] = "1"
         env["CORTEX_DEV_TRACE_HOME"] = str(home)
+        # W2: preflight the same gate the runtime itself enforces, with a
+        # visible failure here instead of a silent stderr refusal buried in
+        # the daemon's own log once it has already started.
+        source_root = Path(__file__).resolve().parent.parent
+        sys.path.insert(0, str(source_root / "src"))
+        from cortex_runtime.observability import wire_trace as _wire_trace
+        try:
+            _wire_trace._gate(env, source_root)
+        except ValueError as error:
+            print(f"cortex_paseo_dev: --wire-trace preflight refused ({error})", file=sys.stderr)
+            return 2
     # A wrapper invoked from an active Paseo agent must not target that agent.
     env.pop("PASEO_AGENT_ID", None)
     env.pop("PASEO_AGENT_CWD", None)
