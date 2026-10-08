@@ -1,5 +1,12 @@
-"""result_submit may carry the report itself (report={title, markdown})
-instead of a reference (report={report_ref}).
+"""result_submit carries its report as one plain string: the complete
+Markdown (optionally titled by report_title) or the exact report_id of the
+worker's own published report.
+
+A Claude engine emits a top-level string argument verbatim but must
+hand-write JSON for object values; the former report={title, markdown} object
+made Sonnet 5 workers break the escaping of nested Markdown, and the engine
+refused those calls before Cortex received them (incident review
+2026-10-08).
 
 The runtime publishes an inline report through the ordinary
 create_draft/write_report path as the worker's own draft, bound to the
@@ -35,7 +42,7 @@ def setup_worker(tmp_path):
 
 
 def inline_args(markdown=MARKDOWN, key='result', **extra):
-    return dict(dict(report=dict(title='Inline result', markdown=markdown), summary='The change works.',
+    return dict(dict(report=markdown, report_title='Inline result', summary='The change works.',
                      checks=[], request_key=key), **extra)
 
 
@@ -179,21 +186,30 @@ def test_recovery_refuses_an_inline_result_not_bound_to_its_own_delivery(tmp_pat
         reconcile_results(store, task.task_id)
 
 
-@pytest.mark.parametrize('form', ['both', 'missing', 'empty'])
-def test_report_is_required_in_exactly_one_form(tmp_path, form):
+@pytest.mark.parametrize('form', ['legacy_inline', 'legacy_reference', 'missing', 'empty', 'whitespace', 'draft_id',
+                                  'tool_call_ref', 'malformed_report_id'])
+def test_report_is_one_required_plain_string(tmp_path, form):
     store, task, worker, assignment = setup_worker(tmp_path)
     report = publish_fixture_report(store, worker)
     args = inline_args()
-    if form == 'both':
-        args['report'] = dict(args['report'], report_ref=report)
+    if form == 'legacy_inline':
+        args['report'] = dict(title='Inline result', markdown=MARKDOWN)
+    elif form == 'legacy_reference':
+        args['report'] = dict(report_ref=report)
     elif form == 'missing':
         del args['report']
     else:
-        args['report'] = {}
+        args['report'] = {'empty': '', 'whitespace': ' \n\t ', 'draft_id': 'd_' + 'a' * 12,
+                          'tool_call_ref': 'gateway:' + 'a' * 32, 'malformed_report_id': 'r_' + 'g' * 12}[form]
     before = report_count(store, task.task_id)
     with pytest.raises(StoreError, match='invalid_arguments') as caught:
         mcp_tools.dispatch(store, worker, 'result_submit', args)
     assert caught.value.field == 'arguments.report'
+    if form.startswith('legacy'):
+        assert caught.value.correction.startswith('Send arguments.report as one plain JSON string, not an object')
+    if form != 'empty':
+        # The one unclaimed own report is named in the correction.
+        assert f'report="{report}"' in caught.value.correction
     assert report_count(store, task.task_id) == before
     assert worker_results(store, task, worker) == []
     with store.connection() as db:
@@ -211,6 +227,48 @@ def test_report_is_required_in_exactly_one_form(tmp_path, form):
     }
 
 
+@pytest.mark.parametrize('markdown, title', [
+    ('Intro line\n\n## Details\n\n# Real title ##\n\nBody.\n', 'Real title'),
+    ('## Decision brief\n\nConclusion.\n', 'Decision brief'),
+    ('\n\n**Conclusion:** works.\n', '**Conclusion:** works.'),
+    ('- first bullet\n', 'first bullet'),
+])
+def test_an_omitted_report_title_comes_from_the_markdown(tmp_path, markdown, title):
+    store, task, worker, assignment = setup_worker(tmp_path)
+    args = inline_args(markdown=markdown)
+    del args['report_title']
+    receipt = mcp_tools.dispatch(store, worker, 'result_submit', args)
+    with store.connection() as db:
+        stored = db.execute('SELECT title FROM editions WHERE report_id=? ORDER BY sequence DESC LIMIT 1',
+                            (receipt['report_ref'],)).fetchone()
+        request = json.loads(db.execute('SELECT result_json FROM runtime_requests WHERE task_id=? AND actor=? AND request_key=?',
+                                        (task.task_id, worker.channel_id, 'result')).fetchone()[0])
+    assert request['result']['report']['title'] == title
+    assert stored['title'] == title
+    assert report_text(store, task, receipt['report_ref']).endswith(markdown)
+
+
+def test_a_long_markdown_report_with_quotes_backslashes_and_fences_is_published_verbatim(tmp_path):
+    """The content that broke nested-object escaping (raw newlines, quotes,
+    backslashes, code fences, a regex) is an ordinary top-level string."""
+    store, task, worker, assignment = setup_worker(tmp_path)
+    block = ('## Evidence\n\n```python\npattern = r"ReviveAdsManager::shared\\(\\)|C:\\\\path"\nprint("a \\"quoted\\" value")\n```\n'
+             '\n| check | outcome |\n| --- | --- |\n| `grep -n \'a\\|b\'` | passed |\n\tTabbed line\n')
+    markdown = '# Hedge-grid results\n\n' + block * 120
+    assert len(markdown) > 20000
+    receipt = mcp_tools.dispatch(store, worker, 'result_submit', inline_args(markdown=markdown))
+    assert report_text(store, task, receipt['report_ref']).endswith(markdown)
+    assert node_of(store, task, assignment)['status'] == 'completed'
+
+
+def test_report_title_is_ignored_with_a_reference(tmp_path):
+    store, task, worker, assignment = setup_worker(tmp_path)
+    report = publish_fixture_report(store, worker)
+    receipt = mcp_tools.dispatch(store, worker, 'result_submit', dict(
+        report='  ' + report + '\n', report_title='Ignored', summary='Observed', checks=[], request_key='result'))
+    assert receipt['report_ref'] == report
+
+
 def test_an_inline_report_with_an_unfilled_template_placeholder_is_refused_before_any_result(tmp_path):
     store, task, worker, assignment = setup_worker(tmp_path)
     placeholder = '<!-- Record relevant inputs, actions, observations, and exact changed paths. -->'
@@ -223,7 +281,7 @@ def test_an_inline_report_with_an_unfilled_template_placeholder_is_refused_befor
 def test_the_reference_form_names_the_published_report(tmp_path):
     store, task, worker, assignment = setup_worker(tmp_path)
     report = publish_fixture_report(store, worker)
-    args = dict(report=dict(report_ref=report), summary='Observed', checks=[], request_key='result')
+    args = dict(report=report, summary='Observed', checks=[], request_key='result')
     receipt = mcp_tools.dispatch(store, worker, 'result_submit', args)
     assert receipt['recorded'] and receipt['report_ref'] == report
     assert node_of(store, task, assignment)['result']['report_ref'] == report
@@ -236,13 +294,32 @@ def test_inline_report_is_advertised_and_validated():
     assert schema['required'] == ['report', 'summary', 'checks', 'request_key']
     assert 'report_ref' not in schema['properties'] and not {'if', 'then', 'else'} & set(schema)
     report = schema['properties']['report']
-    assert set(report['properties']) == {'title', 'markdown', 'report_ref'} and report['additionalProperties'] is False
-    assert report['else'] == {'required': ['title', 'markdown']}
-    assert 'Required in every result_submit' in report['description'] and 'exactly one form' in report['description']
-    assert 'report is required in every call' in tool['description'] and 'report={report_ref:' in tool['description']
+    assert report['type'] == 'string' and report['maxLength'] == 1000000
+    assert not {'properties', 'if', 'then', 'else', 'oneOf', 'anyOf'} & set(report)
+    assert schema['properties']['report_title']['type'] == 'string' and 'report_title' not in schema['required']
+    assert 'Required in every result_submit' in report['description'] and 'one plain string, never an object' in report['description']
+    assert 'report is required in every call' in tool['description'] and 'one plain string, never an object' in tool['description']
     delegation_contracts.validate('worker', 'result_submit', inline_args())
-    delegation_contracts.validate('worker', 'result_submit', dict(inline_args(), report=dict(report_ref='r_' + 'a' * 12)))
-    for bad in (dict(title='T'), dict(title='T', markdown=''), dict(title='T', markdown='x', draft_id='d_' + 'a' * 12),
-                {}, dict(report_ref='r_x'), dict(title='T', markdown='x', report_ref='r_' + 'a' * 12)):
+    delegation_contracts.validate('worker', 'result_submit', dict(inline_args(), report='r_' + 'a' * 12))
+    for bad in (dict(title='T'), dict(title='T', markdown='x'), dict(report_ref='r_' + 'a' * 12), {}, '', ['# T']):
         with pytest.raises(StoreError, match='invalid_arguments'):
             delegation_contracts.validate('worker', 'result_submit', dict(inline_args(), report=bad))
+
+
+def test_no_result_submit_object_or_array_carries_long_free_text():
+    """Long free text must be a top-level string: only there do Claude engines
+    emit it verbatim instead of hand-escaping it as nested JSON."""
+    (tool,) = [t for t in mcp_tools.tool_definitions('worker', role_id='worker-code-reviewer', stage='review')
+               if t['name'] == 'result_submit']
+
+    def nested_strings(schema, path):
+        if schema.get('type') == 'string':
+            yield path, schema.get('maxLength', 0)
+        for name, child in (schema.get('properties') or {}).items():
+            yield from nested_strings(child, f'{path}.{name}')
+        if isinstance(schema.get('items'), dict):
+            yield from nested_strings(schema['items'], f'{path}[]')
+
+    nested = [(path, size) for name, child in tool['inputSchema']['properties'].items()
+              if child.get('type') in {'object', 'array'} for path, size in nested_strings(child, name)]
+    assert nested and all(size <= 4096 for _, size in nested), nested

@@ -313,7 +313,12 @@
   check/receipt and its observed argv when available. Keep the failed check and
   cite an exact later passing rerun, or intentionally submit
   `assignment_outcome: "failed"`. Correcting the check command itself changes its
-  identity and does not close the original failure. Accepted receipts include
+  identity and does not close the original failure. A mistyped command line whose
+  own output shows the check never started (usage, unknown-option or
+  file-not-found error) is not a failed check, though: cite the corrected
+  command's receipt and describe the mistake in the report. A Codex worker on
+  2026-10-07 instead cited `generate_agent_profiles.py --check` (exit 2) and failed
+  an otherwise verified assignment. Accepted receipts include
   `node_status`; this is not task acceptance. No `supersedes` policy was introduced.
 - **Situational skills are still gated at submission.** Successful gateway writes
   and mkdir calls give early `required_before_result_submit` skill/reason hints
@@ -322,11 +327,17 @@
   Reading the skill clears later hints;
   native edits still rely on the result gate. Missing manifests remain explicitly
   unobservable, and advisory observation failure cannot reject a committed write.
-- **Engine JSON parse failures happen before Cortex.** The runtime cannot repair
-  malformed inline-report arguments it never receives. Use structured serialization
-  or the existing owned-draft/reference route; a schema recovery regression is not
-  proof that a live model will serialize correctly. The retained incident input
-  was truncated, so no exact malformed-byte reproducer is available.
+- **Keep long free text in top-level string arguments.** Claude engines emit a
+  top-level string argument verbatim but hand-write JSON for object and array
+  values. Sonnet 5 broke the escaping of Markdown nested in the former
+  `result_submit` `report: {title, markdown}` (raw newlines, invalid escapes) in
+  31 of about 121 inline reports of 3 KB or more (2026-10-04..07), and Claude Code
+  refused the call before Cortex received it, while 532 top-level
+  `project_write`/`draft_write` strings up to 150 KB never failed. Description-only
+  advice to prefer the draft route did not stop it. `report` is now one plain
+  string; nested result strings stay at 4096 characters or fewer. The retained
+  inputs are truncated at 2 KB, so the exact malformed bytes are mostly unknown,
+  and no paid live run has yet confirmed the new form.
 
 See [file boundaries](../acp/permissions-and-containment.md),
 [publications](../acp/publications-and-consistency.md) and
@@ -352,8 +363,8 @@ once advertised `report` and `report_ref` as two optional fields under a root
 `if/then/else`; reviewers repeatedly sent exactly the plain `required` fields
 (summary, checks, request_key, verdict) and were refused, and a description-only
 warning did not stop it. Every field a call needs belongs in the plain
-`required` list; keep alternatives inside one required field (`report` is
-`{title, markdown}` or `{report_ref}`), and never use a root `oneOf`, which
+`required` list; keep alternatives inside one required field (`report` is one
+string: inline Markdown or an exact report id), and never use a root `oneOf`, which
 Codex code mode renders instead of the properties. See
 [publications](../acp/publications-and-consistency.md).
 

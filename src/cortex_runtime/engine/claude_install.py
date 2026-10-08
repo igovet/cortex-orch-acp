@@ -6,26 +6,19 @@ on-disk claude-agent-acp install (Node entry point and the
 ``@agentclientprotocol/claude-agent-acp`` adapter bundle it names) *as
 discovered and recorded by a human operator following the manual recipe in
 ``docs/acp/claude-agent-acp-adapter.md``* -- this module never discovers or
-installs anything itself (see T031 for any future installer).
+installs anything itself; connections.engine_update owns installation.
 
-Unlike codex-acp, the pinned claude-agent-acp release (0.78.0, per
-``.cortex/acp-migration/T002/CAPABILITY_MATRIX.json`` /
-``static-capability-findings.md``) never bundles a separate spawned native
-binary: the Claude Agent SDK it wraps
-(``@anthropic-ai/claude-agent-sdk`` 0.3.270) is a pure JS/TS library loaded
-directly into the same Node process that runs ``dist/index.js``
-(``package.json``'s own ``"bin": {"claude-agent-acp": "dist/index.js"}``,
-lead-verified against the real installed
-``~/.local/share/zed/external_agents/registry/npx/claude-acp/node_modules/
-@agentclientprotocol/claude-agent-acp/package.json`` on 2026-09-17). There is
-therefore no ``bundled_codex_binary``-equivalent field here, and
-:func:`build_claude_launch` never pins a second binary path into the
-process environment the way ``codex_adapter_acp.build_codex_launch`` pins
-``CODEX_PATH``: this connection's own ``CLAUDE_CONFIG_DIR`` isolation
-variable (set generically by ``connections.environment.build_process_env``
-for every ``claude-agent-acp`` connection, per that module's
-``_ISOLATION_ENV_VAR`` mapping) is the only per-connection env this adapter
-ever needs.
+The current fallback release is 0.87.0 (upstream Claude Agent SDK 0.3.287,
+ACP SDK 1.7.0). Cortex's side-by-side SDK 0.3.293 refresh exposes Haiku 5.5;
+the original install is not overwritten. package.json still declares
+dist/index.js as its bin.
+The adapter imports the SDK in Node; the SDK in turn starts Claude Code
+through its own native transport. This record pins the adapter launch
+entry, not a separately selected Claude Code executable. There is no
+bundled_codex_binary-equivalent field, and build_claude_launch does not
+inject CODEX_PATH. The native account uses CLAUDE_CONFIG_DIR, set by
+connections.environment for this engine. Installation is performed by
+connections.engine_update, not by this integrity-record module.
 
 :func:`verify_install` is the only place that turns a caller-held
 ``ClaudeAcpInstall`` back into something ``engine.process.EngineProcess``

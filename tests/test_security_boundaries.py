@@ -190,7 +190,7 @@ def test_worker_cannot_claim_another_workers_or_tasks_report_as_its_own_result(t
 
     worker2 = server_for(tmp_path, worker2_id, worker2_secret)
     error(call(worker2, "result_submit", dict(
-        request_key="claim1", report=dict(report_ref=report_id), summary="stolen", checks=[])), "report_not_own")
+        request_key="claim1", report=report_id, summary="stolen", checks=[])), "report_not_own")
 
 
 # ---------------------------------------------------------------------------

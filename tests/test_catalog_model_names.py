@@ -82,3 +82,22 @@ def test_combined_paseo_model_option_uses_unique_model_ids_and_friendly_names():
     assert by_value[codex_entry.route.model]["description"] == "codex"
     assert by_value[claude_entry.route.model]["description"] == "claude"
     assert option["currentValue"] == codex_entry.route.model
+
+
+def test_two_haiku_versions_keep_distinct_engine_names_and_ids(tmp_path):
+    connection = _connection("cn_" + "e" * 12, "claude-agent-acp")
+    options = [{
+        "id": "model", "name": "Model", "type": "select", "category": "model",
+        "currentValue": "haiku", "options": [
+            {"value": "haiku", "name": "Haiku 5.5", "description": "Fastest for quick answers"},
+            {"value": "claude-haiku-4-5-20251001", "name": "Haiku 4.5"},
+        ],
+    }]
+    snapshot = build_catalog({connection.id: connection}, {connection.id: parse_observation(options)})
+    environ = {"HOME": str(tmp_path), "XDG_STATE_HOME": str(tmp_path / "state"),
+               "XDG_CONFIG_HOME": str(tmp_path / "config")}
+    catalog_store.save_snapshot(snapshot, environ)
+    loaded = catalog_store.load_connection_snapshot(connection.id, snapshot.id, environ)
+    assert loaded is not None
+    assert {entry.route.model: entry.model_name for entry in loaded.entries} == {
+        "haiku": "Haiku 5.5", "claude-haiku-4-5-20251001": "Haiku 4.5"}

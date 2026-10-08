@@ -100,7 +100,7 @@ TOOLS = [
          "Publish this channel's fully filled draft as an immutable Markdown report. "
          "Use create_draft, then draft_write; preserve the marker and remove all placeholders before publication. "
          "The runtime validates ownership, UTF-8, hashes and atomically publishes complete bytes in the project store. "
-          "A worker then sends this exact report_id as result_submit report={report_ref: <report_id>} (or omits write_report and sends report={title, markdown} inline). Publication alone does not complete an assignment or task. "
+          "A worker then sends this exact report_id alone as the plain-string result_submit report (or omits write_report and sends the complete report Markdown as report). Publication alone does not complete an assignment or task. "
          "Open the report with a concise decision brief: conclusion, observed evidence, checks, contradictions, limits and next action. "
          "Choose a unique request_key and use the same arguments for an uncertain retry.", {
              "source_revision": dict(type="integer",minimum=0,maximum=2**53-1,description="Requirements source revision actually used for this evidence. Omit to retain the revision recorded when this draft was created. Later sources signal reconciliation, never automatic rejection of old evidence."),

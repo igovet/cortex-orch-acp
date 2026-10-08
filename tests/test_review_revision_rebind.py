@@ -36,7 +36,7 @@ def setup_review(tmp_path):
 
 
 def _args(report, key):
-    return dict(report=dict(report_ref=report), summary='Reviewed', checks=[], verdict='APPROVE', request_key=key)
+    return dict(report=report, summary='Reviewed', checks=[], verdict='APPROVE', request_key=key)
 
 
 def _bindings(store, task_id):

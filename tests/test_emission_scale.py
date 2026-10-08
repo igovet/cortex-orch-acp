@@ -74,7 +74,7 @@ def _publish_large_result(store, channel):
     checks = [dict(name=f"check {index} " + "n" * 150, outcome="not_run",
                    blocker="Fixture blocker: " + "b" * 900) for index in range(20)]
     mcp_tools.dispatch(store, channel, "result_submit", dict(
-        report=dict(report_ref=report["report_id"]), summary="Observed summary. " * 220, checks=checks,
+        report=report["report_id"], summary="Observed summary. " * 220, checks=checks,
         request_key=str(uuid.uuid4())))
     return PromptOutcome(StopReason.END_TURN, "Visible worker result")
 

@@ -46,7 +46,7 @@ def setup_worker(tmp_path, *, role='backend-dev', start=True):
 
 
 def result_args(key='result'):
-    return dict(report=dict(title='Result', markdown=MARKDOWN), summary='Done.', checks=[], request_key=key)
+    return dict(report=MARKDOWN, report_title='Result', summary='Done.', checks=[], request_key=key)
 
 
 def rejections(store, task):

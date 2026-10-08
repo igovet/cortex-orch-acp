@@ -236,3 +236,35 @@ def test_each_pinned_adapter_gets_its_own_session_new_meta(tmp_path):
     assert meta_codex["cortexBaseInstructions"] == cortex_system_prompt(
         "coordinator", str(tmp_path), environ=environ_codex, native_tools=True
     )
+
+
+@pytest.mark.parametrize("role", ("worker", "coordinator"))
+@pytest.mark.parametrize("unified", (True, False))
+def test_claude_0_87_preserves_role_effort_and_native_tool_metadata(role, unified):
+    environ = {} if unified else {"CORTEX_UNIFIED_BASE_PROMPT": "0"}
+    meta = _session_new_meta_for("claude-agent-acp", "0.87.0", "Role instructions",
+                                role=role, effort="high", environ=environ)
+    expected = dict(UNIFIED if unified else NATIVE_SKILLS, effort="high")
+    assert meta["claudeCode"]["options"] == expected
+    assert base_prompt_mode(meta) == ("unified" if unified else "native")
+    if not unified:
+        assert meta["systemPrompt"] == {"append": "Role instructions"}
+    empty = _session_new_meta_for("claude-agent-acp", "0.87.0", None, role=role, effort="high")
+    assert empty == {"claudeCode": {"options": dict(GATEWAY_ONLY, effort="high")}}
+
+
+
+@pytest.mark.parametrize("role", ("worker", "coordinator"))
+@pytest.mark.parametrize("unified", (True, False))
+def test_codex_2_1_1_preserves_production_instruction_metadata(role, unified):
+    environ = {} if unified else {"CORTEX_UNIFIED_BASE_PROMPT": "0"}
+    meta = _session_new_meta_for("codex-acp", "2.1.1", "Role instructions",
+                                role=role, environ=environ)
+    assert meta["systemPrompt"] == "Role instructions"
+    assert meta["cortexRole"] == role
+    assert base_prompt_mode(meta) == ("unified" if unified else "native")
+    if unified:
+        assert meta["cortexNativeContext"] is False
+        assert meta["cortexBaseInstructions"].startswith("# Cortex session")
+    else:
+        assert meta == {"systemPrompt": "Role instructions", "cortexRole": role}

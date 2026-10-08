@@ -70,6 +70,9 @@ test("humanizes unknown names and keeps expanded payload out of the collapsed la
   assert.equal(row.target, null);
   assert.equal(presentToolSemantics({ name: "mcp.cortex.result_submit", input: { report: { report_ref: "r_abc" } } }).label, "Submit result: r_abc");
   assert.equal(presentToolSemantics({ name: "mcp.cortex.result_submit", input: { report: { title: "Review", markdown: "# secret body" } } }).label, "Submit result");
+  assert.equal(presentToolSemantics({ name: "mcp.cortex.result_submit", input: { report: "r_0123456789ab" } }).label, "Submit result: r_0123456789ab");
+  assert.equal(presentToolSemantics({ name: "mcp.cortex.result_submit", input: { report: "# secret body\n\nr_0123456789ab", report_title: "Review" } }).label, "Submit result");
+  assert.equal(presentToolSemantics({ name: "mcp.cortex.result_submit", input: { report: "secret" } }).label, "Submit result");
   assert.equal(presentToolSemantics({ name: "mcp__other__search_code", input: { query: "{\"secret\":true}" } }).label, "Search Code");
 });
 
@@ -161,6 +164,7 @@ test("every targeted label survives the installed Paseo client's humanizer verba
     presentToolSemantics({ name: "mcp__cortex__read_report", input: { report_id: "r_21f9bba72f15" } }).label,
     presentToolSemantics({ title: "Terminal", input: { command: "pwd" } }).label,
     presentToolSemantics({ name: "mcp.cortex.result_submit", input: { report: { report_ref: "r_abc" } } }).label,
+    presentToolSemantics({ name: "mcp.cortex.result_submit", input: { report: "r_0123456789ab" } }).label,
     presentToolSemantics({ name: "mcp__cortex__set_governance", input: { mode: "light" } }).label,
   ];
   for (const label of targetedLabels) {

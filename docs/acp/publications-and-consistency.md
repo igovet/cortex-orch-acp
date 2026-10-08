@@ -6,27 +6,38 @@ Markdown bodies live alongside it under `.cortex/`. Each task has one real
 publishes pipeline editions. Worker reports are immutable independent Markdown
 files, selected using bounded catalogue and content cursors.
 
-Workers submit a result with its report in one of two forms. For reports with
-code blocks or larger than about 3 KB, the advertised descriptions recommend the
-owned-draft/reference route before the first submission. Inline for short plain reports:
-`result_submit.report` carries the title and complete Markdown, and the runtime
-publishes it through the same `create_draft`/`write_report` path as the worker's own
-draft before recording the result. By reference: the worker creates an owned
-draft, fills it through `draft_write`, publishes using `write_report`, and submits
-the exact returned `report_id` as `result_submit.report.report_ref`. `report` is
-required and exactly one form is accepted (`invalid_arguments` on
-`arguments.report` identifies a missing report, an incomplete inline form or a
-mixed form). Decision-brief items (conclusion, evidence, checks, contradictions,
-limits, next action) are Markdown sections inside `markdown`, never separate
-report fields. The channel binds the task, owner epoch and attempt.
+Workers submit a result with its report as one required top-level plain string,
+never an object. Inline: `result_submit.report` carries the complete Markdown
+(titled by the optional `report_title`, else by its first heading), and the
+runtime publishes it through the same `create_draft`/`write_report` path as the
+worker's own draft before recording the result. By reference: the worker creates
+an owned draft, fills it through `draft_write`, publishes using `write_report`,
+and submits only the exact returned `report_id` as `result_submit.report`.
+`invalid_arguments` on `arguments.report` identifies a missing report, an object
+or array value, a whitespace-only string, or an identifier-shaped string that is
+not an exact report id (a draft id, a receipt, a malformed report id), all
+refused before anything is published. Decision-brief items (conclusion, evidence,
+checks, contradictions, limits, next action) are Markdown sections inside the
+report, never separate fields. The channel binds the task, owner epoch and
+attempt.
+
+The report is a string because Claude engines emit a top-level string argument
+verbatim but must hand-write JSON for object and array values. With the former
+`report: {title, markdown}` object, Sonnet 5 workers broke the escaping of the
+nested Markdown (raw newlines, invalid escapes) in about a quarter of inline
+reports of 3 KB or more across 2026-10-04..07 transcripts, and Claude Code refused
+the call ("could not be parsed as JSON") before Cortex received it; the same
+workers' multi-kilobyte top-level `project_write`/`draft_write` strings never
+failed. Every other string a `result_submit` object or array carries is bounded
+at 4096 characters or fewer.
 
 The advertised `result_submit` JSON schema lists `report` in its plain `required`
-list, expresses the exclusive choice of forms inside it, and states
+list, carries both forms in that one string, and states
 the check-field combinations: `not_run`/`unverified` require `blocker`, while
 `passed`/`failed` omit `blocker`; an optional `command` is descriptive only and
 never replaces receipt evidence. A new result needs a fresh
 `request_key`; retry an uncertain delivery only with identical arguments.
-The worker copies `write_report.report_id` into `result_submit.report.report_ref`, not
+The worker copies `write_report.report_id` alone into `result_submit.report`, not
 the draft id or a command receipt. New rejected `result_submit` calls attempt
 to retain only their error code and safe field path in `submission_rejection`
 observability events, never the rejected arguments or report body. That
@@ -61,14 +72,12 @@ deterministic rejected input only as the live declaration permits; uncertain
 delivery still requires the identical key and payload. This is prevention
 guidance, not proof that a live model follows it.
 
-Before the first submission, prepare a complete report form even though the
-unconditional required-field list cannot require both alternatives. A summary
-and verdict are not a report. Pass structured arguments; hand-concatenating
-Markdown into JSON can fail in the engine before Cortex receives a tool call.
-After a JSON parse error, correct serialization rather than repeating the same
-malformed input. For repeated inline serialization failures, use the existing
-owned-draft route and submit its acknowledged report identity. This guidance
-does not repair arbitrary model output or establish live model compliance.
+Before the first submission, prepare the complete report. A summary and verdict
+are not a report. If the engine reports that a call could not be parsed, nothing
+reached Cortex: resend the same arguments with valid serialization and the same
+request key. Moving the report to a top-level string removes the observed
+nested-escaping failure class; it does not repair arbitrary model output, and no
+paid live run has yet established Sonnet 5 compliance with the new form.
 
 Publication retains exact task/report/attempt identity. Runtime projection can
 recover an interrupted result submission from its durable publication event; absent

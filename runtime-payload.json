@@ -28,6 +28,7 @@
     "src/cortex_runtime/bootstrap.py",
     "src/cortex_runtime/catalog/__init__.py",
     "src/cortex_runtime/catalog/codex_debug_models.py",
+    "src/cortex_runtime/catalog/detached_refresh.py",
     "src/cortex_runtime/catalog/discovery.py",
     "src/cortex_runtime/catalog/evidence.py",
     "src/cortex_runtime/catalog/labels.py",

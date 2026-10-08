@@ -653,13 +653,17 @@ def _run(runtime, task_id, session_id, channel, session_ref, content, emit_updat
             runtime._emit_assignment_tool_calls(task_id, emit_tool_call, batch)
             if batch:
                 events.mark_delivered(runtime._store, task_id, marker)
+            # Live workers first, then the nodes: a worker commits its result
+            # before its future leaves _running, so a worker missing from this
+            # set already shows its result below. Read the other way round, a
+            # worker finishing in between looked lost to retry_lost.
+            with runtime._lock:
+                workers = frozenset(runtime._running.get(task_id, ()))
             context = machine.context(task_id)
             if state == 'REVIEWING' and context['state'] == state:
                 speculation.refresh(context)
             if context['state']!=state: continue
             nodes = context['nodes']
-            with runtime._lock:
-                workers = frozenset(runtime._running.get(task_id, ()))
             running = bool(workers)
             # A worker ends early when its turn is cancelled or its host
             # connection closes; that is not a lost worker to retry here.

@@ -236,6 +236,11 @@ class FakeEngine:
         self._session_params[session_id] = params
         for update in self.scenario.get("replay_updates") or []:
             _notify("session/update", dict(sessionId=session_id, update=update))
+        # "session_new_delay" (opt-in): answer session/new late, like a real
+        # engine whose catalog read outlives a short-lived requester.
+        delay = self.scenario.get("session_new_delay")
+        if delay:
+            time.sleep(delay)
         payload = dict(sessionId=session_id)
         options = self.scenario.get("config_options")
         if options:
@@ -345,7 +350,7 @@ class FakeEngine:
                 draft=call('create_draft',template='general',request_key='draft')
                 call('draft_write',draft_id=draft['draft_id'],content=draft['required_first_line']+'\n\n# Report\n\nObserved disposable fixture.\n',request_key='draft-body')
                 report=call('write_report',draft_id=draft['draft_id'],title='Observed report',summary='Observed fixture',author='worker',request_key='report')
-                result_args=dict(report=dict(report_ref=report['report_id']),summary='Observed fixture',checks=[],request_key='result')
+                result_args=dict(report=report['report_id'],summary='Observed fixture',checks=[],request_key='result')
                 value=call('result_submit',**result_args)
                 if value.get('error')=='review_verdict_required':value=call('result_submit',**dict(result_args,verdict='APPROVE'))
             if value.get('error'):raise RuntimeError(json.dumps(value))

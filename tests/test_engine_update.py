@@ -26,6 +26,13 @@ elif args[0] == "install":
     open(os.path.join(pkg, "dist", "index.js"), "w").write("// adapter\\n")
     json.dump({"name": name, "version": version, "bin": {"claude-agent-acp": "dist/index.js"}},
               open(os.path.join(pkg, "package.json"), "w"))
+    manifest = os.path.join(prefix, "package.json")
+    if os.path.exists(manifest):
+        overrides = json.load(open(manifest)).get("overrides", {})
+        for dependency, pinned in overrides.items():
+            dep = os.path.join(prefix, "node_modules", dependency)
+            os.makedirs(dep)
+            json.dump({"version": pinned}, open(os.path.join(dep, "package.json"), "w"))
 """
 
 
@@ -92,6 +99,11 @@ def test_a_qualified_codex_adapter_wins_over_a_newer_unqualified_one(tmp_path):
     assert not discovery.is_qualified("codex-acp", "1.14.0")
     _install_codex(tmp_path, "2.0.1")
     assert discovery.discover_engine("codex-acp", environ=_environ(tmp_path)).version == "2.0.1"
+    _install_codex(tmp_path, "2.1.1")
+    _install_codex(tmp_path, "2.2.0")
+    assert discovery.discover_engine("codex-acp", environ=_environ(tmp_path)).version == "2.1.1"
+    assert discovery.is_pinned("codex-acp", "2.1.1")
+    assert not discovery.is_qualified("codex-acp", "2.1.0")
 
 
 def test_the_newest_install_is_still_reported_when_none_is_qualified(tmp_path):
@@ -114,3 +126,56 @@ def test_pruning_never_deletes_a_qualified_codex_adapter(tmp_path):
     # versions survive on top of that; only unqualified 1.14.0 is pruned.
     assert sorted(p.name for p in discovery._subdirs(root)) == ["1.12.0", "1.13.0", "1.15.0", "1.16.0"]
     assert discovery.discover_engine("codex-acp", environ=_environ(tmp_path)).version == "1.13.0"
+
+
+def test_claude_sdk_refresh_is_side_by_side_and_discovered_without_changing_adapter_identity(tmp_path):
+    env = _environ(tmp_path, "0.87.0")
+    root = discovery.owned_root(env) / "claude-agent-acp"
+    original = root / "0.87.0" / "node_modules" / PACKAGE
+    (original / "dist").mkdir(parents=True)
+    (original / "dist/index.js").write_text("// original adapter")
+    (original / "package.json").write_text(json.dumps({
+        "version": "0.87.0", "bin": {"claude-agent-acp": "dist/index.js"},
+    }))
+    assert engine_update.update_engine("claude-agent-acp", environ=env) == "0.87.0"
+    refreshed = root / "0.87.0+sdk.0.3.293"
+    assert (original / "dist/index.js").read_text() == "// original adapter"
+    assert json.loads((refreshed / "package.json").read_text())["overrides"] == {
+        "@anthropic-ai/claude-agent-sdk": "0.3.293"}
+    found = discovery.discover_engine("claude-agent-acp", environ=env)
+    assert found.version == "0.87.0"
+    assert found.launch_command[1].startswith(str(refreshed))
+    assert engine_update.update_engine("claude-agent-acp", environ=env) is None
+    assert sorted(p.name for p in discovery._subdirs(root)) == ["0.87.0", "0.87.0+sdk.0.3.293"]
+    assert engine_update.update_engine("claude-agent-acp", environ=_environ(tmp_path, "0.88.0")) == "0.88.0"
+    assert discovery.discover_engine("claude-agent-acp", environ=env).version == "0.88.0"
+
+
+def test_sdk_refresh_refuses_an_unmatched_dependency_and_keeps_current(tmp_path, monkeypatch):
+    env = _environ(tmp_path, "0.87.0")
+    assert engine_update.update_engine("claude-agent-acp", environ=_environ(tmp_path, "0.86.0")) == "0.86.0"
+    run = engine_update._run
+
+    def wrong_sdk(args, timeout, environ):
+        result = run(args, timeout, environ)
+        if args[1] == "install":
+            prefix = args[args.index("--prefix") + 1]
+            from pathlib import Path
+            (Path(prefix) / "node_modules" / engine_update._CLAUDE_SDK_PACKAGE / "package.json").write_text(
+                '{"version": "0.3.287"}')
+        return result
+
+    monkeypatch.setattr(engine_update, "_run", wrong_sdk)
+    assert engine_update.update_engine("claude-agent-acp", environ=env) is None
+    assert discovery.discover_engine("claude-agent-acp", environ=env).version == "0.86.0"
+    root = discovery.owned_root(env) / "claude-agent-acp"
+    assert sorted(p.name for p in discovery._subdirs(root)) == ["0.86.0"]
+    assert not list(root.glob(".tmp-*"))
+
+
+def test_sdk_build_sorting_is_exact_and_never_overrides_newer_adapter():
+    key = discovery.version_key
+    assert key("0.87.0") < key("0.87.0+sdk.0.3.293") < key("0.88.0")
+    assert key("0.87.0+sdk.0.3.287") < key("0.87.0+sdk.0.3.293")
+    for invalid in ("0x87x0", "0.87.0+sdkX0.3.293", "../0.87.0", "0.87.0-beta"):
+        assert key(invalid) == ()

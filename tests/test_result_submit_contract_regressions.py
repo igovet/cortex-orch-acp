@@ -15,7 +15,7 @@ def _schema(stage="review"):
 
 
 def _args(**extra):
-    payload = dict(report=dict(title="Review", markdown="# Review\n\nObserved."),
+    payload = dict(report="# Review\n\nObserved.", report_title="Review",
                    summary="Observed", checks=[], request_key="result-one")
     payload.update(extra)
     return payload
@@ -82,7 +82,7 @@ def test_observed_review_omission_is_named_by_the_plain_required_list():
         validate(schema, observed)
     assert caught.value.field == 'arguments.report' and caught.value.received == 'missing'
     assert 'summary, verdict and findings never replace it' in caught.value.expected
-    for report in (dict(title='Review', markdown='# Review\n\nObserved.'), dict(report_ref='r_' + 'a' * 12)):
+    for report in ('# Review\n\nObserved.', 'r_' + 'a' * 12):
         payload = dict(observed, report=report)
         assert not list(Draft202012Validator(schema).iter_errors(payload))
         validate(schema, payload)

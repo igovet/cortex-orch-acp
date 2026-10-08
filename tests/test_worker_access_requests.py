@@ -440,7 +440,7 @@ def test_access_decision_continues_same_session_through_result_review_verificati
                                    dict(path='extra', content='done', expected_sha256='absent', request_key='write'))
             if node['node_id'] == 'N1':
                 assert pending.wait(10)
-            args = dict(report=dict(title='Observed', markdown='# Observed\n\nFinished.'),
+            args = dict(report='# Observed\n\nFinished.', report_title='Observed',
                         summary='Finished.', checks=[], request_key='result')
             if node['stage'] == 'review':
                 args['verdict'] = 'APPROVE'

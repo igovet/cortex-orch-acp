@@ -18,20 +18,25 @@ def _record(tmp_path, engine, package, version):
     return SimpleNamespace(engine=engine, launch_command=("/usr/bin/node", str(package_dir / "dist" / "index.js")))
 
 
-def test_an_unregistered_installed_version_keeps_the_pinned_registration(tmp_path):
-    """claude-agent-acp is installed at 0.81.0 while only 0.78.0 has its own
-    registration. Resolving the installed version made every Claude worker
-    refuse its first prompt with an UNSUPPORTED delivery (a bare
-    `PortableError`, live 2026-09-22) while the coordinator kept working."""
-    record = _record(tmp_path, "claude-agent-acp", "@agentclientprotocol/claude-agent-acp", "0.81.0")
+def test_an_unregistered_claude_version_does_not_borrow_qualification(tmp_path):
+    record = _record(tmp_path, "claude-agent-acp", "@agentclientprotocol/claude-agent-acp", "0.99.0")
     version = _pinned_version_for("claude-agent-acp", record)
-    assert version == "0.78.0"
+    assert version == "0.99.0"
     plan = delivery_for("claude-agent-acp", version).plan(load_role("worker-debugger"), [])
-    assert plan.qualification == DeliveryQualification.QUALIFIED
+    assert plan.qualification == DeliveryQualification.UNSUPPORTED
+
+
+def test_registered_claude_versions_name_the_actual_install(tmp_path):
+    for version in ("0.78.0", "0.87.0"):
+        record = _record(tmp_path, "claude-agent-acp", "@agentclientprotocol/claude-agent-acp", version)
+        assert _pinned_version_for("claude-agent-acp", record) == version
+        plan = delivery_for("claude-agent-acp", version).plan(load_role("worker-debugger"), [])
+        assert plan.version == version
+        assert plan.qualification == DeliveryQualification.QUALIFIED
 
 
 def test_a_registered_installed_version_is_the_one_named(tmp_path):
-    for version in ("1.13.0", "2.0.1"):
+    for version in ("1.13.0", "2.0.1", "2.1.1"):
         record = _record(tmp_path, "codex-acp", "@agentclientprotocol/codex-acp", version)
         assert _pinned_version_for("codex-acp", record) == version
         plan = delivery_for("codex-acp", version).plan(load_role("worker-debugger"), [])
@@ -39,8 +44,8 @@ def test_a_registered_installed_version_is_the_one_named(tmp_path):
 
 
 def test_no_record_resolves_the_pinned_version():
-    assert _pinned_version_for("claude-agent-acp") == "0.78.0"
-    assert _pinned_version_for("codex-acp") == "1.12.0"
+    assert _pinned_version_for("claude-agent-acp") == "0.87.0"
+    assert _pinned_version_for("codex-acp") == "2.1.1"
 
 
 def test_a_worker_failure_names_its_code_and_line():

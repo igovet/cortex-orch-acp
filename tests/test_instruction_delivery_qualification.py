@@ -201,3 +201,38 @@ def test_delivery_for_rejects_empty_engine_or_version():
         delivery_for("", "1.0.0")
     with pytest.raises(PortableError):
         delivery_for("codex-acp", "")
+
+
+def test_claude_0_87_has_its_own_exact_system_channel_registration():
+    from cortex_runtime.engine.instruction_delivery_registry import (
+        ClaudeAgentAcp0_87Delivery, has_exact_registration,
+    )
+    role = roles.load_role("worker-backend-dev")
+    mechanism = delivery_for("claude-agent-acp", "0.87.0")
+    assert isinstance(mechanism, ClaudeAgentAcp0_87Delivery)
+    assert has_exact_registration("claude-agent-acp", "0.87.0")
+    plan = qualify_delivery(role, mechanism, [])
+    assert plan.version == "0.87.0"
+    assert plan.qualification == DeliveryQualification.QUALIFIED
+    assert plan.channel == "session/new _meta.systemPrompt"
+    assert plan.blocks == ()
+    assert plan.session_new_meta["systemPrompt"] == {"append": role.body_portable}
+
+
+
+def test_codex_2_1_1_has_exact_instruction_and_compaction_registrations():
+    from cortex_runtime.delegation.generations import AUTOMATIC, tier_for
+    from cortex_runtime.engine.instruction_delivery_registry import CodexAcp2_1Delivery, has_exact_registration
+
+    role = roles.load_role("worker-backend-dev")
+    mechanism = delivery_for("codex-acp", "2.1.1")
+    assert isinstance(mechanism, CodexAcp2_1Delivery)
+    assert has_exact_registration("codex-acp", "2.1.1")
+    plan = qualify_delivery(role, mechanism, [])
+    assert plan.version == "2.1.1"
+    assert plan.qualification == DeliveryQualification.QUALIFIED
+    assert plan.blocks == ()
+    assert plan.session_new_meta == {"systemPrompt": role.body_portable}
+    assert tier_for("codex-acp", "2.1.1").tier == AUTOMATIC
+    assert not has_exact_registration("codex-acp", "2.1.0")
+    assert isinstance(delivery_for("codex-acp", "2.1.0"), UnsupportedDelivery)

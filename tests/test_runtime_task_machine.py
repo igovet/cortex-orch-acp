@@ -388,7 +388,7 @@ def test_composed_runtime_executes_plan_review_verification_synthesis(tmp_path, 
                 with store.connection() as db:
                     provision = db.execute('SELECT role_id FROM delegation_provisioning WHERE attempt_id=?',
                                            (channel.attempt_id,)).fetchone()
-                args = dict(report=dict(report_ref=report_id), summary='Observed result', checks=[], request_key='result')
+                args = dict(report=report_id, summary='Observed result', checks=[], request_key='result')
                 if provision['role_id'] == 'worker-code-reviewer' and scenario in {'elicitation', 'text_question', 'worker_question'}:
                     # The reviewer sees the user's answer, bound to the session it came from.
                     answers = mcp_tools.dispatch(store, channel, 'list_sources', {})['answered_questions']
@@ -531,6 +531,115 @@ def test_composed_runtime_executes_plan_review_verification_synthesis(tmp_path, 
     else:
         # Never a dead end: after the automatic attempts the user is asked.
         assert context['state'] == 'WAITING_USER', context
+
+
+
+def test_worker_finishing_during_a_scheduler_pass_is_not_treated_as_lost(tmp_path, monkeypatch):
+    """A reviewer that publishes its result and ends while the scheduler pass
+    holds an older node snapshot is a finished worker, not a lost one.
+
+    Regression: the pass read the nodes (review still running) and only then
+    the live worker set; a worker that finished in between looked lost, and
+    retry_lost's lost_worker_result_changed sent the coordinator to an extra
+    plan revision (the intermittent composed-runtime failures under load).
+    """
+    import sys
+    import threading
+    import time
+    from pathlib import Path
+    from cortex_runtime.acp.orchestrating_runtime import OrchestratingRuntime, PromptOutcome
+    from cortex_runtime.portable.engine_contract import StopReason
+    from cortex_runtime.delegation import mcp_tools
+    from orchestration_fakes import FakeSessionRuntime, FakeWorkspace, FakeConfigSnapshotSource
+
+    store = Store(tmp_path / '.cortex', project_root=tmp_path)
+    task = bootstrap_task(store, SourceEvent(origin='test', event_id='race'), 'Inspect an empty project', 'owner')
+    calls = []
+    # The reviewer publishes only once the scheduler holds its snapshot.
+    review_gate = threading.Event()
+
+    def router(store, channel, session_ref, launch, instructions):
+        def behavior(store, channel, ref, message, call_index):
+            calls.append(channel.role)
+            if channel.role == 'coordinator':
+                context = mcp_tools.dispatch(store, channel, 'task_get_context', {})
+                if context['state'] == 'PLANNING':
+                    proposal = plan()
+                    proposal['verification'] = [['python3', '-B', '-c', 'print("verified")']]
+                    mcp_tools.dispatch(store, channel, 'plan_submit',
+                                       dict(plan=proposal, request_key='plan-' + str(context['revision'])))
+                else:
+                    mcp_tools.dispatch(store, channel, 'synthesis_submit', dict(text='Result reviewed and verified.'))
+                return PromptOutcome(StopReason.END_TURN, 'Visible model message')
+            with store.connection() as db:
+                role = db.execute('SELECT role_id FROM delegation_provisioning WHERE attempt_id=?',
+                                  (channel.attempt_id,)).fetchone()['role_id']
+            if role != 'worker-code-reviewer':
+                (tmp_path / 'src' / 'part0').mkdir(parents=True, exist_ok=True)
+                (tmp_path / 'src' / 'part0' / f'{channel.attempt_id}.txt').write_text('implemented')
+            draft = store.call('create_draft', dict(template='general', request_key='draft-' + channel.attempt_id),
+                               channel.principal_thread_id, channel.parent_principal_thread_id, trusted=True)
+            path = Path(draft['draft_path'])
+            marker = path.read_bytes().split(b'\n\n', 1)[0] + b'\n\n'
+            path.write_bytes(marker + b'# Report\n\nObserved result.\n')
+            receipt = store.call('write_report', dict(draft_id=draft['draft_id'], title='Result',
+                                 summary='Observed result', author='worker', request_key='report-' + channel.attempt_id),
+                                 channel.principal_thread_id, channel.parent_principal_thread_id, trusted=True)
+            args = dict(report=receipt['report_id'], summary='Observed result', checks=[], request_key='result')
+            if role == 'worker-code-reviewer':
+                args['verdict'] = 'APPROVE'
+                assert review_gate.wait(30)
+            mcp_tools.dispatch(store, channel, 'result_submit', args)
+            return PromptOutcome(StopReason.END_TURN, 'Visible model message')
+        return behavior
+
+    engine = FakeSessionRuntime(store, router)
+    runtime = OrchestratingRuntime(store, engine, FakeWorkspace(), FakeConfigSnapshotSource(), allow_unqualified_delivery=True)
+    original = TaskMachine.context
+    raced = []
+
+    def context(self, task_id):
+        snapshot = original(self, task_id)
+        caller = sys._getframe(1).f_code
+        if (raced or caller.co_name != '_run' or not caller.co_filename.endswith('controller.py')
+                or snapshot['state'] != 'REVIEWING'
+                or not any(n['stage'] == 'review' and n['status'] == 'running' for n in snapshot['nodes'])):
+            return snapshot
+        with runtime._lock:
+            in_flight = set(runtime._running.get(task_id, ()))
+        if not in_flight:
+            return snapshot
+        # Deterministically open the race window: the scheduler keeps this
+        # snapshot (review running) while the reviewer publishes its result
+        # and its worker future ends and leaves the live worker set.
+        raced.append(True)
+        review_gate.set()
+        deadline = time.monotonic() + 30
+        with runtime._cond:
+            while in_flight & runtime._running.get(task_id, set()) and time.monotonic() < deadline:
+                runtime._cond.wait(.05)
+        assert not in_flight & runtime._running.get(task_id, set())
+        return snapshot
+
+    monkeypatch.setattr(TaskMachine, 'context', context)
+    output = []
+    try:
+        result = runtime.start_prompt(task.task_id, 'incoming', 'Inspect an empty project', output.append,
+                                      threading.Event(), emit_tool_call=lambda update: True)
+    finally:
+        runtime.shutdown()
+    monkeypatch.setattr(TaskMachine, 'context', original)
+    assert result == StopReason.END_TURN
+    assert raced == [True]
+    final = TaskMachine(store).context(task.task_id)
+    assert final['state'] == 'COMPLETED', final
+    assert final['revision'] == 1
+    with store.connection() as db:
+        returned = [json.loads(r[0]) for r in db.execute(
+            "SELECT payload_json FROM runtime_events WHERE task_id=? AND type IN "
+            "('RETURNED_TO_COORDINATOR','ASSIGNMENT_RETRIED')", (task.task_id,))]
+    assert returned == []
+    assert calls == ['coordinator', 'worker', 'worker', 'coordinator']
 
 
 def test_question_requires_exact_real_answer_and_retries_share_identity(machine):

@@ -5,6 +5,28 @@ lifecycle, dependency scheduling, routes, scopes, permission checks, independent
 review, verification, recovery and completion. Models submit bounded proposals and
 immutable reports. All 23 specialist/consultant profiles remain available.
 
+Claude ACP support now includes exact 0.87.0 instruction delivery (Claude SDK
+0.3.287, ACP SDK 1.7.0, ACP v1), session-observed option handling, and its
+non-AIR `claudeCode.toolName=compact` compaction signal. The owner update
+path initially found 0.87.0 already installed with SDK 0.3.287 (Haiku 4.5).
+A separate exact SDK 0.3.293 refresh now installs beside that original at
+`0.87.0+sdk.0.3.293`. Its no-prompt SDK catalog resolves `haiku` to
+`claude-haiku-5-5` (Haiku 5.5), lists old Haiku separately, and advertises
+low/medium/high/xhigh/max. Actual ACP controls accepted high/xhigh/max without
+a prompt. The public preset and owner production `default` profile now
+enable the new alias at Luna policy parity and deny old Haiku by exact ID. See [current adapter evidence](claude-agent-acp-adapter.md#current-support-0870-2026-10-07).
+These static/no-paid observations do not establish a real model turn or GUI
+qualification. Paid live check not requested by the owner.
+
+Codex ACP now includes exact **2.1.1** support and fallback. All 14 guarded
+patch sites match 2.0.1; protocol/option mapping is unchanged. The owner update
+path found 2.1.1 already installed; checkout discovery now selects it instead
+of 2.0.1. Installed CLI 0.159.3 passes three no-paid wrapper/jail checks;
+13 fake App Server bundle tests pass against each of 2.1.1 and 2.0.1.
+Role metadata now reaches all qualified Codex versions, not only 1.12.0.
+No production Paseo/plugin refresh or paid/client qualification occurred.
+See [current Codex evidence](codex-acp-adapter.md#current-support-211-2026-10-07).
+
 Implemented production paths:
 
 - Transactional task state, plan revisions, validated DAG, original goal and event
@@ -16,8 +38,8 @@ Implemented production paths:
   and READ_ONLY nodes do not conflict by scope.
 - Closed plan/result/question/scope/replan/escalation/synthesis tools. No public
   delegate, decide, integrate, acceptance or model/effort selection API.
-  `result_submit` requires `report`: `{report_ref}` naming a published report or the report inline,
-  which the runtime publishes idempotently through the ordinary owned-draft path
+  `result_submit` requires `report` as one plain string: the `report_id` of a published own report or
+  the inline Markdown, which the runtime publishes idempotently through the ordinary owned-draft path
   (see [publications](publications-and-consistency.md)).
 - Independent review whenever the observed project differs from its execution
   baseline, or for every fix cycle and any unobservable state; unchanged state is
@@ -48,9 +70,9 @@ Implemented production paths:
 
 ## Installed capabilities and the engine jail
 
-The 2026-09-30 one-time adapter update adds codex-acp 2.0.1 with Codex CLI
-0.159.1 to the supported versions. The latest installed Claude adapter is
-0.84.0; its instruction-channel registration still uses the 0.78.0 basis.
+The historical 2026-09-30 one-time update added codex-acp 2.0.1 with Codex CLI
+0.159.1. At that inspection Claude was 0.84.0 with a 0.78.0 instruction-channel
+basis; the current exact registrations are described above.
 Earlier inspection verified Codex CLI 0.154.0/0.155.1, codex-acp
 1.12.0/1.13.0 and claude-agent-acp 0.78.0 (SDK 0.3.270). The installed hosts expose no
 universal native-action approval callback, so native tools are not gated per

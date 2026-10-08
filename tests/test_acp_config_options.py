@@ -919,7 +919,7 @@ def test_paseo_session_new_waits_for_seed_catalog_to_observe_effort(tmp_path, mo
         )
         return SimpleNamespace(success=True)
 
-    monkeypatch.setattr("cortex_runtime.acp.agent.catalog_refresh.perform_refresh", live_refresh)
+    monkeypatch.setattr("cortex_runtime.acp.agent.catalog_detached_refresh.run", live_refresh)
     result = agent._session_new(dict(cwd=str(project), mcpServers=[]))
     options = {option["id"]: option for option in result["configOptions"]}
     assert calls == []
@@ -979,7 +979,7 @@ def test_session_new_refreshes_configured_catalog_asynchronously(tmp_path, monke
         finished.set()
         return SimpleNamespace(success=True)
 
-    monkeypatch.setattr("cortex_runtime.acp.agent.catalog_refresh.perform_refresh", fake_refresh)
+    monkeypatch.setattr("cortex_runtime.acp.agent.catalog_detached_refresh.run", fake_refresh)
     result = agent._session_new(dict(cwd=str(project), mcpServers=[]))
     agent._post_session_new_notifications(result["sessionId"])
     assert finished.wait(2), "background catalog refresh did not complete"
@@ -1017,7 +1017,7 @@ def test_failed_background_catalog_refresh_keeps_existing_selector(tmp_path, mon
         finished.set()
         return SimpleNamespace(success=False)
 
-    monkeypatch.setattr("cortex_runtime.acp.agent.catalog_refresh.perform_refresh", failed_refresh)
+    monkeypatch.setattr("cortex_runtime.acp.agent.catalog_detached_refresh.run", failed_refresh)
     result = agent._session_new(dict(cwd=str(project), mcpServers=[]))
     agent._post_session_new_notifications(result["sessionId"])
     assert finished.wait(2), "background catalog refresh did not complete"

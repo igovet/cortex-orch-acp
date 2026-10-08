@@ -155,38 +155,39 @@ FINDING = obj(dict(
     cross_cutting=dict(type='boolean', description='true when the problem spans several plan tasks or changes an interface, contract or file other tasks depend on; the runtime then sends a fix to every original plan task. false for a problem local to the named task.'),
 ), required=['node', 'files', 'fix', 'cross_cutting'])
 FINDING['properties']['node']['pattern'] = r'^[A-Za-z][A-Za-z0-9_-]{0,63}$'
-REPORT_FORM = obj(dict(
-    title=text('Inline form, sent with markdown: readable English report title. Omit report_ref.', 200),
-    markdown=text('Inline form, sent with title: complete report Markdown: the opening decision brief (conclusion, observed evidence, checks, contradictions, limits, next action), then the detailed evidence. These brief items are Markdown sections inside markdown, never separate report fields. For reports with code blocks or larger than about 3 KB, prefer create_draft, draft_write and write_report, then report={report_ref: <the acknowledged report_id>}. No draft marker and no template placeholder comments; the runtime adds the marker. Omit report_ref.', 1000000),
-    report_ref=text('Reference form, sent alone instead of title and markdown: the exact report_id that this worker\'s own write_report returned in this attempt (r_ plus 12 lowercase hex characters). Never a draft_id, a report from another attempt or a tool_call_ref.', 14),
-), required=[])
-REPORT_FORM['description'] = (
-    'Required in every result_submit, a review included: this attempt\'s report. summary, verdict and findings never '
-    'replace it. For reports with code blocks or larger than about 3 KB, prefer create_draft, draft_write and '
-    'write_report, then report={report_ref: <the acknowledged report_id>}. Decision-brief items (conclusion, '
-    'evidence, checks, contradictions, limits, next action) are Markdown sections inside markdown, never '
-    'separate report fields. Send exactly one form. Inline for short plain reports: {"title": "...", "markdown": "..."}; the runtime publishes '
-    'it as this attempt\'s immutable report before recording the result. Reference, only after create_draft, '
-    'draft_write and write_report: {"report_ref": "<that write_report report_id>"}. Retry an uncertain delivery with '
-    'exactly the same request_key and entire payload; a changed report needs a new logical delivery.')
-REPORT_FORM['properties']['report_ref']['pattern'] = r'^r_[0-9a-f]{12}$'
-# Models fill the plain `required` list; a conditional must never be the only
-# statement that a field is needed. With report and report_ref as two optional
-# root fields under a root if/then/else, reviewers repeatedly sent only
-# summary/checks/request_key/verdict and were refused (session 973dbe54,
-# 2026-10-06; 16 such refusals across six projects after a description-only
-# fix). So the report is one required field and only its two forms are
-# conditional (if/then/else, never oneOf: see the Codex note below).
-REPORT_FORM['if'] = {'required': ['report_ref']}
-REPORT_FORM['then'] = {'not': {'anyOf': [{'required': ['title']}, {'required': ['markdown']}]}}
-REPORT_FORM['else'] = {'required': ['title', 'markdown']}
+# The report is one required top-level plain string. A Claude engine emits a
+# top-level string argument verbatim but must hand-write JSON for an object
+# or array value. In the former report={title, markdown} object, Sonnet 5
+# workers broke the escaping of the nested Markdown (raw newlines, invalid
+# escapes) in about a quarter of inline reports of 3 KB or more, and the
+# engine refused the call ("could not be parsed as JSON") before Cortex
+# received it, while the same workers' multi-kilobyte top-level
+# project_write/draft_write strings never failed (incident review
+# 2026-10-08). Models also fill the plain `required` list and skip
+# conditionals, so a reference and inline Markdown share this one field
+# (an exact report_id is the reference) and the title is optional.
+REPORT_ID_PATTERN = r'^r_[0-9a-f]{12}$'
+REPORT_TEXT = text(
+    'Required in every result_submit, a review included: this attempt\'s report as one plain string, never an '
+    'object. Either the complete report Markdown, which the runtime publishes as this attempt\'s immutable report '
+    'before recording the result: the opening decision brief (conclusion, observed evidence, checks, '
+    'contradictions, limits, next action) as Markdown sections, then the detailed evidence, with no draft marker '
+    'and no template placeholder comments. Or, after create_draft, draft_write and write_report, only the exact '
+    'report_id that write_report returned to this worker in this attempt (r_ plus 12 lowercase hex characters, '
+    'nothing else in the string). Never a draft_id, a tool_call_ref or a report of another attempt. summary, '
+    'verdict and findings never replace it. Retry an uncertain delivery with exactly the same request_key and '
+    'entire payload; a changed report needs a new logical delivery.', 1000000)
+REPORT_TITLE = text(
+    'Optional, only with inline Markdown in report: readable English report title. Omit it to use the first '
+    'Markdown heading of report (else its first line). Ignored when report is a report_id.', 200)
 RESULT = obj(dict(
-    report=REPORT_FORM,
-    assignment_outcome=dict(type='string', enum=['failed'], description='Optional: send failed only to intentionally submit a failed assignment. Otherwise an open failed check is refused with open_failed_check before recording or revoking the channel; rerun exactly the receipt argv and cite the later passed receipt while retaining the failed check. Never omit a real failed check.'),
+    report=REPORT_TEXT,
+    report_title=REPORT_TITLE,
+    assignment_outcome=dict(type='string', enum=['failed'], description='Optional: send failed only to intentionally submit a failed assignment. Otherwise an open failed check is refused with open_failed_check before recording or revoking the channel; rerun exactly the receipt argv and cite the later passed receipt while retaining the failed check. Never omit a real failed check (a mistyped command line that never started the check is not one; see checks[].outcome).'),
     summary=text('What was found or changed, in plain words: the conclusion first, then what supports it. At most 4000 characters.', 4000),
     verdict=dict(type='string', enum=['APPROVE', 'REQUEST_CHANGES', 'BLOCK', 'approve', 'request_changes', 'block'], description='Required for a review-stage worker, omitted for other workers. Send APPROVE (or approve) when correct, REQUEST_CHANGES (or request_changes) for fixable problems, BLOCK (or block) when the task must not proceed. Lowercase forms normalize to the uppercase decision.'),
     findings=array(FINDING, 'Review only, optional, used only with verdict REQUEST_CHANGES and ignored with any other verdict. One entry per problem, each naming the original plan task that must fix it. When every finding names a task of the accepted plan, is not cross_cutting and lists only files inside that task\'s scope, the runtime creates fixes only for the named tasks, each receiving only its own findings and this review\'s report_ref, ordered as in the plan. Otherwise, or when omitted, every original plan task receives a fix with this summary.', maximum=16),
-    checks=array(obj(dict(name=text('Specific stable name of this automated command check, e.g. "unit tests for services/trading" or "ruff on changed files". Reuse exactly the same name for a later passing rerun that closes this check; do not use a report title, task name, or qualitative review remark.',200), outcome=dict(type='string', enum=['passed','failed','not_run','unverified'], description='passed: you ran it in this attempt with command_run (or a user-confirmed outside_command) and it exited 0; requires tool_call_ref (see its evidence rule). failed: it ran and failed; always kept as failed, and result_submit refuses an open failure with open_failed_check unless assignment_outcome="failed" intentionally submits a failed assignment. A failure closes only when a later passed check of this same result cites a rerun of exactly the same command (same argv, and for outside_command the same cwd) that is the latest run of that command in this attempt: then it stays as history with closed_by. Report a fixed failure that way, never by dropping it. not_run: a real blocker prevented running it. unverified: it ran but its result could not be established. not_run and unverified require blocker. A passed claim the runtime cannot verify is recorded as unverified with evidence_gap, or as failed when its cited command or a later run of the same command exited nonzero; the result receipt lists each such check.'),
+    checks=array(obj(dict(name=text('Specific stable name of this automated command check, e.g. "unit tests for services/trading" or "ruff on changed files". Reuse exactly the same name for a later passing rerun that closes this check; do not use a report title, task name, or qualitative review remark.',200), outcome=dict(type='string', enum=['passed','failed','not_run','unverified'], description='passed: you ran it in this attempt with command_run (or a user-confirmed outside_command) and it exited 0; requires tool_call_ref (see its evidence rule). failed: it ran and failed; always kept as failed, and result_submit refuses an open failure with open_failed_check unless assignment_outcome="failed" intentionally submits a failed assignment. A failure closes only when a later passed check of this same result cites a rerun of exactly the same command (same argv, and for outside_command the same cwd) that is the latest run of that command in this attempt: then it stays as history with closed_by. Report a fixed failure that way, never by dropping it; a different argv never closes it. A run whose own output shows the check never started because its command line was mistyped (a usage, unrecognized-flag or file-not-found error for the command itself) is not a failed check of the work: do not cite it as one; cite the receipt of the corrected command and describe the mistyped run in the report. A test, lint, type check or build that ran and reported failures is always a real failed check. not_run: a real blocker prevented running it. unverified: it ran but its result could not be established. not_run and unverified require blocker. A passed claim the runtime cannot verify is recorded as unverified with evidence_gap, or as failed when its cited command or a later run of the same command exited nonzero; the result receipt lists each such check.'),
                          blocker=text('Required and non-whitespace for not_run and unverified; forbidden for passed and failed. State the concrete condition that prevented running or establishing this specific check: for example, a named unavailable host, or a documented project policy that requires an explicit owner request which was not given, such as "paid live check not requested by the owner". "Not run", "out of scope" or "not requested" alone is not a blocker.', 1000),
                          command=array(dict(type='string', description='One literal argument of the command this check ran or would run.', maxLength=4096),
                                        'Optional literal argv. This command is retained only for not_run or unverified gap checks; it identifies the blocked command and lets a later verified identical run close the gap. For passed or failed, it is descriptive only: the runtime derives the actual command and pass/fail evidence exclusively from tool_call_ref, never from this array.',
@@ -298,17 +299,6 @@ def _collect(schema, value, field, violations):
             schema['then'] if _matches_presence_rule(conditional, value) else schema['else'])
         if branch is None or _matches_presence_rule(branch, value):
             pass
-        elif 'report_ref' in conditional.get('required', ()):  # one result_submit report form
-            if 'report_ref' in value:
-                received = 'report_ref together with ' + ' and '.join(n for n in ('title', 'markdown') if n in value)
-            else:
-                received = 'inline form without ' + ' and '.join(n for n in ('title', 'markdown') if n not in value)
-            violations.append(dict(
-                field=field, received=received,
-                expected='exactly one report form: {title, markdown} inline, or {report_ref} alone',
-                correction='Send report={"title": ..., "markdown": ...} inline, or report={"report_ref": <report_id from '
-                           'this worker\'s own write_report>} alone.',
-            ))
         elif 'questions' in conditional.get('required', ()):
             violations.append(dict(field=field, received='mixed or incomplete question form',
                                    expected='question and options, or questions, never both',
@@ -347,7 +337,10 @@ def _collect(schema, value, field, violations):
             violations.append(dict(field=field, received=type(value).__name__, expected='JSON boolean', correction=f'Send {field} as true or false.'))
     elif kind == 'string':
         if not isinstance(value,str):
-            violations.append(dict(field=field, received=type(value).__name__, expected='JSON string', correction=f'Send {field} as a JSON string.'))
+            violations.append(dict(field=field, received=type(value).__name__, expected='JSON string',
+                                   correction=f'Send {field} as a JSON string.' if not isinstance(value, (dict, list)) else
+                                   f'Send {field} as one plain JSON string, not an {"object" if isinstance(value, dict) else "array"}: '
+                                   + schema.get('description', '')))
             return
         target = f"between {schema.get('minLength',0)} and {schema.get('maxLength',32000)} characters"
         if not schema.get('minLength',0) <= len(value) <= schema.get('maxLength',32000):

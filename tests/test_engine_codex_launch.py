@@ -391,9 +391,10 @@ def test_private_codex_adapter_rejects_missing_session_config_guard(tmp_path):
     assert excinfo.value.code == "codex_manual_review_adapter_unsupported"
 
 
+@pytest.mark.parametrize("version", ["2.0.1", "2.1.1"])
 @pytest.mark.parametrize("site", ["history", "compaction", "helpers"])
 @pytest.mark.parametrize("mutation", ["missing", "duplicated"])
-def test_private_codex_2_adapter_rejects_changed_reporter_sites(tmp_path, site, mutation):
+def test_private_codex_2_adapter_rejects_changed_reporter_sites(tmp_path, version, site, mutation):
     from types import SimpleNamespace
     from cortex_runtime.engine.process import (
         _CODEX_AGENT_REVIEWER_2_SOURCE, _CODEX_SEND_PROMPT_BY_VERSION,
@@ -401,7 +402,7 @@ def test_private_codex_2_adapter_rejects_changed_reporter_sites(tmp_path, site, 
     )
 
     source = _pinned_bundle().replace(_CODEX_AGENT_REVIEWER_SOURCE, _CODEX_AGENT_REVIEWER_2_SOURCE)
-    source = source.replace(_CODEX_SEND_PROMPT_SOURCE, _CODEX_SEND_PROMPT_BY_VERSION["2.0.1"][0])
+    source = source.replace(_CODEX_SEND_PROMPT_SOURCE, _CODEX_SEND_PROMPT_BY_VERSION[version][0])
     sites = {"history": _CODEX_HISTORY_2_SOURCE, "compaction": _CODEX_COMPACTION_2_SOURCE,
              "helpers": _CODEX_HELPERS_2_SOURCE}
     source += b"\n" + b"\n".join(sites.values())
@@ -411,8 +412,8 @@ def test_private_codex_2_adapter_rejects_changed_reporter_sites(tmp_path, site, 
     original = package / "dist/index.js"
     original.write_bytes(source)
     package_json = package / "package.json"
-    package_json.write_text('{"version":"2.0.1","type":"module"}')
-    install = SimpleNamespace(package_version="2.0.1", adapter_entry=str(original),
+    package_json.write_text(json.dumps({"version": version, "type": "module"}))
+    install = SimpleNamespace(package_version=version, adapter_entry=str(original),
                               adapter_entry_sha256=hashlib.sha256(source).hexdigest(),
                               package_json=str(package_json))
     with pytest.raises(PortableError) as excinfo:
@@ -420,8 +421,9 @@ def test_private_codex_2_adapter_rejects_changed_reporter_sites(tmp_path, site, 
     assert excinfo.value.code == "codex_manual_review_adapter_unsupported"
 
 
-def test_private_codex_2_adapter_keeps_whole_mcp_tool_schemas(tmp_path):
-    """Only the 2.0.1 bundle (Codex 0.159.1) gets tool_input_schema_max_bytes:
+@pytest.mark.parametrize("version", ["2.0.1", "2.1.1"])
+def test_private_codex_2_adapter_keeps_whole_mcp_tool_schemas(tmp_path, version):
+    """Qualified 2.x bundles get tool_input_schema_max_bytes:
     below it Codex strips every description from a large tool schema."""
     from types import SimpleNamespace
     from cortex_runtime.engine.process import (
@@ -431,15 +433,15 @@ def test_private_codex_2_adapter_keeps_whole_mcp_tool_schemas(tmp_path):
     )
 
     source = _pinned_bundle().replace(_CODEX_AGENT_REVIEWER_SOURCE, _CODEX_AGENT_REVIEWER_2_SOURCE)
-    source = source.replace(_CODEX_SEND_PROMPT_SOURCE, _CODEX_SEND_PROMPT_BY_VERSION["2.0.1"][0])
+    source = source.replace(_CODEX_SEND_PROMPT_SOURCE, _CODEX_SEND_PROMPT_BY_VERSION[version][0])
     source += b"\n" + b"\n".join((_CODEX_HISTORY_2_SOURCE, _CODEX_COMPACTION_2_SOURCE, _CODEX_HELPERS_2_SOURCE))
     package = tmp_path / "install/node_modules/@agentclientprotocol/codex-acp"
     (package / "dist").mkdir(parents=True)
     original = package / "dist/index.js"
     original.write_bytes(source)
     package_json = package / "package.json"
-    package_json.write_text('{"version":"2.0.1","type":"module"}')
-    install = SimpleNamespace(package_version="2.0.1", adapter_entry=str(original),
+    package_json.write_text(json.dumps({"version": version, "type": "module"}))
+    install = SimpleNamespace(package_version=version, adapter_entry=str(original),
                               adapter_entry_sha256=hashlib.sha256(source).hexdigest(),
                               package_json=str(package_json))
     copied = Path(_prepare_codex_manual_review_adapter(install, new_connection_id(), isolated_environ(tmp_path)))

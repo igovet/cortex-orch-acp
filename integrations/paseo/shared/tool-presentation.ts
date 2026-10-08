@@ -166,8 +166,12 @@ function targetFor(name: string, input: ToolPresentationInput, action: string): 
   const author = stringValue(args, "author", "report_author", "worker_name", "worker")
     ?? stringValue(input.metadata, "author", "report_author", "worker_name", "worker");
   const descriptive = stringValue(args, "skill", "summary", "node_key", "statement");
-  // result_submit names a published report as report: {report_ref}.
+  // result_submit names a published report as the plain string report: "r_...";
+  // an inline Markdown report body is never shown. Retained older calls used
+  // report: {report_ref}.
+  const reportString = stringValue(args, "report");
   const value = stringValue(args, "report_id", "report_ref", "draft_id", "source_ref", "check_ref", "candidate_ref", "assignment_ref")
+    ?? (reportString && /^r_[0-9a-f]{12}$/.test(reportString) ? reportString : null)
     ?? stringValue(record(args).report, "report_ref");
   if ((name === "read_skill" || name === "skill") && descriptive) return compactTarget(descriptive);
   if (name === "read_report") return compactTarget(author ? `by ${author}` : value);

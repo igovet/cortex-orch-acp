@@ -2,6 +2,69 @@
 
 ## 1.0.0 (unreleased)
 
+A worker that published its result and ended while a scheduler pass was
+running is no longer mistaken for a lost worker. The pass read the plan nodes
+before the live worker set, so a reviewer finishing in between looked
+"running" with no live worker; `retry_lost` then failed with
+`lost_worker_result_changed` and returned an approved task to the coordinator
+for an extra plan revision (the intermittent composed-runtime test failures
+under load, where an escalation's consultant node vanished from the final
+revision). The live worker set is now read first. No paid/live qualification
+is claimed.
+
+Paseo's model Refresh now refreshes the Claude catalog too. Paseo reads models
+from a Cortex ACP process it stops about a second after `session/new`; the
+refresh started there ran on a thread of that process, and a Claude refresh
+(one effort probe per model, about 12 s) was killed every time, so no Claude
+snapshot was ever saved by Refresh. The refresh now runs in its own process
+session (`catalog/detached_refresh.py`, one per connection at a time) and
+saves its snapshot after the requester exits. The isolated dev profile's
+stale routing (bare `haiku` denied) was updated to the current preset after a
+private backup; its picker now lists Haiku 5.5 at Luna parity. The owner's
+production runtime predates the `+sdk` build ordering and repoints Claude to
+the upstream SDK 0.3.287 install at each start, where `haiku` is Haiku 4.5; it
+needs the current runtime deployed. No paid/live qualification is claimed.
+
+`result_submit` now takes `report` as one plain string: the complete Markdown
+(optional `report_title`, else its first heading) or only the exact `report_id`
+from the worker's own `write_report`. The former `report: {title, markdown}`
+object made Claude engines hand-escape long nested Markdown; Sonnet 5 broke it in
+about a quarter of large inline reports and Claude Code refused those calls
+before Cortex received them, which was the recurring "submit result error".
+Object values and identifier-shaped strings that are not an exact report id are
+refused with a corrective `invalid_arguments` before anything is published. The
+advertised check contract and `open_failed_check` correction now say that a
+mistyped command line that never started the check is not a failed check (cite the
+corrected command's own receipt); exact-argv closure is unchanged, so a different
+argv still never closes a cited failure. No paid/live qualification is claimed.
+
+The `result_submit` schema's `checks[].outcome` field description and the
+top-level `result_submit` tool description worded that mistyped-command
+guidance with "unknown-option"; under Codex code mode that description text
+renders verbatim inside the generated TypeScript declaration, so the literal
+substring "unknown" appeared there even though every field and description
+otherwise survived intact. Both descriptions now say "unrecognized-flag"
+instead, with no change in meaning. No paid/live qualification is claimed.
+
+Codex ACP now supports exact 2.1.1 private-adapter patches, instruction delivery,
+compaction and discovery, with a 2.1.1 fallback. Role metadata reaches all
+qualified versions, not only 1.12.0; diagnostics report the current registrations.
+The owner already had 2.1.1 installed (CLI 0.159.3), so the update path made no
+reinstall. No-paid bundle and CLI/jail checks passed; no production Paseo/plugin
+refresh or paid/live qualification is claimed.
+
+Claude ACP now has an exact 0.87.0 system-instruction registration and fallback,
+observed/grouped model-option handling, diagnostics, and reactive compaction
+recognition for its new non-AIR metadata. Unknown installed Claude versions no
+longer borrow another release's qualification. The original SDK 0.3.287 only
+reports Haiku 4.5; the independently inspected SDK 0.3.293 refresh now installs
+side by side and exposes `haiku` = Haiku 5.5, with old Haiku separately named.
+No-prompt ACP controls accepted high/xhigh/max. The default preset and owner's
+active production profile enable the new alias at Luna policy parity, associate
+`seven_day_haiku`, and deny old Haiku by exact ID. Owner settings were backed up;
+unrelated settings and the original install were preserved. No paid/live
+qualification is claimed.
+
 Model policy gains an optional owner-written `preferred_when` condition. The
 coordinator sees it in `list_route_options.preferred_when` and names the model
 on the plan nodes that meet it; only there does it rank as the owner's preferred

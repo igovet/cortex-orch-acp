@@ -64,6 +64,24 @@ class CodexAcpDelivery:
 
 
 @dataclass(frozen=True)
+class CodexAcp2_1Delivery(CodexAcpDelivery):
+    """Exact 2.1.1 qualification, npm bundle inspected 2026-10-07.
+
+    dist/index.js SHA-256:
+    4b76310393d756a0f111687cd9df899720f36f7c59b1eb1d86429484034ff91b.
+    All 14 guarded patch sites match 2.0.1 byte-for-byte: session/new at
+    34087, session config at 34603, runTurn at 34345, MCP at 34214/34224,
+    typed history at 39090 and compaction renderer at 27483. ACP remains
+    v1; model/list-derived options and instruction metadata are unchanged.
+    The installed-bundle fake App Server trace exercises this channel, not
+    a paid model or rendered client. Native CLI version is install-specific
+    (@openai/codex dependency is ^0.159.1), not a fixed bundled guarantee.
+    """
+
+    version: str = "2.1.1"
+
+
+@dataclass(frozen=True)
 class ClaudeAgentAcp0_78Delivery:
     """The pinned claude-agent-acp 0.78.0 mechanism: ``session/new``'s own
     ``params._meta.systemPrompt`` -- QUALIFIED (T026, upgraded on fresh,
@@ -166,8 +184,37 @@ class ClaudeAgentAcp0_78Delivery:
 
 
 @dataclass(frozen=True)
+class ClaudeAgentAcp0_87Delivery(ClaudeAgentAcp0_78Delivery):
+    """Exact 0.87.0 registration, inspected from the npm tarball 2026-10-07.
+
+    ACP stays v1 (dist/acp-agent.js:1342). createSession reads the string or
+    preset-append systemPrompt at 7047-7063, puts it into options at
+    7177-7181, and calls query({prompt: input, options}) at 7337-7340.
+    The bundled SDK 0.3.287 sdk.mjs BR separately converts the string or
+    preset append into systemPrompt/appendSystemPrompt, forwarded by its
+    initialize control request, never conversation content. Load/resume
+    resupply _meta at acp-agent.js:1442,6928.
+
+    Cortex also installs an exact side-by-side SDK 0.3.293 refresh for
+    Haiku 5.5. Its sdk.mjs fT keeps systemPrompt/preset append separate;
+    initialize forwards initConfig.systemPrompt/appendSystemPrompt, and
+    CLI argument construction retains strictMcpConfig/disallowedTools.
+    No-prompt ACP model/effort controls were exercised with both SDKs;
+    model execution and native-tool enforcement remain unverified.
+
+    The wire payload is unchanged, so plan is shared with 0.78.0. Option
+    forwarding (including strictMcpConfig and disallowedTools) was re-read
+    at 7079,7181,7223; compaction presentation is NOT unchanged (see
+    session_manager and generations). Static qualification is not a paid
+    model-turn or GUI enforcement claim.
+    """
+
+    version: str = "0.87.0"
+
+
+@dataclass(frozen=True)
 class ClaudeAgentAcpUnrecognizedVersionDelivery:
-    """Any claude-agent-acp version other than the pinned 0.78.0: no static
+    """Any claude-agent-acp version without an exact registration: no static
     evidence has been read for it, so it is always UNSUPPORTED -- never a
     guessed/interpolated qualification borrowed from the pinned version
     (the ``_meta.systemPrompt`` channel's exact call chain above was only
@@ -227,7 +274,9 @@ _REGISTRY: dict[tuple[str, str], InstructionDelivery] = {
     ("codex-acp", "1.12.0"): CodexAcpDelivery(version="1.12.0"),
     ("codex-acp", "1.13.0"): CodexAcpDelivery(version="1.13.0"),
     ("codex-acp", "2.0.1"): CodexAcpDelivery(version="2.0.1"),
+    ("codex-acp", "2.1.1"): CodexAcp2_1Delivery(),
     ("claude-agent-acp", "0.78.0"): ClaudeAgentAcp0_78Delivery(),
+    ("claude-agent-acp", "0.87.0"): ClaudeAgentAcp0_87Delivery(),
     ("claude-agent-acp", "*"): ClaudeAgentAcpUnrecognizedVersionDelivery(),
 }
 
@@ -247,8 +296,7 @@ def delivery_for(engine: str, version: str) -> InstructionDelivery:
 
     OpenCode v2 is selected by major range. Otherwise falls back in order:
     exact (engine, version); (engine, "*") wildcard
-    registration (used for any claude-agent-acp version other than the
-    pinned 0.78.0, which has no version-specific evidence of its own);
+    registration (used for claude-agent-acp versions without exact evidence);
     otherwise :class:`UnsupportedDelivery`.
     """
     if not isinstance(engine, str) or not engine:

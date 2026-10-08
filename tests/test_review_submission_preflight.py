@@ -21,7 +21,7 @@ def test_submission_guidance_preflights_report_presence_and_json_transport():
         if t['name'] == 'result_submit')
     assert 'summary, verdict and findings never replace it' in tool['description']
     assert tool['inputSchema']['required'][0] == 'report'
-    assert 'JSON parse error' in tool['description']
+    assert 'could not be parsed, nothing reached Cortex' in tool['description']
     assert 'draft_write' in tool['description']
     protocol = (Path(__file__).resolve().parents[1] /
                 'agent-sources/references/report-publication.md').read_text()
@@ -32,7 +32,7 @@ def test_submission_guidance_preflights_report_presence_and_json_transport():
     delivered = composed_instructions(load_role('worker-code-reviewer'))
     assert 'required and conditional fields against the live schema' in delivered
     assert protocol.strip() in delivered
-    assert 'Pass a structured argument object' in tool['description']
+    assert 'one plain string, never an object' in tool['description']
     assert 'retry an uncertain call only with the identical key and payload' in tool['description']
 
 
@@ -66,9 +66,9 @@ def test_review_first_valid_submission_and_exact_retry(tmp_path, report_form, om
                               (task.task_id,)).fetchone() is None
     markdown = '# Review\n\nQuoted "name", path C:\\fixture and code `\\n`.\n\nNo defects.\n'
     if report_form == 'inline':
-        args['report'] = dict(title='Review', markdown=markdown)
+        args.update(report=markdown, report_title='Review')
     else:
-        args['report'] = dict(report_ref=publish_fixture_report(store, worker, markdown))
+        args['report'] = publish_fixture_report(store, worker, markdown)
     schema = next(t['inputSchema'] for t in mcp_tools.tool_definitions(
         'worker', role_id='worker-code-reviewer', stage='review') if t['name'] == 'result_submit')
     # Encode the object, rather than hand-escaping Markdown into a JSON string.

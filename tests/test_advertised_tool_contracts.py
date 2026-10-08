@@ -30,17 +30,16 @@ def test_result_submit_describes_receipt_sources_and_exclusive_report_forms():
     entry = next(t for t in mcp_tools.tool_definitions("worker", role_id="worker-backend-dev", stage="execution")
                  if t["name"] == "result_submit")
     schema = entry["inputSchema"]
-    # The report is required; only its two forms are an if/then/else inside it
-    # (a root oneOf hides every field from Codex code mode, and models fill
-    # the plain required list rather than evaluate a root conditional).
+    # The report is one required plain string carrying both forms (a root
+    # oneOf hides every field from Codex code mode, models fill the plain
+    # required list rather than evaluate a conditional, and Claude engines
+    # hand-escape object values as JSON but emit top-level strings verbatim).
     assert not {"oneOf", "if", "then", "else"} & set(schema) and "report" in schema["required"]
     report = schema["properties"]["report"]
-    assert (report["if"], report["then"], report["else"]) == (
-        {"required": ["report_ref"]}, {"not": {"anyOf": [{"required": ["title"]}, {"required": ["markdown"]}]}},
-        {"required": ["title", "markdown"]})
-    assert "report={report_ref: <that write_report's report_id>}" in entry["description"]
+    assert report["type"] == "string" and not {"oneOf", "anyOf", "if", "properties"} & set(report)
+    assert "only that write_report's report_id" in entry["description"]
     assert "command_run" in entry["description"] and "tool_call_ref" in entry["description"]
-    assert "write_report" in report["properties"]["report_ref"]["description"]
+    assert "write_report" in report["description"] and "r_ plus 12 lowercase hex" in report["description"]
     assert "same attempt" in schema["properties"]["checks"]["items"]["properties"]["tool_call_ref"]["description"]
     assert "closed_by" in schema["properties"]["checks"]["items"]["properties"]["tool_call_ref"]["description"]
     assert "identical" in schema["properties"]["request_key"]["description"]
@@ -337,28 +336,34 @@ def test_inline_serialization_recovery_keeps_the_owned_reference_route():
     tool=next(t for t in mcp_tools.tool_definitions('worker',role_id='worker-backend-dev',stage='execution')
               if t['name']=='result_submit')
     description=tool['description']
-    assert 'do not hand-concatenate Markdown into JSON' in description
-    assert 'JSON parse error' in description
+    assert 'could not be parsed, nothing reached Cortex' in description
     assert 'create_draft, draft_write and write_report' in description
-    assert 'report={report_ref: <the acknowledged report_id>}' in description
+    assert "only that write_report's report_id" in description
+    assert 'report={' not in description
 
 
-def test_report_brief_sections_and_upfront_owned_draft_advice():
+def test_report_brief_sections_and_owned_draft_reference():
     tool=next(t for t in mcp_tools.tool_definitions('worker',role_id='worker-backend-dev',stage='execution')
               if t['name']=='result_submit')
     report=tool['inputSchema']['properties']['report']
-    assert set(report['properties']) == {'title','markdown','report_ref'}
-    assert report['additionalProperties'] is False
-    for description in (tool['description'],report['description'],
-                        report['properties']['markdown']['description']):
-        assert 'Markdown sections inside markdown, never separate report fields' in description
-        assert 'code blocks or larger than about 3 KB' in description
+    assert report['type']=='string' and 'properties' not in report
+    for description in (tool['description'],report['description']):
+        assert 'one plain string, never an object' in description
         assert 'create_draft, draft_write and write_report' in description
-        assert 'report={report_ref: <the acknowledged report_id>}' in description
         for section in ('conclusion','evidence','checks','contradictions','limits','next action'):
             assert section in description
-    description=tool['description']
-    assert description.index('prefer create_draft') < description.index('JSON parse error')
+    assert 'Markdown sections inside the report, never separate fields' in tool['description']
+
+
+def test_mistyped_check_invocation_guidance_keeps_exact_identity_closure():
+    tool=next(t for t in mcp_tools.tool_definitions('worker',role_id='worker-backend-dev',stage='execution')
+              if t['name']=='result_submit')
+    outcome=tool['inputSchema']['properties']['checks']['items']['properties']['outcome']['description']
+    for description in (tool['description'],outcome):
+        assert 'never started' in description and 'mistyped' in description
+    assert 'a different argv never closes it' in outcome
+    assert 'always a real failed check' in outcome
+    assert 'changing argv never closes a failure' in tool['description']
 
 
 def test_plan_scope_is_a_write_reservation_not_read_access():

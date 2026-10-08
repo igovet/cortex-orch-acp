@@ -28,7 +28,7 @@ def test_source_read_schema_accepts_empty_arguments():
 def test_result_requires_exact_immutable_report_and_checks():
     published=next(tool for tool in tool_definitions('worker') if tool['name']=='result_submit')
     properties=published['inputSchema']['properties']
-    reference=properties['report']['properties']['report_ref']['description']
+    reference=properties['report']['description']
     assert 'write_report' in reference and 'report_id' in reference
     assert 'report' in published['inputSchema']['required'] and 'report_ref' not in properties
     assert 'checks' in published['inputSchema']['required']

@@ -44,6 +44,24 @@ but grant no route: pins, deny, automatic membership, providers, tier,
 availability and quota rules remain controlling. Preferences cannot promote
 a model into a different tier. See [configuration](../configuration.md#user-routing-profiles).
 
+## Current preset: Haiku 5.5 and Luna
+
+The installation preset now enables `claude-agent-acp/haiku` at full
+policy parity with `codex-acp/gpt-6-luna`: light tier, testing stretch,
+high/xhigh/max effort ladder, max ceiling, the same preferred work kinds,
+and null request names. Its exact quota label is `seven_day_haiku`.
+This alias is observed as Haiku 5.5 only in the independently inspected
+SDK 0.3.293 refresh; upstream adapter 0.87.0's SDK 0.3.287 resolves it to
+Haiku 4.5. See [catalog/effort evidence](claude-agent-acp-adapter.md#haiku-55-catalog-and-effort-evidence).
+
+The old exact `claude-agent-acp/claude-haiku-4-5-20251001` stays denied,
+while bare `haiku` is no longer denied. Denies remain exact identities,
+not family inference. The owner explicitly adopted the same addition in
+production routing and the active `default` profile after private backups.
+Existing installations do not acquire the preset by runtime overlay;
+observed catalog support and all hard authorization checks still apply.
+No-prompt ACP configuration success does not establish paid model execution.
+
 ## Route profile: the authorized route set
 
 `configuration.policy.RouteProfile` (persisted per configuration revision

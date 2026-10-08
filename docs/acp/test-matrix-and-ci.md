@@ -72,6 +72,9 @@ model provider. They skip unless their variable names the binary:
   passed against 2.0.1 and the retained 1.13.0; the installed Codex CLI
   0.159.1 wrapper/jail checks also passed. A separate prompt-free dev catalog
   refresh observed `gpt-6.1-sol` on 2.0.1 and refreshed Claude 0.84.0.
+  On 2026-10-07 the 13 bundle tests passed for 2.1.1 and retained 2.0.1;
+  three installed CLI 0.159.3 wrapper/jail tests passed. The fake App Server
+  frame reader now retains raw buffered frames before waiting on the fd.
   This does not qualify paid turns, retained raw custom-tool history or
   rendered client behavior (`paid live check not requested by the owner`).
 - **OpenCode.** `CORTEX_PINNED_OPENCODE_BINARY=<opencode 2.x.x binary>`

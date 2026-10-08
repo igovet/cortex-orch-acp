@@ -880,3 +880,31 @@ def test_invalid_opencode_diagnostics_are_generic_and_nonmutating(home, monkeypa
                                        expected_revision="absent", rules={"model_policy_version": 2, **setting}))
     assert response["ok"] is False
     assert not (home.config / "routing.json").exists()
+
+
+def test_default_preset_haiku55_matches_luna_policy_and_denies_only_old_haiku(home):
+    preset = json.loads((Path(__file__).resolve().parents[1] / "policy/model-settings-default.json").read_text())
+    rules = preset["routing"]
+    claude = rules["models"]["claude-agent-acp"]
+    luna = rules["models"]["codex-acp"]
+    assert "haiku" in rules["enabled"]["claude-agent-acp"]
+    assert "haiku" in claude["auto"]
+    assert claude["tiers"]["haiku"] == luna["tiers"]["gpt-6-luna"] == ["light"]
+    assert claude["policy"]["haiku"] == luna["policy"]["gpt-6-luna"]
+    assert claude["policy"]["haiku"]["effort_ladder"] == ["high", "xhigh", "max"]
+    assert next(w["models"] for w in rules["quota_windows"]["claude-agent-acp"]
+                if w["window"] == "seven_day_haiku") == ["haiku"]
+    assert "haiku" not in rules["deny"]
+    older = "claude-haiku-4-5-20251001"
+    assert "claude-agent-acp/" + older in rules["deny"]
+    written = management.update_routing("user", "absent", rules)
+    assert written["effective_valid"] and auto_route.load_overrides() == rules
+    assert not auto_route.is_denied("claude-agent-acp", "haiku")
+    assert auto_route.is_denied("claude-agent-acp", older)
+    # Exact denies, not family matching, keep old Haiku off even if enabled.
+    import copy
+    expanded = copy.deepcopy(rules)
+    expanded["enabled"]["claude-agent-acp"].append(older)
+    management.update_routing("user", written["written_revision"], expanded)
+    assert auto_route.is_denied("claude-agent-acp", older)
+    assert not auto_route.is_denied("claude-agent-acp", "haiku")

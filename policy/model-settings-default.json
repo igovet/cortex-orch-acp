@@ -4,7 +4,7 @@
     "model_policy_version": 2,
     "deny": [
       "gpt-5.5",
-      "haiku",
+      "claude-agent-acp/claude-haiku-4-5-20251001",
       "claude-agent-acp/claude-sonnet-4-6",
       "claude-agent-acp/claude-opus-4-6",
       "claude-agent-acp/claude-opus-4-7",
@@ -21,7 +21,8 @@
         "default",
         "opus[1m]",
         "claude-fable-5-1[1m]",
-        "claude-sonnet-5"
+        "claude-sonnet-5",
+        "haiku"
       ],
       "codex-acp": [
         "gpt-6.1-sol",
@@ -43,7 +44,8 @@
           "default",
           "opus[1m]",
           "claude-fable-5-1[1m]",
-          "claude-sonnet-5"
+          "claude-sonnet-5",
+          "haiku"
         ],
         "tiers": {
           "claude-fable-5-1[1m]": [
@@ -58,6 +60,9 @@
           "opus[1m]": [
             "deep",
             "flagship"
+          ],
+          "haiku": [
+            "light"
           ]
         },
         "policy": {
@@ -114,6 +119,28 @@
               "analysis"
             ],
             "preferred_when": "Any work of the listed kinds, except backend work; for backend, only very complex, narrowly scoped tasks.",
+            "request_names": null
+          },
+          "haiku": {
+            "also_standard_for": [
+              "testing"
+            ],
+            "effort_floor": "high",
+            "effort_ladder": [
+              "high",
+              "xhigh",
+              "max"
+            ],
+            "max_effort": "max",
+            "preferred_for": [
+              "analysis",
+              "writing",
+              "implementation",
+              "testing",
+              "debugging",
+              "investigation",
+              "operations"
+            ],
             "request_names": null
           }
         }
@@ -243,7 +270,9 @@
         },
         {
           "window": "seven_day_haiku",
-          "models": []
+          "models": [
+            "haiku"
+          ]
         }
       ]
     }

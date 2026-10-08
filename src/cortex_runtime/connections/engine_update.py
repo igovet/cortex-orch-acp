@@ -2,7 +2,8 @@
 
 Runs in the background at startup: asks npm for each engine's latest
 version and, iff it is newer than the newest owned install, installs it
-beside the current one (``<root>/<engine>/<version>``). A new version is
+beside the current one (``<root>/<engine>/<version>``). Exact qualified SDK
+refreshes use ``<version>+sdk.<sdk-version>`` without replacing a running install. A new version is
 used from the next session on, never swapped under a running one; one
 previous version is kept to fall back to. No network, no npm, a failed
 install or a concurrent update elsewhere: nothing changes and the current
@@ -23,6 +24,10 @@ from cortex_runtime.connections import discovery
 _TIMEOUT_VIEW = 20
 _TIMEOUT_INSTALL = 600
 _KEEP = 2  # the current version and one to fall back to
+# 0.87.0 pins SDK 0.3.287 upstream, which predates Haiku 5.5. This exact
+# refreshed dependency was inspected independently; never track SDK latest.
+_CLAUDE_SDK_OVERRIDES = {"0.87.0": "0.3.293"}
+_CLAUDE_SDK_PACKAGE = "@anthropic-ai/claude-agent-sdk"
 
 
 def _npm(environ: dict[str, str] | None) -> str | None:
@@ -43,7 +48,7 @@ def _run(args: list[str], timeout: int, environ: dict[str, str] | None) -> str:
 
 
 def update_engine(engine: str, *, environ: dict[str, str] | None = None) -> str | None:
-    """Install ``engine``'s latest version if it is newer; return it, else ``None``."""
+    """Install the latest adapter/qualified dependency build; return the adapter version."""
     package = discovery._PACKAGE_NAME[engine]
     npm = _npm(environ)
     if npm is None:
@@ -58,17 +63,35 @@ def update_engine(engine: str, *, environ: dict[str, str] | None = None) -> str 
         for stale in root.glob(".tmp-*"):
             shutil.rmtree(stale, ignore_errors=True)
         latest = json.loads(_run([npm, "view", package, "version", "--json"], _TIMEOUT_VIEW, environ))
-        installed = sorted((p.name for p in discovery._subdirs(root)), key=discovery.version_key)
-        if not isinstance(latest, str) or (installed and discovery.version_key(latest) <= discovery.version_key(installed[-1])):
+        if not isinstance(latest, str) or not discovery.version_key(latest):
             return None
-        staging = root / f".tmp-{latest}"
+        sdk_version = _CLAUDE_SDK_OVERRIDES.get(latest) if engine == "claude-agent-acp" else None
+        install_name = f"{latest}+sdk.{sdk_version}" if sdk_version else latest
+        installed = sorted((p.name for p in discovery._subdirs(root)), key=discovery.version_key)
+        if installed and discovery.version_key(install_name) <= discovery.version_key(installed[-1]):
+            return None
+        staging = root / f".tmp-{install_name}"
+        if sdk_version:
+            staging.mkdir()
+            (staging / "package.json").write_text(json.dumps({
+                "private": True, "overrides": {_CLAUDE_SDK_PACKAGE: sdk_version},
+            }), encoding="utf-8")
         _run([npm, "install", "--prefix", str(staging), "--no-audit", "--no-fund", "--omit=dev",
               "--no-save", f"{package}@{latest}"], _TIMEOUT_INSTALL, environ)
         declared = discovery._declared_bin(staging / "node_modules" / package / "package.json")
         if declared is None or declared[0] != latest:
             shutil.rmtree(staging, ignore_errors=True)
             return None
-        staging.rename(root / latest)
+        if sdk_version:
+            sdk_manifest = staging / "node_modules" / _CLAUDE_SDK_PACKAGE / "package.json"
+            try:
+                sdk_matches = json.loads(sdk_manifest.read_text(encoding="utf-8")).get("version") == sdk_version
+            except (OSError, ValueError, AttributeError):
+                sdk_matches = False
+            if not sdk_matches:
+                shutil.rmtree(staging, ignore_errors=True)
+                return None
+        staging.rename(root / install_name)
         # A pinned version is never pruned. codex-acp launches only from
         # a byte-verified, qualified bundle (see ``discovery.is_pinned``),
         # so deleting it to keep the two newest -- both possibly unqualified

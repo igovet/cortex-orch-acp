@@ -159,11 +159,11 @@ def test_worker_protocol_describes_evidence_without_native_authority():
 def test_evidence_protocol_is_runtime_owned_and_receipt_bound():
     from cortex_runtime.orchestration.contracts import RESULT
     assert RESULT['properties']['checks']['items']['properties']['outcome']['enum']==['passed','failed','not_run','unverified']
-    # A result always carries its report: one required report field, inline
-    # {title, markdown} or {report_ref} from the worker's own write_report.
+    # A result always carries its report: one required plain-string report,
+    # inline Markdown or the report_id of the worker's own write_report.
     assert 'report' in RESULT['required'] and 'report_ref' not in RESULT['properties']
-    assert set(RESULT['properties']['report']['properties']) == {'title', 'markdown', 'report_ref'}
-    assert 'exactly one form' in RESULT['properties']['report']['description']
+    assert RESULT['properties']['report']['type'] == 'string'
+    assert 'one plain string, never an object' in RESULT['properties']['report']['description']
     assert 'checks' in RESULT['required']
     assert 'verdict' in RESULT['properties']
 

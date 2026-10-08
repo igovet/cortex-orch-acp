@@ -72,7 +72,7 @@ def test_registration_replay_and_mutation_fence_are_assignment_local(bound):
     for operation, args in [
             ('project_write', dict(path='part0.txt', content='bad', expected_sha256='absent', request_key='write')),
             ('command_run', dict(argv=['true'], request_key='command')),
-            ('result_submit', dict(report=dict(title='Incomplete', markdown='Incomplete'), summary='Incomplete',
+            ('result_submit', dict(report='Incomplete', report_title='Incomplete', summary='Incomplete',
                                    checks=[], request_key='result'))]:
         with pytest.raises(StoreError, match='worker_waiting_for_answer'):
             mcp_tools.dispatch(store, workers[0], operation, args)
@@ -196,7 +196,7 @@ def _runtime_flow(tmp_path, *, questions=1, elicitor=True, early=False, sibling=
                 read = mcp_tools.dispatch(store, channel, 'project_read', dict(path='part0.txt'))
                 mcp_tools.dispatch(store, channel, 'project_write',
                                    dict(path='part0.txt', content='after', expected_sha256=read['sha256'], request_key='after'))
-            args = dict(report=dict(title='Observed', markdown='# Observed\n\nFinished.'), summary='Finished.',
+            args = dict(report='# Observed\n\nFinished.', report_title='Observed', summary='Finished.',
                         checks=[], request_key='result')
             if node['stage'] == 'review':
                 args['verdict'] = 'APPROVE'

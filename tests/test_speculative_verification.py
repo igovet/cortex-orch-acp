@@ -20,7 +20,7 @@ from runtime_scenarios import provision_fixture, publish_fixture_report
 
 def _submit(store, channel, key='result', **extra):
     return mcp_tools.dispatch(store, channel, 'result_submit', dict(
-        report=dict(report_ref=publish_fixture_report(store, channel)), summary='Observed', checks=[],
+        report=publish_fixture_report(store, channel), summary='Observed', checks=[],
         request_key=key, **extra))
 
 

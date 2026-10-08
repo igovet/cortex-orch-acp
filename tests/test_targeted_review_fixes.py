@@ -191,7 +191,7 @@ def test_findings_are_offered_to_reviewers_only_and_described_in_the_schema():
 
 
 def test_findings_are_validated_by_the_runtime_contract():
-    args = dict(report=dict(report_ref='r_' + 'a' * 12), summary='Changes needed.', checks=[], request_key='k',
+    args = dict(report='r_' + 'a' * 12, summary='Changes needed.', checks=[], request_key='k',
                 verdict='REQUEST_CHANGES', findings=[finding('api', ['src/api/x.py'])])
     delegation_contracts.validate('worker', 'result_submit', args)
     for bad in (dict(finding('api', ['src/api/x.py']), cross_cutting='false'),
@@ -209,7 +209,7 @@ def test_an_execution_worker_cannot_submit_findings(tmp_path):
     coordinator = resolve_channel(store, task.channel_id, task.secret)
     worker, _assignment = provision_fixture(store, coordinator)
     report = publish_fixture_report(store, worker)
-    args = dict(report=dict(report_ref=report), summary='Done', checks=[], request_key='result',
+    args = dict(report=report, summary='Done', checks=[], request_key='result',
                 findings=[finding('api', ['src/api/x.py'])])
     with pytest.raises(StoreError, match='reviewer_only_findings'):
         mcp_tools.dispatch(store, worker, 'result_submit', args)

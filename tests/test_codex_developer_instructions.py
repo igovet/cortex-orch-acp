@@ -13,6 +13,7 @@ import select
 import shutil
 import sqlite3
 import subprocess
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -154,13 +155,23 @@ def test_codex_session_metadata_has_an_exact_durable_sent_hash(tmp_path):
 
 def _read_response(proc: subprocess.Popen, response_id: int, seen=None) -> dict:
     assert proc.stdout is not None
-    for _ in range(30):
-        ready, _, _ = select.select([proc.stdout], [], [], 1)
-        if not ready:
+    # TextIO.readline can prefetch the next frame, making select wait on an
+    # empty fd despite a complete response already buffered in Python.
+    # Retain raw framing bytes per process and inspect them before select.
+    deadline = time.monotonic() + 30
+    pending = getattr(proc, "_cortex_test_pending", b"")
+    while time.monotonic() < deadline:
+        if b"\n" not in pending:
+            ready, _, _ = select.select([proc.stdout], [], [], max(0, deadline - time.monotonic()))
+            if not ready:
+                break
+            chunk = os.read(proc.stdout.fileno(), 65536)
+            if not chunk:
+                raise AssertionError("codex-acp exited before its ACP response")
+            pending += chunk
             continue
-        line = proc.stdout.readline()
-        if not line:
-            raise AssertionError("codex-acp exited before its ACP response")
+        line, pending = pending.split(b"\n", 1)
+        proc._cortex_test_pending = pending
         value = json.loads(line)
         if seen is not None:
             seen.append(value)
@@ -231,7 +242,7 @@ def test_installed_adapter_keeps_explicit_mcp_on_disabled_native_name(tmp_path):
         assert config["mcp_servers"]["native"] == {
             "command": "/bin/true", "args": [], "env": {}, "enabled": True, "default_tools_approval_mode": "approve",
             "tool_timeout_sec": 31536000,
-            **({"tool_input_schema_max_bytes": CODEX_MCP_TOOL_SCHEMA_MAX_BYTES} if version == "2.0.1" else {}),
+            **({"tool_input_schema_max_bytes": CODEX_MCP_TOOL_SCHEMA_MAX_BYTES} if version in ("2.0.1", "2.1.1") else {}),
         }
     finally:
         proc.terminate()
@@ -260,7 +271,7 @@ def test_installed_private_adapter_forwards_and_preserves_native_developer_instr
     )
     environ = isolated_environ(tmp_path)
     copied = Path(_prepare_codex_manual_review_adapter(install, new_connection_id(), environ))
-    assert (_CODEX_AGENT_REVIEWER_2_MANUAL if version == "2.0.1" else _CODEX_AGENT_REVIEWER_MANUAL) in copied.read_bytes()
+    assert (_CODEX_AGENT_REVIEWER_2_MANUAL if version in ("2.0.1", "2.1.1") else _CODEX_AGENT_REVIEWER_MANUAL) in copied.read_bytes()
     assert _CODEX_NEW_SESSION_PATCHED in copied.read_bytes()
     assert _CODEX_SESSION_CONFIG_PATCHED in copied.read_bytes()
     adapter_text = copied.read_bytes()
@@ -297,12 +308,17 @@ def test_installed_private_adapter_forwards_and_preserves_native_developer_instr
         proc.stdin.flush()
         initialized = _read_response(proc, 1)
         assert "error" not in initialized, initialized
+        assert initialized["result"]["protocolVersion"] == 1
         proc.stdin.write(json.dumps({"jsonrpc": "2.0", "id": 2, "method": "session/new", "params": {
             "cwd": str(tmp_path), "mcpServers": [], "_meta": {"systemPrompt": "Cortex role rule."},
         }}) + "\n")
         proc.stdin.flush()
         result = _read_response(proc, 2)
         assert "error" not in result, result
+        options = {item["id"]: item for item in result["result"]["configOptions"]}
+        assert {"model", "reasoning_effort", "mode"} <= options.keys()
+        assert options["model"]["currentValue"] == "gpt-5.6-luna"
+        assert options["reasoning_effort"]["currentValue"] == "medium"
         proc.stdin.write(json.dumps({"jsonrpc": "2.0", "id": 3, "method": "session/new", "params": {
             "cwd": str(tmp_path), "mcpServers": [], "_meta": {"systemPrompt": "Replacement role rule."},
         }}) + "\n")
@@ -327,7 +343,9 @@ def test_installed_private_adapter_forwards_and_preserves_native_developer_instr
                 assert config['features'][feature] is False
             # Native action tools are the engine's own; the engine jail bounds them.
             assert config['features']['js_repl'] is True
-            assert 'shell_tool' not in config['features'] and 'web_search' not in config
+            assert config['features']['shell_tool'] is False
+            assert config['features']['view_image'] is False
+            assert 'web_search' not in config
             assert config["model_reasoning_effort"] == "medium"
 
         proc.stdin.write(json.dumps({"jsonrpc": "2.0", "id": 4, "method": "session/prompt", "params": {

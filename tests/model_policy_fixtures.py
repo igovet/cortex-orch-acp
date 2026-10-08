@@ -13,7 +13,7 @@ TIERS = {
         "claude-opus-5[1m]": "deep", "claude-opus-4-6": "deep", "claude-opus-4-8": "deep",
         "claude-opus-5-5": "deep", "opus[1m]": "deep", "opus": "deep", "default": "deep",
         "sonnet": "standard", "claude-sonnet-5": "standard", "claude-sonnet-4-6": "standard",
-        "haiku": "light", "claude-haiku-4-5-20251001": "light", "claude-fable-5-1[1m]": "flagship",
+        "haiku": "light", "claude-haiku-5-5": "light", "claude-haiku-4-5-20251001": "light", "claude-fable-5-1[1m]": "flagship",
         "coordinator-model": "deep", "reviewer-model": "deep",
     },
 }
@@ -21,6 +21,8 @@ STRETCH = {"effort_floor": "high", "effort_ladder": ["high", "xhigh", "max"], "a
 MODELS = {engine: {"tiers": deepcopy(tiers), "auto": list(tiers), "policy": {}} for engine, tiers in TIERS.items()}
 for model in ("gpt-6-luna", "gpt-5.6-luna", "gpt-7-luna"):
     MODELS["codex-acp"]["policy"][model] = deepcopy(STRETCH)
+MODELS["claude-agent-acp"]["policy"]["haiku"] = deepcopy(STRETCH)
+MODELS["claude-agent-acp"]["policy"]["claude-haiku-5-5"] = deepcopy(STRETCH)
 MODELS["codex-acp"]["policy"]["gpt-6-astra"] = {"max_effort": "high", "request_names": ["astra", "астр"]}
 MODELS["claude-agent-acp"]["policy"]["claude-fable-5-1[1m]"] = {"max_effort": "high", "request_names": ["fable", "фейбл", "фэйбл"]}
 

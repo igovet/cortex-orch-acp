@@ -7,6 +7,7 @@ runtime scheduling, model selection or completion decisions.
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from typing import Any, Mapping
 
@@ -62,6 +63,52 @@ def inline_report_form(args: Mapping[str, Any]) -> dict:
     report = args["report"]
     return dict(args, report=dict(
         title=report["title"], markdown_sha256=hashlib.sha256(report["markdown"].encode("utf-8")).hexdigest()))
+
+
+REPORT_ID = re.compile(r"r_[0-9a-f]{12}")
+# A single short token shaped like an identifier (a draft_id, tool_call_ref,
+# malformed report_id...) is a mistaken reference, never a report: publishing
+# it as Markdown would bury the mistake in an immutable report.
+_IDENTIFIER_LIKE = re.compile(r"[A-Za-z][A-Za-z0-9]{0,15}[_:][A-Za-z0-9_:.-]{1,96}")
+
+
+def inline_report_title(markdown: str) -> str:
+    """The title of an inline report sent without ``report_title``: its first
+    level-1 heading, else its first heading, else its first non-empty line,
+    at most 200 characters."""
+    lines = [line.strip() for line in markdown.splitlines() if line.strip()]
+    headings = [(len(m.group(1)), m.group(2).strip()) for m in
+                (re.fullmatch(r"(#{1,6})\s+(.*?)[\s#]*", line) for line in lines) if m and m.group(2).strip()]
+    if headings:
+        title = min(headings, key=lambda heading: heading[0])[1]
+    else:
+        title = re.sub(r"^(?:>\s*|[-*+]\s+|\d+[.)]\s+)+", "", lines[0]) if lines else ""
+    return (title or "Worker report")[:200]
+
+
+def report_argument(args: Mapping[str, Any]) -> dict:
+    """The advertised plain-string ``report`` (with the optional
+    ``report_title``) in the runtime's internal result shape: an exact
+    report_id becomes the top-level ``report_ref`` it always was; anything
+    else is inline Markdown, ``report={title, markdown}``, which
+    :func:`publish_inline_report` publishes. Request digests, delivery
+    recovery and worker_result events keep that one internal shape."""
+    report = args["report"]
+    rest = {key: value for key, value in args.items() if key not in {"report", "report_title"}}
+    candidate = report.strip()
+    if REPORT_ID.fullmatch(candidate):
+        return dict(rest, report_ref=candidate)
+    if not candidate or _IDENTIFIER_LIKE.fullmatch(candidate):
+        raise StoreError(
+            "invalid_arguments", "arguments.report",
+            "whitespace-only string" if not candidate else "an identifier that is not an exact report_id",
+            "the complete report Markdown, or only the exact report_id (r_ plus 12 lowercase hex characters) "
+            "that this worker's own write_report returned",
+            "Send report as the complete Markdown report, or as only the exact report_id that write_report "
+            "returned in this attempt; never a draft_id, tool_call_ref or other identifier. Nothing was recorded.")
+    title = args.get("report_title")
+    return dict(rest, report=dict(title=title.strip() if isinstance(title, str) and title.strip()
+                                  else inline_report_title(report), markdown=report))
 
 
 def publish_inline_report(store, channel: ChannelContext, request_key: str,
@@ -123,10 +170,10 @@ def _worker_publish_result(store, channel: ChannelContext, args: Mapping[str, An
         report = db.execute("SELECT task_id FROM reports WHERE id=?", (report_ref,)).fetchone()
     if report is None or report["task_id"] != channel.task_id:
         raise StoreError(
-            "unknown_report_ref", "arguments.report.report_ref", "well-formed id not published in this task",
+            "unknown_report_ref", "arguments.report", "well-formed id not published in this task",
             "the report_id returned by this worker's write_report in this task",
-            "Publish this worker's filled draft with write_report, then send its exact report_id as "
-            "result_submit report={report_ref: <report_id>}, or send the report inline as report={title, markdown}.",
+            "Publish this worker's filled draft with write_report, then send its exact report_id alone as "
+            "result_submit report, or send the complete report Markdown as report.",
         )
     # T019: report_ref must be a report this worker itself published from its
     # own draft (drafts.owner_thread_id == channel.principal_thread_id) --
@@ -138,10 +185,10 @@ def _worker_publish_result(store, channel: ChannelContext, args: Mapping[str, An
         ).fetchone()
     if draft is None or draft["owner_thread_id"] != channel.principal_thread_id:
         raise StoreError(
-            "report_not_own", "arguments.report.report_ref", "published report owned by another thread or attempt",
+            "report_not_own", "arguments.report", "published report owned by another thread or attempt",
             "a report published from this worker's own draft in this attempt",
             "Publish the result via write_report using this worker's own draft, then send that call's exact "
-            "report_id as result_submit report={report_ref: <report_id>}, or send the report inline as report={title, markdown}.",
+            "report_id alone as result_submit report, or send the complete report Markdown as report.",
         )
     assignment_ref = channel.attempt_id
     dedup_key = f"result_submit:{report_ref}"
@@ -476,7 +523,7 @@ _OPERATION_DESCRIPTIONS = dict(
     verification_submit="After the runtime verification failed and the work itself is fine: replace only the verification commands and verify again, without redoing the reviewed work.",
     synthesis_submit="Submit a final synthesis grounded in the retained reports and verification. Accepted only after every task, the review and the verification finished. Every retained not_run or unverified worker check must be verified first or listed in not_verified with its concrete blocker. The runtime then completes the task, so use it only when nothing is left for the user to decide; otherwise ask with user_question_request.",
     user_question_request="Always use this structured tool for user questions while planning or reconciling, never prose-only or native engine questions. Supply meaningful selectable options; group related questions with questions, instead of question/options. All batch answers are required; custom free text remains available. Write the details once in your message before this call; the question itself is one short line with short answer options. After the call end the turn without writing anything more. The runtime persists the question before elicitation and resumes only after a real answer. A question asked while reconciling (approve a proposed plan, choose how to continue) keeps the task open, and the answer returns it to planning: submit a plan for the chosen work, or answer_submit a short close when the user chose to finish. With skill_proposal it proposes one reusable project skill backed by retained report evidence. Use exactly one accepted action-matched pair, approval first: create: [Create the skill, Not now], [Создать навык, Не сейчас], [Approve creating the skill, Decline creating the skill], [Одобрить создание навыка, Отклонить создание навыка]; update: [Update the skill, Not now], [Обновить навык, Не сейчас], [Approve updating the skill, Decline updating the skill], [Одобрить обновление навыка, Отклонить обновление навыка]. Only an exact pair is accepted; 1 selects its approval label, 2 its decline label, and any other answer is unclear. An arbitrary first option never approves.",
-    result_submit="Submit this worker attempt's report, summary and observed checks. report is required in every call, a review included; summary, verdict and findings never replace it. For reports with code blocks or larger than about 3 KB, prefer create_draft, draft_write and write_report, then report={report_ref: <the acknowledged report_id>}. Decision-brief items (conclusion, evidence, checks, contradictions, limits, next action) are Markdown sections inside markdown, never separate report fields. Send report in exactly one form: inline report={title, markdown}, which the runtime publishes; or, after create_draft, draft_write and write_report, report={report_ref: <that write_report's report_id>}. Pass a structured argument object; do not hand-concatenate Markdown into JSON. After a JSON parse error, correct serialization before retrying; for repeated inline serialization failures use create_draft, draft_write and write_report, then send report={report_ref: <the acknowledged report_id>}. This does not relax publication or receipt checks. Use checks=[] only if no automated command ran. Each checks item has name (a stable check name) and outcome (passed|failed|not_run|unverified; there is no status field); passed or failed needs tool_call_ref, not_run or unverified needs blocker, and command is optional as an argv array of strings. For a verified passed check, run command_run first, inspect its complete exit-0 result, and copy its tool_call_ref into one check. Engine-native shell calls and report ids are not command evidence. project_git is context only, not a check receipt; put its observations in the report body, never derive tool_call_ref from large_output_id. A checks[].command supplied with passed or failed is descriptive only and cannot verify the check; do not send closed_by, which the runtime derives. Every not_run or unverified check needs a concrete blocker. Use a fresh request_key for a new result; retry an uncertain call only with the identical key and payload. Reviewers must include verdict=APPROVE, REQUEST_CHANGES or BLOCK (lowercase forms normalize); other workers omit verdict. Open failed checks are refused with open_failed_check before recording or publishing and leave the channel active. Retain failures and cite an exact-argv later passed rerun, or explicitly send assignment_outcome=failed to submit a failed assignment; changing argv never closes a failure. The receipt carries node_status (completed or failed), not task acceptance. This cannot accept the task. Top-level write_report-only fields such as artifacts are ignored. "
+    result_submit="Submit this worker attempt's report, summary and observed checks. report is required in every call, a review included, and is one plain string, never an object: the complete report Markdown (optionally titled with report_title), which the runtime publishes; or, after create_draft, draft_write and write_report, only that write_report's report_id. summary, verdict and findings never replace it. Decision-brief items (conclusion, evidence, checks, contradictions, limits, next action) are Markdown sections inside the report, never separate fields. If the engine reports that the call could not be parsed, nothing reached Cortex: resend the same arguments with valid serialization and the same request_key. This does not relax publication or receipt checks. Use checks=[] only if no automated command ran. Each checks item has name (a stable check name) and outcome (passed|failed|not_run|unverified; there is no status field); passed or failed needs tool_call_ref, not_run or unverified needs blocker, and command is optional as an argv array of strings. For a verified passed check, run command_run first, inspect its complete exit-0 result, and copy its tool_call_ref into one check. Engine-native shell calls and report ids are not command evidence. project_git is context only, not a check receipt; put its observations in the report body, never derive tool_call_ref from large_output_id. A checks[].command supplied with passed or failed is descriptive only and cannot verify the check; do not send closed_by, which the runtime derives. Every not_run or unverified check needs a concrete blocker. Use a fresh request_key for a new result; retry an uncertain call only with the identical key and payload. Reviewers must include verdict=APPROVE, REQUEST_CHANGES or BLOCK (lowercase forms normalize); other workers omit verdict. Open failed checks are refused with open_failed_check before recording or publishing and leave the channel active. Retain failures and cite an exact-argv later passed rerun, or explicitly send assignment_outcome=failed to submit a failed assignment; changing argv never closes a failure. A mistyped command line whose own output shows the check never started (usage, unrecognized-flag or file-not-found error for the command itself) is not a failed check: cite the corrected command's receipt and describe the mistyped run in the report. The receipt carries node_status (completed or failed), not task acceptance. This cannot accept the task. Top-level write_report-only fields such as artifacts are ignored. "
                   "The runtime compares the project with how it was when this attempt started, attributing only this node's "
                   "declared scope or successful channel writes and excluding sibling writers' scopes. When those changes match a "
                   "situational skill's trigger ({gates}) and this attempt has not read that skill with read_skill, the "
@@ -694,7 +741,7 @@ def dispatch(store, channel: ChannelContext, operation: str, args: Mapping[str, 
             if operation == "result_submit":
                 report_arg = args.get("report") if isinstance(args, Mapping) else None
                 if (error.field == "arguments.report"
-                        and not (isinstance(report_arg, Mapping) and "report_ref" in report_arg)):
+                        and not (isinstance(report_arg, str) and REPORT_ID.fullmatch(report_arg.strip()))):
                     with store.connection() as db:
                         rows = db.execute(
                             "SELECT r.id FROM reports r JOIN drafts d ON d.published_report_id=r.id "
@@ -711,7 +758,7 @@ def dispatch(store, channel: ChannelContext, operation: str, args: Mapping[str, 
                     candidates = [row["id"] for row in rows if row["id"] not in claimed]
                     if len(candidates) == 1:
                         error.correction += (f" This attempt published {candidates[0]}; send it as "
-                                             f"report={{report_ref: {candidates[0]}}}.")
+                                             f'report="{candidates[0]}".')
                 # Retain only a code and safe field path, never rejected
                 # arguments, report bodies, receipts or raw error messages.
                 try:

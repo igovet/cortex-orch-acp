@@ -135,7 +135,14 @@ python3 -B scripts/cortex_acp_setup.py apply-routing-defaults
 
 This validated install-only command creates absent routing/default files and
 preserves existing settings. It does not repair an existing malformed or legacy
-policy; diagnose that policy explicitly instead. Check the dev profile's saved
+policy; diagnose that policy explicitly instead. Nor does it update a valid policy
+written from an older preset: on 2026-10-08 the dev profile still denied bare
+`haiku` after the preset had enabled Haiku 5.5, so the dev picker could not show
+it. Compare the dev `routing.json` with the `routing` object of
+`policy/model-settings-default.json`; to adopt the preset, back the dev file up
+privately and write it with
+`cortex_runtime.configuration.management.update_routing` under the dev XDG
+variables above. Check the dev profile's saved
 coordinator model against its enabled models and current connection catalogue
 before a paid prompt; do not substitute a different route.
 

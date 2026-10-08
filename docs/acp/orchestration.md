@@ -222,14 +222,20 @@ The advertised `result_submit` schema carries
 this contract in its property descriptions; `delegation.evidence.assess_check`
 enforces it.
 
-A worker result must contain `report`, a required field, in exactly one form:
-`report: {report_ref}` naming a report published for that worker attempt, or
-inline `report: {title, markdown}`; do not mix them. When publishing a draft with
-`write_report`, pass its returned `report_id` as the later `result_submit`
-`report: {report_ref}`. Without a draft, inline submission publishes the report
-as part of the result. The report is in the schema's plain `required` list, not
-only in a conditional: models fill that list, and with a root if/then/else alone
-reviewers sent just summary, checks and verdict. If the report is missing, the
+A worker result must contain `report`, a required top-level plain string: the
+exact `report_id` of a report published for that worker attempt, or the complete
+inline Markdown, titled by the optional `report_title` or else by its first
+heading. When publishing a draft with `write_report`, pass its returned
+`report_id` alone as the later `result_submit` `report`. Without a draft, inline
+submission publishes the report as part of the result. The report is in the
+schema's plain `required` list, not only in a conditional: models fill that list,
+and with a root if/then/else alone reviewers sent just summary, checks and
+verdict. It is a string rather than an object because Claude engines emit a
+top-level string argument verbatim but hand-write JSON for object values: the
+former `report: {title, markdown}` object let Sonnet 5 workers break the escaping
+of nested Markdown, and the engine refused those calls before Cortex received
+them. Any other identifier-shaped `report` (a draft id, a receipt, a malformed
+report id) is refused with `invalid_arguments` before anything is published. If the report is missing, the
 correction may suggest a report only when exactly one eligible own published
 report is available; this hint does not bind the report, and the worker must still
 submit an explicit reference or inline report. A report identifier is not a
@@ -377,6 +383,15 @@ matches nothing. A run the gateway rejected before executing it
   unrecorded. The closed check then carries `closed_by` with the closing
   `tool_call_ref`, in the node result, the `worker_result` event and the
   receipt.
+- **A mistyped command line is not a failed check.** When a run's own output
+  shows the check never started because its command line was mistyped (a usage,
+  unknown-option or file-not-found error for the command itself), the worker does
+  not cite it as a failed check: it cites the corrected command's own receipt
+  and describes the mistyped run in the report. The run stays in the attempt's
+  command history; nothing closes it or infers a pass from it, and a test, lint,
+  type check or build that ran and reported failures is always a real failed
+  check. The advertised `checks[].outcome` description and the
+  `open_failed_check` correction say so.
 - **Ambiguity keeps it open.** A rerun with a different `argv` or `cwd`, a
   weak or uncited pass, a failure without its own verified receipt, a later
   run of the same command that failed or has no established result, or an

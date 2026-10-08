@@ -106,14 +106,14 @@ def dispatch(store, channel, operation, args):
         from .policy import propose_replan
         return propose_replan(store,channel,operation,args)
     if operation == 'result_submit':
-        from ..delegation.mcp_tools import _worker_publish_result, inline_report_form, publish_inline_report
-        # The advertised report is one required field in one of two forms
-        # (validated above). A reference is retained as the top-level
-        # report_ref it always was, so request digests, delivery recovery and
-        # worker_result events keep one internal shape.
-        if 'report_ref' in args['report']:
-            args = dict({key: value for key, value in args.items() if key != 'report'},
-                        report_ref=args['report']['report_ref'])
+        from ..delegation.mcp_tools import (_worker_publish_result, inline_report_form, publish_inline_report,
+                                            report_argument)
+        # The advertised report is one required plain string (validated
+        # above): an exact report_id is retained as the top-level report_ref
+        # it always was, inline Markdown as report={title, markdown}, so
+        # request digests, delivery recovery and worker_result events keep
+        # one internal shape.
+        args = report_argument(args)
         with store.connection() as db:
             provision = db.execute('SELECT idempotency_key FROM delegation_provisioning WHERE task_id=? AND attempt_id=?',
                                    (channel.task_id, channel.attempt_id)).fetchone()
@@ -193,6 +193,10 @@ def dispatch(store, channel, operation, args):
                                          "(and outside_command cwd), retain the failed check and cite the later passed "
                                          "receipt in this result; a different argv does not close it. Or explicitly send "
                                          'assignment_outcome="failed" to submit an intentional failed assignment. '
+                                         "If this run's own output shows the check never started because its command line "
+                                         "was mistyped (usage, unknown-option or file-not-found error for the command "
+                                         "itself), it is not a failed check: remove it from checks, cite the corrected "
+                                         "command's own receipt and describe the mistyped run in the report. "
                                          "Nothing was recorded or published and your channel remains active; the same "
                                          "request_key may be reused.")
                 # A supplied argv on a completed check is descriptive, never

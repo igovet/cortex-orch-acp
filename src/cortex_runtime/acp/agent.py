@@ -49,7 +49,7 @@ from .transport import StdioTransport, EOF
 from . import replay_store as acp_replay_store
 from . import wire_budget as acp_wire_budget
 from . import questions_store as acp_questions_store
-from ..catalog import refresh as catalog_refresh
+from ..catalog import detached_refresh as catalog_detached_refresh
 from ..bootstrap import _current_owner_epoch_obj, append_source_event, bootstrap_task
 from ..catalog.model import CatalogEntry
 from ..catalog.evidence import Fact, ProvenanceSource
@@ -968,7 +968,7 @@ class Agent:
 
         def refresh(record):
             try:
-                catalog_refresh.perform_refresh(record, session["project"], environ=self.environ)
+                catalog_detached_refresh.run(record, session["project"], environ=self.environ)
             except Exception:
                 pass
             finally:
@@ -986,9 +986,15 @@ class Agent:
         done.wait(_PASEO_DISCOVERY_WAIT_SECONDS)
 
     def _refresh_catalog_for_session(self, session_id, session, project, record):
-        """Run one prompt-free refresh and publish only a successful result."""
+        """Run one prompt-free refresh and publish only a successful result.
+
+        The refresh runs in its own process session (``catalog.detached_refresh``):
+        Paseo stops a discovery ACP process about a second after ``session/new``,
+        long before a Claude refresh (one effort probe per model) can finish, and
+        a refresh thread of this process would die with it without saving.
+        """
         try:
-            outcome = catalog_refresh.perform_refresh(
+            outcome = catalog_detached_refresh.run(
                 record, project, environ=self.environ,
             )
         except Exception:

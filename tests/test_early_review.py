@@ -23,7 +23,7 @@ from runtime_scenarios import provision_fixture, publish_fixture_report
 
 def _submit(store, worker, key='result', **extra):
     report = publish_fixture_report(store, worker)
-    args = dict(report=dict(report_ref=report), summary='Observed result', checks=[], request_key=key, **extra)
+    args = dict(report=report, summary='Observed result', checks=[], request_key=key, **extra)
     return mcp_tools.dispatch(store, worker, 'result_submit', args)
 
 
@@ -163,7 +163,7 @@ def test_native_late_change_still_rebinds_review(tmp_path):
     # No universal native-action interception exists. Simulate a lingering
     # process's native edit rather than claiming MCP revocation blocks it.
     (tmp_path / 'late-native.py').write_text('late = True\n')
-    args = dict(report=dict(report_ref=report), summary='Reviewed', checks=[], verdict='APPROVE', request_key='first')
+    args = dict(report=report, summary='Reviewed', checks=[], verdict='APPROVE', request_key='first')
     with pytest.raises(StoreError, match='review_project_revision_changed'):
         mcp_tools.dispatch(store, reviewer, 'result_submit', args)
     assert next(n for n in machine.context(task.task_id)['nodes']

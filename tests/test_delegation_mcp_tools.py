@@ -89,7 +89,7 @@ def test_write_report_description_names_result_submit_report_ref():
     from cortex_runtime.contracts import TOOLS
 
     description = next(tool["description"] for tool in TOOLS if tool["name"] == "write_report")
-    assert "result_submit report={report_ref: <report_id>}" in description
+    assert "report_id alone as the plain-string result_submit report" in description
 
 
 @pytest.mark.parametrize("report_count, expects_hint", [(0, False), (1, True), (2, False)])
@@ -117,7 +117,7 @@ def test_submission_rejection_retains_every_safe_violation_field(tmp_path):
     worker = _worker_channel(store, task_id, coordinator)
     with pytest.raises(StoreError):
         mcp_tools.dispatch(store, worker, "result_submit", dict(
-            report=dict(title="Work", markdown="# Work"), summary="Observed", request_key="bad-result",
+            report="# Work", report_title="Work", summary="Observed", request_key="bad-result",
             checks=[dict(status="passed", command="pytest")],
         ))
 

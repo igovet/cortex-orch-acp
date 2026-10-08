@@ -84,7 +84,7 @@ def test_every_advertised_tool_uses_its_current_validator_and_read_classificatio
         if name in {"user_question_request", "ask_question"}:
             args.update(question="Which target?", options=["Small target", "Large target"])
         if name == "result_submit":
-            args["report"] = {"title": "Result", "markdown": "# Result\n\nObserved.\n"}
+            args["report"] = "# Result\n\nObserved.\n"
         assert not list(Draft202012Validator(schema).iter_errors(args)), name
         validator = (lambda a: validate_base(name, a)) if name in BY_NAME else (lambda a: delegation_contracts.validate(role, name, a))
         validator(args)
@@ -103,16 +103,20 @@ def test_every_delegation_read_bypasses_mutation_epoch_gate():
 
 
 @pytest.mark.parametrize("args, valid", [
-    ({"report": {"title": "Report", "markdown": "# Report"}, "summary": "Done", "checks": [], "request_key": "once"}, True),
-    ({"report": {"report_ref": "r_" + "a" * 12}, "summary": "Done", "checks": [], "request_key": "once"}, True),
+    ({"report": "# Report", "report_title": "Report", "summary": "Done", "checks": [], "request_key": "once"}, True),
+    ({"report": "# Report", "summary": "Done", "checks": [], "request_key": "once"}, True),
+    ({"report": "", "summary": "Done", "checks": [], "request_key": "once"}, False),
+    ({"report": {"title": "Report", "markdown": "# Report"}, "summary": "Done", "checks": [], "request_key": "once"}, False),
+    ({"report": "r_" + "a" * 12, "summary": "Done", "checks": [], "request_key": "once"}, True),
+    ({"report": {"report_ref": "r_" + "a" * 12}, "summary": "Done", "checks": [], "request_key": "once"}, False),
     ({"report": {}, "summary": "Done", "checks": [], "request_key": "once"}, False),
     ({"report": {"title": "Report"}, "summary": "Done", "checks": [], "request_key": "once"}, False),
     ({"report_ref": "r_" + "a" * 12, "summary": "Done", "checks": [], "request_key": "once"}, False),
     ({"summary": "Done", "checks": [], "request_key": "once"}, False),
     ({"report": {"title": "Report", "markdown": "# Report", "report_ref": "r_" + "a" * 12}, "summary": "Done", "checks": [], "request_key": "once"}, False),
-    ({"report": {"report_ref": "r_" + "a" * 12}, "summary": "Done", "checks": [{"name": "GUI", "outcome": "not_run"}], "request_key": "once"}, False),
-    ({"report": {"report_ref": "r_" + "a" * 12}, "summary": "Done", "checks": [{"name": "GUI", "outcome": "unverified", "blocker": "   "}], "request_key": "once"}, False),
-    ({"report": {"report_ref": "r_" + "a" * 12}, "summary": "Done", "checks": [{"name": "pytest", "outcome": "passed", "command": ["pytest"]}], "request_key": "once"}, True),
+    ({"report": "r_" + "a" * 12, "summary": "Done", "checks": [{"name": "GUI", "outcome": "not_run"}], "request_key": "once"}, False),
+    ({"report": "r_" + "a" * 12, "summary": "Done", "checks": [{"name": "GUI", "outcome": "unverified", "blocker": "   "}], "request_key": "once"}, False),
+    ({"report": "r_" + "a" * 12, "summary": "Done", "checks": [{"name": "pytest", "outcome": "passed", "command": ["pytest"]}], "request_key": "once"}, True),
 ])
 def test_result_report_and_check_combinations_match_validator(args, valid):
     schema = next(t["inputSchema"] for t in mcp_tools.tool_definitions("worker") if t["name"] == "result_submit")
@@ -144,7 +148,7 @@ def test_review_findings_contract_agrees_with_its_validator():
     finding_schema = schema["properties"]["findings"]["items"]
     finding = {name: _sample(finding_schema["properties"][name]) for name in finding_schema["required"]}
     args = dict({key: _sample(schema["properties"][key]) for key in schema["required"]},
-                report={"report_ref": "r_" + "a" * 12}, findings=[finding])
+                report="r_" + "a" * 12, findings=[finding])
     assert not list(Draft202012Validator(schema).iter_errors(args))
     delegation_contracts.validate("worker", "result_submit", args)
     for bad in (dict(finding, cross_cutting="false"), dict(finding, files=[]), dict(finding, node="_fix_1_x")):

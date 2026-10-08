@@ -120,12 +120,12 @@ def test_result_submit_wire_advertises_and_rejects_missing_report(tmp_path):
     tools = _call(project, worker, worker_secret, _init_and('tools/list', {}), tmp_path)[-1]['result']['tools']
     schema = next(tool['inputSchema'] for tool in tools if tool['name'] == 'result_submit')
     assert 'oneOf' not in schema and 'if' not in schema and 'report' in schema['required']
-    assert schema['properties']['report']['properties']['report_ref']['pattern'] == r'^r_[0-9a-f]{12}$'
+    assert schema['properties']['report']['type'] == 'string' and 'properties' not in schema['properties']['report']
     args = dict(summary='Observed', checks=[], request_key='missing-report')
     refused = _call(project, worker, worker_secret, _init_and('tools/call',
                     dict(name='result_submit', arguments=args)), tmp_path)[-1]
     assert 'invalid_arguments' in json.dumps(refused) and 'arguments.report' in json.dumps(refused)
-    assert 'report_ref' in json.dumps(refused)
+    assert 'report_id' in json.dumps(refused)
 
 
 def test_plan_wire_is_idempotent_and_does_not_start_a_worker(tmp_path):
@@ -186,7 +186,7 @@ def test_worker_gateway_publication_and_result_cross_real_mcp_process(tmp_path):
     draft=call('create_draft',template='general',request_key='draft')
     call('draft_write',draft_id=draft['draft_id'],content=draft['required_first_line']+'\n\n# Report\n\nCompleted fixture.\n',request_key='body')
     report=call('write_report',draft_id=draft['draft_id'],title='Report',summary='Observed',author='worker',request_key='publish')
-    args=dict(report=dict(report_ref=report['report_id']),summary='Observed',checks=[],request_key='result')
+    args=dict(report=report['report_id'],summary='Observed',checks=[],request_key='result')
     result=call('result_submit',**args)
     assert result['recorded'] and result['node_status']=='completed'
     # Accepted result revokes the channel even while its engine lingers.
@@ -228,7 +228,7 @@ def test_result_submit_accepts_descriptive_command_without_trusting_fake_receipt
                     'ready', 'ready', 'shared_project_root', worker, None, None, None,
                     'qualified', None, coordinator.owner_epoch, stamp, stamp))
         db.commit()
-    args = dict(report=dict(title='Report', markdown='# Report\n\nObserved.'),
+    args = dict(report='# Report\n\nObserved.', report_title='Report',
                 summary='Observed', request_key='result-with-command', checks=[dict(
                     name='unit tests', outcome='passed', command=['python3', '-m', 'pytest'],
                     tool_call_ref='gateway:' + 'a' * 32)])

@@ -41,11 +41,11 @@ REQUESTED_CAPABILITIES = (
 # --------------------------------------------------------------------
 
 
-def _make_manager(tmp_path, scenario):
+def _make_manager(tmp_path, scenario, *, engine="codex-acp"):
     environ = isolated_environ(tmp_path)
     connection_id = new_connection_id()
     scenario_path = write_scenario(tmp_path, scenario)
-    record = make_connection_record(connection_id, launch_command=fake_launch_command(scenario_path), environ=environ)
+    record = make_connection_record(connection_id, launch_command=fake_launch_command(scenario_path), engine=engine, environ=environ)
     return EngineSessionManager(record, str(tmp_path), environ=environ, call_timeout=5.0)
 
 
@@ -1001,3 +1001,43 @@ def test_capsule_oversize_is_blocked_with_a_named_reason(tmp_path, monkeypatch):
     delivery = delegation_deliveries.for_generation(store, "coordinator", generation["id"])[0]
     assert delivery["state"] == "blocked"
     assert delivery["reason"] == "capsule_oversize"
+
+
+@pytest.mark.parametrize("engine,tool_name,is_compaction", [
+    ("claude-agent-acp", "compact", True),
+    ("claude-agent-acp", "Bash", False),
+    ("codex-acp", "compact", False),
+    ("claude-agent-acp", None, False),
+])
+def test_claude_0_87_compaction_uses_engine_metadata_not_display_title(
+    tmp_path, engine, tool_name, is_compaction,
+):
+    scenario = default_scenario(prompt_updates=[
+        dict(sessionUpdate="tool_call", toolCallId="compact-new", kind="think",
+             title="Compact conversation", status="in_progress",
+             _meta={"claudeCode": {"toolName": tool_name}}),
+        dict(sessionUpdate="tool_call_update", toolCallId="compact-new", status="completed",
+             _meta={"claudeCode": {"toolName": tool_name}}),
+    ])
+    manager = _make_manager(tmp_path, scenario, engine=engine)
+    try:
+        manager.negotiate(REQUESTED_CAPABILITIES)
+        session_id = manager.create_session("t_aaaaaaaaaaaa", "xr_" + "0" * 24)
+        events = list(manager.prompt_turn(session_id, "hello"))
+        signals = [event for event in events if event.kind == EngineEventKind.COMPACTION_SIGNAL]
+        if is_compaction:
+            assert [event.compaction_reason for event in signals] == ["in_progress", "completed"]
+            assert signals[0].tool_call_ref == signals[1].tool_call_ref
+            assert not any(event.kind == EngineEventKind.TOOL_CALL_OBSERVED for event in events)
+        else:
+            assert signals == []
+            assert any(event.kind == EngineEventKind.TOOL_CALL_OBSERVED for event in events)
+    finally:
+        manager.shutdown(grace=2.0)
+
+
+def test_claude_0_87_compaction_tier_names_its_actual_marker():
+    tier = delegation_generations.tier_for("claude-agent-acp", "0.87.0")
+    assert tier.version == "0.87.0"
+    assert tier.tier == delegation_generations.AUTOMATIC
+    assert "toolName=compact" in tier.limitation

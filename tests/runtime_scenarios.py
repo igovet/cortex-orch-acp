@@ -21,7 +21,7 @@ def publish_result(store,channel):
         channel.principal_thread_id,channel.parent_principal_thread_id,trusted=True)
     with store.connection() as db:
         row=db.execute('SELECT role_id FROM delegation_provisioning WHERE attempt_id=?',(channel.attempt_id,)).fetchone()
-    args=dict(report=dict(report_ref=report['report_id']),summary='Fixture observation',checks=[],request_key=str(uuid.uuid4()))
+    args=dict(report=report['report_id'],summary='Fixture observation',checks=[],request_key=str(uuid.uuid4()))
     if row['role_id']=='worker-code-reviewer': args['verdict']='APPROVE'
     mcp_tools.dispatch(store,channel,'result_submit',args)
     return PromptOutcome(StopReason.END_TURN,'Visible worker result')

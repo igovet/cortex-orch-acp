@@ -1348,7 +1348,17 @@ class EngineSessionManager:
             # tool evidence), keyed by the same stable portable tool_call_ref as
             # the dedup/evidence id, phase carried in compaction_reason.
             meta = update.get("_meta")
-            if isinstance(meta, dict) and isinstance(meta.get("contextCompaction"), dict) and ref is not None:
+            # Claude 0.87.0 moved compaction facts to AIR-only metadata.
+            # Non-AIR clients get this explicit tool name instead; never
+            # infer compaction from a human-readable title or another engine.
+            claude_meta = meta.get("claudeCode") if isinstance(meta, dict) else None
+            claude_compaction = (
+                getattr(self._record, "engine", None) == "claude-agent-acp"
+                and isinstance(claude_meta, dict)
+                and claude_meta.get("toolName") == "compact"
+            )
+            legacy_compaction = isinstance(meta, dict) and isinstance(meta.get("contextCompaction"), dict)
+            if (legacy_compaction or claude_compaction) and ref is not None:
                 status = update.get("status") if isinstance(update.get("status"), str) else "unknown"
                 return EngineEvent(kind=EngineEventKind.COMPACTION_SIGNAL, tool_call_ref=ref, compaction_reason=status)
             if getattr(self._record, "engine", None) == "opencode":

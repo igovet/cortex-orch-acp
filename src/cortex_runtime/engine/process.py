@@ -452,6 +452,10 @@ _CODEX_SEND_PROMPT_BY_VERSION = {
         _CODEX_SEND_PROMPT_SOURCE.replace(*_CODEX_SEND_PROMPT_1_13_RENAME),
         _CODEX_SEND_PROMPT_PATCHED.replace(*_CODEX_SEND_PROMPT_1_13_RENAME),
     ),
+    "2.1.1": (
+        _CODEX_SEND_PROMPT_SOURCE.replace(*_CODEX_SEND_PROMPT_1_13_RENAME),
+        _CODEX_SEND_PROMPT_PATCHED.replace(*_CODEX_SEND_PROMPT_1_13_RENAME),
+    ),
     "2.0.1": (
         _CODEX_SEND_PROMPT_SOURCE.replace(*_CODEX_SEND_PROMPT_1_13_RENAME),
         _CODEX_SEND_PROMPT_PATCHED.replace(*_CODEX_SEND_PROMPT_1_13_RENAME),
@@ -459,7 +463,8 @@ _CODEX_SEND_PROMPT_BY_VERSION = {
 }
 
 # 2.0.1 renamed the mode label and replaced the response-item/history helpers
-# with typed reporters. Keep its verified patch sites separate from 1.x.
+# with typed reporters. 2.1.1 has byte-identical patched sites (npm bundle
+# comparison, 2026-10-07); only these exact versions use the v2 patch.
 _CODEX_AGENT_REVIEWER_2_SOURCE = _CODEX_AGENT_REVIEWER_SOURCE.replace(b'"Approve for me"', b'"Auto review"')
 _CODEX_AGENT_REVIEWER_2_MANUAL = _CODEX_AGENT_REVIEWER_MANUAL.replace(b'"Approve for me"', b'"Auto review"')
 _CODEX_CUSTOM_TOOL_HELPERS_2_INSERT = (
@@ -543,7 +548,7 @@ def _prepare_codex_manual_review_adapter(install, connection_id: str, environ=No
             + ", ".join(sorted(_CODEX_SEND_PROMPT_BY_VERSION)) + ".",
         )
     send_prompt_source, send_prompt_patched = send_prompt
-    reporter_v2 = install.package_version == "2.0.1"
+    reporter_v2 = install.package_version in ("2.0.1", "2.1.1")
     reviewer_source = _CODEX_AGENT_REVIEWER_2_SOURCE if reporter_v2 else _CODEX_AGENT_REVIEWER_SOURCE
     reviewer_manual = _CODEX_AGENT_REVIEWER_2_MANUAL if reporter_v2 else _CODEX_AGENT_REVIEWER_MANUAL
     package_dir = Path(install.package_json).parent

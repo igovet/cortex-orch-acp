@@ -60,7 +60,7 @@ SUPPORTED_ENGINES: tuple[str, ...] = tuple(_PACKAGE_NAME)
 # 2026-09-22). ``claude-agent-acp`` has a version-independent delivery
 # registration and no byte-level patch, so any installed version launches.
 QUALIFIED_ADAPTER_VERSIONS: dict[str, tuple[str, ...] | None] = {
-    "codex-acp": ("1.12.0", "1.13.0", "2.0.1"),
+    "codex-acp": ("1.12.0", "1.13.0", "2.0.1", "2.1.1"),
     "claude-agent-acp": None,
     # OpenCode v2 is accepted by major version. Keep the range visible to
     # settings clients; do not interpret it as an exact-version allowlist.
@@ -137,11 +137,11 @@ def owned_root(environ: dict[str, str] | None = None) -> Path:
 
 
 def version_key(text: str) -> tuple[int, ...]:
-    """``"0.80.0"`` -> ``(0, 80, 0)``; anything else sorts first."""
-    try:
-        return tuple(int(part) for part in text.split("."))
-    except ValueError:
+    """Sort adapter versions, then exact side-by-side SDK refresh builds."""
+    match = re.fullmatch(r"([0-9]+[.][0-9]+[.][0-9]+)(?:[+]sdk[.]([0-9]+[.][0-9]+[.][0-9]+))?", text)
+    if match is None:
         return ()
+    return tuple(int(part) for part in ".".join(filter(None, match.groups())).split("."))
 
 
 def _declared_bin(package_json_path: Path) -> tuple[str, str] | None:

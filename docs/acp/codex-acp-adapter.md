@@ -11,7 +11,49 @@ install identity/integrity) and
 (launch/env mapping, configuration-option mapping, evidence, instruction
 delivery).
 
-Pinned release basis: `@agentclientprotocol/codex-acp` **1.12.0**, per the
+## Current support: 2.1.1 (2026-10-07)
+
+The npm latest release is **2.1.1**. Its exact registration is separate from
+the historical 1.x/2.0.1 evidence below; unknown releases remain unsupported.
+All 14 guarded private-adapter patch sites are byte-identical to 2.0.1
+(`dist/index.js` SHA-256
+`4b76310393d756a0f111687cd9df899720f36f7c59b1eb1d86429484034ff91b`).
+ACP remains v1, with unchanged `model`, `reasoning_effort` and `mode`
+option IDs and model/list-derived choices. No new option mapping or static
+model allowlist is needed. `collaboration_mode`/`fast-mode` remain unmapped;
+the existing execution-verification unavailable sentinel is not promoted.
+
+[Upstream releases](https://github.com/agentclientprotocol/codex-acp/releases)
+since 2.0.1 fix imported attachment history, readable service errors, an
+active-writer resume error, and AIR custom answers. Cortex does not advertise
+AIR or enable native question tools. The session/new instruction extension,
+MCP schema budget, private reviewer, per-turn config, custom-tool reporting,
+typed-history patch and restored compaction metadata keep their existing
+exact-source guards.
+
+The owner's engine directory already contained 2.1.1. This checkout's
+discovery selection changed **2.0.1 → 2.1.1** after qualification; the approved
+`connections.engine_update.update_engine("codex-acp")` operation returned
+no update because the installation was already current. The fallback is now
+2.1.1. No production Paseo installation or plugin was changed, and a running
+older runtime/session is not hot-upgraded by editing this checkout.
+
+This installed 2.1.1 copy resolves **Codex CLI 0.159.3** (the npm dependency is
+`^0.159.1`, not a fixed binary version). Sanitized native login status reports
+ChatGPT authentication. Its offline `debug models` catalog includes
+`gpt-6.1-sol`; offline catalog presence does not establish a paid route or
+grant model-policy authorization.
+
+No-paid checks: 13 installed-bundle fake App Server tests pass for 2.1.1
+and retained 2.0.1, including instruction/native-context delivery, explicit
+MCP configuration, custom-tool lifecycle, option surface and compaction.
+Three installed 0.159.3 wrapper/jail tests pass with a loopback fake provider,
+including native patch containment and the advertised tool inventory.
+These do not qualify paid turns, rendered client behavior, retained raw
+custom-tool history, or instruction survival after real internal compaction.
+Paid live check not requested by the owner.
+
+Historical 1.12.0 release basis: `@agentclientprotocol/codex-acp` **1.12.0**, per the
 static evidence in `.cortex/acp-migration/T002/CAPABILITY_MATRIX.json` and
 `.cortex/acp-migration/T002/ADR-001b-codex-acp-version-drift.md`, and the
 `dist/index.js` line citations recorded in
@@ -30,7 +72,7 @@ Codex session and every catalog refresh then failed closed with
 `codex_manual_review_adapter_unsupported` — Codex was entirely unavailable
 and no new model could reach the catalogue (live, 2026-09-22).
 
-Qualified versions: **1.12.0**, **1.13.0** and **2.0.1**. What was verified for 1.13.0,
+Qualified versions: **1.12.0**, **1.13.0**, **2.0.1** and **2.1.1**. What was verified for 1.13.0,
 against the installed bundle rather than assumed:
 
 - All 15 patched call sites match; exactly one differs from 1.12.0
@@ -91,12 +133,13 @@ observed in a real client.
 
 ## Current runtime gateway policy
 
-The verified private codex-acp 1.12.0 copy and Codex CLI 0.154.0/0.155.1 wrapper disable
-native shell, patch, agents, hooks, plugins, apps, browsing and other native action
-tools. Every turn requests `readOnly` with network access disabled. A private model
-catalogue preserves configured model routes while disabling native shell/patch
-capabilities. Authenticated Cortex MCP operations provide scoped project access.
-Account configuration and credentials remain in the production native account.
+The private adapter and CLI wrapper disable native shell/view-image tools,
+agents, hooks, plugins, apps and native question tools through supported config.
+Native `apply_patch` remains available, bounded by the engine jail. Every turn
+requests `dangerFullAccess`, `untrusted` approval and the user reviewer; the jail,
+not Codex's nested sandbox, is the filesystem boundary. Authenticated Cortex MCP
+operations provide scoped project access. Account configuration and credentials
+remain in the production native account.
 
 The wrapper verifies installed shapes and checks that account MCP servers are
 disabled for this child before starting App Server. Unsupported versions or changed

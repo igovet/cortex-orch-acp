@@ -1,7 +1,7 @@
 # Security policy
 
 Fresh-install model settings use the saved 2026-10-05 owner default's portable
-routing policy, `claude-agent-acp/opus[1m]` coordinator at medium effort, and Russian
+routing policy plus the owner-requested 2026-10-07 Haiku 5.5 addition, `claude-agent-acp/opus[1m]` coordinator at medium effort, and Russian
 message language. Existing owner settings are never replaced. Account/connection
 identities and machine-specific MCP definitions/paths are not cloned; see
 [the install snapshot boundary](docs/configuration.md#fresh-install-owner-default-snapshot).
@@ -17,6 +17,34 @@ a security boundary. See the [dependency disposition](docs/acp/paseo-dependency-
 for exact paths, artifact-test limits and the next upstream-fix decision.
 
 ## Current ACP boundary (1.0.0)
+
+Claude ACP 0.87.0 is separately source-qualified for system instruction delivery;
+unknown installed Claude versions cannot borrow that qualification. Its existing
+native-tool restrictions are retained through inspected SDK option forwarding,
+not claimed as real-model enforcement evidence. Compaction detection uses the
+engine's explicit `claudeCode.toolName=compact` metadata rather than display text.
+No-prompt model catalog initialization does not prove execution or authorize a
+model that is absent from the catalog. The exact side-by-side SDK 0.3.293
+refresh exposes `haiku` = Haiku 5.5 and accepts high/xhigh/max through ACP
+controls. Its instruction and native-tool restriction forwarding was
+independently inspected; this is not paid inference/enforcement evidence.
+Old Haiku is denied by exact ID in the preset and deliberately adopted owner
+settings; the original SDK 0.3.287 install is not overwritten. See
+[adapter evidence](docs/acp/claude-agent-acp-adapter.md#current-support-0870-2026-10-07).
+The prompt-free catalog refresh a new ACP session starts runs in a child process
+with its own session, so it can outlive the ACP process that requested it (Paseo
+stops discovery processes about a second after `session/new`). It is still bounded
+by the per-call refresh timeout, sends no prompt, runs one refresh per connection
+at a time and only adds a catalog snapshot. See
+[catalog refresh lifetime](docs/acp/claude-agent-acp-adapter.md#catalog-refresh-lifetime-and-deployed-runtimes).
+
+Codex ACP 2.1.1 uses the same exact-source-guarded private patches as 2.0.1,
+with a separate evidenced registration. Unknown versions remain unsupported;
+installing a newer package does not bypass those checks. Role metadata is sent
+for every qualified Codex version. Installed CLI 0.159.3 passed no-paid
+wrapper/jail tests; native shell/view-image remain disabled and native
+`apply_patch` remains jail-bounded. No paid/client enforcement or production
+Paseo/plugin update is claimed. See [Codex evidence](docs/acp/codex-acp-adapter.md#current-support-211-2026-10-07).
 
 Cortex is an incoming ACP stdio agent. It launches Codex and Claude ACP engines,
 and the optional OpenCode v2 engine once the owner onboards it, as separate processes and stores task metadata and published Markdown under the
@@ -88,11 +116,12 @@ a recovery answer is fixed and has a focused no-paid regression. This repairs
 the recovery transition only; it does not establish why a model produced no
 proposal in a separate three-prompt run, nor qualify Desktop batch/worker UI.
 
-The worker result schema requires a `report` in exactly one owned form:
-`report: {report_ref}` for an already published report, or inline
-`report: {title, markdown}`. When a draft was published through `write_report`,
-its returned `report_id` is passed as `result_submit.report.report_ref`; a unique
-own-report suggestion is only a
+The worker result schema requires `report` as one plain string: either the
+exact `report_id` of an already published own report, or the complete inline
+Markdown (optional `report_title`). When a draft was published through
+`write_report`, its returned `report_id` alone is passed as `result_submit.report`;
+any other identifier-shaped value is refused before anything is published, and a
+unique own-report suggestion is only a
 correction hint and does not bind a report. Check blockers and command evidence
 are distinct. Rejected submissions retain only a safe error code and bounded
 field-path diagnostics in observability events; rejected values and report bodies

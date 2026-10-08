@@ -37,7 +37,7 @@ def _run(store, channel, key, argv=TOGGLE):
 def _submit(store, worker, checks, **extra):
     report = publish_fixture_report(store, worker)
     return mcp_tools.dispatch(store, worker, 'result_submit',
-                              dict(report=dict(report_ref=report), summary='Observed', checks=checks, request_key='result', **extra))
+                              dict(report=report, summary='Observed', checks=checks, request_key='result', **extra))
 
 
 def _node(store, task, assignment):
@@ -252,7 +252,7 @@ def test_open_failed_check_refuses_before_recording_or_intentionally_fails(tmp_p
     store,task,worker,assignment=_fixture(tmp_path,'open-failure')
     failed=_run(store,worker,'wrong-check')['tool_call_ref']
     other=_run(store,worker,'corrected-check',['python3','-B','-c','print("corrected assertion")'])['tool_call_ref']
-    args=dict(report=dict(title='Result',markdown='# Result\n\nObserved.'),summary='Observed',request_key='result',
+    args=dict(report='# Result\n\nObserved.', report_title='Result',summary='Observed',request_key='result',
               checks=[dict(name='unit tests',outcome='failed',tool_call_ref=failed),
                       dict(name='unit tests',outcome='passed',tool_call_ref=other)])
     with store.connection() as db:
@@ -290,3 +290,38 @@ def test_intentional_assignment_failure_without_a_command_failure_is_explicit(tm
     store,task,worker,assignment=_fixture(tmp_path,'intentional')
     receipt=_submit(store,worker,[],assignment_outcome='failed')
     assert receipt['node_status'] == _node(store,task,assignment)['status'] == 'failed'
+
+
+# The codex worker of task t_2cf2f985b809 (2026-10-07) ran its profile check
+# with an unknown --check option (argparse usage error, exit 2) and then with
+# the supported positional form (exit 0). Citing the usage error as a failed
+# check left it open for good, so it failed an otherwise verified assignment.
+MISTYPED = ['python3', '-B', '-c', 'import argparse; argparse.ArgumentParser().parse_args()', '--check']
+CORRECTED = ['python3', '-B', '-c',
+             'import argparse; p = argparse.ArgumentParser(); p.add_argument("mode"); p.parse_args()', 'check']
+
+
+def test_a_mistyped_invocation_is_never_closed_by_a_different_argv_and_need_not_be_cited(tmp_path):
+    from cortex_runtime.contracts import StoreError
+    from cortex_runtime.delegation.evidence import command_history
+    store, task, worker, assignment = _fixture(tmp_path, 'mistyped')
+    mistyped = _run(store, worker, 'mistyped', MISTYPED)
+    corrected = _run(store, worker, 'corrected', CORRECTED)
+    assert (mistyped['exit_code'], corrected['exit_code']) == (2, 0)
+    cited = [dict(name='profile check', outcome='failed', tool_call_ref=mistyped['tool_call_ref']),
+             dict(name='profile check', outcome='passed', tool_call_ref=corrected['tool_call_ref'])]
+    # Exact identity binding is unchanged: a different argv closes nothing.
+    with pytest.raises(StoreError, match='open_failed_check') as caught:
+        _submit(store, worker, cited)
+    assert 'a different argv does not close it' in caught.value.correction
+    assert 'mistyped' in caught.value.correction and 'remove it from checks' in caught.value.correction
+    # The advertised path: a command line that never started the check is not
+    # a check of the work. The corrected command stands on its own receipt;
+    # the mistyped run stays in the runtime's own history, never closed.
+    receipt = _submit(store, worker, cited[1:])
+    assert receipt['checks'] == [dict(name='profile check', outcome='passed')]
+    assert receipt['node_status'] == _node(store, task, assignment)['status'] == 'completed'
+    with store.connection() as db:
+        history = command_history(db, task.task_id, worker.attempt_id)
+    assert [(run['ref'], run['status']) for run in history] == [
+        (mistyped['tool_call_ref'], 'failed'), (corrected['tool_call_ref'], 'passed')]

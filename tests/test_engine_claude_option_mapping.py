@@ -143,3 +143,32 @@ def test_sdk_unknown_model_takes_its_effort_from_session_new_meta_not_a_config_o
     with pytest.raises(Exception):
         build_claude_session_new_meta("role", effort="ultra")
     assert SDK_EFFORTS == ("low", "medium", "high", "xhigh", "max")
+
+
+def test_0_87_grouped_models_and_out_of_picker_current_model():
+    observed = [{"id": "model", "type": "select", "currentValue": "custom-current",
+                 "options": [{"group": "SDK", "name": "SDK",
+                              "options": [{"value": "haiku", "name": "Haiku 4.5"}]}]}]
+    assert claude_option_mapping(_revision(model="haiku"), observed) == [("model", "haiku")]
+    assert claude_option_mapping(_revision(model="custom-current"), observed) == [("model", "custom-current")]
+    with pytest.raises(ConfigurationRejected):
+        claude_option_mapping(_revision(model="not-advertised"), observed)
+
+
+@pytest.mark.parametrize("effort", ("low", "medium", "high", "xhigh", "max"))
+def test_0_87_effort_choices_remain_observed_not_hardcoded(effort):
+    observed = _observed_config_options()
+    option = next(item for item in observed if item["id"] == "effort")
+    option["options"] = [{"value": effort, "name": effort}]
+    assert ("effort", effort) in claude_option_mapping(
+        _revision(supported_parameters=(("effort", effort),)), observed)
+    with pytest.raises(ConfigurationRejected):
+        claude_option_mapping(_revision(supported_parameters=(("effort", "default"),)), observed)
+
+
+def test_current_effort_is_not_permission_to_set_an_unoffered_effort():
+    observed = _observed_config_options()
+    option = next(item for item in observed if item["id"] == "effort")
+    option["currentValue"] = "max"
+    with pytest.raises(ConfigurationRejected):
+        claude_option_mapping(_revision(supported_parameters=(("effort", "max"),)), observed)

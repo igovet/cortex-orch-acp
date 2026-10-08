@@ -14,15 +14,11 @@ claude-agent-acp configuration failure here
 native path, silently or otherwise, and no Codex-specific env var or
 option id is ever referenced from here.
 
-Everything here is scoped to the pinned release recorded in
-``.cortex/acp-migration/T002/CAPABILITY_MATRIX.json`` (observed
-``@agentclientprotocol/claude-agent-acp`` 0.78.0, per
-``tests/fixtures/catalog/claude_agent_acp_config_options.json``'s fixture
-note, itself derived from the real installed
-``~/.local/share/zed/external_agents/registry/npx/claude-acp/node_modules/
-@agentclientprotocol/claude-agent-acp/dist/`` bundle, lead- and
-agent-verified 2026-09-17); nothing here claims a main-branch/newer-release
-capability.
+Supported instruction-delivery releases are 0.78.0 and 0.87.0 (current
+fallback), each inspected independently; see instruction_delivery_registry.
+0.87.0 bundles Claude Agent SDK 0.3.287 and ACP SDK 1.7.0, while retaining
+ACP v1 and the model/effort/mode option ids. Model names and effort choices
+remain session-observed, not inferred from the package version.
 """
 from __future__ import annotations
 
@@ -56,7 +52,7 @@ _CLAUDE_MODE_OPTION_ID = "mode"
 _EFFORT_PARAM_NAMES = ("thought_level", "effort")
 _MODE_PARAM_NAME = "mode"
 
-EXECUTION_VERIFICATION_UNAVAILABLE = "unavailable_in_claude_agent_acp_0_78_0"
+EXECUTION_VERIFICATION_UNAVAILABLE = "unavailable_in_claude_agent_acp"
 
 
 def _rejected(code: str) -> ConfigurationRejected:
@@ -76,7 +72,21 @@ def _allowed_values(option: dict) -> set | None:
     options = option.get("options")
     if not isinstance(options, list):
         return None
-    return {choice.get("value") for choice in options if isinstance(choice, dict)}
+    values = set()
+    for choice in options:
+        if not isinstance(choice, dict):
+            continue
+        # ACP select options can be grouped (0.87.0 accepts both shapes).
+        nested = choice.get("options")
+        if isinstance(nested, list):
+            values.update(item.get("value") for item in nested if isinstance(item, dict))
+        elif "value" in choice:
+            values.add(choice["value"])
+    # 0.87.0 explicitly permits an out-of-picker current model. It is an
+    # observed identity, not permission to invent another model or effort.
+    if option.get("id") == _CLAUDE_MODEL_OPTION_ID and isinstance(option.get("currentValue"), str):
+        values.add(option["currentValue"])
+    return values
 
 
 def _require_supported_option(option_id: str, value, observed_config_options) -> tuple[str, object]:
@@ -93,7 +103,7 @@ def claude_option_mapping(revision, observed_config_options) -> list[tuple[str, 
     """``ConfigurationRevision`` -> ``session/set_config_option`` pairs.
 
     Mirrors ``codex_adapter_acp.codex_option_mapping`` exactly, against the
-    pinned claude-agent-acp 0.78.0 ``configOptions`` shape instead:
+    observed claude-agent-acp ``configOptions`` shape (0.78.0/0.87.0):
 
     - ``model`` is always required and always mapped from
       ``revision.route.model`` (values are catalog-discovered per
@@ -102,8 +112,9 @@ def claude_option_mapping(revision, observed_config_options) -> list[tuple[str, 
     - ``effort`` is mapped only when the revision's
       ``supported_parameters`` includes a ``"thought_level"`` or
       ``"effort"`` entry (T007/T008 naming); its value must be one of the
-      pinned release's observed ``effort`` options (``"default"``/
-      ``"medium"`` per the fixture note -- never an invented effort name).
+      session's observed ``effort`` options. 0.87.0 derives these from
+      SDK supportedEffortLevels; "default" may be absent with recommended
+      values enabled. No model family or effort is invented here.
     - ``mode`` is mapped only when the revision's ``supported_parameters``
       includes a ``"mode"`` entry, and only when that value is one of the
       pinned release's observed ``mode`` options (``"default"``/
@@ -196,15 +207,12 @@ class ClaudeEvidenceStatus:
     Mirrors ``codex_adapter_acp.CodexEvidenceStatus`` field-for-field; see
     that class's own docstring for what each field does and does not prove.
 
-    ``execution_verified`` is always exactly
-    ``EXECUTION_VERIFICATION_UNAVAILABLE`` for this pinned release: the
-    installed claude-agent-acp 0.78.0 surface gives no statically-verifiable,
-    non-model-authored signal that a specific turn actually executed under a
-    specific confirmed model/effort/mode (a ``usage_update`` event reports
-    token counts and cost per ``usage-markdown.js``, never a confirmed model
-    identity, and a model's own self-report of "which model I am" is never
-    treated as evidence anywhere in this runtime). This status is never
-    upgraded by observing a ``usage_update``/turn-end event.
+    ``execution_verified`` remains EXECUTION_VERIFICATION_UNAVAILABLE.
+    0.87.0 can attach a model to usage updates, unlike the original 0.78.0
+    evidence basis. Cortex does not bind that metadata to an exact
+    confirmed model/effort/mode for a turn, so it cannot certify execution.
+    Configuration application, usage and a model's self-report never
+    upgrade this status.
     """
 
     selected: str
@@ -374,9 +382,8 @@ def build_claude_session_new_meta(instructions_text: str, *, role: str = "worker
                                   native_skills: bool = False) -> dict:
     """``_meta`` payload for ``session/new`` appending Cortex instructions.
 
-    The real, statically-confirmed claude-agent-acp 0.78.0 instructions
-    channel (dist ``acp-agent.js:5887-5901``, lead- and agent-verified
-    2026-09-17): ``session/new``'s own ``params._meta.systemPrompt`` is read
+    The statically-confirmed claude-agent-acp 0.78.0/0.87.0 instructions
+    channel (dist ``acp-agent.js:5887-5901`` / ``7047-7063``): ``session/new``'s own ``params._meta.systemPrompt`` is read
     as either a plain string (a full override of the SDK's
     ``{"type": "preset", "preset": "claude_code"}`` default) or an object
     (``{"append": ..., "excludeDynamicSections": ...}``-shaped, forwarded
@@ -385,8 +392,8 @@ def build_claude_session_new_meta(instructions_text: str, *, role: str = "worker
     the engine's preset while adding this role's instructions.
 
     This is the real, code-confirmed, QUALIFIED channel
-    ``engine.instruction_delivery_registry.ClaudeAgentAcp0_78Delivery``
-    actually uses (its own ``plan()`` calls this function) -- wired end to
+    the exact registrations in ``engine.instruction_delivery_registry``
+    actually use (its own ``plan()`` calls this function) -- wired end to
     end into the real production path via
     ``delegation.live_adapters._session_new_meta_for``/``open()`` and
     ``engine.session_manager.EngineSessionManager.create_session``'s

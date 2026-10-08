@@ -171,3 +171,68 @@ def test_installed_claude_acp_0_78_forwards_strict_mcp_to_sdk_cli():
     assert "strictMcpConfig?: boolean;" in sdk_types
     assert "Only use MCP servers passed via the `mcpServers` option" in sdk_types
     assert 'if(ee)W.push("--strict-mcp-config")' in sdk_source
+
+
+def _installed_0_87():
+    from cortex_runtime.connections.discovery import owned_root
+    root = owned_root() / "claude-agent-acp/0.87.0/node_modules"
+    adapter = root / "@agentclientprotocol/claude-agent-acp"
+    sdk = root / "@anthropic-ai/claude-agent-sdk"
+    if not (adapter / "package.json").is_file() or not (sdk / "sdk.mjs").is_file():
+        pytest.skip("Installed Claude ACP 0.87.0/SDK copy is unavailable")
+    assert json.loads((adapter / "package.json").read_text())["version"] == "0.87.0"
+    assert json.loads((sdk / "package.json").read_text())["version"] == "0.3.287"
+    return adapter, sdk
+
+
+def test_installed_0_87_system_options_and_compaction_source_without_model_call():
+    adapter, sdk = _installed_0_87()
+    source = (adapter / "dist/acp-agent.js").read_text()
+    sdk_source = (sdk / "sdk.mjs").read_text()
+    assert "const customPrompt = params._meta.systemPrompt;" in source
+    assert "systemPrompt = customPrompt;" in source
+    assert "const options = {\n            systemPrompt," in source
+    assert "...userProvidedOptions," in source
+    assert "disallowedTools: [...(userProvidedOptions?.disallowedTools || []), ...disallowedTools]" in source
+    assert "prompt: input,\n            options," in source
+    assert "systemPrompt:p,appendSystemPrompt:f" in sdk_source
+    assert "strictMcpConfig?: boolean;" in (sdk / "sdk.d.ts").read_text()
+    assert 'claudeCode: { toolName: "compact" }' in (
+        adapter / "dist/tool-calls/reporters/compaction.js"
+    ).read_text()
+
+
+def test_installed_0_87_initialize_without_auth_or_prompt(tmp_path):
+    adapter, _sdk = _installed_0_87()
+    env = {**os.environ, "HOME": str(tmp_path / "home"),
+           "CLAUDE_CONFIG_DIR": str(tmp_path / "claude")}
+    result = subprocess.run(["node", str(adapter / "dist/index.js")], input=json.dumps({
+        "jsonrpc": "2.0", "id": 1, "method": "initialize",
+        "params": {"protocolVersion": 1, "clientCapabilities": {},
+                   "clientInfo": {"name": "cortex-no-paid-test", "version": "1"}},
+    }) + "\n", capture_output=True, text=True, env=env, cwd=tmp_path, timeout=10)
+    assert result.returncode == 0
+    response = next(json.loads(line) for line in result.stdout.splitlines()
+                    if json.loads(line).get("id") == 1)
+    assert response["result"]["protocolVersion"] == 1
+    assert response["result"]["agentInfo"]["version"] == "0.87.0"
+
+
+def test_installed_0_87_sdk293_refresh_keeps_instruction_and_tool_boundaries():
+    from cortex_runtime.connections.discovery import owned_root
+    root = owned_root() / "claude-agent-acp/0.87.0+sdk.0.3.293/node_modules"
+    adapter = root / "@agentclientprotocol/claude-agent-acp"
+    sdk = root / "@anthropic-ai/claude-agent-sdk"
+    if not (adapter / "package.json").is_file() or not (sdk / "sdk.mjs").is_file():
+        pytest.skip("Installed Claude ACP 0.87.0/SDK 0.3.293 refresh is unavailable")
+    assert json.loads((adapter / "package.json").read_text())["version"] == "0.87.0"
+    assert json.loads((sdk / "package.json").read_text())["version"] == "0.3.293"
+    source = (adapter / "dist/acp-agent.js").read_text()
+    sdk_source = (sdk / "sdk.mjs").read_text()
+    assert "prompt: input,\n            options," in source
+    assert "disallowedTools: [...(userProvidedOptions?.disallowedTools || []), ...disallowedTools]" in source
+    assert "systemPrompt:typeof this.initConfig?.systemPrompt" in sdk_source
+    assert "appendSystemPrompt:this.initConfig?.appendSystemPrompt" in sdk_source
+    assert 'if(R)K.push("--strict-mcp-config")' in sdk_source
+    assert 'K.push("--disallowedTools",U.join(","))' in sdk_source
+    assert "claude-haiku-5-5" in sdk_source

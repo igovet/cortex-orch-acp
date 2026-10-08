@@ -425,7 +425,8 @@ The validated public asset policy/model-settings-default.json is installation/mi
 ### Fresh-install owner default snapshot
 
 The public install asset reflects the saved production `default` profile updated
-on 2026-10-05 at 10:45 UTC. Its routing is an exact non-secret snapshot, including
+on 2026-10-05 at 10:45 UTC, with the owner-requested Haiku 5.5 addition
+adopted on 2026-10-07. Its routing is a non-secret snapshot, including
 multi-tier memberships, effort floors/ceilings, preferences, request labels and
 quota-window associations. The portable coordinator is
 `claude-agent-acp/opus[1m]` with `thought_level: medium`; no mode override is
@@ -441,6 +442,32 @@ no saved `routing-profiles.json` snapshot is created or replaced. A fresh host m
 register its own connections/MCP servers and resolve the exact coordinator against
 one observed selectable route. Missing or unsupported model/effort observations
 still fail closed; this snapshot is not live qualification.
+
+### Haiku 5.5 and Luna parity
+
+The preset enables `claude-agent-acp/haiku`, observed as Haiku 5.5 with
+SDK 0.3.293 / CLI 2.1.293. Cortex's updater installs that exact SDK refresh
+beside upstream adapter 0.87.0 (whose SDK 0.3.287 still resolves the alias
+to Haiku 4.5); see [adapter evidence](acp/claude-agent-acp-adapter.md#haiku-55-catalog-and-effort-evidence).
+Do not treat an older install's `haiku` label as proof of the new model.
+A Cortex runtime older than that build-name ordering repoints the connection
+to the upstream install at every start; see
+[catalog refresh lifetime and deployed runtimes](acp/claude-agent-acp-adapter.md#catalog-refresh-lifetime-and-deployed-runtimes).
+
+Both `haiku` and `codex-acp/gpt-6-luna` have light tier, testing stretch,
+effort floor high, ladder high/xhigh/max, maximum max, identical preferred
+work kinds and null request names. The SDK supports all three chosen levels;
+no unsupported effort was substituted. `seven_day_haiku` associates only
+the exact new alias. The deny entry is the exact old
+`claude-agent-acp/claude-haiku-4-5-20251001`, not bare `haiku`.
+Deny matching remains exact; it is not a family rule.
+
+The owner's production routing and selected `default` profile were
+deliberately updated together after private backups; unrelated profile
+sections stayed unchanged. This does not change setup's rule that existing
+owner settings/profiles are never silently overwritten, nor project/env
+precedence or routes of already-open sessions. No paid model turn or GUI
+qualification was performed.
 
 ### Exact quota-window associations
 
@@ -472,7 +499,7 @@ python3 -B scripts/cortex_model_policy_migrate.py preview --candidate /absolute/
 
 Saved profiles capture this field on explicit save/create and restore it on activation; older snapshots are not silently rewritten or filled from working settings/template data. Migrate a saved snapshot from its own candidate with `--profile`, or save the intended current working settings explicitly. Deleting a selected profile still only unlinks it, without resetting materialized settings.
 
-The public install-only asset retains the previous seven-route tiers, efforts, preferences and denies, disabled OpenCode, and explicit canonical scoped-label associations preserving the former quota predicate for the configured identities. No runtime template overlay exists. Unknown/new provider labels remain conservative until configured; this is not evidence those labels are currently emitted or that production has adopted the candidate. Production application requires separate reviewed/verified adoption.
+The public install-only asset retains the previous route policy with the explicit Haiku 5.5/Luna-parity addition above, disabled OpenCode, and explicit canonical scoped-label associations preserving the former quota predicate for the configured identities. No runtime template overlay exists. Unknown/new provider labels remain conservative until configured; this is not evidence those labels are currently emitted or that production has adopted the candidate. Production application requires separate reviewed/verified adoption.
 
 ### Explicit user model priority and usage switching
 

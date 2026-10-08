@@ -31,7 +31,7 @@ delivered only after the commit can also be omitted; see the
 
 
 Fresh-install model settings use the saved 2026-10-05 owner default's portable
-routing policy, `claude-agent-acp/opus[1m]` coordinator at medium effort, and Russian
+routing policy plus the owner-requested 2026-10-07 Haiku 5.5 addition, `claude-agent-acp/opus[1m]` coordinator at medium effort, and Russian
 message language. Existing owner settings are never replaced. Account/connection
 identities and machine-specific MCP definitions/paths are not cloned; see
 [the install snapshot boundary](docs/configuration.md#fresh-install-owner-default-snapshot).
@@ -50,6 +50,24 @@ after committed deletion and reports reclaimed bytes (or an honest vacuum failur
 Invalid input and busy-store races are refused. `/clear` is host-reserved, not a Cortex alias.
 See [retention maintenance](docs/acp/packaging-and-onboarding.md#retention-maintenance)
 for safety details and the owner-run CLI alternative.
+
+Claude ACP's current fallback is 0.87.0, with an exact source-backed
+instruction-delivery registration and updated compaction observation. Its
+side-by-side SDK 0.3.293 refresh resolves `haiku` to Haiku 5.5 and
+advertises low/medium/high/xhigh/max. The default preset and production
+`default` profile enable it at Luna policy parity; old Haiku remains denied
+by exact ID. No-prompt ACP controls accepted high/xhigh/max. See [adapter support and limits](docs/acp/claude-agent-acp-adapter.md#current-support-0870-2026-10-07).
+A Cortex runtime older than this checkout repoints Claude to the upstream SDK
+0.3.287 install at each start, where `haiku` is Haiku 4.5; the owner's production
+runtime was in that state on 2026-10-08. The catalog refresh a new session starts
+now runs in its own process, so Paseo's Refresh also saves the Claude catalog; see
+[catalog refresh lifetime](docs/acp/claude-agent-acp-adapter.md#catalog-refresh-lifetime-and-deployed-runtimes).
+This is no-paid evidence, not live model or release qualification.
+
+Codex ACP's current fallback and exact supported release is 2.1.1.
+The owner already had it installed; checkout discovery now selects it instead
+of 2.0.1. No-paid bundle and CLI/jail checks passed; the production Paseo plugin
+was not refreshed. See [Codex support and limits](docs/acp/codex-acp-adapter.md#current-support-211-2026-10-07).
 
 ## What Cortex is
 
@@ -82,9 +100,12 @@ The objective property description exposes its Unicode code-point limit even
 when a host renders only descriptions; rewrite overlong text without dropping
 requirements. Rejection does not accept a plan or start workers.
 
-For `result_submit`, `report` is required in exactly one form: inline
-`report: {title, markdown}`, or `report: {report_ref}` naming the `report_id`
-returned by this worker's `write_report`. The advertised schema
+For `result_submit`, `report` is required and is one plain string, never an
+object: the complete report Markdown (optional `report_title`; otherwise its
+first heading is the title), or only the `report_id` returned by this worker's
+`write_report`. Claude engines emit a top-level string verbatim but hand-escape
+object values as JSON, which broke long nested reports before Cortex received
+the call. The advertised schema
 specifies check fields and receipt sources; rejected result submissions attempt to retain
 only a code and safe field path for diagnostics, not the submitted content.
 Review workers must send a verdict (`APPROVE`, `REQUEST_CHANGES` or `BLOCK`;

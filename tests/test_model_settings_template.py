@@ -22,14 +22,15 @@ def test_public_asset_preserves_exact_baseline_tiers_efforts_and_coordinator():
     assert template["coordinator"] == {"engine": "claude-agent-acp", "model": "opus[1m]",
                                        "parameters": {"thought_level": "medium"}}
     assert template["language"] == "ru"
-    # Complete portable production default snapshot, saved 2026-10-06 08:41 UTC.
+    # Complete portable production default snapshot, saved 2026-10-07 UTC.
     canonical = json.dumps(template, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
-    assert hashlib.sha256(canonical.encode()).hexdigest() == "7c157e97370a58cd5f0cd207d42cbab3b3701954290da38b37086258409e5f40"
+    assert hashlib.sha256(canonical.encode()).hexdigest() == "c0487f1ad7a6376350167b067ce163b7d685374e6428609238d59a7a56afb339"
     expected = {
         ("claude-agent-acp", "default"): ("deep",),
         ("claude-agent-acp", "opus[1m]"): ("flagship", "deep"),
         ("claude-agent-acp", "claude-fable-5-1[1m]"): ("flagship",),
         ("claude-agent-acp", "claude-sonnet-5"): ("standard",),
+        ("claude-agent-acp", "haiku"): ("light",),
         ("codex-acp", "gpt-6.1-sol"): ("deep", "standard"),
         ("codex-acp", "gpt-6-astra"): ("flagship",),
         ("codex-acp", "gpt-6-luna"): ("light",),
@@ -44,6 +45,7 @@ def test_public_asset_preserves_exact_baseline_tiers_efforts_and_coordinator():
                 "opus[1m]": ("medium", "high", "xhigh"),
                 "claude-fable-5-1[1m]": ("low", "medium", "high"),
                 "claude-sonnet-5": ("medium", "high", "xhigh"),
+                "haiku": ("high", "xhigh", "max"),
                 "gpt-6.1-sol": ("medium", "high", "xhigh"),
                 "gpt-6-astra": ("low", "medium", "high"),
                 "gpt-6-luna": ("high", "xhigh", "max"),
@@ -54,10 +56,13 @@ def test_public_asset_preserves_exact_baseline_tiers_efforts_and_coordinator():
     assert routing["models"]["opencode"]["tiers"]["byteplus-plan/glm-5.2"] == "deep"
     assert routing["providers"] == ["claude-agent-acp", "codex-acp"]
     assert routing["auto_allow"] == ["opencode/byteplus-plan/glm-5.3-flash"]
-    assert routing["deny"] == ["gpt-5.5", "haiku", "claude-agent-acp/claude-sonnet-4-6",
+    assert routing["deny"] == ["gpt-5.5", "claude-agent-acp/claude-haiku-4-5-20251001", "claude-agent-acp/claude-sonnet-4-6",
         "claude-agent-acp/claude-opus-4-6", "claude-agent-acp/claude-opus-4-7", "claude-agent-acp/claude-opus-4-8",
         "claude-agent-acp/claude-opus-5[1m]", "claude-agent-acp/claude-fable-5", "codex-acp/gpt-5.6-luna",
         "codex-acp/gpt-5.6-sol", "codex-acp/gpt-5.6-terra", "codex-acp/gpt-6-sol"]
+    assert routing["models"]["claude-agent-acp"]["auto"] == routing["enabled"]["claude-agent-acp"]
+    assert routing["models"]["claude-agent-acp"]["policy"]["haiku"] == routing["models"]["codex-acp"]["policy"]["gpt-6-luna"]
+    assert {"window": "seven_day_haiku", "models": ["haiku"]} in routing["quota_windows"]["claude-agent-acp"]
     assert routing["models"]["codex-acp"]["policy"]["gpt-6-astra"]["request_names"] == ["astra", "астр"]
     assert routing["models"]["claude-agent-acp"]["policy"]["claude-fable-5-1[1m]"]["request_names"] == ["fable", "фейбл", "фэйбл"]
     assert all(v == "configured" for (e, m) in expected for v in model_policy.policy_for(e, m, routing).attribute_sources.values())

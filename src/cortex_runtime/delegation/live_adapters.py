@@ -58,8 +58,8 @@ from typing import Callable, Mapping
 # falling through to a wildcard entry. Any other/unknown engine name still
 # resolves to ``"*"`` -- never a guessed/interpolated version.
 _PINNED_ENGINE_VERSION: dict[str, str] = {
-    "codex-acp": "1.12.0",
-    "claude-agent-acp": "0.78.0",
+    "codex-acp": "2.1.1",
+    "claude-agent-acp": "0.87.0",
     # Placeholder only when a connection is not available to probe; all 2.x
     # versions are accepted, and actual sessions use their binary's version.
     "opencode": "2.0.0",
@@ -102,19 +102,16 @@ def _pinned_version_for(engine: str, record=None) -> str:
     that actually runs -- Cortex can have more than one qualified codex-acp
     version installed (see ``connections.discovery
     .QUALIFIED_ADAPTER_VERSIONS``). An installed version with no exact
-    registration keeps resolving to the engine's pinned version, exactly as
-    before this lookup existed: claude-agent-acp is installed at 0.81.0 while
-    only 0.78.0 is registered, and resolving the installed version made every
-    Claude worker refuse its first prompt with an UNSUPPORTED delivery
-    (live, 2026-09-22), while the coordinator, resolved without a record,
-    kept working.
+    registration keeps resolving to the engine's pinned version, except for
+    Claude: its actual installed version must be named even when unsupported,
+    never borrowing another release's instruction-delivery qualification.
     """
     if record is not None:
         installed = _installed_version_for(record)
         if installed:
             from ..engine.instruction_delivery_registry import has_exact_registration
 
-            if has_exact_registration(engine, installed):
+            if engine == "claude-agent-acp" or has_exact_registration(engine, installed):
                 return installed
     return _PINNED_ENGINE_VERSION.get(engine, "*")
 
@@ -299,7 +296,7 @@ def _session_new_meta_for(
     if role not in {"coordinator", "worker"}:
         raise ValueError("role must be 'coordinator' or 'worker'")
     if not instructions:
-        if engine == "claude-agent-acp" and version == "0.78.0":
+        if engine == "claude-agent-acp" and version in {"0.78.0", "0.87.0"}:
             from ..engine.claude_adapter_acp import claude_native_subagent_restriction_meta
 
             return claude_native_subagent_restriction_meta(role=role, effort=effort)
@@ -315,7 +312,7 @@ def _session_new_meta_for(
         "enabled" if unified_base_prompt else "disabled",
     )
 
-    if engine == "claude-agent-acp" and version == "0.78.0":
+    if engine == "claude-agent-acp" and version in {"0.78.0", "0.87.0"}:
         rules = project_rules_for_claude(project_root)
         if rules:
             instructions = instructions + "\n\n" + rules
@@ -358,7 +355,7 @@ def _session_new_meta_for(
                 access_class=prompt_access_class(role, role_id), native_tools=True)
         meta = {**meta, **build_codex_session_new_meta(
             instructions, base_instructions=base_instructions)}
-    if engine == "codex-acp" and version == "1.12.0" and meta is not None:
+    if engine == "codex-acp" and meta is not None:
         return {**meta, "cortexRole": role}
     return meta
 
@@ -498,7 +495,7 @@ class ConfigurationServiceSnapshotSource:
         return dict(
             engine=engine,
             # The exact evidence-qualified version per engine (see
-            # engine.instruction_delivery_registry's ("codex-acp","1.12.0")
+            # engine.instruction_delivery_registry's ("codex-acp","2.1.1")
             # pin, T013); configuration_revisions does not itself track a
             # downstream engine version column, so this mirrors the one
             # pinned mapping instead of inventing a second source of truth.

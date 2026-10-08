@@ -1,4 +1,136 @@
-# claude-agent-acp outgoing adapter (T026)
+# claude-agent-acp outgoing adapter
+
+## Current support: 0.87.0 (2026-10-07)
+
+The current fallback and exact instruction-delivery registration are
+`@agentclientprotocol/claude-agent-acp` **0.87.0**. The 0.78.0 registration
+is retained independently; unregistered installed Claude versions are refused
+rather than borrowing the fallback's qualification. The owner's engine update
+path is `connections.engine_update.update_engine("claude-agent-acp")`;
+it installs beside existing versions under Cortex's owned engine directory,
+not the production Paseo installation. An initial invocation on 2026-10-07 found the upstream 0.87.0 install current.
+A subsequent no-paid investigation found that its exact SDK dependency
+0.3.287 predates Haiku 5.5. Cortex now installs a separately inspected SDK
+**0.3.293** override at `0.87.0+sdk.0.3.293`, beside the unchanged upstream
+install. Discovery prefers this build while reporting the real adapter version
+0.87.0. The updater pins this exact SDK for this exact adapter, not SDK latest;
+future adapter versions do not inherit the override.
+
+Evidence was read from the [published npm tarball](https://registry.npmjs.org/@agentclientprotocol/claude-agent-acp/-/claude-agent-acp-0.87.0.tgz)
+and the installed package, not inferred from a version-string change:
+
+| Contract | 0.87.0 source |
+| --- | --- |
+| ACP v1; SDK dependencies Claude 0.3.287, ACP 1.7.0 | `package.json`; `dist/acp-agent.js:1342` |
+| String override / preset-append system instructions | `dist/acp-agent.js:7047-7063` |
+| SDK options forwarded; separate prompt and options into query | `dist/acp-agent.js:7079,7177-7181,7223,7337-7340` |
+| Load/resume preserve supplied session metadata | `dist/acp-agent.js:1442,6928` |
+| SDK turns system text into separate initialize-control fields | SDK `sdk.mjs`, `BR`, `systemPrompt` / `appendSystemPrompt` |
+| Exact allowlisted model IDs retained; labels versioned from independent SDK metadata | `dist/session-model.js:272-325`, `versionedModelDisplayName` |
+| Effort choices come from the current SDK model; recommended presentation can omit `default` | `dist/session-effort.js:buildEffortConfigOption` |
+| Non-AIR reactive compaction marker | `dist/tool-calls/reporters/compaction.js`, `_meta.claudeCode.toolName="compact"` |
+
+The [upstream 0.78→0.87 changelog](https://raw.githubusercontent.com/agentclientprotocol/claude-agent-acp/v0.87.0/CHANGELOG.md)
+also records SDK updates, resume-query recreation, bypass-policy and
+cancellation fixes, AIR tool-contract changes, optional session notices, and
+restored main-thread agent selection. Cortex continues using ACP v1 and does
+not expose the agent picker as runtime delegation. Native subagent/async tools
+remain disallowed. Model metadata on newer usage updates does not bind a
+complete model/effort/mode execution identity; Cortex's version-neutral
+execution-verification status remains unavailable.
+
+The instructions and native-tool restriction payloads are unchanged:
+`strictMcpConfig`, empty plugins, disabled hooks, `disallowedTools`, and
+unified string/preset-append system prompts still follow their inspected SDK
+paths. Static qualification does **not** establish a paid model turn, effective
+tool enforcement, rendered GUI behavior, or release readiness.
+
+Unlike 0.78.0, 0.87.0 reserves detailed compaction metadata for AIR clients.
+Cortex does not advertise AIR or standardized compaction support. It now
+recognizes the explicit Claude `toolName="compact"` marker on tool-call start
+and completion, retaining one correlated evidence identity, rather than
+inferring compaction from the display title. The tier remains reactive
+`automatic`, never a pre-compaction hook.
+
+### Haiku 5.5 catalog and effort evidence
+
+No-prompt initialization on 2026-10-07 distinguished two native runtimes:
+
+| Native runtime | SDK catalog value | Resolved model / display name | Efforts |
+| --- | --- | --- | --- |
+| Upstream SDK 0.3.287 / CLI 2.1.287 | `haiku` | `claude-haiku-4-5-20251001` / Haiku 4.5 | No effort support fields |
+| Refreshed SDK 0.3.293 / CLI 2.1.293 | `haiku` | `claude-haiku-5-5` / Haiku 5.5 | low, medium, high, xhigh, max |
+| Refreshed SDK 0.3.293 / CLI 2.1.293 | `claude-haiku-4-5-20251001` | Same exact ID / Haiku 4.5 | No effort support fields |
+
+The owner's independently installed CLI 2.1.293 returned the same two SDK
+rows before installation. Its bundled model table explicitly records
+`claude-haiku-5-5`, Haiku 5.5 and effort/max/xhigh capabilities. The npm
+adapter's latest remained 0.87.0 while SDK latest/next was 0.3.293; updating
+only the adapter version could not reveal the new model.
+
+Using the installed refreshed build, ACP `session/new` advertised `haiku`
+as **Haiku 5.5**. With no prompt sent, `session/set_config_option` selected
+that alias and independently accepted high, xhigh and max with exact returned
+current values. ACP exposed default/low/medium/high/xhigh/max effort choices.
+The SDK lists old Haiku separately; the observed ACP picker only exposed
+the new alias. This is configuration/control evidence, not inference from
+the generic unknown-model effort fallback and not a paid inference result.
+
+The public preset and the owner's active `default` profile enable `haiku`
+with the same light tier, testing stretch, high→xhigh→max ladder, maximum,
+preferences and request-name policy as `codex-acp/gpt-6-luna`.
+`seven_day_haiku` names that exact alias. Only the old exact
+`claude-agent-acp/claude-haiku-4-5-20251001` is denied; Cortex deny matching
+does not infer families. Existing owner settings are not silently replaced
+by installation; this production adoption was explicitly authorized and
+backed up. New sessions must use the refreshed install, not the original SDK.
+
+SDK 0.3.293's `sdk.mjs` `fT` still separates system/preset-append
+instructions from conversation input, and its initialize control payload
+carries `initConfig.systemPrompt`/`appendSystemPrompt`. CLI argument
+construction still forwards strict MCP and disallowed tools. The adapter
+source and compaction marker are unchanged. These independently inspected
+paths extend the exact 0.87.0 registration; they do not qualify unknown SDK
+versions or prove native-tool enforcement.
+
+Native Claude login was checked without printing identity or credentials:
+logged in, `claude.ai`, first-party provider. No prompt or paid model call
+was sent; all owned discovery processes exited. A new owner-requested live
+check is still required for turn-level qualification; paid live check not
+requested by the owner.
+
+### Catalog refresh lifetime and deployed runtimes
+
+A prompt-free Claude refresh observes every model's own effort selector with
+one `session/set_config_option` each; on 2026-10-08 eleven models took about
+12 s (11.5 s of it in that observation). Paseo reads models from a Cortex ACP
+process it stops about a second after `session/new`. While the refresh started
+after `session/new` ran on a thread of that process, it was killed every time:
+the isolated dev Paseo's Refresh saved Codex and OpenCode catalogs but never a
+Claude one. It now runs in its own process session
+(`src/cortex_runtime/catalog/detached_refresh.py`, one refresh per connection
+at a time) and saves its snapshot after the requesting process has exited.
+
+The picker also shows only models the effective routing enables. On the same
+date the dev profile's `routing.json` still carried the pre-Haiku policy (bare
+`haiku` denied, not enabled), so a catalog that already held Haiku 5.5 still
+produced the six-model picker. It was updated to the current preset through
+`management.update_routing` after a private backup.
+
+A Cortex runtime deployed before the `<version>+sdk.<sdk>` build-name ordering
+in `connections/discovery.py` sorts `0.87.0+sdk.0.3.293` below `0.87.0`. Each
+start of such a runtime repoints the Claude connection back to the upstream
+install, whose SDK 0.3.287 resolves `haiku` to Haiku 4.5 with no effort
+choices, even though routing names `haiku` at Luna parity. The owner's
+production Paseo runtime was in that state on 2026-10-08; production sessions
+get Haiku 5.5 only after the current runtime is deployed there.
+
+## Historical 0.78.0 implementation evidence
+
+The sections below retain the original T026/0.78.0 evidence and historical
+qualification limits. Their exact-version-only statements describe that
+historical release, not the current 0.87.0 registration above.
+
 
 Cortex is an outgoing ACP v1 client of a pinned, operator-verified
 `@agentclientprotocol/claude-agent-acp` install (Node.js entry point over
