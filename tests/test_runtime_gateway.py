@@ -27,7 +27,7 @@ def context(tmp_path):
 def test_coordinator_can_inspect_but_cannot_modify_or_run(context):
     store,ch,_,root=context
     (root/'hello').write_text('hello')
-    assert dispatch(store,ch,'project_read',dict(path='hello'))['content']=='hello'
+    assert dispatch(store,ch,'project_read',dict(path='hello',line_numbers=False))['content']=='hello'
     for name,args,error in [
         ('project_write',dict(path='hello',content='bad',expected_sha256='absent',request_key='a'),'gateway_scope_denied'),
         ('command_run',dict(argv=['true'],request_key='b'),'gateway_command_denied'),
@@ -306,6 +306,7 @@ def test_keyless_write_replays_before_cas_and_different_content_is_a_new_action(
     assert dispatch(store,worker,'project_write',args) == first
     with pytest.raises(StoreError,match='gateway_write_conflict'):
         dispatch(store,worker,'project_write',dict(args,content='different'))
+    dispatch(store,worker,'project_read',dict(path='new'))
     second=dispatch(store,worker,'project_write',dict(args,content='second',expected_sha256=first['sha256']))
     assert second['sha256'] != first['sha256'] and (root/'new').read_text() == 'second'
     with store.connection() as db:
@@ -366,13 +367,13 @@ def test_read_only_specialists_hold_no_write_grant(tmp_path,role):
         store,worker,root=_role_worker(tmp_path,role)
     (root/'hello').write_text('hello')
     outside=root.parent/(role+'-'+root.name)
-    assert dispatch(store,worker,'project_read',dict(path='hello'))['content']=='hello'
+    assert dispatch(store,worker,'project_read',dict(path='hello',line_numbers=False))['content']=='hello'
     for name,args in [('project_write',dict(path='hello',content='bad',expected_sha256='absent',request_key='w')),
                       ('outside_write',dict(path=str(outside),content='x',request_key='o'))]:
         with pytest.raises(StoreError,match='gateway_scope_denied'): dispatch(store,worker,name,args)
     assert (root/'hello').read_text()=='hello' and not outside.exists()
     names={t['name'] for t in mcp_tools.tool_definitions('worker',role_id='worker-'+role,stage='execution')}
-    assert not names & {'project_write','project_mkdir','project_delete','project_skill_link','outside_write','outside_command'}
+    assert not names & {'project_write','project_edit','project_mkdir','project_delete','project_skill_link','outside_write','outside_command'}
     assert {'project_read','command_run'} <= names
 
     if role == 'build-verification':
@@ -492,7 +493,7 @@ def test_keyless_refusal_after_possible_effect_remains_pending(tmp_path,monkeypa
     import json
     from cortex_runtime.orchestration import gateway
     store,worker,root=_role_worker(tmp_path,'backend-dev')
-    def partial(root,args,effects):
+    def partial(root,args,effects,**kwargs):
         effects['possible']=True
         (Path(root)/args['path']).write_text('effect')
         raise StoreError('storage_error','cause','failure')

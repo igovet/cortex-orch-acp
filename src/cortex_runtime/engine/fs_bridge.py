@@ -272,7 +272,10 @@ class FsBridge:
                 os.fchmod(tmp_fd, mode)
                 with os.fdopen(tmp_fd, "wb") as handle:
                     handle.write(data)
+                    handle.flush()
+                    os.fsync(handle.fileno())
                 os.replace(tmp_name, basename, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+                os.fsync(dir_fd)
             except OSError as exc:
                 try:
                     os.unlink(tmp_name, dir_fd=dir_fd)

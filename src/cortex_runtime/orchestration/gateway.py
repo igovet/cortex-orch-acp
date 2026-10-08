@@ -71,12 +71,23 @@ SCHEMAS = {
     'project_mkdir': obj(dict(path=text('Project-relative directory; missing parent directories are created too, and an existing directory returns created: false. '+WORK_AREA,512),
                               request_key=text(AUTO_KEY,128)), required=['path']),
     'project_read': obj(dict(path=text('Project-relative regular file or directory; \'.\' is the project root. Never absolute, never containing \'..\' or a backslash, and never inside .cortex or .git. Under .claude/.codex only the exact project notes session-history.md and lessons-learned.md are allowed; create missing notes with project_write. Missing paths return exists: false, sha256: "absent" (pass directly to project_write.expected_sha256), and parent_exists (informational: project_write creates missing parent directories). UTF-8 files return text and SHA-256; a supported image (PNG, JPEG, GIF or WEBP, detected by content, not extension) returns an MCP image content block plus sha256/size_bytes/mime/path as text, up to a 10 MiB cap (gateway_image_too_large above it); any other non-UTF-8 file returns only SHA-256, byte size and binary: true.',512),
-                             offset=integer('UTF-8 character offset for file reads.',1000000000),
-                             limit=integer('Maximum characters or directory entries; response supplies the next offset.',65536)), required=['path']),
+                             offset=dict(type='integer',minimum=1,maximum=1000000000,description='1-based line offset for text or 1-based entry offset for directories; default 1. Never a character offset.'),
+                             limit=dict(type='integer',minimum=1,maximum=2000,description='Maximum lines or directory entries; default and maximum 2000. The inline byte budget may return fewer; follow next_offset. Lines longer than 2000 characters, or a single line exceeding the inline budget, are explicitly truncated and never count toward complete read coverage.'),
+                             line_numbers=dict(type='boolean',description='Default true: prefix text lines with their 1-based number and a tab. Set false for exact raw text. Never include number prefixes in project_edit strings or project_write content.')), required=['path']),
     'project_write': obj(dict(path=text('Project-relative file; missing parent directories are created (never through a symlink or file); symlinks are rejected. '+WORK_AREA,512),
-                              content=text('Complete new UTF-8 file content. Root .gitignore writes retain a final /.cortex/ rule; returned hash describes the protected bytes.',1000000),
-                              expected_sha256=text('Lowercase hex SHA-256 of the file as it is now (project_read returns it as sha256), or the literal string "absent" returned by project_read for a missing path; pass that value directly to create a new file. A mismatch refuses the write and changes nothing.',64),
+                              content=text('Complete replacement UTF-8 content, never a page or append. Existing files require complete, non-truncated project_read coverage of the current bytes on this same channel. Use project_edit for partial changes or appending. Root .gitignore writes retain a final /.cortex/ rule; returned hash describes the protected bytes.',1000000),
+                              expected_sha256=text('Current SHA-256 from project_read.full_content_sha256 after complete read coverage on this channel, or "absent" returned by project_read for a missing path; pass that value directly for creation. A partial read sha256 is only identity and cannot authorize whole-file overwrite; neither a supplied hash nor a drastic shrink bypasses the complete-read guard. A mismatch changes nothing.',64),
                               request_key=text(AUTO_KEY,128)), required=['path','content','expected_sha256']),
+    'project_edit': obj(dict(
+        path=text('Existing project-relative UTF-8 regular file. '+WORK_AREA+' Requires a prior text read on this channel and an unchanged SHA-256; a partial read suffices. Refuses links and binary files.',512),
+        edits=array(obj(dict(
+            old_string=text('Exact nonempty text to replace, including whitespace but excluding read line-number prefixes; must occur once unless replace_all is true.',1000000),
+            new_string=dict(type='string',minLength=0,maxLength=1000000,description='Replacement text, possibly empty to remove the match; must differ from old_string. To append, match a unique tail anchor and repeat it followed by the added text.'),
+            replace_all=dict(type='boolean',description='Default false: require exactly one match. True replaces all exact occurrences, never regex or fuzzy matching.')),
+            required=['old_string','new_string']),
+            'Ordered exact replacements, each with old_string, new_string and optional replace_all. Validated against the evolving content and committed atomically only if every edit succeeds. To append, replace a unique tail anchor with itself plus the appended text.',
+            minimum=1,maximum=64),
+        request_key=text(AUTO_KEY,128)),required=['path','edits']),
     'project_skill_link': obj(dict(action=dict(type='string',enum=['link','unlink'],description='link: make .claude/skills/<name> the relative symlink ../../.agents/skills/<name>, creating .claude/skills when absent; an exact existing link is left unchanged. unlink: remove only that exact link (the skill in .agents/skills stays).'),
                                    name=text('Skill directory name under .agents/skills: 1-64 lowercase letters, digits and single hyphens. For link, .agents/skills/<name> must be a real directory holding a regular SKILL.md.',64),
                                    replace_symlink_target=text('link only, and only to replace an existing symlink at .claude/skills/<name> with a different target: its exact current link text (a refusal names it). The user confirms the replacement. Omit otherwise; a file or directory there is never replaced.',4096),
@@ -247,6 +258,20 @@ def _detect_image_mime(data):
     return None
 
 
+def _read_file_snapshot(root, path):
+    """Internal exact bytes/digest snapshot, never a public display page."""
+    with _parent(root,path) as (parent,leaf):
+        fd = os.open(leaf,os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,dir_fd=parent)
+    try:
+        data, digest = _read_regular_file(fd)
+    finally:
+        os.close(fd)
+    try:
+        return dict(content=data.decode('utf-8'), sha256=digest, size_bytes=len(data))
+    except UnicodeDecodeError:
+        return dict(binary=True, sha256=digest, size_bytes=len(data))
+
+
 def _read(root, args):
     parts = _parts(args['path'])
     if not parts:
@@ -256,10 +281,10 @@ def _read(root, args):
             fd = os.open(leaf,os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,dir_fd=parent)
     try:
         info = os.fstat(fd)
-        offset, limit = args.get('offset',0), max(1,args.get('limit',16000))
+        from .project_files import directory_page, text_page
         if stat.S_ISDIR(info.st_mode):
-            entries = sorted(n for n in os.listdir(fd) if n not in PRIVATE)
-            return dict(entries=entries[offset:offset+limit],next_offset=offset+limit if offset+limit<len(entries) else None)
+            entries = sorted(n.encode('utf-8','surrogateescape').decode('utf-8','replace') for n in os.listdir(fd) if n not in PRIVATE)
+            return directory_page(entries, args)
         data, digest = _read_regular_file(fd)
         mime = _detect_image_mime(data)
         if mime is not None:
@@ -274,13 +299,12 @@ def _read(root, args):
             body = data.decode('utf-8')
         except UnicodeDecodeError:
             return dict(sha256=digest,size_bytes=len(data),binary=True)
-        return dict(content=body[offset:offset+limit],sha256=digest,
-                    total_characters=len(body),next_offset=offset+limit if offset+limit<len(body) else None)
+        return text_page(body, digest, args, len(data))
     finally:
         os.close(fd)
 
 
-def _write(root,args,effects=None):
+def _write(root,args,effects=None, *, read_state=None, require_complete_read=False):
     from .ignore_guard import protected_content
     content = protected_content(args['content']) if _parts(args['path']) == ('.gitignore',) else args['content']
     data = content.encode('utf-8')
@@ -294,6 +318,7 @@ def _write(root,args,effects=None):
             effects['possible']=True
     with _parent(root,args['path'],create_parents=create_parent) as (parent,leaf):
         mode = 0o600
+        previous = b''
         try:
             fd = os.open(leaf,os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,dir_fd=parent)
         except FileNotFoundError:
@@ -304,9 +329,12 @@ def _write(root,args,effects=None):
                 if not stat.S_ISREG(info.st_mode) or info.st_nlink!=1:
                     raise StoreError('gateway_regular_file_required')
                 mode=stat.S_IMODE(info.st_mode) & 0o777
-                observed=hashlib.file_digest(stream,'sha256').hexdigest()
+                previous, observed = _read_regular_file(stream.fileno())
         if observed != args['expected_sha256']:
             raise StoreError('gateway_write_conflict')
+        if observed != 'absent' and require_complete_read:
+            from .project_files import require_read
+            require_read(read_state, observed, complete=True)
         temporary='.cortex-write-'+uuid.uuid4().hex
         if effects is not None:
             effects['possible']=True
@@ -319,7 +347,47 @@ def _write(root,args,effects=None):
         finally:
             try: os.unlink(temporary,dir_fd=parent)
             except FileNotFoundError: pass
-    return dict(sha256=hashlib.sha256(data).hexdigest(),byte_count=len(data))
+    return dict(sha256=hashlib.sha256(data).hexdigest(),byte_count=len(data),
+                previous_size_bytes=len(previous), size_bytes=len(data),
+                previous_lines=len(previous.decode('utf-8', errors='replace').splitlines()),
+                new_lines=len(content.splitlines()),
+                drastic_shrink=bool(previous and len(data) < len(previous) / 2))
+
+
+def _edit(root,args,state,effects):
+    from .project_files import require_read, apply_edits, compact_diff
+    with _parent(root,args['path']) as (parent,leaf):
+        fd = os.open(leaf,os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,dir_fd=parent)
+    try:
+        data, digest = _read_regular_file(fd)
+    finally:
+        os.close(fd)
+    require_read(state, digest, complete=False)
+    try:
+        before = data.decode('utf-8')
+    except UnicodeDecodeError:
+        raise StoreError('gateway_text_required', 'path',
+                         correction='project_edit requires a UTF-8 text file.') from None
+    from .ignore_guard import protected_content
+    after = apply_edits(before, args['edits'])
+    if _parts(args['path']) == ('.gitignore',):
+        after = protected_content(after)
+    if len(after.encode('utf-8')) > 16000000:
+        raise StoreError('gateway_file_too_large')
+    # Bound presentation work before the effect, using the exact protected bytes.
+    presentation = compact_diff(before,after,args['path'])
+    # All replacements are validated in memory before one durable atomic write.
+    result = _write(root,dict(path=args['path'],content=after,expected_sha256=digest),effects)
+    result.update(presentation)
+    result['edits_applied'] = len(args['edits'])
+    from .project_files import inline_size, MAX_INLINE_BYTES
+    if inline_size(result) > MAX_INLINE_BYTES-2048:
+        result.pop('oldText', None)
+        result.pop('newText', None)
+    while inline_size(result) > MAX_INLINE_BYTES-2048:
+        result['diff'] = result['diff'][:len(result['diff'])//2]
+        result['diff_truncated'] = True
+    return result
 
 
 def _command(store,channel,root,scopes,args,ref,owner,effects):
@@ -451,7 +519,7 @@ def dispatch(store,channel,operation,args):
     validate(SCHEMAS[operation],args)
     digest=hashlib.sha256(encoded(args).encode()).hexdigest()
     key=args.get('request_key')
-    auto_key=key is None and operation in {'project_write','project_mkdir','project_delete'}
+    auto_key=key is None and operation in {'project_write','project_edit','project_mkdir','project_delete'}
     if auto_key:
         key='auto:'+hashlib.sha256(encoded(dict(operation=operation, payload=args)).encode()).hexdigest()
     with store.connection() as db:
@@ -466,7 +534,12 @@ def dispatch(store,channel,operation,args):
             # and retained reports, never from the project's source.
             raise StoreError('gateway_read_denied')
         if operation=='project_read':
-            try: return _read(root,args)
+            try:
+                result = _read(root,args)
+                from .project_files import record_read
+                record_read(db,channel,root,args,result)
+                db.commit()
+                return result
             except FileNotFoundError:
                 # _read validated the path and traversed it without following links.
                 # Observe the parent with the same no-follow policy, never Path.exists().
@@ -485,7 +558,7 @@ def dispatch(store,channel,operation,args):
         from .worker_waits import check_mutation
         if operation != 'project_git':
             check_mutation(db, channel)
-        if operation in {'project_write','project_mkdir','project_delete'}:
+        if operation in {'project_write','project_edit','project_mkdir','project_delete'}:
             # A private path is refused before anything else (a deletion
             # there once asked the user to confirm what was then refused).
             _parts(args['path'])
@@ -600,14 +673,26 @@ def dispatch(store,channel,operation,args):
                                                  'created. Choose another directory path.')
                             # Already a real directory: the requested state holds.
                             result=dict(created=False)
-                elif operation=='project_write':
-                    result=_write(root,args,effects)
+                elif operation in {'project_write','project_edit'}:
+                    # Recheck deny-write policy at the effect boundary, not just dispatch.
+                    if not _matches(args['path'],scopes) or _matches(args['path'],write_denials(db,channel.task_id)):
+                        raise StoreError('gateway_scope_denied')
+                    from .project_files import read_state
+                    state = read_state(db,channel,root,args['path'])
+                    if operation == 'project_write':
+                        result=_write(root,args,effects,read_state=state,require_complete_read=True)
+                    else:
+                        result=_edit(root,args,state,effects)
+                    # Invalidate read coverage after every mutation; the result is not a Read.
+                    db.execute('DELETE FROM runtime_requests WHERE task_id=? AND actor=? AND operation=? '
+                               "AND json_extract(result_json,'$.read_state.path')=?",
+                               (channel.task_id,channel.channel_id,'project_read_state',args['path']))
                 elif operation=='project_skill_link':
                     result=skill_links.apply(root,args,effects)
                 else:
                     result=write_draft(store,db,channel,args['draft_id'],args['content'])
                 db.commit()
-            if operation in {'project_write','project_mkdir'}:
+            if operation in {'project_write','project_edit','project_mkdir'}:
                 try:
                     from .skill_gate import required_before_result_submit
                     with store.connection() as db:
@@ -616,7 +701,8 @@ def dispatch(store,channel,operation,args):
                                         'WHERE n.task_id=? AND p.attempt_id=?',
                                         (channel.task_id,channel.attempt_id)).fetchone()
                     hints=required_before_result_submit(store,channel,stage=node['stage'],
-                                                       role_ids=(node['role'],role['role_id'] if role else None), advisory=True)
+                                                       role_ids=(node['role'],role['role_id'] if role else None), advisory=True,
+                                                       successful_paths=(args['path'],))
                 except Exception:
                     # The write already committed. An advisory observation failure
                     # must never pretend the mutation failed or invite a new write.
@@ -655,13 +741,16 @@ def dispatch(store,channel,operation,args):
             # The command may have run: an uncertain outcome, never "nothing changed".
             raise storage_failure(error) from error
         raise StoreError('gateway_io_failure', 'operation', operation) from error
+    if operation in {'project_write','project_edit'}:
+        from .project_files import bound_mutation_result
+        bound_mutation_result(result)
     with store.connection() as db:
         db.execute('BEGIN IMMEDIATE')
         db.execute('UPDATE runtime_requests SET result_json=? WHERE task_id=? AND actor=? AND request_key=?',
                     (encoded(dict(complete=True,receipt=result)),channel.task_id,channel.channel_id,key))
         event(db,channel.task_id,'TOOL_COMPLETED',dict(operation=operation,tool_call_ref=ref,result=result,
                                                **({'path':args['path']} if operation in
-                                                  {'project_write','project_delete','project_mkdir'} else {})),channel.channel_id)
+                                                  {'project_write','project_edit','project_delete','project_mkdir'} else {})),channel.channel_id)
         db.commit()
     return result
 

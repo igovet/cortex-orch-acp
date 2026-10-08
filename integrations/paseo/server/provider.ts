@@ -706,6 +706,15 @@ export function typedAnswer(
   return actions.some((action) => action.label === answer) ? undefined : answer;
 }
 
+/** The chat bubble that echoes an answered Cortex question: the exact
+ * question text (plus its batch topic label when the question was part of
+ * a batch) paired with the exact answer, so the timeline shows what was
+ * asked next to what was picked -- not the answer alone. */
+export function formatQuestionAnswer(question: string, answer: string, topic?: string): string {
+  const line = `Question: ${question.trim()} → Answer: ${answer}`;
+  return topic ? `${topic}: ${line}` : line;
+}
+
 /** Paseo offers prompt.steer and the stock ACP bridge lacks it. */
 export function emulatesSteer(offered: readonly string[], supported: readonly string[]): boolean {
   return offered.includes("prompt.steer") && !supported.includes("prompt.steer");
@@ -918,6 +927,7 @@ export function wrapCortexConnection(
     Array<{ id: string; label: string }>
   >();
   const questionIds = new Map<string, string>();
+  const questionTexts = new Map<string, string>();
   // Session/question-bound forms retain exact submission receipts through retries.
   const batches = new Map<string, QuestionFormState>();
   const batchPermissions = new Map<string, string>();
@@ -955,6 +965,7 @@ export function wrapCortexConnection(
   async function sendTypedAnswer(
     input: Extract<Parameters<typeof connection.send>[0], { type: "session.permission" }>,
     questionId: string,
+    questionText: string,
     answer: string,
   ) {
     const requestId = `${ANSWER_REQUEST_PREFIX}${randomUUID()}`;
@@ -969,7 +980,7 @@ export function wrapCortexConnection(
     listeners.forEach((listener) => listener({
       type: "timeline.item",
       sessionId: input.sessionId,
-      item: { type: "user_message", id: `cortex-question-answer:${questionId}`, text: answer },
+      item: { type: "user_message", id: `cortex-question-answer:${questionId}`, text: formatQuestionAnswer(questionText, answer) },
     } as ProviderEvent));
     await connection.send({ ...input, response: { behavior: "deny" } });
   }
@@ -1118,10 +1129,14 @@ export function wrapCortexConnection(
             }
             if (!state.echoed) {
               state.echoed = true;
-              for (const answer of answers) listeners.forEach((listener) => listener({
-                type: "timeline.item", sessionId: permissionInput.sessionId,
-                item: { type: "user_message", id: `cortex-question-answer:${answer.questionId}`, text: answer.answer },
-              } as ProviderEvent));
+              for (const answer of answers) {
+                const member = state.batch.questions.find((candidate) => candidate.questionId === answer.questionId);
+                const text = member ? formatQuestionAnswer(member.question, answer.answer, member.topic) : answer.answer;
+                listeners.forEach((listener) => listener({
+                  type: "timeline.item", sessionId: permissionInput.sessionId,
+                  item: { type: "user_message", id: `cortex-question-answer:${answer.questionId}`, text },
+                } as ProviderEvent));
+              }
             }
             await retireForm(permissionInput.sessionId, state);
           })();
@@ -1150,12 +1165,14 @@ export function wrapCortexConnection(
         const selected = actions?.find((action) => action.label === answer);
         const typed = actions ? typedAnswer(answers, actions) : undefined;
         const questionId = questionIds.get(input.permissionId);
-        if (typed !== undefined && questionId !== undefined) {
+        const questionText = questionTexts.get(input.permissionId);
+        if (typed !== undefined && questionId !== undefined && questionText !== undefined) {
           const permissionId = input.permissionId;
           // A refused answer keeps the card and its options for a retry.
-          return sendTypedAnswer(input, questionId, typed).then(() => {
+          return sendTypedAnswer(input, questionId, questionText, typed).then(() => {
             questionActions.delete(permissionId);
             questionIds.delete(permissionId);
+            questionTexts.delete(permissionId);
           }) as ReturnType<typeof connection.send>;
         }
         if (actions && !selected) {
@@ -1178,6 +1195,7 @@ export function wrapCortexConnection(
         void result.finally(() => {
           questionActions.delete(input.permissionId);
           questionIds.delete(input.permissionId);
+          questionTexts.delete(input.permissionId);
         });
       }
       return result;
@@ -1187,6 +1205,7 @@ export function wrapCortexConnection(
       batchPermissions.clear();
       questionActions.clear();
       questionIds.clear();
+      questionTexts.clear();
       for (const pending of answerRequests.values()) pending.reject(new Error("Cortex connection closed before answer acknowledgment"));
       answerRequests.clear();
       queueRequests.clear();
@@ -1328,6 +1347,7 @@ export function wrapCortexConnection(
             typeof event.request.input?.question === "string"
               ? event.request.input.question
               : event.request.title ?? "Choose an option";
+          questionTexts.set(event.request.id, questionText);
           listener({
             ...event,
             request: {

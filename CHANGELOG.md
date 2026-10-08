@@ -2,6 +2,36 @@
 
 ## 1.0.0 (unreleased)
 
+Project file tools now follow the read-before-edit discipline of native editors
+and refuse the partial-read overwrite that truncated a shared research file. A
+text `project_read` pages by 1-based line (`offset` and `limit`, at most 2000
+lines each; `line_numbers` defaults to true), keeps each result under 24,000
+bytes and marks lines longer than 2000 characters as truncated. Offsets are
+line numbers now, not character offsets, so callers that passed character
+offsets must change. A truncated line never counts as read. Complete,
+non-truncated coverage of a file is kept per channel as digests and line
+ranges only, and `full_content_sha256` is returned only after that coverage.
+`project_write` replaces an existing file only with that complete-coverage
+digest: the `sha256` of a partial page identifies the page and never authorizes
+an overwrite, and a supplied hash alone does not either. Creation still uses
+`absent`. Receipts report previous and new bytes and lines plus a
+`drastic_shrink` flag; a shrink is visible, not refused. The new `project_edit`
+applies one to 64 ordered exact `old_string`/`new_string` replacements
+atomically: each must match uniquely unless `replace_all` is true, an append
+replaces a unique tail anchor, any prior text read on the channel with an
+unchanged digest is enough, and the receipt carries a bounded diff. Own read
+coverage is cleared after every mutation. The write path fsyncs the temporary
+file before the rename and the parent directory after it. Focused gateway tests
+are in `tests/test_project_file_tools.py`; no live or rendered qualification is
+claimed.
+
+Paseo's live chat echo for an answered Cortex question now reads
+`Question: <question> → Answer: <answer>`, with the batch topic label in front
+for a labelled batch member. Single, free-text ("Other...") and batch answers
+each get their own line. Only the echo text changed: the recorded answer and
+the durable replay event are unchanged. Unit tests cover the text; no rendered
+GUI check was run.
+
 The no-paid suite can run inside Cortex's verification sandbox without making
 lifecycle tests depend on nested user namespaces. Test-only launch seams keep
 real command outcomes and retention; actual bubblewrap tests probe once and

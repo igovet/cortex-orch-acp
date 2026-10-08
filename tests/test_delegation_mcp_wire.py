@@ -99,7 +99,7 @@ def test_roles_advertise_only_the_new_protocol(tmp_path):
     for role,ch,key in [('coordinator',coordinator,secret),('worker',worker,wsecret)]:
         tools=_call(project,ch,key,_init_and('tools/list',{}),tmp_path)[-1]['result']['tools']
         names={t['name'] for t in tools}
-        never_usable={'project_write','project_mkdir','project_delete','project_skill_link','outside_write','outside_command','command_run'} if role=='coordinator' else set()
+        never_usable={'project_write','project_edit','project_mkdir','project_delete','project_skill_link','outside_write','outside_command','command_run'} if role=='coordinator' else set()
         assert set(schemas_for(role))-never_usable<=names
         assert not never_usable & names
         assert not {'delegate','decide','complete_assignment','integrate','set_governance','create_task'} & names
@@ -183,6 +183,14 @@ def test_worker_gateway_publication_and_result_cross_real_mcp_process(tmp_path):
     written=call('project_write',path='new.txt',content='new',expected_sha256=missing['sha256'])
     assert call('project_write',path='new.txt',content='new',expected_sha256=missing['sha256']) == written
     assert (project/'new.txt').read_text() == 'new'
+    read=call('project_read',path='new.txt',line_numbers=False)
+    assert read['content']=='new' and read['complete']
+    edited=call('project_edit',path='new.txt',edits=[dict(old_string='new',new_string='edited')])
+    assert edited['newText']=='edited' and edited['oldText']=='new'
+    assert (project/'new.txt').read_text()=='edited'
+    # Creation replay cannot overwrite the now-edited file.
+    assert call('project_write',path='new.txt',content='new',expected_sha256='absent')==written
+    assert (project/'new.txt').read_text()=='edited'
     draft=call('create_draft',template='general',request_key='draft')
     call('draft_write',draft_id=draft['draft_id'],content=draft['required_first_line']+'\n\n# Report\n\nCompleted fixture.\n',request_key='body')
     report=call('write_report',draft_id=draft['draft_id'],title='Report',summary='Observed',author='worker',request_key='publish')

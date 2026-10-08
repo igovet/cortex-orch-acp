@@ -170,7 +170,7 @@ def _examples(paths: Iterable[str]) -> str:
     return shown + (f" (+{len(paths) - _EXAMPLE_LIMIT} more)" if len(paths) > _EXAMPLE_LIMIT else "")
 
 
-def attributable_changed_paths(store, channel, changed: set[str]) -> set[str] | None:
+def attributable_changed_paths(store, channel, changed: set[str], *, successful_paths: Iterable[str] = ()) -> set[str] | None:
     """Conservatively attribute a shared-tree delta; never charge sibling work.
 
     Declared scopes are coordination reservations, not write grants. Explicit
@@ -196,14 +196,16 @@ def attributable_changed_paths(store, channel, changed: set[str]) -> set[str] | 
             (channel.task_id, own["revision"], channel.task_id, channel.attempt_id),
         ) if row["role"] not in READ_ONLY and row["stage"] != "review"
             for scope in json.loads(row["scope_json"])]
-        writes = set()
+        # The advisory caller may name a write that has committed but whose
+        # TOOL_COMPLETED event is not published yet. These paths are runtime-owned.
+        writes = set(successful_paths)
         for row in db.execute(
             "SELECT e.payload_json FROM runtime_events e JOIN trusted_channels c ON c.channel_id=e.actor "
             "WHERE e.task_id=? AND c.attempt_id=? AND e.type='TOOL_COMPLETED'",
             (channel.task_id, channel.attempt_id),
         ):
             payload = json.loads(row["payload_json"])
-            if payload.get("operation") in {"project_write", "project_delete"} and isinstance(payload.get("path"), str):
+            if payload.get("operation") in {"project_write", "project_edit", "project_delete"} and isinstance(payload.get("path"), str):
                 writes.add(payload["path"])
         other_writes = set()
         for row in db.execute(
@@ -214,14 +216,15 @@ def attributable_changed_paths(store, channel, changed: set[str]) -> set[str] | 
             (channel.task_id, own["revision"], channel.attempt_id),
         ):
             payload = json.loads(row["payload_json"])
-            if payload.get("operation") in {"project_write", "project_delete"} and isinstance(payload.get("path"), str):
+            if payload.get("operation") in {"project_write", "project_edit", "project_delete"} and isinstance(payload.get("path"), str):
                 other_writes.add(payload["path"])
     return {path for path in changed if path in writes or
             (_matches(path, scopes) and not _matches(path, other_scopes) and path not in other_writes)}
 
 
 def required_before_result_submit(store, channel, *, stage: str | None,
-                                  role_ids: Iterable[str | None], advisory: bool = False) -> list[dict]:
+                                  role_ids: Iterable[str | None], advisory: bool = False,
+                                  successful_paths: Iterable[str] = ()) -> list[dict]:
     """Observe unread triggered skills for a gateway hint or the result gate."""
     from ..portable.roles import situational_skill_triggers
     from .contracts import READ_ONLY
@@ -258,7 +261,7 @@ def required_before_result_submit(store, channel, *, stage: str | None,
     # write-receipt hint must never charge a code-only worker for a
     # sibling's unrelated docs/** edit just because the shared-tree delta
     # includes it (see this module's own docstring on attribution limits).
-    attributed = attributable_changed_paths(store, channel, changed)
+    attributed = attributable_changed_paths(store, channel, changed, successful_paths=successful_paths)
     if attributed is None:
         if not advisory:
             from ..observability.events import append_event

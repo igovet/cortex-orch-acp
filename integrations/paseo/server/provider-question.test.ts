@@ -54,7 +54,8 @@ const question = seen.find((event) => event.type === "session.permission");
 assert.equal(question.request.kind, "question");
 assert.equal(question.request.input.questions[0].allowOther, true);
 
-// A typed answer reaches Cortex first, shows in the chat, then retires the card.
+// A typed answer reaches Cortex first, shows in the chat paired with the
+// question it answers, then retires the card.
 await answer("permission:q1", "Neither, do C");
 assert.deepEqual(sent.map((input) => input.type), ["session.configure", "session.permission"]);
 const scalarPayload = JSON.parse(sent[0].changes.settings[QUESTION_ANSWER_CONFIG_ID]);
@@ -63,7 +64,7 @@ assert.equal(scalarPayload.answer, "Neither, do C");
 assert.ok(scalarPayload.requestKey);
 assert.deepEqual(sent[1].response, { behavior: "deny" });
 assert.ok(seen.some((event) => event.type === "timeline.item" && event.item.type === "user_message"
-  && event.item.text === "Neither, do C"));
+  && event.item.text === "Question: Approve? → Answer: Neither, do C"));
 assert.ok(!seen.some((event) => event.type?.startsWith("request.")));
 
 // An option is still answered as that option.
@@ -89,7 +90,8 @@ const cardCount = seen.filter((event) => event.type === "session.permission").le
 card("permission:q3-replay", "pq_3");
 assert.equal(seen.filter((event) => event.type === "session.permission").length, cardCount);
 await answer("permission:q3", "Other text");
-assert.equal(seen.filter((event) => event.type === "timeline.item" && event.item.text === "Other text").length, 1);
+assert.equal(seen.filter((event) => event.type === "timeline.item"
+  && event.item.text === "Question: Approve? → Answer: Other text").length, 1);
 // Numeric custom text remains exact, never becomes an ordinal.
 card("permission:q4", "pq_4");
 await answer("permission:q4", "2");

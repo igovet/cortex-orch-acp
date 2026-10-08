@@ -116,6 +116,12 @@ assert.equal(payload.batchId, "qb_test");
 assert.ok(payload.requestKey);
 assert.deepEqual(payload.answers, [{ questionId: "pq_first", answer: "Compact" }, { questionId: "pq_second", answer: "2. custom numeric text" }]);
 assert.equal(seen.filter((event) => event.type === "timeline.item").length, 2);
+// Each answered batch member echoes its own question paired with its
+// answer -- the question is visible next to the answer, not only the answer.
+assert.deepEqual(
+  seen.filter((event) => event.type === "timeline.item").map((event) => event.item.text),
+  ["Question: Which layout? → Answer: Compact", "Question: Which theme? → Answer: 2. custom numeric text"],
+);
 await response(answers); // ACK retry never duplicates config or answer history
 assert.equal(sent.filter((input) => input.type === "session.configure").length, 2);
 assert.equal(seen.filter((event) => event.type === "timeline.item").length, 2);

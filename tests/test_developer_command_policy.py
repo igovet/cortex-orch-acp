@@ -158,7 +158,7 @@ def test_note_scope_and_file_tools_keep_engine_configuration_private(tmp_path, r
     validate_scope([relative])
     result = gateway._write(root, dict(path=relative, content='notes', expected_sha256='absent'))
     assert result['sha256'] == hashlib.sha256(b'notes').hexdigest()
-    assert gateway._read(root, dict(path=relative))['content'] == 'notes'
+    assert gateway._read(root, dict(path=relative, line_numbers=False))['content'] == 'notes'
     prefix = relative.split('/')[0]
     for denied in (prefix, prefix + '/**', prefix + '/settings.json', prefix + '/hooks/x',
                    prefix + '/CLAUDE.md', prefix + '/credentials.json', 'nested/' + relative):

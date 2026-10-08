@@ -54,6 +54,7 @@ const ACTIONS: Record<string, { kind: ToolPresentationKind; icon: ToolPresentati
   list_reports: { kind: "read", icon: "FileText", action: "List reports" },
   read_report: { kind: "read", icon: "FileText", action: "Read report" },
   project_read: { kind: "read", icon: "FileText", action: "Read" },
+  project_edit: { kind: "edit", icon: "FilePenLine", action: "Edit" },
   project_write: { kind: "edit", icon: "FilePenLine", action: "Edit" },
   project_delete: { kind: "edit", icon: "FilePenLine", action: "Delete" },
   project_mkdir: { kind: "edit", icon: "FilePenLine", action: "Create directory" },
@@ -181,6 +182,14 @@ function targetFor(name: string, input: ToolPresentationInput, action: string): 
   if (name === "read_source" && value) return compactTarget(value);
   if ((name === "read_check" || name === "assess_check") && value) return compactTarget(value);
   if (name === "read_plan" || name === "list_reports" || name === "list_events" || name === "list_sources" || name === "read_capsule" || name === "read_diagnostics") return null;
+  if (path && name === "project_read") {
+    const page = record(args);
+    const offset = typeof page.offset === "number" ? page.offset : 1;
+    const limit = typeof page.limit === "number" ? page.limit : undefined;
+    if (offset !== 1 || limit !== undefined) {
+      return compactTarget(`${path} (lines ${offset}${limit === undefined ? "+" : `–${offset + limit - 1}`})`);
+    }
+  }
   if (path) return compactTarget(path);
   if (command) return compactTarget(command);
   if (value) return compactTarget(value);

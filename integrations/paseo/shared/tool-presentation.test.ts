@@ -4,7 +4,7 @@ import { KNOWN_CORTEX_TOOL_NAMES, presentToolSemantics } from "./tool-presentati
 
 const cortexTools = [
   "answer_submit", "replan_request", "scope_request", "escalation_request",
-  "project_read", "project_write", "project_delete", "project_mkdir", "project_git", "draft_write", "command_run",
+  "project_read", "project_write", "project_edit", "project_delete", "project_mkdir", "project_git", "draft_write", "command_run",
   "create_task", "set_governance", "create_draft", "read_draft", "write_report",
   "list_reports", "read_report", "task_get_context", "plan_submit", "synthesis_submit",
   "user_question_request", "result_submit", "list_sources", "read_source",
@@ -171,4 +171,14 @@ test("every targeted label survives the installed Paseo client's humanizer verba
     assert.ok(label.length > 0 && label.includes(":"), label);
     assert.equal(hostHumanize(label), label, label);
   }
+});
+
+test("project_edit is an expandable diff and line pages have readable ranges", () => {
+  const edit = presentToolSemantics({ name: "mcp.cortex.project_edit", input: { path: "app.py", edits: [{ old_string: "a", new_string: "b" }] } });
+  assert.equal(edit.kind, "edit");
+  assert.equal(edit.expandable, true);
+  assert.equal(edit.label, "Edit: app.py");
+  const page = presentToolSemantics({ name: "mcp.cortex.project_read", input: { path: "app.py", offset: 21, limit: 10 } });
+  assert.equal(page.label, "Read: app.py (lines 21–30)");
+  assert.equal(page.expandable, false);
 });

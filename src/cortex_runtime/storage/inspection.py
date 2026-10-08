@@ -227,7 +227,7 @@ def read_binding_page(project, session_id, task_id, owner_epoch, *, cursor=None,
             raise StoreError('inspection_evidence_overflow')
         for receipt in receipts:
             result = json.loads(receipt['result_json'])
-            if receipt['operation'] in {'command_run', 'outside_command', 'outside_write', 'project_write',
+            if receipt['operation'] in {'command_run', 'outside_command', 'outside_write', 'project_write', 'project_edit',
                                         'project_mkdir', 'project_delete', 'project_skill_link', 'draft_write', 'external_call'}:
                 rows.append(dict(section='action_receipts', identity_sha256=_digest([receipt['actor'], receipt['request_key']]),
                                  operation=receipt['operation'], tool_call_ref=result.get('tool_call_ref'),

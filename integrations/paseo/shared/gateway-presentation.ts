@@ -45,7 +45,7 @@ export function gatewayPresentation(title: string, rawInput: unknown, rawOutput:
   const name = envelope.server === "cortex" && typeof envelope.tool === "string"
     ? envelope.tool : title.match(/^(?:mcp\.cortex\.|mcp__cortex__)([a-z_]+)$/)?.[1];
   const kinds: Record<string, "read" | "edit" | "shell"> = {
-    project_read: "read", project_write: "edit", draft_write: "edit", command_run: "shell",
+    project_read: "read", project_edit: "edit", project_write: "edit", draft_write: "edit", command_run: "shell",
   };
   if (!name || !kinds[name]) return null;
   const input = envelope.server === "cortex" ? fields(envelope.arguments) : envelope;
@@ -57,8 +57,18 @@ export function gatewayPresentation(title: string, rawInput: unknown, rawOutput:
     const text = fields(result.content[0]).text;
     if (typeof text === "string") { try { output = JSON.parse(text); } catch { output = text; } }
   }
+  // Only a retained successful edit result carries a committed diff. Do not
+  // fabricate a diff from proposed replacements on a pending/failed call.
+  const edit = fields(output);
+  const projected: Record<string, unknown> = name === "project_edit" && typeof edit.diff === "string"
+    ? { ...input, unifiedDiff: edit.diff,
+        ...(typeof edit.oldText === "string" && typeof edit.newText === "string"
+          ? { oldText: edit.oldText, newText: edit.newText } : {}) }
+    : input;
+  if (name === "project_edit" && typeof edit.diff === "string") output = { ...edit, content: edit.diff };
   const argv = input.argv;
   const command = Array.isArray(argv) && argv.every(item => typeof item === "string")
     ? argv.map(item => /^[a-zA-Z0-9_./:=+-]+$/.test(item) ? item : JSON.stringify(item)).join(" ") : undefined;
-  return { name, kind: kinds[name], input: { ...input, ...(command === undefined ? {} : { command }) }, output };
+  const projectedInput: Record<string, unknown> = { ...projected, ...(command === undefined ? {} : { command }) };
+  return { name, kind: kinds[name], input: projectedInput, output };
 }

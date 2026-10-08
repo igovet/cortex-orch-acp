@@ -311,3 +311,20 @@ def test_host_buffer_revision_is_distinct_from_disk_revision(tmp_path):
     disk_entry = next(entry for entry in entries if entry.source == "disk")
     host_entry = next(entry for entry in entries if entry.source == "host_buffer")
     assert disk_entry.sha256 != host_entry.sha256  # never silently equated
+
+def test_write_fsyncs_file_before_rename_and_parent_after(tmp_path, monkeypatch):
+    import stat
+    bridge = FsBridge()
+    events = []
+    fsync, replace = os.fsync, os.replace
+    def sync(fd):
+        events.append('directory' if stat.S_ISDIR(os.fstat(fd).st_mode) else 'file')
+        return fsync(fd)
+    def rename(*args, **kwargs):
+        events.append('replace')
+        return replace(*args, **kwargs)
+    monkeypatch.setattr(os, 'fsync', sync)
+    monkeypatch.setattr(os, 'replace', rename)
+    bridge.write_text_file(_binding(tmp_path), dict(path=str(tmp_path/'new'), content='durable'))
+    assert events == ['file', 'replace', 'directory']
+    assert (tmp_path/'new').read_text() == 'durable'

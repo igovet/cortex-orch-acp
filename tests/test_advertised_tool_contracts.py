@@ -105,7 +105,7 @@ def test_every_offered_tool_is_fully_described(kind, role_id, stage):
 @pytest.mark.parametrize("kind,role_id,stage", PROFILES[:-1])
 def test_no_channel_is_offered_a_tool_the_gateway_always_refuses(kind, role_id, stage):
     names = {t["name"] for t in mcp_tools.tool_definitions(kind, role_id=role_id, stage=stage)}
-    writes = {"project_write", "project_mkdir", "project_delete", "project_skill_link", "outside_write", "outside_command"}
+    writes = {"project_write", "project_edit", "project_mkdir", "project_delete", "project_skill_link", "outside_write", "outside_command"}
     may_write = kind == "worker" and stage != "review" and role_id not in READ_ONLY
     assert (names & writes == writes) if may_write else not names & writes
     may_run = kind == "worker" and "consultant" not in role_id
@@ -120,7 +120,7 @@ def test_write_paths_state_the_real_work_area_not_an_enforced_scope():
     """Writers hold the whole project (gateway._authority); the declared scope
     coordinates writers. No write tool may claim it is enforced."""
     from cortex_runtime.orchestration.gateway import SCHEMAS, WORK_AREA
-    for name in ("project_write", "project_mkdir", "project_delete"):
+    for name in ("project_write", "project_edit", "project_mkdir", "project_delete"):
         description = SCHEMAS[name]["properties"]["path"]["description"]
         assert "assignment scope" not in description, name
         assert WORK_AREA in description and "not an enforced boundary" in description, name
@@ -384,3 +384,21 @@ def test_project_git_context_only_is_explicit_on_result_check_surfaces():
     for description in (result['description'],checks['description'],
                         checks['items']['properties']['tool_call_ref']['description']):
         assert 'project_git' in description and 'context only' in description
+
+def test_safe_file_tool_contracts_and_every_writing_role():
+    from cortex_runtime.orchestration.gateway import SCHEMAS
+    read = SCHEMAS['project_read']['properties']
+    assert read['offset']['minimum'] == read['limit']['minimum'] == 1
+    assert read['limit']['maximum'] == 2000
+    assert 'line_numbers' in read
+    assert 'partial' in SCHEMAS['project_write']['properties']['expected_sha256']['description']
+    edit = SCHEMAS['project_edit']['properties']['edits']
+    assert edit['minItems'] == 1 and edit['maxItems'] == 64
+    assert edit['items']['properties']['new_string']['minLength'] == 0
+    import json
+    from pathlib import Path
+    # tool_definitions owns the role filter; existing profiles need no tool list.
+    for profile in json.loads((Path(__file__).resolve().parents[1]/'profiles.json').read_text())['profiles']:
+        role = 'worker-' + profile['name'].replace('_', '-')
+        names = {t['name'] for t in mcp_tools.tool_definitions('worker', role_id=role, stage='execution')}
+        assert ('project_edit' in names) == ('project_write' in names), role

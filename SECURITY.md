@@ -155,7 +155,7 @@ task-closure question is required. The runtime records the source and unfinished
 work, fences assignments and owned sessions, and uses terminal `CANCELLED`, not
 verified `COMPLETED`. A model claim that the user wants to finish is not an
 authorization or a passing review/verification receipt.
-Paseo's structured question path is role-neutral across coordinator, worker and runtime fallback requests. For grouped questions it uses one paginated form and submits the complete set together; incomplete submissions are rejected. Unique, bounded topic headers are presentation keys mapped back to exact member identities; a complete legacy id-keyed answer map is also accepted, but mixed or foreign key sets fail closed. Numeric text-fallback selection uses the same current-open creation/batch order as the displayed numbers, not random ids. None of these mappings grants access. The "Other..." field and a chat reply are valid free-text answers. Dismissing or cancelling the form does not create an answer, and a declined or timed-out host elicitation leaves the durable question pending. Where an ACP host lacks the structured UI, Cortex can only fall back to a text prompt; it does not enforce that a model asks every question or that every host renders options. A free-text legacy card's instructional action is not an answer.
+Paseo's structured question path is role-neutral across coordinator, worker and runtime fallback requests. For grouped questions it uses one paginated form and submits the complete set together; incomplete submissions are rejected. Unique, bounded topic headers are presentation keys mapped back to exact member identities; a complete legacy id-keyed answer map is also accepted, but mixed or foreign key sets fail closed. Numeric text-fallback selection uses the same current-open creation/batch order as the displayed numbers, not random ids. None of these mappings grants access. The "Other..." field and a chat reply are valid free-text answers. Dismissing or cancelling the form does not create an answer, and a declined or timed-out host elicitation leaves the durable question pending. Where an ACP host lacks the structured UI, Cortex can only fall back to a text prompt; it does not enforce that a model asks every question or that every host renders options. A free-text legacy card's instructional action is not an answer. The live chat echo after an acknowledged answer shows the question with the answer (`Question: … → Answer: …`); it is a presentation of the already recorded answer and grants nothing.
 Plan verification commands execute as literal argv without a shell. Submission rejects command substitution, backticks, redirection, pipes, shell operators and standalone parentheses, so a plan cannot defer that syntax error until verification. Structural validation does not prove semantic correctness of a plan, review or implementation.
 
 Worker briefs preserve the assignment objective, scope and dependency report references. The original task goal and review git evidence are shortened only when needed to fit the provisioning limit, and every shortened field identifies the worker-readable capsule or git-output source. These references use tools already available to the worker and do not change its assignment authority. A recovery capsule whose critical sections exceed their byte budget is compacted deterministically, never refused: each truncated field carries its sha256, size, a fenced preview with its original trust label and the tool that returns the full text (`read_source` for user messages and answers). Each trimmed list names its omitted entries, so recovery never silently loses required context.
@@ -181,7 +181,7 @@ Accepted receipts disclose `node_status`, not task acceptance.
 
 Missing permitted project reads return `sha256: "absent"` for the existing CAS
 creation path, never an access grant. Private paths, links and real read errors
-stay refused. Keyless project write/mkdir/delete actions use operation/payload
+stay refused. Keyless project write/edit/mkdir/delete actions use operation/payload
 hashes scoped to their channel; identical retries retain effect receipts and never
 repeat a deletion or its confirmation. A pre-effect refusal keeps its rejection
 event but no replayable derived-key receipt; an identical retry after fixing the
@@ -231,6 +231,10 @@ Creating a project file creates its missing parent directories only after the
 private-path, write-grant and user deny-write checks passed for the full path;
 each component is created and reopened no-follow, and a file or symlink component
 is refused (`gateway_parent_not_directory`) without following it.
+
+Project file writes never accept a partial read as overwrite authority. `project_read` returns line pages whose `sha256` identifies the bytes read; only a channel's complete, non-truncated coverage of the current bytes yields `full_content_sha256`, and `project_write` of an existing file requires that value (`gateway_complete_read_required` otherwise). A stale read, a hand-supplied hash and `absent` for an existing file are refused before anything changes. A large shrink is flagged in the receipt (`drastic_shrink`) rather than refused, but it still needs complete coverage. `project_edit` applies ordered exact replacements atomically after any prior text read of the current bytes; a missing or ambiguous match refuses the whole edit. Coverage is per channel and per digest, stores no file bodies, and is cleared by every successful mutation. Coverage is a runtime ledger, not a permission grant: private, link and deny-write checks still apply before any read or write. A line longer than 2000 characters is never counted as read, so such a file can be changed only with `project_edit`.
+
+Internal `.gitignore` reconciliation uses an exact, unnumbered, non-truncated snapshot through the same no-follow, single-link and 16 MB reader; public read pages are never repair input. Edit presentation uses the protected bytes committed by the writer. Diff matching is skipped before computation when combined input exceeds 32,000 characters or the before/after line-count product exceeds 250,000; the receipt marks `diff_omitted: "input_budget"` and `diff_truncated: true`. Hash and size evidence remain available.
 
 ## Tool access and containment
 
@@ -423,8 +427,7 @@ unmounted. The full `/etc` tree and user home are never added by that grant. A
 read grant cannot overlay the project or unmask its private store. Native account
 MCP entries are disabled. Server-initiated sampling/elicitation is refused.
 
-Cortex gateway file writes use declared-scope checks, no-follow descriptors,
-expected-content hashes and atomic replacement. Commands run under Linux
+Cortex gateway file writes check assignment and role authority (writing workers hold the whole-project grant), use no-follow descriptors, require complete-read or expected-content hashes, and replace files atomically. Commands run under Linux
 `bwrap`: the project is read-only by default and launch-time grants make the
 whole project writable for a writing worker; that jail grant is broader than
 the worker's runtime-declared assignment scope. Additional access requests
@@ -538,8 +541,7 @@ engine mode floor; the external MCP allowlist; the paid probes' explicit
 `--i-authorize-paid-call`/`--approval-ref` flags; credential-free command
 environments (the owner's ssh-agent socket excepted, below) and display/log
 redaction. The ssh password dialog is a secret
-entry, not an approval, and is not answered by Auto. The ssh password dialog is a secret
-entry, not an approval, and is not answered by Auto.
+entry, not an approval, and is not answered by Auto. The ssh password dialog is a secret entry, not an approval, and is not answered by Auto.
 
 Only the user changes the mode, through their ACP client: Paseo's composer mode
 control (ACP `modes`/`session/set_mode`) or the `access_mode` config option
@@ -622,7 +624,7 @@ outlives it is no longer swept, and could still plant one of those absent entrie
 A writing worker can also leave an interactive rebase or cherry-pick in progress;
 git shows that state and runs its todo list only when the owner continues it.
 Reviewers and read-only roles see `.git` read-only; automatic verification does
-not see it. `project_read`/`project_write`/`project_delete` still refuse every
+not see it. `project_read`/`project_write`/`project_edit`/`project_delete` still refuse every
 path through `.git`, `.cortex`, `.codex` or `.claude`, and plan scopes cannot name
 them. The single exception is `project_skill_link`: a writing worker may create or
 remove exactly the relative symlink `.claude/skills/<name>` ->

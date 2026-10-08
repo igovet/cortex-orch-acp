@@ -134,6 +134,10 @@ Native edits remain checked where authorship is attributable.
 If a reminder's database lookup or observation fails after a write commits,
 the successful write receipt carries `skill_hint_unavailable` instead of a write error.
 
+A text `project_read` pages by 1-based line: `offset` is a line number, `limit` is at most 2000 lines, and `line_numbers` is on by default. Each result stays under 24,000 bytes. A line longer than 2000 characters is flagged as truncated and never counts as read. Complete coverage is kept per channel. `project_write` replaces an existing file only with the `full_content_sha256` from that complete read; a partial page's `sha256` identifies those bytes and never authorizes an overwrite. The new `project_edit` applies up to 64 ordered exact replacements atomically, after any prior text read of the unchanged file. An append replaces a unique tail anchor. Each successful write or edit clears the channel's read coverage. Receipts show previous and new size and lines and a `drastic_shrink` flag. A file with a line over 2000 characters cannot be fully read, so `project_edit` is the only route to change it.
+
+Root `.gitignore` repair reads exact full text internally, never display pages. Edit receipts describe the protected committed bytes. Diff matching is input-budgeted; oversized inputs return `diff_omitted: "input_budget"` and `diff_truncated: true` without blocking the edit.
+
 A missing permitted `project_read` path succeeds with `sha256: "absent"` for
 creation and `parent_exists`; private/link/read-error boundaries remain enforced.
 Creating a file (`expected_sha256: "absent"`) also creates its missing parent
@@ -141,7 +145,7 @@ directories, no-follow; `project_mkdir` likewise creates missing parents and
 returns `created: false` for an existing directory. A file or symlink in the parent
 chain is refused with `gateway_parent_not_directory`; a non-`absent` hash under a
 missing parent is a `gateway_write_conflict`.
-Project write/mkdir/delete keys may be omitted: identical keyless retries reuse
+Project write/edit/mkdir/delete keys may be omitted: identical keyless retries reuse
 their effect receipt, but a precondition refusal before any effect is not replayed
 under its derived key. After correcting the precondition, retry the same keyless
 write; explicit-key refusals still need a fresh key. `project_git` is context only,
@@ -153,7 +157,7 @@ Cortex is an ACP v1 stdio agent. Its runtime coordinates Codex and Claude ACP wo
 
 To close a task immediately at your own decision, send `/cortex-finish` with no arguments, even while a Paseo turn is active. Cortex stops its owned work and records the closure as terminal `CANCELLED`, **not** verified `COMPLETED`; unfinished review, checks, and synthesis are not claimed as passed. An explicit close-as-is answer to a task-closure question has the same effect. See [completion and lifecycle](docs/acp/completion-and-lifecycle.md).
 
-Questions from coordinator, worker, or runtime fallback flows use the same structured question contract: worker cards require meaningful selectable choices, and Paseo presents an answer form with an "Other..." field. Related questions can be grouped into one paginated form and submitted together; every member must be answered. Tabs use short topics rather than ids; colliding labels gain a bounded numeric suffix, and header-keyed answers map back to exact question identities. Text fallback numbers follow the current open-question order used by `/cortex-answer`, with blank lines between questions; remaining questions renumber after an answer. Free-text answers and chat replies remain available, and dismissing a form does not answer or close the pending question. Hosts without the required structured-question UI may present the prompt and choices as chat text instead. This is a runtime/UI contract, not proof that a model will always recognize when it should ask or that every ACP host renders a form. See [questions and steering](docs/acp/steering-and-questions.md).
+Questions from coordinator, worker, or runtime fallback flows use the same structured question contract: worker cards require meaningful selectable choices, and Paseo presents an answer form with an "Other..." field. Related questions can be grouped into one paginated form and submitted together; every member must be answered. Tabs use short topics rather than ids; colliding labels gain a bounded numeric suffix, and header-keyed answers map back to exact question identities. Text fallback numbers follow the current open-question order used by `/cortex-answer`, with blank lines between questions; remaining questions renumber after an answer. Free-text answers and chat replies remain available, and dismissing a form does not answer or close the pending question. Hosts without the required structured-question UI may present the prompt and choices as chat text instead. After an answer is recorded, the Paseo chat echoes the pair as `Question: <question> → Answer: <answer>`, one line per batch member and prefixed with its topic when it has one. This is a runtime/UI contract, not proof that a model will always recognize when it should ask or that every ACP host renders a form. See [questions and steering](docs/acp/steering-and-questions.md).
 
 A real answer to a runtime recovery question starts a fresh bounded planning
 cycle, including when answered within the same host turn. The three-prompt

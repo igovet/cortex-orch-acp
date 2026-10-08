@@ -185,3 +185,81 @@ def test_missing_start_manifest_conservatively_ensures_rule(tmp_path):
     store, _, worker = setup_worker(tmp_path, start=False)
     assert mcp_tools.dispatch(store, worker, 'result_submit', result_args())['recorded']
     ignored(tmp_path)
+
+
+@pytest.mark.parametrize('content', [
+    '*.log\n!important.log\n',
+    ''.join(f'pattern-{index}\n' for index in range(4001)),
+    '# ' + 'x'*10000 + '\n*.log\n!important.log\n',
+    '# keep\r\n*.log\r\n!important.log\r\n',
+], ids=['rules', 'many-lines', 'long-line', 'crlf'])
+@pytest.mark.parametrize('boundary', ['command', 'submission'])
+def test_repair_preserves_every_raw_rule_at_real_boundaries(tmp_path, content, boundary):
+    store, _, worker = setup_worker(tmp_path)
+    path = tmp_path / '.gitignore'
+    path.write_bytes(content.encode())
+    if boundary == 'command':
+        receipt = mcp_tools.dispatch(store, worker, 'command_run', dict(
+            argv=[sys.executable, '-B', '-c', "open('.gitignore','ab').write(b'# native edit\\n')"],
+            request_key='preserve-rules', timeout_seconds=30))
+        assert receipt['complete'] and receipt['exit_code'] == 0
+        content += '# native edit\n'
+    else:
+        assert mcp_tools.dispatch(store, worker, 'result_submit', result_args())['recorded']
+    expected = ignore_guard.protected_content(content).encode()
+    assert path.read_bytes() == expected
+    assert ignore_guard.snapshot(tmp_path)['sha256'] == hashlib.sha256(expected).hexdigest()
+    ignored(tmp_path)
+    result = subprocess.run(['git', '-C', str(tmp_path), 'check-ignore', '--no-index', '--stdin'],
+                            input='debug.log\nimportant.log\npattern-3999\n',
+                            text=True, capture_output=True)
+    expected_ignored = ['pattern-3999'] if 'pattern-3999' in content else ['debug.log']
+    assert result.stdout.splitlines() == expected_ignored
+
+
+@pytest.mark.parametrize('content', [
+    '*.log\n/.cortex/\n',
+    ''.join(f'pattern-{index}\n' for index in range(4001)) + '/.cortex/\n',
+    '# ' + 'x'*10000 + '\r\n/.cortex/\r\n',
+], ids=['rules', 'many-lines', 'long-line-crlf'])
+def test_already_protected_snapshot_never_repairs_or_changes_bytes(tmp_path, content, monkeypatch):
+    store, _, worker = setup_worker(tmp_path)
+    data = content.encode()
+    (tmp_path / '.gitignore').write_bytes(data)
+    observed = ignore_guard.snapshot(tmp_path)
+    assert observed['content'] == content
+    assert observed['sha256'] == hashlib.sha256(data).hexdigest()
+    def unexpected(*args, **kwargs):
+        pytest.fail('An already protected file must not be rewritten')
+    monkeypatch.setattr(gateway, '_write', unexpected)
+    assert ignore_guard.enforce(store, worker) is None
+    assert (tmp_path / '.gitignore').read_bytes() == data
+
+
+@pytest.mark.parametrize('kind', ['binary', 'symlink', 'hardlink', 'oversized'])
+def test_exact_guard_reader_preserves_safety_refusals(tmp_path, kind):
+    store, _, worker = setup_worker(tmp_path)
+    path = tmp_path / '.gitignore'
+    if kind == 'symlink':
+        target = tmp_path / 'rules'
+        target.write_bytes(b'*.log\n')
+        path.symlink_to(target)
+    elif kind == 'hardlink':
+        import os
+        target = tmp_path / 'rules'
+        target.write_bytes(b'*.log\n')
+        os.link(target, path)
+    else:
+        path.write_bytes(b'\xff' if kind == 'binary' else b'x'*16000001)
+    if kind == 'symlink':
+        with pytest.raises(OSError):
+            ignore_guard.enforce(store, worker)
+        assert path.is_symlink() and target.read_bytes() == b'*.log\n'
+    else:
+        error = {'binary': 'gitignore_guard_non_utf8',
+                 'hardlink': 'gateway_regular_file_required',
+                 'oversized': 'gateway_file_too_large'}[kind]
+        before = path.read_bytes()
+        with pytest.raises(StoreError, match=error):
+            ignore_guard.enforce(store, worker)
+        assert path.read_bytes() == before

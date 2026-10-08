@@ -421,3 +421,17 @@ def test_advisory_hint_is_attributed_like_the_hard_gate(tmp_path):
                                dict(path='src/more.py',content='Y=3',expected_sha256='absent'))
     assert 'required_before_result_submit' not in receipt
     assert mcp_tools.dispatch(store,worker,'result_submit',result_args())['recorded']
+
+def test_project_edit_attributed_outside_declared_scope_and_returns_skill_hint(tmp_path):
+    store, task, worker = setup_worker(tmp_path)
+    with store.connection() as db:
+        db.execute("UPDATE runtime_nodes SET scope_json=? WHERE assignment_ref=(SELECT idempotency_key FROM delegation_provisioning WHERE attempt_id=?)",
+                   (json.dumps(['src']), worker.attempt_id))
+        db.commit()
+    native_edit(tmp_path, 'src/app.py')
+    mcp_tools.dispatch(store, worker, 'project_read', dict(path='docs/guide.md'))
+    receipt = mcp_tools.dispatch(store, worker, 'project_edit', dict(path='docs/guide.md',
+        edits=[dict(old_string='Value is 1.', new_string='Value is 2.')]))
+    assert receipt['required_before_result_submit'][0]['skill'] == 'documentation-sync'
+    changed = skill_gate.attributable_changed_paths(store, worker, {'src/app.py', 'docs/guide.md'})
+    assert changed == {'src/app.py', 'docs/guide.md'}

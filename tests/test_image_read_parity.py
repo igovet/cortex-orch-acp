@@ -89,7 +89,7 @@ def test_project_read_of_text_file_stays_a_single_text_block(tmp_path):
     project, store, channel, secret = _worker(tmp_path)
     (project / 'note.txt').write_text('hello', encoding='utf-8')
     reply = server.Server(channel_credentials=(channel, secret, str(project))).dispatch(
-        'tools/call', dict(name='project_read', arguments=dict(path='note.txt')))
+        'tools/call', dict(name='project_read', arguments=dict(path='note.txt',line_numbers=False)))
     assert not reply['isError']
     assert len(reply['content']) == 1 and reply['content'][0]['type'] == 'text'
     assert json.loads(reply['content'][0]['text'])['content'] == 'hello'

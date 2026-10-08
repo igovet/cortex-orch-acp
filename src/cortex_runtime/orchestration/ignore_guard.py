@@ -13,9 +13,9 @@ def protected_content(content: str) -> str:
 
 
 def snapshot(root):
-    from .gateway import _read
+    from .gateway import _read_file_snapshot
     try:
-        return _read(root, dict(path='.gitignore', limit=16000000))
+        return _read_file_snapshot(root, '.gitignore')
     except FileNotFoundError:
         return dict(content='', sha256='absent')
 

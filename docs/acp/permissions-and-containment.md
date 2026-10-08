@@ -187,11 +187,33 @@ Read-only roles and review stages have no project write grant. Steering revokes
 old worker channels before its text is delivered to a model. Scope/replan/escalation
 requests are proposals; the replacement plan is validated again.
 
-`project_read` is cursor-bounded. UTF-8 regular files return text and a SHA-256; a
-supported image (PNG, JPEG, GIF or WEBP, sniffed by content, not extension), up to a
-10 MiB cap, returns a real MCP `image` content block plus its SHA-256, byte size, MIME
-type and path as text (`gateway_image_too_large` above the cap); any other non-UTF-8
-regular file returns only its SHA-256, byte size and `binary: true`.
+`project_read` pages text by 1-based line. `offset` is a line number (default 1)
+and `limit` is at most 2000 lines (the default and the maximum). `line_numbers`
+defaults to true, which prefixes each line with its number and a tab; `false`
+returns the raw text. Line numbers never belong in `project_edit` strings or in
+`project_write` content. Each text result stays under 24,000 serialized bytes,
+counting the duplicated structured copy. `start_line`, `end_line`, `total_lines`,
+`complete`, `partial`, `next_offset` and `truncated_lines` report what was
+returned. A line longer than 2000 characters is cut and listed in
+`truncated_lines`, and a truncated line never counts as read. UTF-8 regular files
+return text and a SHA-256 that identifies the bytes read. A supported image (PNG,
+JPEG, GIF or WEBP, sniffed by content, not extension), up to a 10 MiB cap,
+returns a real MCP `image` content block plus its SHA-256, byte size, MIME type
+and path as text (`gateway_image_too_large` above the cap). Any other non-UTF-8
+regular file returns only its SHA-256, byte size and `binary: true`. A text file
+above 16 MB is refused (`gateway_file_too_large`).
+
+Read coverage is kept per channel. Ranges of non-truncated lines accumulate
+across pages only while the file's digest is unchanged. Only digests and line
+ranges are stored, in the runtime request ledger (`project_read_state`), never
+file bodies. Coverage is capped at 2048 merged ranges, so a fragmented read
+cannot become complete. `full_content_sha256` is returned only when this
+channel's coverage of the current bytes is complete. A partial page's `sha256`
+is identity only and never authorizes an overwrite. A successful `project_write`
+or `project_edit` clears the path's coverage on that channel, so the next
+mutation needs a fresh read. Copying a digest from another channel, or computing
+one outside the runtime, does not bypass this rule.
+
 `project_read` of a permitted missing path succeeds with `exists: false`,
 `sha256: "absent"` and `parent_exists`. This is an observation, never permission:
 all private-path and no-follow checks still apply, and real OS read failures
@@ -204,19 +226,54 @@ component is refused with `gateway_parent_not_directory` naming it. A non-`absen
 `expected_sha256` under a missing parent is a `gateway_write_conflict` (field
 `expected_sha256`, expected `absent`) and creates nothing. `project_mkdir` also
 creates missing parents; an existing real directory returns `created: false`, and
-a file or symlink at the path is `gateway_path_exists`. A refusal before any
+a file or symlink at the path is `gateway_path_exists`.
+
+`project_write` replaces the whole content of one file and never appends. An
+existing file requires `expected_sha256` equal to `full_content_sha256` from
+complete coverage on this channel. A partial read, a hand-supplied hash, or
+`absent` for an existing file is refused with `gateway_complete_read_required`,
+`gateway_stale_read` or `gateway_write_conflict`, and nothing changes. The
+receipt reports `previous_size_bytes`, `size_bytes` (also as `byte_count`),
+`previous_lines`, `new_lines`, and `drastic_shrink` when the new size is below
+half the old one. A shrink is visible in the receipt and is not refused on its
+own; complete coverage is still required.
+
+`project_edit` applies one to 64 ordered exact replacements (`edits`, each with
+`old_string`, `new_string` and an optional `replace_all`) atomically. It needs a
+prior text read on this channel whose digest still matches the file; a partial
+page is enough. With no prior read it refuses with `gateway_read_required`, and
+with a stale read it refuses with `gateway_stale_read`. Each `old_string` must be
+nonempty, must differ from its `new_string`, and must match exactly once unless
+`replace_all` is true (`gateway_edit_not_found`, `gateway_edit_not_unique`,
+`gateway_edit_no_change`). Matching is exact, including whitespace, and
+overlapping occurrences count as ambiguous. Edits apply in order to the evolving
+text. The file changes only if every edit succeeds, through the same atomic
+writer `project_write` uses. An append replaces a unique tail anchor with itself
+plus the added text. The result carries `edits_applied`, the new `sha256`, the
+size and line receipt, and a bounded unified diff (`diff`, `diff_truncated`;
+small before and after texts are included when they fit). Presentation uses the
+exact committed content, including the final root `.gitignore` protection rule;
+an edit whose removed rule is restored therefore reports no deletion. Before
+calling the diff matcher, combined input is capped at 32,000 characters and the
+before/after line-count product at 250,000. Above either budget the edit still
+commits, but returns an empty `diff`, `diff_truncated: true` and
+`diff_omitted: "input_budget"`; hash, size and line evidence remain available.
+Presentation is computed before the filesystem effect. `project_edit` refuses
+links, binary files and results above 16 MB.
+
+`project_write`, `project_edit`, `project_mkdir` and `project_delete` accept an
+omitted `request_key`: the runtime derives a stable operation/payload hash scoped
+to the channel. Identical keyless retries of actual effects reuse the retained
+result before checking CAS,
+creating a directory or asking for deletion confirmation. Different payloads
+are different actions; an intentional repeat of the same payload after other
+changes needs a fresh explicit key. A pending/unknown receipt still refuses replay.
+`project_delete` requires the exact existing SHA-256, supports binary files and
+checks their raw-byte SHA-256 before unlinking. A refusal before any
 possible side effect keeps its TOOL_REJECTED event but not a replayable auto-key
 receipt, so an identical keyless retry can succeed after correction. An explicit
 key retains the refusal with its full structured field/expected/correction; use a
-new explicit key for the corrected action.
-`project_write` and `project_delete` require the exact existing SHA-256; creation
-requires `absent`. These two tools and `project_mkdir` accept an omitted
-`request_key`: the runtime derives a stable operation/payload hash scoped to the
-channel. Identical keyless retries of actual effects reuse the retained result before checking CAS,
-creating a directory or asking for deletion confirmation. Different payloads
-are different actions; an intentional repeat of the same payload after other
-changes needs a fresh explicit key. A pending/unknown receipt still refuses replay. `project_delete` supports binary files and checks their raw-byte
-SHA-256 before unlinking. File operations use no-follow directory descriptors and
+new explicit key for the corrected action. File operations use no-follow directory descriptors and
 reject symlinks, hardlinks and private components `.cortex`, `.git`, `.codex`,
 `.claude`. A private path is refused before anything else, so a deletion there
 never asks the user first. `draft_write` accepts only the exact owned, unpublished
@@ -227,7 +284,7 @@ transaction; published reports are immutable.
 
 `project_skill_link` (`orchestration.skill_links`) is the only write `.claude`
 accepts, and it is not a path grant: plan scopes, `project_read`,
-`project_write`, `project_mkdir` and `project_delete` still refuse every
+`project_write`, `project_edit`, `project_mkdir` and `project_delete` still refuse every
 `.claude` path, the native shell still sees `.claude` read-only and
 `command_run` still masks it. It creates or removes exactly one directory
 symlink, `.claude/skills/<name>` -> `../../.agents/skills/<name>`, so Claude
@@ -303,7 +360,7 @@ network credentials and are not covered). This applies only when the project roo
 is itself a checkout (a `.git` directory, or a linked worktree's `.git` file) and
 the whole project is granted:
 
-| Path | `command_run` / native shell (writing worker) | `project_write` / `project_delete` / `project_read` |
+| Path | `command_run` / native shell (writing worker) | `project_read` / `project_write` / `project_edit` / `project_delete` |
 | --- | --- | --- |
 | `.git` data: objects, refs, logs, index, HEAD, packed-refs, locks, merge/rebase/stash state, `info/` | writable | denied |
 | A linked worktree's own `<common>/worktrees/<name>/` and its common directory (even outside the project) | writable | denied |
@@ -391,6 +448,12 @@ Without a complete start/current manifest the runtime conservatively ensures
 the rule, creating `.gitignore` if missing; unchanged observed tasks do not
 create an ignore file. Read-only roles and already recorded result replays do not mutate it.
 This uses the current task root, not an arbitrary outside command target.
+
+Repair snapshots are exact full UTF-8 text and its raw-byte digest, not public
+`project_read` display pages. They retain every unrelated rule, including files
+with more than 2000 lines or long lines, without numbering or truncation. Already
+protected files are not rewritten. The internal reader keeps the same 16 MB,
+no-follow and regular-single-link restrictions.
 
 All repairs recheck live gateway authority and deny-write paths and use the
 normal no-follow, regular-single-link, digest-checked atomic writer. An unsafe

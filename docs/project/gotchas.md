@@ -1,5 +1,65 @@
 # Gotchas
 
+## Partial reads must never authorize a whole-file overwrite (2026-10-08)
+
+- **The incident.** Production session b91db2c4 (another project, 2026-10-08)
+  grew a research file correctly through about fifteen appends by twelve
+  workers, from 15,153 to 61,472 characters. Then two workers each read one
+  *page* of the file with `project_read` offset/limit, added their entry to
+  that page and passed the page as the complete `project_write` content. The
+  page's `sha256` was the digest of the whole file, so the optimistic-concurrency
+  check passed. The file shrank to 2,909 characters (about 59,500 lost), and a
+  later write lost about 5,000 more. The receipts reported no shrink. The
+  root-cause report is `r_7e426e12cd3e`; the pre-loss text is recoverable only
+  from worker transcripts, and this change does not restore it.
+- **Root cause.** A partial page's `sha256` identified the whole file, and
+  `project_write` treated any matching digest as authority to replace the file.
+  Nothing compared the new size with the old one, and no read had to cover the
+  file. Claude sessions have no native `Read`, `Edit` or `Write` alternative
+  (`CLAUDE_GATEWAY_ALTERNATIVES` in `src/cortex_runtime/engine/claude_adapter_acp.py`),
+  so the Cortex file tools are the only write path there.
+- **Current guards** (`src/cortex_runtime/orchestration/project_files.py`,
+  `src/cortex_runtime/orchestration/gateway.py`):
+  - Text reads page by 1-based line (`offset`, `limit` up to 2000 lines,
+    `line_numbers` on by default). A result stays under 24,000 bytes. A line
+    longer than 2000 characters is truncated and flagged, and a truncated line
+    never counts as read.
+  - Coverage belongs to one channel and one digest. Ranges of non-truncated
+    lines accumulate across pages only while the digest is unchanged, and only
+    digests and ranges are stored, never file bodies. `full_content_sha256`
+    appears only after complete coverage; a partial page's `sha256` is identity
+    only.
+  - `project_write` of an existing file needs that complete coverage and the
+    matching digest. A hash supplied by hand, a partial page's hash, or
+    `absent` for an existing file is refused. Creation still uses `absent`.
+    A shrink is shown in the receipt (`drastic_shrink`, previous and new bytes
+    and lines) and is not refused on its own.
+  - `project_edit` applies 1 to 64 ordered exact `old_string`/`new_string`
+    replacements atomically. Any prior text read on the channel with an unchanged
+    digest is enough. Each `old_string` must match uniquely unless `replace_all`
+    is true. An append replaces a unique tail anchor with itself plus the added
+    text. If any edit fails, nothing is written. The receipt carries a bounded
+    diff.
+  - Every successful write or edit clears that path's coverage on the channel,
+    so the next mutation needs a fresh read.
+  - The write path fsyncs the temporary file before the rename and the parent
+    directory after it. `src/cortex_runtime/engine/fs_bridge.py` does the same
+    for engine-side file writes.
+- **Rules for writers.** Use `project_edit` for any partial change. Before a
+  `project_write`, read every page without truncated lines. Never reuse a digest
+  from a partial page, from another channel, or from a locally computed hash.
+- **Known limits.**
+  - A file with a line over 2000 characters cannot reach complete coverage, so
+    `project_write` cannot replace it and `project_edit` is the only route. The
+    current examples are `README.md` (one line of 2,081 characters) and
+    `docs/acp/roles-and-delegation.md` (two lines over 2,000 characters). Split
+    such a line before a whole-file rewrite is needed.
+  - The session that wrote this note ran an earlier build: its `project_read`
+    still paged by character offset, and its advertised tools did not include
+    `project_edit`. The guards above are verified against source and the
+    focused tests in `tests/test_project_file_tools.py`. No live run on the
+    current build has been recorded.
+
 ## Nested user namespaces are not a lifecycle-test dependency
 
 A correctly enforced host policy can deny a second bubblewrap namespace inside
@@ -200,7 +260,7 @@ A background engine auto-update can install a new `claude-agent-acp` adapter ver
   so "token handling"/"the token budget is 4096" remain untouched; a real
   `token`-named credential is still also caught by the `key=value`/
   `key: value` assignment rule (`_KEY_VALUE_SECRET`, extended with a quoted-
-  key form so `{"token": "X"}` is caught too) or the "token is/was X" claim
+  key form so `{"token": "X"}` is caught too) or the "token is/was X"claim
   rule (`_SECRET_CLAIM`). A new known-token-format rule (`_KNOWN_TOKEN`)
   redacts GitHub/GitLab/Slack/OpenAI/AWS tokens and three-part JWTs
   regardless of context. `StreamingRedactor._hold_start` now also holds a

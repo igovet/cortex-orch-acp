@@ -202,7 +202,7 @@ def test_gateway_file_tools_resolve_the_task_worktree(tmp_path):
                           workspace_root=str(worktree))
     TaskMachine(store).create(boot.task_id, "Implement")
     channel = resolve_channel(store, boot.channel_id, boot.secret)
-    assert dispatch(store, channel, "project_read", dict(path="only-in-worktree.txt"))["content"] == "worktree"
+    assert dispatch(store, channel, "project_read", dict(path="only-in-worktree.txt", line_numbers=False))["content"] == "worktree"
     assert dispatch(store, channel, "project_read", dict(path="only-in-main.txt")) == dict(
         exists=False, path="only-in-main.txt", sha256="absent", parent_exists=True)
 

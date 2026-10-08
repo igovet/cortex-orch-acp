@@ -72,14 +72,17 @@ def test_delete_refuses_binary_file_with_wrong_raw_hash(worker,monkeypatch):
     assert target.read_bytes()==data
 
 
-def test_project_read_keeps_utf8_text_hash_and_character_paging(worker):
+def test_project_read_keeps_utf8_text_hash_and_line_paging(worker):
     import hashlib
     store,ch,directory=worker
-    target=directory/'text.txt';data='héllo'.encode('utf-8')
+    target=directory/'text.txt';data='héllo\nsecond\n'.encode('utf-8')
     target.write_bytes(data)
-    result=dispatch(store,ch,'project_read',dict(path=str(target.relative_to(store.project_root)),offset=1,limit=2))
-    assert result==dict(content='él',sha256=hashlib.sha256(data).hexdigest(),
-                       total_characters=5,next_offset=3)
+    result=dispatch(store,ch,'project_read',dict(path=str(target.relative_to(store.project_root)),offset=2,limit=1,line_numbers=False))
+    assert result['content']=='second\n'
+    assert result['sha256']==hashlib.sha256(data).hexdigest()
+    assert result['total_lines']==2 and result['start_line']==result['end_line']==2
+    assert result['partial'] and result['full_content_sha256'] is None
+
 
 
 def test_project_read_returns_binary_hash_size_and_marker(worker):
