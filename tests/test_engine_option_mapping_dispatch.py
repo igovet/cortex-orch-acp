@@ -268,3 +268,22 @@ def test_codex_2_1_1_preserves_production_instruction_metadata(role, unified):
         assert meta["cortexBaseInstructions"].startswith("# Cortex session")
     else:
         assert meta == {"systemPrompt": "Role instructions", "cortexRole": role}
+
+
+@pytest.mark.parametrize("role", ["worker", "coordinator"])
+@pytest.mark.parametrize("instructions", [None, "Cortex role"])
+def test_claude_0_88_dispatch_includes_native_tool_policy(role, instructions):
+    meta = _session_new_meta_for("claude-agent-acp", "0.88.0", instructions, role=role, effort="high")
+    options = meta["claudeCode"]["options"]
+    assert options["strictMcpConfig"] is True
+    assert options["disallowedTools"] == GATEWAY_ONLY["disallowedTools"]
+    assert options["effort"] == "high"
+    assert "tools" not in options
+    assert options["plugins"] == []
+    assert options["managedSettings"] == {"disableAllHooks": True}
+    if instructions:
+        assert isinstance(meta["systemPrompt"], str)
+        assert instructions in meta["systemPrompt"]
+    else:
+        assert "systemPrompt" not in meta
+    assert _session_new_meta_for("claude-agent-acp", "0.89.0", instructions, role=role) is None

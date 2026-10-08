@@ -18,19 +18,23 @@ for exact paths, artifact-test limits and the next upstream-fix decision.
 
 ## Current ACP boundary (1.0.0)
 
-Claude ACP 0.87.0 is separately source-qualified for system instruction delivery;
-unknown installed Claude versions cannot borrow that qualification. Its existing
+Claude ACP 0.88.0 is separately source-qualified for system instruction delivery;
+0.78.0 and 0.87.0 remain independently registered. Unknown installed Claude
+versions cannot borrow that qualification or displace registered installs in
+discovery; pruning preserves registered installs. Critical-role dispatch excludes
+an unsupported or non-retryably unqualified engine/version across models and
+connections, without weakening route pins or owner policy. Its existing
 native-tool restrictions are retained through inspected SDK option forwarding,
 not claimed as real-model enforcement evidence. Compaction detection uses the
 engine's explicit `claudeCode.toolName=compact` metadata rather than display text.
 No-prompt model catalog initialization does not prove execution or authorize a
-model that is absent from the catalog. The exact side-by-side SDK 0.3.293
-refresh exposes `haiku` = Haiku 5.5 and accepts high/xhigh/max through ACP
+model that is absent from the catalog. The bundled SDK 0.3.293 (also retained as an exact side-by-side 0.87.0
+refresh) exposes `haiku` = Haiku 5.5 and accepts high/xhigh/max through ACP
 controls. Its instruction and native-tool restriction forwarding was
 independently inspected; this is not paid inference/enforcement evidence.
 Old Haiku is denied by exact ID in the preset and deliberately adopted owner
 settings; the original SDK 0.3.287 install is not overwritten. See
-[adapter evidence](docs/acp/claude-agent-acp-adapter.md#current-support-0870-2026-10-07).
+[adapter evidence](docs/acp/claude-agent-acp-adapter.md#current-support-0880-2026-10-08).
 The prompt-free catalog refresh a new ACP session starts runs in a child process
 with its own session, so it can outlive the ACP process that requested it (Paseo
 stops discovery processes about a second after `session/new`). It is still bounded

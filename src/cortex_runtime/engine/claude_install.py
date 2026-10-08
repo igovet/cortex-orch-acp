@@ -8,9 +8,10 @@ discovered and recorded by a human operator following the manual recipe in
 ``docs/acp/claude-agent-acp-adapter.md``* -- this module never discovers or
 installs anything itself; connections.engine_update owns installation.
 
-The current fallback release is 0.87.0 (upstream Claude Agent SDK 0.3.287,
-ACP SDK 1.7.0). Cortex's side-by-side SDK 0.3.293 refresh exposes Haiku 5.5;
-the original install is not overwritten. package.json still declares
+The current fallback release is 0.88.0 (Claude Agent SDK 0.3.293,
+ACP SDK 1.7.0). Exact 0.78.0 and 0.87.0 registrations remain supported;
+0.87.0's side-by-side SDK 0.3.293 refresh is retained without overwriting it.
+package.json still declares
 dist/index.js as its bin.
 The adapter imports the SDK in Node; the SDK in turn starts Claude Code
 through its own native transport. This record pins the adapter launch

@@ -96,8 +96,8 @@ def update_engine(engine: str, *, environ: dict[str, str] | None = None) -> str 
         # a byte-verified, qualified bundle (see ``discovery.is_pinned``),
         # so deleting it to keep the two newest -- both possibly unqualified
         # -- would leave the engine permanently unlaunchable rather than
-        # merely not-yet-current. An engine qualified for every version has
-        # nothing pinned and is pruned exactly as before.
+        # merely not-yet-current. Claude exact instruction-delivery registrations
+        # (including side-by-side SDK builds) are protected for the same reason.
         keep = {path.name for path in sorted(discovery._subdirs(root), key=lambda p: discovery.version_key(p.name))[-_KEEP:]}
         for old in discovery._subdirs(root):
             if old.name in keep or discovery.is_pinned(engine, old.name):

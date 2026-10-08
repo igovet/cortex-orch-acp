@@ -891,3 +891,95 @@ def test_usage_boundary_reaches_real_dispatch(tmp_path, used, expected_engine):
         assert _read_log(log_a if expected_engine == "claude-agent-acp" else log_b) == []
     finally:
         adapter.terminate_owned(result.attempt_id)
+
+
+def _delivery_refusal():
+    from cortex_runtime.portable.errors import PortableErrorCategory
+    return PortableError(
+        category=PortableErrorCategory.VALIDATION, code="instruction_delivery_unqualified",
+        remediation="Exact engine version is not qualified.", retry_eligible=False,
+    )
+
+
+def test_delivery_refusal_blocks_every_model_on_same_engine_version_for_dispatch(tmp_path, monkeypatch):
+    from cortex_runtime.delegation import live_adapters
+    from cortex_runtime.routing import availability
+
+    store, channel, provisioning, adapter, connection_a, connection_b, log_a, log_b, project, environ = _setup(tmp_path)
+    _runtime_task(store, channel)
+    _routing(project, {"engine_affinity": {"*": "claude-agent-acp"}})
+    first = provisioning.delegate(channel, "Build", "Build it.", "backend-dev", "Built.", "req-1")
+    assert _read_log(log_b)
+    # This is the hook used by the runtime's unexpected generation-error path.
+    adapter.record_instruction_delivery_failure(first.engine_session_ref, _delivery_refusal())
+    [entry] = availability.active(store)
+    assert entry["reason"] == "instruction_delivery_unqualified"
+    assert entry["model"] is None and entry["scope"] == "connection"
+    assert entry["evidence"] == "claude-agent-acp@0.88.0"
+    assert entry["attempt_id"] == first.attempt_id
+    adapter.terminate_owned(first.attempt_id)
+    before_b = list(_read_log(log_b))
+
+    # Other connections and models on that engine+version cannot evade it.
+    (tmp_path / "other").mkdir()
+    second_claude = _make_connection(tmp_path / "other", environ, engine="claude-agent-acp",
+                                    model="other-model", request_log=tmp_path / "other.jsonl")
+    entries = adapter._worker_unavailable_routes(dict(task_id=channel.task_id, role_id="worker-backend-dev"))
+    assert availability.blocking(entries, second_claude.id, "other-model")
+    assert availability.blocking(entries, connection_b.id, "sonnet")
+    with monkeypatch.context() as expired:
+        expired.setattr(availability, "active", lambda store: [])
+        entries = adapter._worker_unavailable_routes(dict(task_id=channel.task_id, role_id="worker-backend-dev"))
+        assert availability.blocking(entries, connection_b.id, "opus")
+        assert availability.blocking(entries, second_claude.id, "other-model")
+    result = provisioning.delegate(channel, "Build", "Build it.", "backend-dev", "Built.", "req-2")
+    try:
+        assert _read_log(log_a) and _read_log(log_b) == before_b
+        assert routing_store.list_audit_for_attempt(store, result.attempt_id)[0]["engine"] == "codex-acp"
+    finally:
+        adapter.terminate_owned(result.attempt_id)
+
+    # An updated qualified install and roles with no critical rules are not
+    # poisoned by a connection-level record of another version's refusal.
+    original = live_adapters._pinned_version_for
+    monkeypatch.setattr(live_adapters, "_pinned_version_for",
+                        lambda engine, record=None: "0.87.0" if engine == "claude-agent-acp"
+                        else original(engine, record))
+    entries = adapter._worker_unavailable_routes(dict(task_id=channel.task_id, role_id="worker-backend-dev"))
+    assert availability.blocking(entries, connection_b.id, "sonnet") is None
+    entries = adapter._worker_unavailable_routes(dict(task_id=channel.task_id, role_id="content-safety"))
+    assert availability.blocking(entries, connection_b.id, "sonnet") is None
+
+
+def test_unregistered_claude_dispatch_skips_provider_before_start_and_pin_refuses(tmp_path, monkeypatch):
+    from cortex_runtime.delegation import live_adapters
+
+    store, channel, provisioning, adapter, connection_a, connection_b, log_a, log_b, project, environ = _setup(tmp_path)
+    original = live_adapters._pinned_version_for
+    monkeypatch.setattr(live_adapters, "_pinned_version_for",
+                        lambda engine, record=None: "0.89.0" if engine == "claude-agent-acp"
+                        else original(engine, record))
+    _routing(project, {"engine_affinity": {"*": "claude-agent-acp"}})
+    result = provisioning.delegate(channel, "Build", "Build it.", "backend-dev", "Built.", "req-1")
+    adapter.terminate_owned(result.attempt_id)
+    assert _read_log(log_a) and _read_log(log_b) == []
+    _routing(project, {"pin": {"backend-dev": "claude-agent-acp/reviewer-model"}})
+    with pytest.raises(PortableError) as refused:
+        provisioning.delegate(channel, "Build", "Build it.", "backend-dev", "Built.", "req-2")
+    assert refused.value.code == "pinned_route_unavailable"
+    assert "instruction_delivery_unqualified" in refused.value.remediation
+    assert _read_log(log_b) == []
+
+
+def test_unrelated_or_retryable_portable_failure_does_not_poison_engine_route(tmp_path):
+    from cortex_runtime.portable.errors import PortableErrorCategory
+    from cortex_runtime.routing import availability
+
+    store, channel, _, adapter, _, connection_b, *_ = _setup(tmp_path)
+    _runtime_task(store, channel)
+    for code, retry in [("invalid_field", False), ("instruction_delivery_unqualified", True)]:
+        error = PortableError(category=PortableErrorCategory.VALIDATION, code=code,
+                              remediation="Test error.", retry_eligible=retry)
+        adapter._record_dispatch_route_failure(error, connection_b, "reviewer-model", channel.task_id, "xa_test")
+    assert adapter._unqualified_instruction_routes == set()
+    assert availability.active(store) == []

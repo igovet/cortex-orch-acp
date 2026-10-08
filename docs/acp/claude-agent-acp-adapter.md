@@ -1,8 +1,61 @@
 # claude-agent-acp outgoing adapter
 
-## Current support: 0.87.0 (2026-10-07)
+## Current support: 0.88.0 (2026-10-08)
 
-The current fallback and exact instruction-delivery registration are
+Cortex now has an exact instruction-delivery registration for the installed
+`@agentclientprotocol/claude-agent-acp` **0.88.0**, bundled Claude Agent SDK
+**0.3.293** and ACP SDK **1.7.0**, still speaking ACP v1. It needs no SDK
+override build. The independent 0.78.0 and 0.87.0 registrations remain available.
+
+Read-only inspection of the installed distribution established these paths:
+
+| Contract | 0.88.0 source |
+| --- | --- |
+| ACP v1 | `dist/acp-agent.js:1368` |
+| String override / preset append → query options, separate from conversation | `dist/acp-agent.js:7091-7107,7221-7225,7381-7384` |
+| Load/resume resupply session-defining metadata when recreating queries | `dist/acp-agent.js:1468,1499-1523,6968-6976` |
+| SDK string/preset conversion and initialize control fields | SDK `sdk.mjs:142` (`fT`), `sdk.mjs:138` |
+| Strict MCP/options, explicit disallowed tools and tools forwarding | `dist/acp-agent.js:7140-7145,7225,7267-7268`; SDK `sdk.mjs:136` |
+| Model / effort / mode select shapes | `dist/session-model.js:179-192`, `dist/session-effort.js:64-100`, `dist/session-mode.js:68-75` |
+| Usage model metadata (`_claude/model`), not full execution identity | `dist/acp-agent.js:2614-2625,3565,4377,4835,5206` |
+| Reactive non-AIR compaction marker | `dist/tool-calls/reporters/compaction.js:17-65` |
+
+The inspected `dist/acp-agent.js` SHA-256 is
+`790992f7c7387d78a5324fcfcbf9eb79a811ebd68eb3d6161a93de34b28327a0`.
+Tests also initialize the real adapter with an empty account directory and no
+prompt, and inspect its option forwarding without calling a model. Static
+source qualification and this protocol check do **not** prove paid execution,
+effective native-tool enforcement, rendered GUI behavior or release readiness.
+
+The previous failure was a runtime version-selection mismatch: the updater
+installed 0.88.0, discovery preferred it, but only 0.78.0/0.87.0 had exact
+instruction-delivery registrations. Unregistered versions could also miss the
+runtime's native-tool metadata branch. The adapter's `AskUserQuestion`-only
+denial and `--tools default` are its defaults, **not** Cortex's policy.
+Dispatch now uses the exact registry for that metadata branch, supplying the
+existing Cortex native-subagent/gateway-alternative denial, strict MCP,
+empty plugins and disabled hooks to all registered Claude releases.
+
+Discovery orders valid candidates by their **declared package version's**
+exact instruction-delivery registration first, then by version/build. Future
+unregistered installs cannot displace the newest registered install; pruning
+retains registered versions and their SDK refresh builds. With no registered
+install, discovery still reports the actual unsupported version for diagnostics,
+but critical-role dispatch refuses it before launch.
+
+A non-retryable `instruction_delivery_unqualified` failure is retained as
+route unavailability, not a model-performance failure. Critical-role dispatch
+excludes that engine/version across connections and models for the task's
+dispatch lifetime; authorized alternate routes remain subject to existing
+routing policy, and pins/user-selected identities are never silently replaced.
+A different qualified version on the same connection does not inherit the
+refusal. Paid live check not requested by the owner.
+
+<a id="current-support-0870-2026-10-07"></a>
+
+## Previous exact support: 0.87.0 (2026-10-07)
+
+On 2026-10-07 the fallback and exact instruction-delivery registration were
 `@agentclientprotocol/claude-agent-acp` **0.87.0**. The 0.78.0 registration
 is retained independently; unregistered installed Claude versions are refused
 rather than borrowing the fallback's qualification. The owner's engine update

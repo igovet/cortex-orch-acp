@@ -1041,3 +1041,11 @@ def test_claude_0_87_compaction_tier_names_its_actual_marker():
     assert tier.version == "0.87.0"
     assert tier.tier == delegation_generations.AUTOMATIC
     assert "toolName=compact" in tier.limitation
+
+
+def test_claude_0_88_compaction_tier_uses_inspected_non_air_marker():
+    tier = delegation_generations.tier_for("claude-agent-acp", "0.88.0")
+    assert tier.version == "0.88.0"
+    assert tier.tier == delegation_generations.AUTOMATIC
+    assert "toolName=compact" in tier.limitation
+    assert "pre-compaction hook" in tier.limitation

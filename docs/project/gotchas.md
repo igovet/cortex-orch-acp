@@ -1,5 +1,9 @@
 # Gotchas
 
+## Claude adapter auto-update can outrun delivery registration
+
+A background engine auto-update can install a new `claude-agent-acp` adapter version before Cortex has an exact instruction-delivery registration for it. Do not assume the newest installed version is qualified: discovery now falls back to the newest registered install, and pruning preserves registered installs rather than removing them as old versions. If no registered install exists, diagnostics report the actual unsupported version and critical-role dispatch refuses it before launch. This is a delivery qualification guard, not evidence of effective tool enforcement or a real model turn. See [Claude adapter evidence](../acp/claude-agent-acp-adapter.md#current-support-0880-2026-10-08).
+
 ## O1/O2/W2: installed-client label humanizing, orphan question-card update, and an over-broad wire-trace .git gate (2026-10-07)
 
 - **O1: the installed Paseo client humanizes any tool-row name lacking

@@ -155,6 +155,11 @@ _TIER_REGISTRY: dict[tuple[str, str], CompactionTier] = {
         "The adapter reports compaction reactively through tool_call/tool_call_update "
         "with _meta.claudeCode.toolName=compact; no pre-compaction hook is available.",
     ),
+    ("claude-agent-acp", "0.88.0"): CompactionTier(
+        "claude-agent-acp", "0.88.0", AUTOMATIC,
+        "The adapter reports compaction reactively through tool_call/tool_call_update "
+        "with _meta.claudeCode.toolName=compact; no pre-compaction hook is available.",
+    ),
     ("claude-agent-acp", "0.78.0"): CompactionTier("claude-agent-acp", "0.78.0", AUTOMATIC, _AUTOMATIC_LIMITATION),
     ("claude-agent-acp", "0.77.0"): CompactionTier("claude-agent-acp", "0.77.0", AUTOMATIC, _AUTOMATIC_LIMITATION),
     ("claude-agent-acp", "*"): CompactionTier("claude-agent-acp", "*", AUTOMATIC, _AUTOMATIC_LIMITATION),

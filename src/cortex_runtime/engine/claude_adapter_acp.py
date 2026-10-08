@@ -14,9 +14,9 @@ claude-agent-acp configuration failure here
 native path, silently or otherwise, and no Codex-specific env var or
 option id is ever referenced from here.
 
-Supported instruction-delivery releases are 0.78.0 and 0.87.0 (current
+Supported instruction-delivery releases are 0.78.0, 0.87.0 and 0.88.0 (current
 fallback), each inspected independently; see instruction_delivery_registry.
-0.87.0 bundles Claude Agent SDK 0.3.287 and ACP SDK 1.7.0, while retaining
+0.88.0 bundles Claude Agent SDK 0.3.293 and ACP SDK 1.7.0, while retaining
 ACP v1 and the model/effort/mode option ids. Model names and effort choices
 remain session-observed, not inferred from the package version.
 """
@@ -103,7 +103,7 @@ def claude_option_mapping(revision, observed_config_options) -> list[tuple[str, 
     """``ConfigurationRevision`` -> ``session/set_config_option`` pairs.
 
     Mirrors ``codex_adapter_acp.codex_option_mapping`` exactly, against the
-    observed claude-agent-acp ``configOptions`` shape (0.78.0/0.87.0):
+    observed claude-agent-acp ``configOptions`` shape (0.78.0/0.87.0/0.88.0):
 
     - ``model`` is always required and always mapped from
       ``revision.route.model`` (values are catalog-discovered per
@@ -382,8 +382,8 @@ def build_claude_session_new_meta(instructions_text: str, *, role: str = "worker
                                   native_skills: bool = False) -> dict:
     """``_meta`` payload for ``session/new`` appending Cortex instructions.
 
-    The statically-confirmed claude-agent-acp 0.78.0/0.87.0 instructions
-    channel (dist ``acp-agent.js:5887-5901`` / ``7047-7063``): ``session/new``'s own ``params._meta.systemPrompt`` is read
+    The statically-confirmed claude-agent-acp 0.78.0/0.87.0/0.88.0 instructions
+    channel (dist ``acp-agent.js:5887-5901`` / ``7047-7063`` / ``7091-7107``): ``session/new``'s own ``params._meta.systemPrompt`` is read
     as either a plain string (a full override of the SDK's
     ``{"type": "preset", "preset": "claude_code"}`` default) or an object
     (``{"append": ..., "excludeDynamicSections": ...}``-shaped, forwarded

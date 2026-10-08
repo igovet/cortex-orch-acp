@@ -59,7 +59,7 @@ from typing import Callable, Mapping
 # resolves to ``"*"`` -- never a guessed/interpolated version.
 _PINNED_ENGINE_VERSION: dict[str, str] = {
     "codex-acp": "2.1.1",
-    "claude-agent-acp": "0.87.0",
+    "claude-agent-acp": "0.88.0",
     # Placeholder only when a connection is not available to probe; all 2.x
     # versions are accepted, and actual sessions use their binary's version.
     "opencode": "2.0.0",
@@ -295,8 +295,10 @@ def _session_new_meta_for(
     """
     if role not in {"coordinator", "worker"}:
         raise ValueError("role must be 'coordinator' or 'worker'")
+    from ..engine.instruction_delivery_registry import has_exact_registration
+
     if not instructions:
-        if engine == "claude-agent-acp" and version in {"0.78.0", "0.87.0"}:
+        if engine == "claude-agent-acp" and has_exact_registration(engine, version):
             from ..engine.claude_adapter_acp import claude_native_subagent_restriction_meta
 
             return claude_native_subagent_restriction_meta(role=role, effort=effort)
@@ -312,7 +314,7 @@ def _session_new_meta_for(
         "enabled" if unified_base_prompt else "disabled",
     )
 
-    if engine == "claude-agent-acp" and version in {"0.78.0", "0.87.0"}:
+    if engine == "claude-agent-acp" and has_exact_registration(engine, version):
         rules = project_rules_for_claude(project_root)
         if rules:
             instructions = instructions + "\n\n" + rules
@@ -688,6 +690,8 @@ class EngineSessionManagerAdapter:
         # The (connection record, model) each worker attempt opened on, so
         # a later turn refused for the route can name it (routing.availability).
         self._attempt_routes: dict[str, tuple[object, str | None]] = {}
+        # A delivery refusal is version-wide, not a reason to try another model.
+        self._unqualified_instruction_routes: set[tuple[str, str, str]] = set()
         self._workspace_locks: dict[str, object] = {}
         # T017 (fresh review, MEDIUM): a queued open must observe
         # cancellation promptly instead of polling forever.
@@ -868,9 +872,7 @@ class EngineSessionManagerAdapter:
         is_worker = bool(launch.get("assignment_id")) and self._store is not None
         unavailable = ()
         if is_worker:
-            from ..routing import availability
-
-            unavailable = availability.active(self._store)
+            unavailable = self._worker_unavailable_routes(launch)
         if self._store is not None:
             self._resolve_runtime_route(launch, project_root, unavailable)
         # EXT-01 carried item: exactly one resolved connection id for this
@@ -1093,7 +1095,9 @@ class EngineSessionManagerAdapter:
                     instructions=instructions,
                     cause="session_replacement" if replacement else "session_open",
                 )
-            except BaseException:
+            except BaseException as error:
+                if is_worker:
+                    self._record_dispatch_route_failure(error, record, route_model, task_id, attempt_id)
                 # A revoked/mismatched channel must not leave a newly opened
                 # engine or its skill snapshot live after binding fails.
                 self.terminate_owned(attempt_id)
@@ -1697,6 +1701,64 @@ class EngineSessionManagerAdapter:
                 model = extras["route_model"]
         return model
 
+    def _worker_unavailable_routes(self, launch) -> list[dict]:
+        """Project route failures plus exact delivery failures for critical roles.
+
+        Project-wide account failures keep their ordinary expiry. Instruction
+        failures apply only to critical roles and the actual engine version,
+        for this task's dispatch lifetime; installing a qualified version on
+        the same connection does not inherit the refusal.
+        """
+        from ..connections import registry as connection_registry
+        from ..engine.instruction_delivery_registry import has_exact_registration
+        from ..portable.roles import load_role
+        from ..routing import availability
+
+        critical = bool(load_role(launch.get("role_id") or "worker-general").critical_rules)
+        entries = availability.active(self._store)
+        state = connection_registry.read_registry(self._environ)
+        records = dict(state.connections)
+        # Profile inheritance can resolve a connection outside an automatic
+        # catalog, but still needs the identical version/role fence.
+        if not launch.get("route_override") and not launch.get("resolved_connection_id"):
+            record = self._connection_record_factory(launch["task_id"])
+            records.setdefault(record.id, record)
+        current = {key: _pinned_version_for(record.engine, record) for key, record in records.items()}
+        entries = [entry for entry in entries
+                   if entry.get("reason") != "instruction_delivery_unqualified"
+                   or (critical and entry.get("evidence") ==
+                       f"{entry.get('engine')}@{current.get(entry.get('connection_id'))}")]
+        if not critical:
+            return entries
+        with self._lock:
+            refused = set(self._unqualified_instruction_routes)
+        for record in records.values():
+            version = current[record.id]
+            if ((launch["task_id"], record.engine, version) in refused
+                    or (record.engine == "claude-agent-acp"
+                        and not has_exact_registration(record.engine, version))):
+                entries.append(dict(
+                    engine=record.engine, connection_id=record.id, model=None, scope="connection",
+                    reason="instruction_delivery_unqualified", evidence=f"{record.engine}@{version}",
+                    expires_at="engine version qualification required",
+                ))
+        return entries
+
+    def record_instruction_delivery_failure(self, session_ref: str, error: BaseException) -> None:
+        """Retain a non-retryable generation-delivery failure before it is reported."""
+        from ..portable.errors import PortableError
+
+        if not (isinstance(error, PortableError)
+                and error.code == "instruction_delivery_unqualified" and not error.retry_eligible):
+            return
+        with self._lock:
+            meta = self._session_meta.get(session_ref)
+            route = self._attempt_routes.get(meta["attempt_id"]) if meta is not None else None
+        if meta is not None and meta["recipient"] == "worker" and route is not None:
+            self._record_dispatch_route_failure(
+                error, route[0], route[1], meta["task_id"], meta["attempt_id"],
+            )
+
     def _refuse_unavailable_route(self, record, model, unavailable) -> None:
         """A worker is never opened on a route ``routing.availability``
         still records as unavailable -- whichever way the route was fixed
@@ -1727,7 +1789,15 @@ class EngineSessionManagerAdapter:
 
         if attempt_id in self._cancelled_attempts or task_id in self._cancelled_tasks:
             return
-        if isinstance(error, WorkerModeNotConfirmed):
+        from ..portable.errors import PortableError
+
+        if (isinstance(error, PortableError) and error.code == "instruction_delivery_unqualified"
+                and not error.retry_eligible):
+            version = _pinned_version_for(record.engine, record)
+            with self._lock:
+                self._unqualified_instruction_routes.add((task_id, record.engine, version))
+            failure = ("instruction_delivery_unqualified", "connection", f"{record.engine}@{version}")
+        elif isinstance(error, WorkerModeNotConfirmed):
             failure = ("configuration_not_confirmed", "model", "WorkerModeNotConfirmed")
         elif isinstance(error, EngineProtocolError):
             failure = failure_classification.route_failure(error)

@@ -2,6 +2,8 @@
 
 ## 1.0.0 (unreleased)
 
+Claude ACP now has an exact 0.88.0 instruction-delivery registration for its bundled SDK 0.3.293. Discovery prefers the newest registered adapter and pruning preserves registered installs, so a background engine auto-update that installs a newer adapter without a registration no longer displaces the usable registered version. Critical dispatch rejects unsupported or non-retryably unqualified engine/version pairs rather than retrying another model on that adapter. Qualification here is static/source and no-paid protocol evidence only: paid CLI check not run (not requested by the owner); desktop live check is a separate later task and is not claimed here.
+
 A worker that published its result and ended while a scheduler pass was
 running is no longer mistaken for a lost worker. The pass read the plan nodes
 before the live worker set, so a reviewer finishing in between looked

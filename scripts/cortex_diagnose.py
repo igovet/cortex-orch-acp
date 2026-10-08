@@ -33,7 +33,7 @@ from cortex_runtime.configuration import store as configuration_store  # noqa: E
 from cortex_runtime.connections import discovery, registry  # noqa: E402
 from cortex_runtime.connections.model import AuthMode, SUPPORT_MATRIX  # noqa: E402
 from cortex_runtime.engine.instruction_delivery_registry import (  # noqa: E402
-    ClaudeAgentAcp0_78Delivery, ClaudeAgentAcp0_87Delivery, CodexAcpDelivery, CodexAcp2_1Delivery, delivery_for,
+    ClaudeAgentAcp0_78Delivery, ClaudeAgentAcp0_87Delivery, ClaudeAgentAcp0_88Delivery, CodexAcpDelivery, CodexAcp2_1Delivery, delivery_for,
 )
 from cortex_runtime.portable.errors import PortableError  # noqa: E402
 from cortex_runtime.packaging import pinned  # noqa: E402
@@ -45,6 +45,7 @@ _QUALIFICATION_BY_CLASS = {
     CodexAcp2_1Delivery: "qualified",
     ClaudeAgentAcp0_78Delivery: "qualified",
     ClaudeAgentAcp0_87Delivery: "qualified",
+    ClaudeAgentAcp0_88Delivery: "qualified",
 }
 
 
@@ -181,7 +182,7 @@ def _client_registration_check(zed_settings):
 
 def _adapter_qualification_checks():
     checks = []
-    for engine, version in (("codex-acp", "1.12.0"), ("codex-acp", "1.13.0"), ("codex-acp", "2.0.1"), ("codex-acp", "2.1.1"), ("claude-agent-acp", "0.78.0"), ("claude-agent-acp", "0.87.0")):
+    for engine, version in (("codex-acp", "1.12.0"), ("codex-acp", "1.13.0"), ("codex-acp", "2.0.1"), ("codex-acp", "2.1.1"), ("claude-agent-acp", "0.78.0"), ("claude-agent-acp", "0.87.0"), ("claude-agent-acp", "0.88.0")):
         delivery = delivery_for(engine, version)
         qualification = _QUALIFICATION_BY_CLASS.get(type(delivery), "unsupported")
         checks.append(_check(f"adapter_qualification:{engine}:{version}", "ok" if qualification != "unsupported" else "warn",

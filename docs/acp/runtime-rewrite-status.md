@@ -5,6 +5,8 @@ lifecycle, dependency scheduling, routes, scopes, permission checks, independent
 review, verification, recovery and completion. Models submit bounded proposals and
 immutable reports. All 23 specialist/consultant profiles remain available.
 
+Claude ACP now has an exact 0.88.0 instruction-delivery registration for the adapter's bundled Claude SDK 0.3.293 (ACP SDK 1.7.0). Discovery and pruning preserve registered installations as fallback when a background engine auto-update installs a newer unregistered adapter. Critical-role dispatch refuses unsupported or non-retryably unqualified engine/version pairs for that task rather than retrying a different model on the same adapter. The change has static/source and no-paid protocol qualification only; no paid CLI live check was run (not requested by the owner). A desktop live check is a separate later task and is not reported as completed. Static forwarding does not establish effective native-tool enforcement, a paid model turn or rendered GUI behavior. See [current adapter evidence](claude-agent-acp-adapter.md#current-support-0880-2026-10-08).
+
 Claude ACP support now includes exact 0.87.0 instruction delivery (Claude SDK
 0.3.287, ACP SDK 1.7.0, ACP v1), session-observed option handling, and its
 non-AIR `claudeCode.toolName=compact` compaction signal. The owner update

@@ -242,3 +242,19 @@ def test_a_fallback_refused_for_another_failure_class_is_still_not_retried(execu
           failure_class="rate_limited")
     with pytest.raises(StoreError, match="worker_failure_not_retryable:fallback_refused:no_untried_authorized_route"):
         retry_lost(runtime, channel.task_id, node)
+
+
+def test_delivery_qualification_failure_retry_is_route_scoped_and_never_escalates(executing):
+    store, machine, channel, runtime = executing
+    node = _running_node(machine, channel)
+    _fail(store, channel.task_id, node, "xa_unqualified",
+          error="PortableError:instruction_delivery_unqualified",
+          route=dict(engine="claude-agent-acp", connection_id="cn_claude",
+                     reason="instruction_delivery_unqualified", evidence="claude-agent-acp@0.89.0"))
+    retry_lost(runtime, channel.task_id, node)
+    next_node = _running_node(machine, channel)
+    assert next_node
+    assert attempt_routing(store, channel.task_id, "xa_unqualified") == (False, "normal", "auto", None, None, None)
+    entries = availability.active(store)
+    assert availability.blocking(entries, "cn_claude", "haiku")
+    assert availability.blocking(entries, "cn_claude", "opus")

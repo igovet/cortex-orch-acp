@@ -5,6 +5,15 @@ validates the plan, reserves ready nodes, selects the configured role route,
 provisions each engine session, delivers a bounded assignment and schedules review.
 There is no public model-controlled spawn, effort selection or acceptance API. A coordinator plan requires a constrained `model` recommendation and may include `model_reason`; `list_route_options` provides a read-only live menu. Runtime policy makes the final route and effort decision. See [automatic routing](routing-and-fallback.md#automatic-worker-routing-tiers-model-hints-and-ranking).
 
+Critical rules require an exact qualified instruction-delivery channel.
+Claude 0.88.0 now has its own inspected registration; dispatch supplies the
+same native-tool restriction metadata as the earlier registered releases.
+Unregistered Claude versions cannot displace registered installs, and a
+non-retryable delivery refusal makes the task's engine/version unavailable
+across models for critical-role dispatch. This is a delivery qualification
+boundary, not evidence of effective model/tool enforcement. See [Claude
+support and limits](claude-agent-acp-adapter.md#current-support-0880-2026-10-08).
+
 All 23 worker role instructions remain available as canonical skill sources,
 composed from role specializations and the shared report protocol. The redundant
 `agents/*.toml` profile files and generated reference copies have been removed;

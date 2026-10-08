@@ -5755,6 +5755,9 @@ class OrchestratingRuntime:
                 # T017 fix: this call was previously unwrapped -- any other
                 # exception from a worker's prompt silently lost the
                 # assignment (no durable record at all). Record it instead.
+                record_delivery_failure = getattr(self._engine, "record_instruction_delivery_failure", None)
+                if record_delivery_failure is not None:
+                    record_delivery_failure(result.engine_session_ref, error)
                 self._finalize_generation_delivery(result.engine_session_ref, generation_delivery_id, failure_kind="unexpected_exception", stop_reason=None)
                 with self._lock:
                     self._worker_recoveries_in_flight.discard(assignment_ref)

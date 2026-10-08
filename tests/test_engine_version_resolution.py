@@ -27,7 +27,7 @@ def test_an_unregistered_claude_version_does_not_borrow_qualification(tmp_path):
 
 
 def test_registered_claude_versions_name_the_actual_install(tmp_path):
-    for version in ("0.78.0", "0.87.0"):
+    for version in ("0.78.0", "0.87.0", "0.88.0"):
         record = _record(tmp_path, "claude-agent-acp", "@agentclientprotocol/claude-agent-acp", version)
         assert _pinned_version_for("claude-agent-acp", record) == version
         plan = delivery_for("claude-agent-acp", version).plan(load_role("worker-debugger"), [])
@@ -44,7 +44,7 @@ def test_a_registered_installed_version_is_the_one_named(tmp_path):
 
 
 def test_no_record_resolves_the_pinned_version():
-    assert _pinned_version_for("claude-agent-acp") == "0.87.0"
+    assert _pinned_version_for("claude-agent-acp") == "0.88.0"
     assert _pinned_version_for("codex-acp") == "2.1.1"
 
 
@@ -61,3 +61,16 @@ def test_a_worker_failure_names_its_code_and_line():
     assert described["error"] == "PortableError:instruction_delivery_unqualified"
     assert described["where"].startswith("test_engine_version_resolution.py:")
     assert "secret" not in str(described) and "/home/user" not in str(described)
+
+
+def test_discovery_uses_declared_registered_version_not_directory_label(tmp_path):
+    from cortex_runtime.connections import discovery
+    _record(tmp_path, "claude-agent-acp", "@agentclientprotocol/claude-agent-acp", "0.88.0")
+    unknown = _record(tmp_path, "claude-agent-acp", "@agentclientprotocol/claude-agent-acp", "0.89.0")
+    # A misleading directory label must not lend its package qualification.
+    from pathlib import Path
+    Path(unknown.launch_command[1]).parents[4].rename(tmp_path / "claude-agent-acp" / "0.78.0")
+    found = discovery.discover_engine(
+        "claude-agent-acp", registry_root=tmp_path / "claude-agent-acp", node_binary="/usr/bin/node",
+    )
+    assert found.version == "0.88.0"

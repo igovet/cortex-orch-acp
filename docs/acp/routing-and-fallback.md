@@ -16,6 +16,15 @@ and bounded by the configured per-model policy. `list_route_options` is a
 read-only snapshot for coordinators; dispatch validates current eligibility
 again.
 
+Critical roles require qualified instruction delivery for the exact engine
+version. Dispatch excludes unregistered Claude versions before engine launch.
+A non-retryable `instruction_delivery_unqualified` failure is retained as route
+unavailability and fences that task's engine/version across models and
+connections, rather than escalating to a different model on the same unusable
+adapter. An updated qualified version does not inherit the refusal. Existing
+authorization, pins and user-requested identities still apply; an unavailable
+pin is refused, not substituted. See [exact Claude support](claude-agent-acp-adapter.md#current-support-0880-2026-10-08).
+
 This automatic worker selection is separate from configured coordinator routes
 and from the explicitly authorized fallback path described below. Legacy
 mixed-team route profiles and fallback checks remain documented here for

@@ -165,10 +165,11 @@ def test_diagnostics_launches_zero_engine_processes_after_full_setup(monkeypatch
     assert report["overall"] in ("ok", "degraded")
 
 
-def test_claude_0_87_exact_registration_is_reported_qualified():
+@pytest.mark.parametrize("version", ["0.78.0", "0.87.0", "0.88.0"])
+def test_claude_exact_registration_is_reported_qualified(version):
     checks = cortex_diagnose._adapter_qualification_checks()
     check = next(item for item in checks
-                 if item["name"] == "adapter_qualification:claude-agent-acp:0.87.0")
+                 if item["name"] == f"adapter_qualification:claude-agent-acp:{version}")
     assert check["status"] == "ok"
     assert check["detail"] == "instruction delivery is qualified."
 

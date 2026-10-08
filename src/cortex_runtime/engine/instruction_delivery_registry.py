@@ -213,6 +213,40 @@ class ClaudeAgentAcp0_87Delivery(ClaudeAgentAcp0_78Delivery):
 
 
 @dataclass(frozen=True)
+class ClaudeAgentAcp0_88Delivery(ClaudeAgentAcp0_78Delivery):
+    """Exact installed 0.88.0 qualification, inspected read-only 2026-10-08.
+
+    dist/acp-agent.js SHA-256:
+    790992f7c7387d78a5324fcfcbf9eb79a811ebd68eb3d6161a93de34b28327a0.
+    ACP v1 at 1368; string/preset append at 7091-7107, options at
+    7221-7225, query({prompt: input, options}) at 7381-7384. Resume/load
+    resupply _meta at 1468,1499-1523,6968-6976 (existing queries are reused
+    only when their session-defining params match).
+    Its bundled SDK 0.3.293 sdk.mjs:142 fT separates systemPrompt/preset
+    append from prompt; line 138 sends initConfig.systemPrompt and
+    appendSystemPrompt in the initialize control request.
+
+    strictMcpConfig/options spread at acp-agent.js:7225; disallowedTools
+    merged at 7267, tools resolved at 7140-7145 and forwarded at 7268.
+    SDK sdk.mjs:136 builds --strict-mcp-config, --disallowedTools and
+    --tools (a preset becomes "default", not an explicit allowlist).
+    Cortex must supply its own disallowedTools; AskUserQuestion alone
+    is only the adapter's no-form-elicitation default, not Cortex policy.
+
+    Model/effort/mode retain select shapes: session-model.js:179-192,
+    session-effort.js:64-100, session-mode.js:68-75. Usage attaches
+    _claude/model at acp-agent.js:2614-2625,3565,4377,4835,5206; this
+    is not complete model/effort/mode execution verification.
+    Non-AIR compaction uses claudeCode.toolName=compact at
+    dist/tool-calls/reporters/compaction.js:17-65, reactively only.
+    Shared plan is justified by these paths, not version interpolation.
+    No paid turn, effective native-tool enforcement or GUI is qualified.
+    """
+
+    version: str = "0.88.0"
+
+
+@dataclass(frozen=True)
 class ClaudeAgentAcpUnrecognizedVersionDelivery:
     """Any claude-agent-acp version without an exact registration: no static
     evidence has been read for it, so it is always UNSUPPORTED -- never a
@@ -277,6 +311,7 @@ _REGISTRY: dict[tuple[str, str], InstructionDelivery] = {
     ("codex-acp", "2.1.1"): CodexAcp2_1Delivery(),
     ("claude-agent-acp", "0.78.0"): ClaudeAgentAcp0_78Delivery(),
     ("claude-agent-acp", "0.87.0"): ClaudeAgentAcp0_87Delivery(),
+    ("claude-agent-acp", "0.88.0"): ClaudeAgentAcp0_88Delivery(),
     ("claude-agent-acp", "*"): ClaudeAgentAcpUnrecognizedVersionDelivery(),
 }
 
@@ -284,6 +319,8 @@ _REGISTRY: dict[tuple[str, str], InstructionDelivery] = {
 def has_exact_registration(engine: str, version: str) -> bool:
     """True for an exact npm registration or a supported OpenCode v2
     version. Wildcards do not count as qualified registrations."""
+    if version == "*":
+        return False
     if engine == "opencode":
         from ..connections.discovery import is_qualified
 

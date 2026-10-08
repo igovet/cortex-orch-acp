@@ -57,11 +57,11 @@ SUPPORTED_ENGINES: tuple[str, ...] = tuple(_PACKAGE_NAME)
 # catalog refresh failed closed with
 # ``codex_manual_review_adapter_unsupported``, and the engine's newly
 # published models could never appear in the model catalog (live,
-# 2026-09-22). ``claude-agent-acp`` has a version-independent delivery
-# registration and no byte-level patch, so any installed version launches.
+# 2026-09-22). Claude also requires exact instruction-delivery evidence;
+# an auto-installed but unregistered release must not displace a qualified one.
 QUALIFIED_ADAPTER_VERSIONS: dict[str, tuple[str, ...] | None] = {
     "codex-acp": ("1.12.0", "1.13.0", "2.0.1", "2.1.1"),
-    "claude-agent-acp": None,
+    "claude-agent-acp": ("0.78.0", "0.87.0", "0.88.0"),
     # OpenCode v2 is accepted by major version. Keep the range visible to
     # settings clients; do not interpret it as an exact-version allowlist.
     "opencode": ("2.x.x",),
@@ -74,6 +74,10 @@ def is_qualified(engine: str, version: str) -> bool:
     ``None`` in :data:`QUALIFIED_ADAPTER_VERSIONS` means every version; an
     engine with no entry at all is never qualified.
     """
+    if engine == "claude-agent-acp":
+        from ..engine.instruction_delivery_registry import has_exact_registration
+
+        return has_exact_registration(engine, version)
     allowed = QUALIFIED_ADAPTER_VERSIONS.get(engine, ())
     if engine == "opencode":
         return isinstance(version, str) and re.fullmatch(r"2\.[0-9]+\.[0-9]+", version) is not None
@@ -84,6 +88,8 @@ def is_pinned(engine: str, version: str) -> bool:
     """True iff ``version`` is one of the *named* versions an engine is
     qualified for -- an engine qualified for every version (``None``) has
     no pinned version to protect, so its installs are pruned normally."""
+    if engine == "claude-agent-acp":
+        return is_qualified(engine, version.split("+sdk.", 1)[0])
     allowed = QUALIFIED_ADAPTER_VERSIONS.get(engine)
     if engine == "opencode":
         return False
@@ -212,6 +218,7 @@ def _subdirs(root: Path) -> list[Path]:
 
 def _discover_in(entries: list[Path], engine: str, package_name: str, node: str,
                  environ: dict[str, str] | None) -> EngineDiscovery | None:
+    candidates = []
     for entry in entries:
         package_json = entry / "node_modules" / package_name / "package.json"
         try:
@@ -239,13 +246,16 @@ def _discover_in(entries: list[Path], engine: str, package_name: str, node: str,
         except OSError:
             continue
         native_dir = _home(environ) / _NATIVE_CREDENTIAL_SUBDIR[engine]
-        return EngineDiscovery(
-            engine=engine,
-            version=version,
-            launch_command=(node, str(bin_path)),
-            native_credential_dir=str(native_dir),
-        )
-    return None
+        candidates.append((
+            (is_qualified(engine, version), version_key(version), version_key(entry.name)),
+            EngineDiscovery(
+                engine=engine, version=version, launch_command=(node, str(bin_path)),
+                native_credential_dir=str(native_dir),
+            ),
+        ))
+    # Qualification follows the declared package version, never a directory
+    # label. This also handles SDK builds and explicit registry_root reads.
+    return max(candidates, key=lambda candidate: candidate[0])[1] if candidates else None
 
 
 # Where OpenCode's installer puts its binary, relative to HOME.

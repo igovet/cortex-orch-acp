@@ -52,15 +52,15 @@ def test_installs_newer_keeps_one_previous_and_survives_offline(tmp_path):
     for version in ("0.78.0", "0.80.0", "0.81.0"):
         assert engine_update.update_engine("claude-agent-acp", environ=_environ(tmp_path, version)) == version
     root = discovery.owned_root(_environ(tmp_path)) / "claude-agent-acp"
-    assert sorted(p.name for p in discovery._subdirs(root)) == ["0.80.0", "0.81.0"]
+    assert sorted(p.name for p in discovery._subdirs(root)) == ["0.78.0", "0.80.0", "0.81.0"]
 
     # Same version again, or offline: nothing changes.
     assert engine_update.update_engine("claude-agent-acp", environ=_environ(tmp_path, "0.81.0")) is None
     assert engine_update.update_all(environ=_environ(tmp_path)) == {}
 
     found = discovery.discover_engine("claude-agent-acp", environ=_environ(tmp_path))
-    assert found.version == "0.81.0"
-    assert found.launch_command[1].startswith(str(root / "0.81.0"))
+    assert found.version == "0.78.0"
+    assert found.launch_command[1].startswith(str(root / "0.78.0"))
 
 
 def test_never_uses_a_client_registry_copy(tmp_path):
@@ -94,8 +94,8 @@ def test_a_qualified_codex_adapter_wins_over_a_newer_unqualified_one(tmp_path):
     # The newest *qualified* version wins among qualified ones.
     _install_codex(tmp_path, "1.12.0")
     assert discovery.discover_engine("codex-acp", environ=_environ(tmp_path)).version == "1.13.0"
-    # claude-agent-acp qualifies every version, so it still tracks newest.
-    assert discovery.is_qualified("claude-agent-acp", "0.99.0")
+    # Claude also needs an exact source-qualified instruction channel.
+    assert not discovery.is_qualified("claude-agent-acp", "0.99.0")
     assert not discovery.is_qualified("codex-acp", "1.14.0")
     _install_codex(tmp_path, "2.0.1")
     assert discovery.discover_engine("codex-acp", environ=_environ(tmp_path)).version == "2.0.1"
@@ -179,3 +179,20 @@ def test_sdk_build_sorting_is_exact_and_never_overrides_newer_adapter():
     assert key("0.87.0+sdk.0.3.287") < key("0.87.0+sdk.0.3.293")
     for invalid in ("0x87x0", "0.87.0+sdkX0.3.293", "../0.87.0", "0.87.0-beta"):
         assert key(invalid) == ()
+
+
+def test_unknown_claude_updates_never_displace_or_prune_registered_installs(tmp_path):
+    for version in ("0.87.0", "0.88.0", "0.89.0", "0.90.0", "0.91.0"):
+        assert engine_update.update_engine("claude-agent-acp", environ=_environ(tmp_path, version)) == version
+    env = _environ(tmp_path)
+    root = discovery.owned_root(env) / "claude-agent-acp"
+    assert sorted(p.name for p in discovery._subdirs(root)) == [
+        "0.87.0+sdk.0.3.293", "0.88.0", "0.90.0", "0.91.0",
+    ]
+    assert discovery.discover_engine("claude-agent-acp", environ=env).version == "0.88.0"
+    assert discovery.is_pinned("claude-agent-acp", "0.87.0+sdk.0.3.293")
+    assert discovery.is_pinned("claude-agent-acp", "0.88.0")
+    assert not discovery.is_qualified("claude-agent-acp", "0.89.0")
+    # 0.88.0 already bundles SDK 0.3.293; there must be no override build.
+    assert "0.88.0" not in engine_update._CLAUDE_SDK_OVERRIDES
+    assert not (root / "0.88.0" / "package.json").exists()

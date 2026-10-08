@@ -236,3 +236,24 @@ def test_codex_2_1_1_has_exact_instruction_and_compaction_registrations():
     assert tier_for("codex-acp", "2.1.1").tier == AUTOMATIC
     assert not has_exact_registration("codex-acp", "2.1.0")
     assert isinstance(delivery_for("codex-acp", "2.1.0"), UnsupportedDelivery)
+
+
+def test_claude_0_88_is_exactly_qualified_but_future_versions_are_not():
+    from cortex_runtime.engine.instruction_delivery_registry import (
+        ClaudeAgentAcp0_88Delivery, has_exact_registration,
+    )
+    role = roles.load_role("worker-backend-dev")
+    mechanism = delivery_for("claude-agent-acp", "0.88.0")
+    assert isinstance(mechanism, ClaudeAgentAcp0_88Delivery)
+    assert has_exact_registration("claude-agent-acp", "0.88.0")
+    plan = qualify_delivery(role, mechanism, [])
+    assert plan.version == "0.88.0"
+    assert plan.qualification == DeliveryQualification.QUALIFIED
+    assert plan.blocks == ()
+    assert plan.session_new_meta["systemPrompt"] == {"append": role.body_portable}
+    assert not has_exact_registration("claude-agent-acp", "0.89.0")
+    assert not has_exact_registration("claude-agent-acp", "*")
+    with pytest.raises(PortableError) as refused:
+        qualify_delivery(role, delivery_for("claude-agent-acp", "0.89.0"), [])
+    assert refused.value.code == "instruction_delivery_unqualified"
+    assert refused.value.retry_eligible is False

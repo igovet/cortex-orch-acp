@@ -51,12 +51,14 @@ Invalid input and busy-store races are refused. `/clear` is host-reserved, not a
 See [retention maintenance](docs/acp/packaging-and-onboarding.md#retention-maintenance)
 for safety details and the owner-run CLI alternative.
 
-Claude ACP's current fallback is 0.87.0, with an exact source-backed
-instruction-delivery registration and updated compaction observation. Its
-side-by-side SDK 0.3.293 refresh resolves `haiku` to Haiku 5.5 and
+Claude ACP's current fallback is 0.88.0, with an exact source-backed
+instruction-delivery registration and bundled SDK 0.3.293. Discovery prefers
+the newest registered install and retains it across future unqualified updates;
+critical-role dispatch excludes unsupported engine versions instead of retrying
+another model on them. SDK 0.3.293 resolves `haiku` to Haiku 5.5 and
 advertises low/medium/high/xhigh/max. The default preset and production
 `default` profile enable it at Luna policy parity; old Haiku remains denied
-by exact ID. No-prompt ACP controls accepted high/xhigh/max. See [adapter support and limits](docs/acp/claude-agent-acp-adapter.md#current-support-0870-2026-10-07).
+by exact ID. No-prompt ACP controls accepted high/xhigh/max. See [adapter support and limits](docs/acp/claude-agent-acp-adapter.md#current-support-0880-2026-10-08).
 A Cortex runtime older than this checkout repoints Claude to the upstream SDK
 0.3.287 install at each start, where `haiku` is Haiku 4.5; the owner's production
 runtime was in that state on 2026-10-08. The catalog refresh a new session starts
@@ -192,7 +194,7 @@ Within an eligible routing tier, owner `preferred_for` model choices now rank ah
 
 A model's preference can also carry an owner-written `preferred_when` condition (for example "frontend changes without design work"). The coordinator judges each plan node against it and names the model only where it holds; elsewhere the model is an ordinary candidate. In Settings, preferred work kinds are now chosen from the work-kind list instead of typed. See [model policy](docs/configuration.md).
 
-The current Codex adapter is codex-acp 2.0.1 with Codex CLI 0.159.1, with a separately observed offline catalog. The installed Claude adapter is claude-agent-acp 0.84.0. Codex 1.12.0 and 1.13.0 remain supported fallbacks; later Codex adapters still need explicit compatibility support. This one-time update does not change the existing background installer. See [adapter compatibility](docs/acp/codex-acp-adapter.md).
+The current Codex adapter is codex-acp 2.0.1 with Codex CLI 0.159.1, with a separately observed offline catalog. The supported Claude fallback is claude-agent-acp 0.88.0. Codex 1.12.0 and 1.13.0 remain supported fallbacks; later Codex adapters still need explicit compatibility support. This one-time update does not change the existing background installer. See [adapter compatibility](docs/acp/codex-acp-adapter.md).
 
 OpenCode v2 (`opencode acp`, any `2.x.x` release) is an optional third engine.
 It uses your native OpenCode logins and your configured custom providers
