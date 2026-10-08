@@ -19,7 +19,7 @@ for exact paths, artifact-test limits and the next upstream-fix decision.
 ## Current ACP boundary (1.0.0)
 
 Claude ACP 0.88.0 is separately source-qualified for system instruction delivery;
-0.78.0 and 0.87.0 remain independently registered. Unknown installed Claude
+0.78.0 and 0.87.0 remain independently registered. One owner-requested Desktop check on 0.88.0 (2026-10-08) observed its resumed scenario complete without an instruction-delivery refusal; it does not establish native-tool enforcement (see [Claude adapter support](docs/acp/claude-agent-acp-adapter.md#current-support-0880-2026-10-08) and [the Desktop evidence](docs/acp/evidence/claude-088-live-desktop-2026-10-08.md)). Unknown installed Claude
 versions cannot borrow that qualification or displace registered installs in
 discovery; pruning preserves registered installs. Critical-role dispatch excludes
 an unsupported or non-retryably unqualified engine/version across models and

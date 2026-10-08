@@ -207,3 +207,56 @@ def _fake_engines_run_unjailed(request, monkeypatch):
     if request.node.get_closest_marker("engine_jail") is None:
         from cortex_runtime.delegation import live_adapters
         monkeypatch.setattr(live_adapters, "_jail_for", lambda store, credentials: None)
+
+
+# Lifecycle tests exercise real commands, retention, revision checks and
+# cancellation, not Linux namespace policy. Only the launch preparation is
+# replaced; real sandbox tests opt out explicitly and require a successful
+# namespace probe. Production never imports this fixture or offers a bypass.
+def pytest_configure(config):
+    config.addinivalue_line("markers", "requires_bwrap: executes a real bubblewrap sandbox")
+    config.addinivalue_line("markers", "real_verification_sandbox: keep production verification launch preparation")
+
+
+@pytest.fixture(scope="session")
+def _bwrap_namespace_probe():
+    import shutil
+    import subprocess
+    from sandbox_fakes import bwrap_namespace_reason
+    return bwrap_namespace_reason(shutil.which("bwrap"), subprocess.run)
+
+
+@pytest.fixture(autouse=True)
+def _real_bwrap_requires_namespaces(request):
+    if request.node.get_closest_marker("requires_bwrap") is not None:
+        reason = request.getfixturevalue("_bwrap_namespace_probe")
+        if reason:
+            pytest.skip(reason)
+
+
+@pytest.fixture(autouse=True)
+def _lifecycle_verification_launch(request, monkeypatch):
+    if request.node.get_closest_marker("real_verification_sandbox") is not None:
+        return
+    from cortex_runtime.orchestration import controller
+    from sandbox_fakes import verification_command
+    monkeypatch.setattr(controller, "_verification_command", verification_command)
+
+
+@pytest.fixture(autouse=True)
+def _git_context_launch(request, monkeypatch):
+    if request.node.get_closest_marker("requires_bwrap") is not None:
+        return
+    from cortex_runtime.orchestration import artifacts
+    from cortex_runtime.delegation import revision
+    from sandbox_fakes import project_git_command, sandboxed_git
+    monkeypatch.setattr(artifacts, "_project_git_command", project_git_command)
+    monkeypatch.setattr(revision, "sandboxed_git", sandboxed_git)
+
+
+@pytest.fixture
+def unjailed_gateway_command(monkeypatch):
+    """Opt-in for receipt/recovery tests, never for containment assertions."""
+    from cortex_runtime.orchestration import sandbox
+    from sandbox_fakes import unjailed_gateway_argv
+    monkeypatch.setattr(sandbox, "compact_argv", unjailed_gateway_argv)

@@ -32,6 +32,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
   self.send_response(200);self.send_header('Content-Type','text/event-stream');self.end_headers();self.wfile.write(body.encode())
 
 
+@pytest.mark.requires_bwrap
 def test_installed_wrapper_in_jail_runs_native_patch_only_inside_scope(tmp_path):
     binary=os.environ.get('CORTEX_PINNED_CODEX_BINARY')
     if not binary: pytest.skip('set CORTEX_PINNED_CODEX_BINARY for installed no-paid tool dispatch check')
@@ -100,6 +101,7 @@ def _declared_exec_tool_names(body):
  return set(re.findall(r'declare const tools: \{ ([a-zA-Z0-9_]+)\(', json.dumps(body)))
 
 
+@pytest.mark.requires_bwrap
 def test_installed_wrapper_advertises_apply_patch_without_shell_or_view_image_tools(tmp_path):
     """Closes the gap left unverified by r_98c4d5ec4233/r_edaa460fcf2e: proves,
     against the real installed App Server with the exact Cortex-forced config,

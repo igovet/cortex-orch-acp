@@ -55,6 +55,7 @@ def run(worker, argv, key):
                             dict(argv=argv, timeout_seconds=60, request_key=key))
 
 
+@pytest.mark.requires_bwrap
 def test_worker_git_test_and_build_commands(worker, repo):
     (repo / 'test_example.py').write_text(
         'def test_build():\n'
@@ -71,6 +72,7 @@ def test_worker_git_test_and_build_commands(worker, repo):
     assert git('log', '-1', '--format=%s', cwd=repo).strip() == 'tests'
 
 
+@pytest.mark.requires_bwrap
 def test_worker_real_docker_client_reaches_unix_socket(worker, tmp_path):
     docker = shutil.which('docker')
     if docker is None:
@@ -113,6 +115,8 @@ def test_worker_real_docker_client_reaches_unix_socket(worker, tmp_path):
 
 
 @pytest.mark.parametrize('linked', [False, True])
+@pytest.mark.requires_bwrap
+@pytest.mark.real_verification_sandbox
 def test_automatic_verification_can_inspect_git_but_cannot_write(tmp_path, repo, linked):
     root = repo
     if linked:
@@ -166,6 +170,7 @@ def test_note_scope_and_file_tools_keep_engine_configuration_private(tmp_path, r
 
 @pytest.mark.parametrize('native', [False, True])
 @pytest.mark.parametrize('writing,denied', [(True, False), (False, False), (True, 'file'), (True, 'directory')])
+@pytest.mark.requires_bwrap
 def test_note_mounts_obey_role_denials_and_hide_other_state(tmp_path, native, writing, denied):
     root = tmp_path / 'project'
     (root / '.claude').mkdir(parents=True)
@@ -200,6 +205,7 @@ def test_note_mounts_obey_role_denials_and_hide_other_state(tmp_path, native, wr
     assert settings.read_text() == '{}'
 
 
+@pytest.mark.requires_bwrap
 def test_readonly_engine_pytest_cache_is_private_and_writable(tmp_path):
     root = tmp_path / 'project'
     root.mkdir()
@@ -241,6 +247,7 @@ def test_note_exceptions_do_not_follow_symlinks_or_hardlinks(tmp_path, linked_pa
     assert private.read_text() == 'secret'
 
 
+@pytest.mark.requires_bwrap
 def test_readonly_gateway_pytest_cache_is_private(worker, repo, monkeypatch):
     monkeypatch.setattr(gateway, '_authority', lambda db, ch: ([], 'owner'))
     (repo / 'test_cache.py').write_text(

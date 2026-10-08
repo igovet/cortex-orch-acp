@@ -58,6 +58,7 @@ def sandboxed(root, scratch, script, scopes=('.',), **kwargs):
                               env={'PATH': '/usr/bin:/bin'}, timeout=60)
 
 
+@pytest.mark.requires_bwrap
 def test_sandboxed_git_commits_branches_and_stashes(tmp_path, repo):
     done = sandboxed(repo, tmp_path / 'scratch', '''set -e
         echo two >> a.txt
@@ -72,6 +73,7 @@ def test_sandboxed_git_commits_branches_and_stashes(tmp_path, repo):
     assert git('status', '--porcelain', cwd=repo) == ''
 
 
+@pytest.mark.requires_bwrap
 def test_git_hooks_config_and_pointers_stay_protected(tmp_path, repo):
     hooks = repo / '.git' / 'hooks'
     hooks.mkdir(exist_ok=True)
@@ -101,6 +103,7 @@ def test_git_hooks_config_and_pointers_stay_protected(tmp_path, repo):
     assert not (repo / '.cortex' / 'new').exists()
 
 
+@pytest.mark.requires_bwrap
 def test_linked_worktree_commits_through_its_common_directory(tmp_path, repo):
     worktree = tmp_path / 'wt'
     git('worktree', 'add', '-q', '-b', 'side', str(worktree), cwd=repo)
@@ -124,6 +127,7 @@ def test_linked_worktree_commits_through_its_common_directory(tmp_path, repo):
     assert git('log', '-1', '--format=%s', 'side', cwd=repo).strip() == 'from worktree'
 
 
+@pytest.mark.requires_bwrap
 def test_without_a_writing_grant_git_is_read_only(tmp_path, repo):
     head = (repo / '.git' / 'HEAD').read_text()
     done = sandboxed(repo, tmp_path / 'scratch', '''
@@ -135,6 +139,7 @@ def test_without_a_writing_grant_git_is_read_only(tmp_path, repo):
     assert (repo / '.git' / 'HEAD').read_text() == head
 
 
+@pytest.mark.requires_bwrap
 def test_tool_state_directories_in_the_project_are_writable(tmp_path, repo):
     done = sandboxed(repo, tmp_path / 'scratch', '''set -e
         for dir in .venv/lib node_modules/.cache/tool .pytest_cache __pycache__ .mypy_cache target/debug build; do
@@ -157,6 +162,7 @@ def test_direct_file_tools_never_reach_git_or_cortex(tmp_path, repo):
     assert not (repo / '.git' / 'hooks' / 'post-commit').exists()
 
 
+@pytest.mark.requires_bwrap
 def test_engine_jail_native_shell_commits_but_cannot_touch_hooks(tmp_path, repo):
     scratch = tmp_path / 'jail'
     scratch.mkdir()
@@ -174,6 +180,7 @@ def test_engine_jail_native_shell_commits_but_cannot_touch_hooks(tmp_path, repo)
     assert git('log', '-1', '--format=%s', cwd=repo).strip() == 'jailed'
 
 
+@pytest.mark.requires_bwrap
 def test_command_run_commits_and_reports_planted_git_configuration(tmp_path, repo, monkeypatch):
     """The real command_run path (owner shell, retained output): a commit
     lands; a planted repository pointer is removed and fails the command."""

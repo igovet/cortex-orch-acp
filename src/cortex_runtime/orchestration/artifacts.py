@@ -40,6 +40,18 @@ def report_digest(store, task_id, filename):
 _INLINE_OUTPUT_BOUND = 65536
 
 
+def _project_git_command(root, scratch, argv, metadata):
+    from .sandbox import verification_command
+    command = verification_command(root, scratch, argv)
+    index = command.index('--chdir')
+    command[index:index] = [*(arg for directory in metadata for arg in ('--ro-bind', directory, directory)),
+                           '--setenv', 'GIT_DIR', metadata[0], '--setenv', 'GIT_WORK_TREE', str(root),
+                           '--setenv', 'GIT_CONFIG_NOSYSTEM', '1',
+                           '--setenv', 'GIT_CONFIG_GLOBAL', '/dev/null',
+                           '--setenv', 'GIT_TERMINAL_PROMPT', '0']
+    return command
+
+
 def project_git_evidence(store, task_id, owner_scope, root, kind):
     """Observe fixed read-only git commands, outside the model's own sandbox.
 
@@ -50,7 +62,6 @@ def project_git_evidence(store, task_id, owner_scope, root, kind):
     from pathlib import Path
     import subprocess
     import tempfile
-    from .sandbox import verification_command
     from ..recovery.large_output_store import persist_output
     from ..delegation.revision import git_metadata_dirs
     root = Path(root).resolve(strict=True)
@@ -69,13 +80,7 @@ def project_git_evidence(store, task_id, owner_scope, root, kind):
              ':(exclude).codex', ':(exclude)**/.codex/**',
              ':(exclude).claude', ':(exclude)**/.claude/**']
     with tempfile.TemporaryDirectory(prefix='cortex-git-read-') as scratch:
-        command = verification_command(root, scratch, argv)
-        index = command.index('--chdir')
-        command[index:index] = [*(arg for directory in metadata for arg in ('--ro-bind', directory, directory)),
-                               '--setenv', 'GIT_DIR', metadata[0], '--setenv', 'GIT_WORK_TREE', str(root),
-                               '--setenv', 'GIT_CONFIG_NOSYSTEM', '1',
-                               '--setenv', 'GIT_CONFIG_GLOBAL', '/dev/null',
-                               '--setenv', 'GIT_TERMINAL_PROMPT', '0']
+        command = _project_git_command(root, scratch, argv, metadata)
         with tempfile.TemporaryFile() as output:
             proc = subprocess.Popen(command, stdout=output, stderr=subprocess.STDOUT, env={'PATH':'/usr/bin:/bin'})
             failure = None

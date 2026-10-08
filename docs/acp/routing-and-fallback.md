@@ -23,7 +23,7 @@ unavailability and fences that task's engine/version across models and
 connections, rather than escalating to a different model on the same unusable
 adapter. An updated qualified version does not inherit the refusal. Existing
 authorization, pins and user-requested identities still apply; an unavailable
-pin is refused, not substituted. See [exact Claude support](claude-agent-acp-adapter.md#current-support-0880-2026-10-08).
+pin is refused, not substituted. See [exact Claude support](claude-agent-acp-adapter.md#current-support-0880-2026-10-08). The owner-requested Desktop run on 0.88.0 (2026-10-08) is bounded evidence, not clean qualification: [Desktop evidence](evidence/claude-088-live-desktop-2026-10-08.md).
 
 This automatic worker selection is separate from configured coordinator routes
 and from the explicitly authorized fallback path described below. Legacy

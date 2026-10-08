@@ -9,6 +9,8 @@ of a command makes an earlier pass of it a failure.
 """
 import json
 import pytest
+
+pytestmark = pytest.mark.usefixtures('unjailed_gateway_command')
 from cortex_runtime.bootstrap import bootstrap_task
 from cortex_runtime.portable.identity import SourceEvent
 from cortex_runtime.store import Store

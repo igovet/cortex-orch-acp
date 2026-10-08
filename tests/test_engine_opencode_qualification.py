@@ -214,6 +214,7 @@ def _opencode_pids(root_pid):
     return found
 
 
+@pytest.mark.requires_bwrap
 def test_opencode_runs_through_the_cortex_launch_path(setup):
     manager, provider, project = setup["manager"], setup["provider"], setup["project"]
 

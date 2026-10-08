@@ -33,6 +33,7 @@ def _spawn_from_a_turn_thread(spawn):
 
 
 @pytest.mark.skipif(BWRAP is None, reason="bwrap unavailable")
+@pytest.mark.requires_bwrap
 def test_a_jailed_engine_outlives_the_turn_thread_that_opened_it():
     direct = _spawn_from_a_turn_thread(lambda: subprocess.Popen(ARGV, start_new_session=True))
     spawned = _spawn_from_a_turn_thread(

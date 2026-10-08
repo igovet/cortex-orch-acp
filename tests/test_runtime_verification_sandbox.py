@@ -8,6 +8,7 @@ from cortex_runtime.orchestration.sandbox import verification_command, with_umas
 from cortex_runtime.contracts import StoreError
 
 
+@pytest.mark.requires_bwrap
 def test_real_check_cannot_read_private_home_or_runtime_store(tmp_path):
     project = tmp_path / 'project'
     project.mkdir()
@@ -29,6 +30,7 @@ def test_real_check_cannot_read_private_home_or_runtime_store(tmp_path):
     assert (project / '.cortex' / 'private').read_text() == 'private'
 
 
+@pytest.mark.requires_bwrap
 def test_var_tmp_is_a_private_writable_per_run_directory(tmp_path):
     """Some tools hardcode /var/tmp; on a host where the real /var/tmp is a
     read-only mount (or, under ``system_root``, simply inherits the whole
@@ -56,6 +58,7 @@ def test_var_tmp_is_a_private_writable_per_run_directory(tmp_path):
     assert not (Path('/var/tmp') / 'marker').exists()
 
 
+@pytest.mark.requires_bwrap
 def test_with_umask_overrides_the_ambient_process_umask(tmp_path):
     """Sandboxed commands (a worker's shell, a verification check) get an
     explicit, deliberate 022 regardless of whatever the Cortex runtime
@@ -76,6 +79,7 @@ def test_missing_sandbox_does_not_fall_back_to_unsandboxed_command(monkeypatch,t
         verification_command(tmp_path,tmp_path,['python3','-c','print(1)'])
 
 
+@pytest.mark.requires_bwrap
 def test_plan_verification_cannot_be_used_as_a_write_bypass(tmp_path):
     root=tmp_path/'project';root.mkdir();(root/'.cortex').mkdir()
     target=root/'protected';target.write_text('original')
@@ -86,6 +90,7 @@ def test_plan_verification_cannot_be_used_as_a_write_bypass(tmp_path):
     assert target.read_text()=='original'
 
 
+@pytest.mark.requires_bwrap
 def test_a_worker_shell_runs_as_the_owner_but_stays_scope_confined(tmp_path):
     """The shell a worker uses is the owner's: their name, real HOME and
     environment, network; never runtime credentials, never writes to HOME."""

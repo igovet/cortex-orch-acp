@@ -6,6 +6,8 @@ silently and nothing unverified becomes a pass.
 """
 import json
 import pytest
+
+pytestmark = pytest.mark.usefixtures('unjailed_gateway_command')
 from cortex_runtime.contracts import StoreError
 from cortex_runtime.bootstrap import bootstrap_task
 from cortex_runtime.portable.identity import SourceEvent

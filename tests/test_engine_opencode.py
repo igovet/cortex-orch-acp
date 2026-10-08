@@ -37,7 +37,7 @@ from cortex_runtime.portable.instruction_delivery import DeliveryQualification
 from cortex_runtime.portable.roles import RoleInstructionSet  # noqa: F401 - import proves the portable seam loads
 from engine_fakes import isolated_environ, make_connection_record, new_connection_id
 
-needs_bwrap = pytest.mark.skipif(shutil.which("bwrap") is None, reason="bubblewrap is required")
+needs_bwrap = pytest.mark.requires_bwrap
 
 
 def _fake_binary(tmp_path, version="2.0.19", mode=0o755):

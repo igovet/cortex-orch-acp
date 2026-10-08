@@ -97,7 +97,7 @@ def test_lost_cortex_channel_is_named_and_gets_no_same_session_followup(tmp_path
     assert TaskMachine(store).context(task_id)["state"] == "WAITING_USER"
 
 
-def test_lost_cortex_channel_never_retries_over_an_uncertain_action(tmp_path):
+def test_lost_cortex_channel_never_retries_over_an_uncertain_action(tmp_path, unjailed_gateway_command):
     store, task_id = _task(tmp_path)
     marker = tmp_path / "side-effect.log"
     command = ["python3", "-B", "-c", f"open({str(marker)!r}, 'a').write('ran\\n')"]

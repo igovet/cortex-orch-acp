@@ -1,8 +1,19 @@
 # Gotchas
 
+## Nested user namespaces are not a lifecycle-test dependency
+
+A correctly enforced host policy can deny a second bubblewrap namespace inside
+Cortex's sandbox. A lifecycle test then used to end in WAITING_USER instead of
+COMPLETED because its verification command could not launch. Test-only launch
+seams now execute those checks without nesting; production still requires its
+sandbox. Real bubblewrap tests probe once and skip known namespace denial
+explicitly, not as a pass. Unexpected probe errors still fail. Run the
+`requires_bwrap` cases outside nesting for containment evidence; see
+[verification](verification.md#running-the-suite-inside-a-runtime-sandbox).
+
 ## Claude adapter auto-update can outrun delivery registration
 
-A background engine auto-update can install a new `claude-agent-acp` adapter version before Cortex has an exact instruction-delivery registration for it. Do not assume the newest installed version is qualified: discovery now falls back to the newest registered install, and pruning preserves registered installs rather than removing them as old versions. If no registered install exists, diagnostics report the actual unsupported version and critical-role dispatch refuses it before launch. This is a delivery qualification guard, not evidence of effective tool enforcement or a real model turn. See [Claude adapter evidence](../acp/claude-agent-acp-adapter.md#current-support-0880-2026-10-08).
+A background engine auto-update can install a new `claude-agent-acp` adapter version before Cortex has an exact instruction-delivery registration for it. Do not assume the newest installed version is qualified: discovery now falls back to the newest registered install, and pruning preserves registered installs rather than removing them as old versions. If no registered install exists, diagnostics report the actual unsupported version and critical-role dispatch refuses it before launch. This is a delivery qualification guard, not evidence of effective tool enforcement. An owner-requested Desktop run on 0.88.0 (2026-10-08) observed a resumed scenario complete with real model turns, but that bounded, not-clean evidence does not establish native-tool enforcement ([Desktop evidence](../acp/evidence/claude-088-live-desktop-2026-10-08.md)). See [Claude adapter evidence](../acp/claude-agent-acp-adapter.md#current-support-0880-2026-10-08).
 
 ## O1/O2/W2: installed-client label humanizing, orphan question-card update, and an over-broad wire-trace .git gate (2026-10-07)
 

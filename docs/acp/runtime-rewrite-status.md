@@ -5,7 +5,7 @@ lifecycle, dependency scheduling, routes, scopes, permission checks, independent
 review, verification, recovery and completion. Models submit bounded proposals and
 immutable reports. All 23 specialist/consultant profiles remain available.
 
-Claude ACP now has an exact 0.88.0 instruction-delivery registration for the adapter's bundled Claude SDK 0.3.293 (ACP SDK 1.7.0). Discovery and pruning preserve registered installations as fallback when a background engine auto-update installs a newer unregistered adapter. Critical-role dispatch refuses unsupported or non-retryably unqualified engine/version pairs for that task rather than retrying a different model on the same adapter. The change has static/source and no-paid protocol qualification only; no paid CLI live check was run (not requested by the owner). A desktop live check is a separate later task and is not reported as completed. Static forwarding does not establish effective native-tool enforcement, a paid model turn or rendered GUI behavior. See [current adapter evidence](claude-agent-acp-adapter.md#current-support-0880-2026-10-08).
+Claude ACP now has an exact 0.88.0 instruction-delivery registration for the adapter's bundled Claude SDK 0.3.293 (ACP SDK 1.7.0). Discovery and pruning preserve registered installations as fallback when a background engine auto-update installs a newer unregistered adapter. Critical-role dispatch refuses unsupported or non-retryably unqualified engine/version pairs for that task rather than retrying a different model on the same adapter. The change has static/source and no-paid protocol qualification, plus one owner-requested paid `desktop` check on 2026-10-08 with coordinator and worker route `claude-agent-acp/claude-sonnet-5` on adapter 0.88.0. Its resumed scenario completed (disposable task `t_0c750c5f00ad` COMPLETED) without `instruction_delivery_unqualified`; the first canary attempt was operator-cancelled, one worker-written version diagnostic assertion remains an open failed check, and the native agentInfo version is unverified. Paid CLI mode was not run (not requested by the owner). This is bounded evidence, not clean or full qualification, paid native-tool enforcement or release readiness; see [the Desktop evidence](evidence/claude-088-live-desktop-2026-10-08.md). Static forwarding alone does not establish effective native-tool enforcement. See [current adapter evidence](claude-agent-acp-adapter.md#current-support-0880-2026-10-08).
 
 Claude ACP support now includes exact 0.87.0 instruction delivery (Claude SDK
 0.3.287, ACP SDK 1.7.0, ACP v1), session-observed option handling, and its
@@ -18,7 +18,7 @@ low/medium/high/xhigh/max. Actual ACP controls accepted high/xhigh/max without
 a prompt. The public preset and owner production `default` profile now
 enable the new alias at Luna policy parity and deny old Haiku by exact ID. See [current adapter evidence](claude-agent-acp-adapter.md#current-support-0870-2026-10-07).
 These static/no-paid observations do not establish a real model turn or GUI
-qualification. Paid live check not requested by the owner.
+qualification. Paid live check not requested by the owner as of 2026-10-07; the 0.88.0 Desktop check above is separate.
 
 Codex ACP now includes exact **2.1.1** support and fallback. All 14 guarded
 patch sites match 2.0.1; protocol/option mapping is unchanged. The owner update

@@ -73,6 +73,7 @@ def test_script_shows_the_prompt_in_the_matching_dialog(environ, tmp_path, promp
 
 
 @pytest.mark.engine_jail
+@pytest.mark.requires_bwrap
 @pytest.mark.skipif(shutil.which('bwrap') is None, reason='bubblewrap is required')
 def test_engine_jail_uses_the_sealed_script(environ, tmp_path):
     _enable(environ)
@@ -88,6 +89,7 @@ def test_engine_jail_uses_the_sealed_script(environ, tmp_path):
 
 
 @pytest.mark.engine_jail
+@pytest.mark.requires_bwrap
 @pytest.mark.skipif(shutil.which('bwrap') is None, reason='bubblewrap is required')
 def test_command_sandbox_uses_the_sealed_script(environ, tmp_path):
     _enable(environ)
@@ -146,6 +148,7 @@ _REACH_AGENT = ('import os, socket; s = socket.socket(socket.AF_UNIX); '
 
 
 @pytest.mark.engine_jail
+@pytest.mark.requires_bwrap
 @pytest.mark.skipif(shutil.which('bwrap') is None, reason='bubblewrap is required')
 def test_command_sandbox_reaches_the_owner_agent(environ, agent, tmp_path):
     project, scratch = tmp_path / 'project', tmp_path / 'scratch'
@@ -158,6 +161,7 @@ def test_command_sandbox_reaches_the_owner_agent(environ, agent, tmp_path):
 
 
 @pytest.mark.engine_jail
+@pytest.mark.requires_bwrap
 @pytest.mark.skipif(shutil.which('bwrap') is None, reason='bubblewrap is required')
 def test_engine_jail_reaches_the_owner_agent(environ, agent, tmp_path):
     project, scratch = tmp_path / 'project', tmp_path / 'scratch'

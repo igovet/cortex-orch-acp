@@ -37,6 +37,21 @@ runs to them:
   as a user home, and a scratch home under a user directory that is itself a
   dotfiles repository produces false failures far from their cause.
 
+### Nested-sandbox portability
+
+The default suite may itself run inside Cortex's runtime verification sandbox.
+Lifecycle verification uses a test-only launch seam, not nested bubblewrap;
+real subprocess outcomes, retention, cancellation and revision checks remain
+exercised. Production sandbox preparation remains fail-closed and has no bypass.
+Fixed git-context commands use a separate test-only preparation seam.
+
+Tests executing real bubblewrap use `requires_bwrap` and one namespace probe per
+pytest session. Known namespace denial skips explicitly with
+`bwrap cannot create user namespace in this environment (nested sandbox)`;
+unexpected probe failures are errors, never inferred passes. Run
+`python3 -B -m pytest -q -m requires_bwrap -rs` outside a nested sandbox to retain
+real containment evidence. See [verification](../project/verification.md#running-the-suite-inside-a-runtime-sandbox).
+
 ### Parallel run
 
 With [pytest-xdist](https://pypi.org/project/pytest-xdist/) installed

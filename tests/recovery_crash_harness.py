@@ -28,6 +28,9 @@ CHILD_TEMPLATE = textwrap.dedent(
     from cortex_runtime.acp.orchestrating_runtime import OrchestratingRuntime
     from cortex_runtime.delegation.live_adapters import EngineSessionManagerAdapter, ConfigurationServiceSnapshotSource
     from cortex_runtime.configuration.service import ConfigurationService
+    # Match conftest's fake-engine launch seam in this child process too.
+    from cortex_runtime.delegation import live_adapters
+    live_adapters._jail_for = lambda store, credentials: None
     from orchestration_fakes import FakeWorkspace
     from engine_fakes import fake_launch_command, make_connection_record
 

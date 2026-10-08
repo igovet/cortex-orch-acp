@@ -231,6 +231,8 @@ def test_mcp_tools_request_result_and_error_keep_exact_identity(trace, tmp_path)
     assert "error" in events[-1]["payload"]
 
 
+@pytest.mark.requires_bwrap
+@pytest.mark.real_verification_sandbox
 def test_verification_real_sandbox_full_output_exit_and_lifecycle(trace, tmp_path):
     from cortex_runtime.delegation import revision
     from cortex_runtime.orchestration import controller

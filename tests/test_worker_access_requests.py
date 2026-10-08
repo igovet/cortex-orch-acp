@@ -348,6 +348,7 @@ def test_extension_reservations_block_later_scheduler_claims_across_tasks(bound)
     assert len(machine.claim_ready(boot.task_id, 'coordinator')) == 1
 
 
+@pytest.mark.requires_bwrap
 def test_real_production_jail_already_writes_sixth_file_and_keeps_denial(bound, tmp_path):
     if shutil.which('bwrap') is None:
         pytest.skip('bubblewrap is required')

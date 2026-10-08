@@ -110,6 +110,7 @@ def test_blocked_and_waiting_tasks_remain_inactive(context,state):
         dispatch(store,ch,'project_read',dict(path='.'))
 
 
+@pytest.mark.requires_bwrap
 def test_real_scoped_command_cannot_write_other_scope_or_read_runtime(tmp_path):
     root=tmp_path/'project';root.mkdir();scratch=tmp_path/'scratch';scratch.mkdir()
     (root/'src').mkdir();(root/'other').write_text('original')
@@ -137,6 +138,7 @@ print('isolated')
     assert (root/'.cortex'/'secret').read_text()=='secret'
 
 
+@pytest.mark.requires_bwrap
 def test_a_hardlink_to_outside_is_read_only_and_never_refuses_the_worker(tmp_path):
     """A build's hardlinks refused the whole worker; writing through one must
     still never reach the file outside the project."""
@@ -151,6 +153,7 @@ def test_a_hardlink_to_outside_is_read_only_and_never_refuses_the_worker(tmp_pat
     assert outside.read_text()=='private' and (root/'work'/'own.txt').read_text()=='ok\n'
 
 
+@pytest.mark.requires_bwrap
 def test_hardlinks_wholly_inside_the_writable_project_can_be_reinstalled(tmp_path):
     """esbuild links its two binaries together; pinning them made every
     `npm ci` fail with EBUSY. A file whose every link is a writable project
@@ -170,6 +173,7 @@ def test_hardlinks_wholly_inside_the_writable_project_can_be_reinstalled(tmp_pat
 
 
 @pytest.mark.parametrize('shape',['outside','denied','ungranted'])
+@pytest.mark.requires_bwrap
 def test_a_project_hardlink_pair_stays_read_only_unless_every_link_is_writable(tmp_path,shape):
     """A third link outside the project, a peer under a deny-write path, or a
     peer outside the granted scope keeps the granted link read-only."""
@@ -191,6 +195,7 @@ def test_a_project_hardlink_pair_stays_read_only_unless_every_link_is_writable(t
     assert first.read_text()=='private' and (root/'work'/'b').exists()
 
 
+@pytest.mark.requires_bwrap
 def test_project_shapes_that_used_to_refuse_the_worker_now_run(tmp_path, monkeypatch):
     """A private-name symlink, a socket in scope, and the tree limit each
     stopped a worker from starting at all."""

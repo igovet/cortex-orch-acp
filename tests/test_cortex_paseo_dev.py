@@ -560,7 +560,19 @@ def test_gui_refuses_launch_inside_cortex_sandbox(tmp_path, monkeypatch):
     assert not marker.exists()
 
 
+def _mountinfo_root(path: Path) -> str:
+    """``path`` as mountinfo reports a bind of it: relative to its own
+    filesystem, e.g. without the ``/tmp`` prefix when /tmp is a tmpfs."""
+    mount = path
+    while not os.path.ismount(mount):
+        mount = mount.parent
+    lines = Path("/proc/self/mountinfo").read_text(encoding="utf-8").splitlines()
+    root = [fields[3] for fields in (line.split(" ") for line in lines) if fields[4] == str(mount)][-1]
+    return str(Path(root) / path.relative_to(mount))
+
+
 @pytest.mark.skipif(shutil.which("bwrap") is None, reason="bubblewrap is not installed")
+@pytest.mark.requires_bwrap
 def test_cli_reads_the_real_sandbox_var_tmp_mount(tmp_path, monkeypatch):
     """The real /proc/self/mountinfo of a bwrap namespace laid out like a Cortex
     command sandbox is refused; the same command with a plain /var/tmp runs."""
@@ -571,13 +583,11 @@ def test_cli_reads_the_real_sandbox_var_tmp_mount(tmp_path, monkeypatch):
     wrapper = [sys.executable, str(SCRIPT), "--paseo", str(fake), "--home", str(tmp_path / "dev-home"), "--", "start"]
     plain = subprocess.run(["bwrap", "--dev-bind", "/", "/", "--tmpfs", "/var/tmp", "--", *wrapper],
                            capture_output=True, text=True, cwd=str(ROOT))
-    if plain.returncode != 0 and plain.stderr.startswith("bwrap:"):
-        pytest.skip("bubblewrap cannot create a namespace here: " + plain.stderr.strip())
     assert plain.returncode == 0
     assert marker.read_text().split() == ["--home", str(tmp_path / "dev-home"), "start"]
     marker.unlink()
     sandboxed = subprocess.run(["bwrap", "--dev-bind", "/", "/", "--bind", str(scratch), "/var/tmp", "--", *wrapper],
                                capture_output=True, text=True, cwd=str(ROOT))
     assert sandboxed.returncode == 2
-    assert str(scratch) in sandboxed.stderr
+    assert _mountinfo_root(scratch) in sandboxed.stderr
     assert not marker.exists()

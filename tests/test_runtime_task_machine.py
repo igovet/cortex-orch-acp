@@ -5,6 +5,8 @@ import json
 
 import pytest
 
+pytestmark = pytest.mark.usefixtures('unjailed_gateway_command')
+
 from model_policy_fixtures import exact_policy
 from cortex_runtime.bootstrap import bootstrap_task
 from cortex_runtime.contracts import StoreError

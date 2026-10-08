@@ -49,7 +49,9 @@ excludes that engine/version across connections and models for the task's
 dispatch lifetime; authorized alternate routes remain subject to existing
 routing policy, and pins/user-selected identities are never silently replaced.
 A different qualified version on the same connection does not inherit the
-refusal. Paid live check not requested by the owner.
+refusal.
+
+**Owner-requested Desktop check, 2026-10-08.** The owner requested one paid live check in `desktop` mode. Its coordinator and worker routes were `claude-agent-acp/claude-sonnet-5` on adapter 0.88.0. The resumed scenario completed: disposable task `t_0c750c5f00ad` reached COMPLETED at plan revision 2, and no `instruction_delivery_unqualified` failure was recorded. The first canary attempt was interrupted by the operator and cancelled (`turn_interrupted`); it is retained and not accepted. One worker-written version diagnostic assertion remains an open failed check. The native agentInfo version was not observed and remains unverified. Paid CLI mode was not run (not requested by the owner). This is bounded evidence, not clean or full qualification, and it is not proof of paid native-tool enforcement or release readiness. See [the Desktop evidence page](evidence/claude-088-live-desktop-2026-10-08.md).
 
 <a id="current-support-0870-2026-10-07"></a>
 
@@ -148,9 +150,7 @@ versions or prove native-tool enforcement.
 
 Native Claude login was checked without printing identity or credentials:
 logged in, `claude.ai`, first-party provider. No prompt or paid model call
-was sent; all owned discovery processes exited. A new owner-requested live
-check is still required for turn-level qualification; paid live check not
-requested by the owner.
+was sent; all owned discovery processes exited. As of 2026-10-07, a new owner-requested live check was still required for turn-level qualification and none had been requested; the 0.88.0 Desktop check in the current section is separate.
 
 ### Catalog refresh lifetime and deployed runtimes
 

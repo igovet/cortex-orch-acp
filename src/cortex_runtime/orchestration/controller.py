@@ -57,6 +57,18 @@ def _verification_output_tail(output):
     return tail
 
 
+@contextlib.contextmanager
+def _verification_command(root, scratch, argv):
+    """Prepare the production sandbox; tests may replace only this launch seam."""
+    from .sandbox import as_owner, gateway_command, with_umask, readonly_test_cache
+    scopes = [path + '/**' for path in revision.ignored_directories(str(root))]
+    with gateway_command(root, scratch, with_umask(argv), scopes, system_root=True,
+                         reveal=frozenset({'.git'})) as (command, fds):
+        as_owner(command, os.environ)
+        readonly_test_cache(command, scratch, os.environ)
+        yield command, fds
+
+
 def _verification_observation(runtime, task_id, context, expected, emit_tool_call, cancel, run_id):
     """Run retained literal argv commands to completion with complete output.
 
@@ -92,14 +104,8 @@ def _verification_observation(runtime, task_id, context, expected, emit_tool_cal
             # node_modules) are writable, so sources stay untouched and the
             # revision (which skips ignored paths) cannot drift. No access to
             # the real private store, even from an interpreter.
-            from .sandbox import as_owner, gateway_command, with_umask, readonly_test_cache
             try:
-                scopes = [path + '/**' for path in revision.ignored_directories(str(root))]
-                command, fds = stack.enter_context(
-                    gateway_command(root, scratch, with_umask(argv), scopes, system_root=True,
-                                    reveal=frozenset({'.git'})))
-                as_owner(command, os.environ)
-                readonly_test_cache(command, scratch, os.environ)
+                command, fds = stack.enter_context(_verification_command(root, scratch, argv))
             except StoreError as error:
                 if trace is not None:
                     trace.record("verification", "in", dict(blocker=str(error)),

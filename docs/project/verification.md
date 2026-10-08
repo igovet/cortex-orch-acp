@@ -57,6 +57,23 @@ PYTHONDONTWRITEBYTECODE=1 python3 -B -m pytest -q
   during a full diagnostic run.
 - Test totals vary with the checkout; retain the exact counts, skips and exit code from each run rather than treating a historical count as current. Remaining conditional guards are platform guards (POSIX FIFO, symlink support, `tmux` presence) that are not the sole coverage of any mandatory case.
 
+## Running the suite inside a runtime sandbox
+
+Lifecycle tests replace only verification launch preparation with a test-only
+runner (`tests/sandbox_fakes.py`): literal commands still execute, and production
+retains output, exit status, cancellation and revision checks. Git-context tests
+likewise use a real fixed git command without a nested sandbox; receipt/recovery
+tests opt into `unjailed_gateway_command` when containment is not their subject.
+There is no production environment flag or unsandboxed fallback.
+
+Real containment tests are marked `requires_bwrap`. A session-scoped probe tries
+a user namespace once; a known namespace denial skips them with
+`bwrap cannot create user namespace in this environment (nested sandbox)`.
+Unexpected probe errors and failures after a successful probe still fail.
+Use `python3 -B -m pytest -q -m requires_bwrap -rs` outside a nested sandbox to
+exercise those cases; a nested run is not containment qualification. Do not
+change host AppArmor or sysctl policy to make lifecycle tests pass.
+
 ## Release-grade run
 
 For a release-grade run, verify in a throwaway clone rather than the working

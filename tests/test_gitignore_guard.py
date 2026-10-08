@@ -5,6 +5,8 @@ import sys
 
 import pytest
 
+pytestmark = pytest.mark.usefixtures('unjailed_gateway_command')
+
 from cortex_runtime.contracts import StoreError
 from cortex_runtime.delegation import mcp_tools
 from cortex_runtime.orchestration import gateway, ignore_guard

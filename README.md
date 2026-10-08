@@ -54,8 +54,7 @@ for safety details and the owner-run CLI alternative.
 Claude ACP's current fallback is 0.88.0, with an exact source-backed
 instruction-delivery registration and bundled SDK 0.3.293. Discovery prefers
 the newest registered install and retains it across future unqualified updates;
-critical-role dispatch excludes unsupported engine versions instead of retrying
-another model on them. SDK 0.3.293 resolves `haiku` to Haiku 5.5 and
+critical-role dispatch excludes unsupported engine versions instead of retrying another model on them. One owner-requested paid `desktop` check on 2026-10-08 completed its resumed scenario on this adapter with `claude-agent-acp/claude-sonnet-5`; that is bounded evidence, not clean or full qualification (see [the Desktop evidence](docs/acp/evidence/claude-088-live-desktop-2026-10-08.md)). SDK 0.3.293 resolves `haiku` to Haiku 5.5 and
 advertises low/medium/high/xhigh/max. The default preset and production
 `default` profile enable it at Luna policy parity; old Haiku remains denied
 by exact ID. No-prompt ACP controls accepted high/xhigh/max. See [adapter support and limits](docs/acp/claude-agent-acp-adapter.md#current-support-0880-2026-10-08).

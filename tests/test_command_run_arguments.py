@@ -16,6 +16,8 @@ import uuid
 
 import pytest
 
+pytestmark = pytest.mark.usefixtures('unjailed_gateway_command')
+
 from cortex_runtime.bootstrap import bootstrap_task
 from cortex_runtime.contracts import StoreError
 from cortex_runtime.delegation import mcp_tools
@@ -123,6 +125,7 @@ def _mcp(project, channel, secret, tmp_path, calls):
     return [json.loads(line)['result'] for line in done.stdout.splitlines()][1:]
 
 
+@pytest.mark.requires_bwrap
 def test_mcp_wire_runs_with_timeout_and_names_the_invalid_field(tmp_path):
     """The real cortex.py MCP server, as an engine's Cortex child process."""
     project, _, channel, secret = _worker(tmp_path)

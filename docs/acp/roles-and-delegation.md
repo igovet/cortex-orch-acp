@@ -12,7 +12,7 @@ Unregistered Claude versions cannot displace registered installs, and a
 non-retryable delivery refusal makes the task's engine/version unavailable
 across models for critical-role dispatch. This is a delivery qualification
 boundary, not evidence of effective model/tool enforcement. See [Claude
-support and limits](claude-agent-acp-adapter.md#current-support-0880-2026-10-08).
+support and limits](claude-agent-acp-adapter.md#current-support-0880-2026-10-08). The 2026-10-08 owner-requested Desktop run on 0.88.0 is bounded evidence, not clean qualification: [Desktop evidence](evidence/claude-088-live-desktop-2026-10-08.md).
 
 All 23 worker role instructions remain available as canonical skill sources,
 composed from role specializations and the shared report protocol. The redundant

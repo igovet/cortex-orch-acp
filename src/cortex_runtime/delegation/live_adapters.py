@@ -1711,10 +1711,17 @@ class EngineSessionManagerAdapter:
         """
         from ..connections import registry as connection_registry
         from ..engine.instruction_delivery_registry import has_exact_registration
+        from ..portable.errors import PortableError
         from ..portable.roles import load_role
         from ..routing import availability
 
-        critical = bool(load_role(launch.get("role_id") or "worker-general").critical_rules)
+        try:
+            critical = bool(load_role(launch.get("role_id") or "worker-general").critical_rules)
+        except PortableError:
+            # Role validity belongs to route authorization and instruction
+            # loading, which report their own refusal; an unloadable role
+            # is fenced conservatively here rather than refused early.
+            critical = True
         entries = availability.active(self._store)
         state = connection_registry.read_registry(self._environ)
         records = dict(state.connections)

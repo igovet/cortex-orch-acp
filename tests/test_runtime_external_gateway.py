@@ -61,6 +61,7 @@ def close(proc):
     except subprocess.TimeoutExpired: proc.kill();proc.wait(timeout=3)
 
 
+@pytest.mark.requires_bwrap
 def test_external_gateway_grants_filter_containment_replay_and_revocation(proxy):
     store,task,machine,root,start=proxy;proc=start()
     try:
@@ -93,6 +94,7 @@ def test_external_path_grant_cannot_overlay_private_masks(proxy,grant,key):
     finally: close(proc)
 
 
+@pytest.mark.requires_bwrap
 def test_server_runs_with_owner_home_and_writes_granted_state(proxy, tmp_path):
     """An index keyed by project path must land in the owner's real cache."""
     store,task,machine,root,start=proxy
@@ -162,6 +164,7 @@ def test_pipes_above_fd_setsize_still_carry_frames():
     finally: resource.setrlimit(resource.RLIMIT_NOFILE,(soft,hard))
 
 
+@pytest.mark.requires_bwrap
 def test_network_grant_includes_system_resolution_files_and_loopback(proxy, tmp_path):
     import socket
     store,task,machine,root,start=proxy
@@ -193,6 +196,7 @@ for line in sys.stdin:
     finally: listener.close()
 
 
+@pytest.mark.requires_bwrap
 def test_coordinator_relay_starts_before_the_task_row_and_survives_recovery(tmp_path):
     """The coordinator session (and its relay) opens before runtime_tasks has a
     row; the relay used to exit 65 and the engine never restarted it."""
@@ -215,6 +219,7 @@ def test_coordinator_relay_starts_before_the_task_row_and_survives_recovery(tmp_
     finally: close(proc)
 
 
+@pytest.mark.requires_bwrap
 def test_a_mismatched_response_names_its_shape_without_content(proxy, tmp_path):
     """A server that answers with a different id (codebase-memory-mcp
     truncates ids above 2**31-1 to 32 bits) used to fail as a bare
@@ -238,6 +243,7 @@ for line in sys.stdin:
 
 
 
+@pytest.mark.requires_bwrap
 def test_each_launch_gets_a_private_runtime_dir_outside_tmp(proxy, tmp_path):
     """codebase-memory-mcp coordinates through a per-user daemon. Started in
     the sandbox it found one launched outside it, could not verify it across
@@ -270,6 +276,7 @@ for line in sys.stdin:
     assert not list((home/'.cache'/'cortex-mcp-runtime').iterdir())
 
 
+@pytest.mark.requires_bwrap
 def test_external_gateway_marks_only_configured_tools_always_load(proxy):
     store,task,machine,root,start=proxy
     proc=start(dict(allowed_tools=['inspect','forbidden'],read_only_tools=['inspect','forbidden'],always_load_tools=['inspect']))
@@ -299,6 +306,7 @@ def test_describe_arguments_fills_only_undescribed_known_arguments():
     assert describe_arguments('codebase-memory-mcp',other_tool) is other_tool
 
 
+@pytest.mark.requires_bwrap
 def test_external_gateway_describes_undocumented_code_index_patterns(proxy, tmp_path):
     store,task,machine,root,start=proxy
     script=tmp_path/'index.py'

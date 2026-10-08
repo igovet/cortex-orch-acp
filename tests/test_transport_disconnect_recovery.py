@@ -16,6 +16,8 @@ from unittest.mock import patch
 
 import pytest
 
+pytestmark = pytest.mark.usefixtures('unjailed_gateway_command')
+
 from cortex_runtime.acp.orchestrating_runtime import OrchestratingRuntime, PromptOutcome
 from cortex_runtime.bootstrap import bootstrap_task
 from cortex_runtime.delegation import mcp_tools

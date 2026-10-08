@@ -983,3 +983,19 @@ def test_unrelated_or_retryable_portable_failure_does_not_poison_engine_route(tm
         adapter._record_dispatch_route_failure(error, connection_b, "reviewer-model", channel.task_id, "xa_test")
     assert adapter._unqualified_instruction_routes == set()
     assert availability.active(store) == []
+
+
+def test_unknown_role_is_fenced_not_refused_by_delivery_qualification(tmp_path, monkeypatch):
+    """Role validity belongs to route authorization: the delivery fence must
+    neither raise for an unloadable role nor let one evade the fence."""
+    from cortex_runtime.delegation import live_adapters
+    from cortex_runtime.routing import availability
+
+    store, channel, _, adapter, _, connection_b, *_ = _setup(tmp_path)
+    original = live_adapters._pinned_version_for
+    monkeypatch.setattr(live_adapters, "_pinned_version_for",
+                        lambda engine, record=None: "0.89.0" if engine == "claude-agent-acp"
+                        else original(engine, record))
+    entries = adapter._worker_unavailable_routes(dict(task_id=channel.task_id, role_id="implementer"))
+    entry = availability.blocking(entries, connection_b.id, "sonnet")
+    assert entry is not None and entry["reason"] == "instruction_delivery_unqualified"

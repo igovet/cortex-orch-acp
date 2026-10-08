@@ -17,6 +17,8 @@ import tracemalloc
 import uuid
 from types import SimpleNamespace
 
+import pytest
+
 import cortex_runtime.delegation.revision as revision
 import cortex_runtime.orchestration.sandbox as sandbox
 from cortex_runtime.acp.wire_budget import SESSION_UPDATE_MAX_BYTES
@@ -768,6 +770,7 @@ def test_change_fingerprint_tracks_scheduler_inputs(tmp_path):
     assert machine.change_fingerprint(task_id) != seen[-1]
 
 
+@pytest.mark.real_verification_sandbox
 def test_verification_5mb_output_persistence_and_bounded_tool_card(
     tmp_path, monkeypatch,
 ):

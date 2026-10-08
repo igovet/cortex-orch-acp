@@ -102,6 +102,11 @@ def test_actual_fresh_python_startup_imports_and_pytest_exit_propagation(tmp_pat
                       ('XDG_CACHE_HOME','cache'), ('TMPDIR','tmp')]:
         path = scratch/name; path.mkdir(mode=0o700); expected[key] = str(path)
     deps = Path(pytest.__file__).resolve().parent.parent
+    if deps.parent.name != f'python{sys.version_info.major}.{sys.version_info.minor}':
+        # The launcher rightly refuses another interpreter's packages (see the
+        # 'interpreter' refusal case); without a compatible pytest this host
+        # cannot exercise a real startup.
+        pytest.skip(f'pytest comes from {deps.parent.name} packages, not this interpreter')
     before = {p: p.read_bytes() for p in scratch.rglob('*') if p.is_file()}
     for mode, exit_code in [('pass', 0), ('fail', 1)]:
         env = os.environ.copy()

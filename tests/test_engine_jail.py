@@ -39,6 +39,7 @@ def tree(tmp_path):
     return project
 
 
+@pytest.mark.requires_bwrap
 def test_only_the_scope_is_writable_and_private_state_is_hidden(tmp_path, tree):
     result = _run(tmp_path, '''
         echo new > src/a.py && echo new > src/c.py && echo scope-ok
@@ -55,12 +56,14 @@ def test_only_the_scope_is_writable_and_private_state_is_hidden(tmp_path, tree):
     assert (tree / 'docs/b.md').read_text() == 'original\n'
 
 
+@pytest.mark.requires_bwrap
 def test_no_scope_leaves_the_whole_project_read_only(tmp_path, tree):
     result = _run(tmp_path, 'echo bad > src/a.py || echo ro', [])
     assert result.stdout.split() == ['ro']
     assert (tree / 'src/a.py').read_text() == 'original\n'
 
 
+@pytest.mark.requires_bwrap
 def test_engine_state_is_writable_but_config_and_plugins_are_not(tmp_path, tree):
     state = tmp_path / 'home' / '.claude'
     (state / 'plugins' / 'p').mkdir(parents=True)
@@ -81,6 +84,7 @@ def test_engine_state_is_writable_but_config_and_plugins_are_not(tmp_path, tree)
     assert (state / 'plugins' / 'p').is_dir()
 
 
+@pytest.mark.requires_bwrap
 def test_owner_runtime_sockets_are_visible_like_on_the_host(tmp_path, tree):
     """Everything that works on the host works in the sandbox: the session
     bus, audio, display and keyring live under /run/user."""
@@ -90,6 +94,7 @@ def test_owner_runtime_sockets_are_visible_like_on_the_host(tmp_path, tree):
     assert result.stdout.split() != ['0']
 
 
+@pytest.mark.requires_bwrap
 def test_revoked_channel_terminates_the_jailed_engine(tmp_path, tree):
     environ = isolated_environ(tmp_path)
     record = make_connection_record(new_connection_id(), ('/bin/sleep', '60'), environ=environ)
@@ -132,6 +137,7 @@ def test_transient_store_error_is_not_read_as_channel_revocation(tmp_path):
     assert jail['alive']()  # transient error -> stay alive, re-check next tick
 
 
+@pytest.mark.requires_bwrap
 def test_a_linked_engine_state_dir_and_config_still_run_locked_down(tmp_path, tree):
     """A dotfile manager links ~/.claude and its settings elsewhere; that
     refused every engine. It must run, with the config still read-only."""
