@@ -2,7 +2,7 @@
 
 OpenCode 2.x reaches a session's MCP servers -- Cortex's gateway included --
 only from inside its ``execute`` (Code Mode) tool, as
-``tools.<server>.<tool>(input)`` (docs/acp/opencode-adapter.md). Its ACP
+``tools.<server>.<tool>(input)`` (docs/features/opencode-engine/index.md). Its ACP
 updates therefore describe the wrapper, not the MCP call. The shapes observed
 in a real OpenCode session are:
 

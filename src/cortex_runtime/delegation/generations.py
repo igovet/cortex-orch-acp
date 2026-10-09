@@ -68,7 +68,7 @@ for the two pinned adapters --
 Neither presentation is a *pre*-compaction hook: both arrive once the
 engine has already started (``in_progress``) or finished (``completed``)
 compacting, never before -- Cortex cannot intervene before a hidden
-internal engine action (see ``docs/acp/context-generations.md`` and
+internal engine action (see ``docs/features/context-generations/index.md`` and
 INVARIANTS.md). ``automatic`` here means "the adapter emits a verifiable
 signal Cortex can react to", not "Cortex is warned in advance".
 """

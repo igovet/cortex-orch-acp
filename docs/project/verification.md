@@ -1,7 +1,7 @@
 # Verification
 
 Commands below are copied exactly from `AGENTS.md`, `README.md`,
-`docs/acp/test-matrix-and-ci.md` and `integrations/paseo/package.json`.
+`docs/project/test-matrix.md` and `integrations/paseo/package.json`.
 
 ## Verification coverage
 
@@ -50,7 +50,7 @@ PYTHONDONTWRITEBYTECODE=1 python3 -B -m pytest -q
   check self-skips when the process can bypass directory permissions, so a
   root CI runner would silently never run it.
 - Nothing in this suite can reach a paid engine (see
-  `docs/acp/test-matrix-and-ci.md`): the paid probes refuse to run without
+  `docs/project/test-matrix.md`): the paid probes refuse to run without
   both `--i-authorize-paid-call` and `--approval-ref`, `cortex_acp.py` tests
   use a fresh temporary `HOME`/`XDG_CONFIG_HOME`/`XDG_STATE_HOME` with no
   connections configured, and a dedicated test asserts zero engine launches
@@ -124,7 +124,7 @@ For final-default propagation and bound lifecycle metadata, run the complete
 with the targeted pytest command above. These use the real installer, ACP
 selection and adapter with a fake downstream subprocess, plus executable
 metadata-reader and refusal fixtures. They do not prove paid host behavior.
-See [bound task inspection](../acp/observability.md#bound-task-inspection)
+See [bound task inspection](../features/observability/index.md#bound-task-inspection)
 for the exact read-only command, binding/pagination requirements and limits.
 
 ## Setup status (read-only)
@@ -141,7 +141,7 @@ explicitly requests it for the current work and names the mode, `cli` or
 `desktop`; without a request, report each applicable live check as not run with
 the blocker "paid live check not requested by the owner". Run a requested check
 only through the isolated dev Paseo environment described in
-[`docs/acp/dev-paseo-environment.md`](../acp/dev-paseo-environment.md):
+[`docs/project/dev-environment.md`](dev-environment.md):
 the permanent `~/.paseo-dev` daemon, separate `~/.config/Paseo-dev` Electron
 profile, a disposable project, and the Cortex runtime launched by that daemon
 from the explicit absolute checkout plugin path. Do not use production
@@ -214,7 +214,7 @@ must be handed to the Desktop QA owner after final stamping.
 
 Dependency security checks are separate from installation/test success. Run
 `npm --prefix integrations/paseo audit --json` and retain its nonzero exit when
-findings remain. The [dated dependency disposition](../acp/paseo-dependency-audit.md)
+findings remain. The [dated dependency disposition](paseo-dependency-audit.md)
 records the unpatched braces advisory and why a forced React Native upgrade is
 not a verified fix. The client-bundle regression checks generated-artifact inputs,
 not the installed host's dependency security.
@@ -278,7 +278,7 @@ imports it.
 
 **GUI testing** (verifies rendered user-facing behavior):
 
-Paseo 0.10.0 desktop evidence (2026-09-29) is inconsistent about availability, so the screen must be treated as unverified rather than reliably reachable. One earlier report described the implemented settings screen and component tests; two isolated live desktop checks found the plugin enabled/running at this worktree but no Cortex entry in Settings or matching command-palette result. The later recheck also inspected the rendered screenshots directly. These negative findings apply to the tested host/session, not every host version or feature flag. Because those desktop runs could not reach the screen, they did not exercise GUI settings reads/updates, saving, revision-conflict/error display, secret redaction, or the OpenCode section; component/render tests are not substitutes. See desktop reports `r_24d9b22e87f5` and `r_a7f0d6da5ec2` for retained evidence and limitations. The settings UI code now uses typed controls rather than JSON text editors; component/unit tests and a client-bundle render-walk establish neither that the screen is reachable in Paseo Desktop nor rendered GUI behavior. Use the existing documented CLI fallback for supported setup operations, including OpenCode onboarding, where the UI is unavailable. Use the isolated dev home/profile and a disposable project as described in [the dev Paseo environment guide](../acp/dev-paseo-environment.md).
+Paseo 0.10.0 desktop evidence (2026-09-29) is inconsistent about availability, so the screen must be treated as unverified rather than reliably reachable. One earlier report described the implemented settings screen and component tests; two isolated live desktop checks found the plugin enabled/running at this worktree but no Cortex entry in Settings or matching command-palette result. The later recheck also inspected the rendered screenshots directly. These negative findings apply to the tested host/session, not every host version or feature flag. Because those desktop runs could not reach the screen, they did not exercise GUI settings reads/updates, saving, revision-conflict/error display, secret redaction, or the OpenCode section; component/render tests are not substitutes. The limitations of those desktop runs are stated here. The settings UI code now uses typed controls rather than JSON text editors; component/unit tests and a client-bundle render-walk establish neither that the screen is reachable in Paseo Desktop nor rendered GUI behavior. Use the existing documented CLI fallback for supported setup operations, including OpenCode onboarding, where the UI is unavailable. Use the isolated dev home/profile and a disposable project as described in [the dev Paseo environment guide](dev-environment.md).
 
 Always pass the plugin directory explicitly as a full absolute path. The plugin
 is edited in isolated git worktrees and the path changes between sessions.
@@ -292,7 +292,7 @@ python3 -B scripts/cortex_paseo_dev.py -- plugin install "$PWD/integrations/pase
 python3 -B scripts/cortex_paseo_dev.py gui
 ```
 
-In Paseo Desktop, inspect the rendered behavior under test. If the Cortex Settings screen is available, check workspace selection, supported setting sections, validation/conflict behavior, redacted values, and explicit OpenCode onboarding; if it is absent, record that outcome and do not report those interactions as tested. The 2026-09-29 Paseo 0.10.0 checks found the plugin screen and command absent, with the later check also inspecting screenshot pixels; see `r_24d9b22e87f5` and `r_a7f0d6da5ec2`. GUI form behavior remains unverified because those runs could not reach the screen. For Xvfb use `python3 -B scripts/cortex_paseo_dev.py gui --xvfb`.
+In Paseo Desktop, inspect the rendered behavior under test. If the Cortex Settings screen is available, check workspace selection, supported setting sections, validation/conflict behavior, redacted values, and explicit OpenCode onboarding; if it is absent, record that outcome and do not report those interactions as tested. The 2026-09-29 Paseo 0.10.0 checks found the plugin screen and command absent, with the later check also inspecting screenshot pixels. GUI form behavior remains unverified because those runs could not reach the screen. For Xvfb use `python3 -B scripts/cortex_paseo_dev.py gui --xvfb`.
 After testing, stop only the isolated dev daemon:
 
 ```
@@ -363,7 +363,7 @@ code redaction, and zero-exit incomplete or mismatched binding envelopes.
 Run `tests/test_cortex_paseo_dev.py` with the same launcher for neighboring helper
 behavior. These checks cannot establish the cause of an earlier generic live refusal. Also use
 `npm --prefix integrations/paseo run test:qualification-binding` for the TS contract.
-See [binding provenance and limits](../acp/dev-paseo-environment.md#read-only-dev-binding).
+See [binding provenance and limits](dev-environment.md#read-only-dev-binding).
 After all edits, sequentially stamp, validate, check profiles, run isolated
 `tests/test_package.py`, then validate again. Runtime independent review and
 current-artifact final verification remain separate from these worker checks.
@@ -385,6 +385,33 @@ filled in, overlapping phases are not summed, and it refuses busy, uncheckpointe
 legacy, unsupported or over-limit inputs. Use an authorized disposable project
 and do not treat the timeline as a live qualification.
 
+For the observability signals and aggregates, run each focused file as its own
+command, not the full suite:
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 python3 -B -m pytest -q tests/test_gateway_observability_signals.py
+PYTHONDONTWRITEBYTECODE=1 python3 -B -m pytest -q tests/test_external_proxy_signals.py
+PYTHONDONTWRITEBYTECODE=1 python3 -B -m pytest -q tests/test_session_timing_signals.py
+PYTHONDONTWRITEBYTECODE=1 python3 -B -m pytest -q tests/test_observability_stage2_metrics.py
+PYTHONDONTWRITEBYTECODE=1 python3 -B -m pytest -q tests/test_cortex_timeline_aggregates.py
+```
+
+`tests/test_external_proxy_signals.py` has two groups. Three tests marked
+`requires_bwrap` drive a real gateway subprocess: `test_same_arguments_different_meta_same_arguments_sha256`,
+`test_denied_tool_records_one_refusal_row_without_arguments` and
+`test_denied_method_records_one_transport_error_row`. Where bwrap cannot create a user
+namespace, for example inside a nested sandbox, they skip. A skip is not evidence that
+the assertions passed; rerun the file on a host that can run bwrap. Three further tests run
+without bwrap: `test_unjailed_arguments_sha256_ignores_meta_and_follows_arguments`,
+`test_unjailed_denied_tool_appends_one_refusal_row_without_arguments` and
+`test_unjailed_transport_failure_appends_one_error_row_without_arguments`. They run the real
+`external_proxy.main()` in-process against a fake MCP child, replacing only the final OS
+launch through the `unjailed_gateway_command` fixture. They do not assert containment;
+the bwrap tests remain the containment evidence. The multi-task aggregate command
+(`python3 -B scripts/cortex_timeline.py --project "$PROJECT" --aggregate --json`) is
+owner-run on a checkpointed store; inside a worker sandbox it refuses with
+`unsafe_storage`.
+
 For early review, digest caching and speculative verification, use the focused
 tests covering the changed behavior, including:
 
@@ -399,7 +426,7 @@ PYTHONDONTWRITEBYTECODE=1 python3 -B -m pytest -q tests/test_dev_wire_trace.py
 ```
 
 A requested trace session is separate from automated checks and must follow
-[dev Paseo isolation policy](../acp/dev-paseo-environment.md). Do not use
+[dev Paseo isolation policy](dev-environment.md). Do not use
 production Paseo. Start tracing only through
 `python3 -B scripts/cortex_paseo_dev.py --wire-trace -- daemon start ...`;
 inspect existing traces with

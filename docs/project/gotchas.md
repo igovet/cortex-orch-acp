@@ -10,7 +10,7 @@
   page's `sha256` was the digest of the whole file, so the optimistic-concurrency
   check passed. The file shrank to 2,909 characters (about 59,500 lost), and a
   later write lost about 5,000 more. The receipts reported no shrink. The
-  root-cause report is `r_7e426e12cd3e`; the pre-loss text is recoverable only
+  root cause is not recorded in this document; the pre-loss text is recoverable only
   from worker transcripts, and this change does not restore it.
 - **Root cause.** A partial page's `sha256` identified the whole file, and
   `project_write` treated any matching digest as authority to replace the file.
@@ -52,7 +52,7 @@
   - A file with a line over 2000 characters cannot reach complete coverage, so
     `project_write` cannot replace it and `project_edit` is the only route. The
     current examples are `README.md` (one line of 2,081 characters) and
-    `docs/acp/roles-and-delegation.md` (two lines over 2,000 characters). Split
+    `docs/features/roles-and-delegation/index.md` (two lines over 2,000 characters). Split
     such a line before a whole-file rewrite is needed.
   - The session that wrote this note ran an earlier build: its `project_read`
     still paged by character offset, and its advertised tools did not include
@@ -73,7 +73,7 @@ explicitly, not as a pass. Unexpected probe errors still fail. Run the
 
 ## Claude adapter auto-update can outrun delivery registration
 
-A background engine auto-update can install a new `claude-agent-acp` adapter version before Cortex has an exact instruction-delivery registration for it. Do not assume the newest installed version is qualified: discovery now falls back to the newest registered install, and pruning preserves registered installs rather than removing them as old versions. If no registered install exists, diagnostics report the actual unsupported version and critical-role dispatch refuses it before launch. This is a delivery qualification guard, not evidence of effective tool enforcement. An owner-requested Desktop run on 0.88.0 (2026-10-08) observed a resumed scenario complete with real model turns, but that bounded, not-clean evidence does not establish native-tool enforcement ([Desktop evidence](../acp/evidence/claude-088-live-desktop-2026-10-08.md)). See [Claude adapter evidence](../acp/claude-agent-acp-adapter.md#current-support-0880-2026-10-08).
+A background engine auto-update can install a new `claude-agent-acp` adapter version before Cortex has an exact instruction-delivery registration for it. Do not assume the newest installed version is qualified: discovery now falls back to the newest registered install, and pruning preserves registered installs rather than removing them as old versions. If no registered install exists, diagnostics report the actual unsupported version and critical-role dispatch refuses it before launch. This is a delivery qualification guard, not evidence of effective tool enforcement. An owner-requested Desktop run on 0.88.0 (2026-10-08) observed a resumed scenario complete with real model turns, but that bounded, not-clean evidence does not establish native-tool enforcement (Desktop evidence). See [Claude adapter evidence](../features/claude-engine/index.md#current-support-0880-2026-10-08).
 
 ## O1/O2/W2: installed-client label humanizing, orphan question-card update, and an over-broad wire-trace .git gate (2026-10-07)
 
@@ -83,7 +83,7 @@ A background engine auto-update can install a new `claude-agent-acp` adapter ver
   `Shell python3 m pytest q`).** The plugin's own targeted label
   (`presentToolSemantics` in `integrations/paseo/shared/tool-presentation.ts`)
   built `${action} — ${target}` with an em dash; a target with no dot or
-  slash (a bare shell argv, a report id like `r_21f9bba72f15`) left the
+  slash (a bare shell argv, a report-style identifier) left the
   whole string without any of the host's keep-verbatim characters. The
   label now uses `${action}: ${target}`; the colon guarantees the host's
   `/[:./]/` rule matches, so every targeted label renders exactly as sent.
@@ -207,7 +207,7 @@ A background engine auto-update can install a new `claude-agent-acp` adapter ver
   advisory hint always used the *whole* shared-tree delta -- a parallel
   worker that only ever touched code still got hinted about
   `documentation-sync` the moment any sibling wrote `docs/**`/`README.md`/
-  `SECURITY.md`, observed live on 2026-10-07 (report `r_e037854b97f0`:
+  `SECURITY.md`, observed live on 2026-10-07 (
   `luna`/`sonnet` each made one extra `read_skill` call after `sol` wrote
   `docs/project/index.md`). `required_before_result_submit` now calls
   `attributable_changed_paths` in both modes, and advisory mode emits no
@@ -356,7 +356,7 @@ A background engine auto-update can install a new `claude-agent-acp` adapter ver
   is a configured ID. Shared bare IDs grant neither route; plan previews explain
   the missing-engine ambiguity. Exact enabled identities now also accept direct
   means prepositions and a request verb anywhere in the same user message;
-  labels keep local grammar, and negations/hard routing checks remain. See [routing identity rules](../acp/routing-and-fallback.md#settings-only-routing).
+  labels keep local grammar, and negations/hard routing checks remain. See [routing identity rules](../features/routing-and-fallback/index.md#settings-only-routing).
 - **A missing write parent is created, not refused.** Production session
   e37b655d (2026-10-07) refused `project_write docs/project/index.md` twice with
   an opaque `gateway_io_failure` (field `operation`) because `docs/project` did
@@ -414,9 +414,9 @@ A background engine auto-update can install a new `claude-agent-acp` adapter ver
   inputs are truncated at 2 KB, so the exact malformed bytes are mostly unknown,
   and no paid live run has yet confirmed the new form.
 
-See [file boundaries](../acp/permissions-and-containment.md),
-[publications](../acp/publications-and-consistency.md) and
-[check history](../acp/orchestration.md#check-history-and-current-outcome).
+See [file boundaries](../features/permissions-and-containment/index.md),
+[publications](../features/publications-and-consistency/index.md) and
+[check history](../features/orchestration/index.md#check-history-and-current-outcome).
 
 Quota window labels are exact evidence, not model-family names. An unmapped exhausted window conservatively blocks all models until an explicit association distinguishes it. A scoped `models: []` is an intentional exclusion, not unknown usage. Older profiles without mappings remain untouched and use conservative semantics when activated; never fill them silently from current settings. See [quota fields and migration](../configuration.md#exact-quota-window-associations).
 
@@ -441,7 +441,7 @@ warning did not stop it. Every field a call needs belongs in the plain
 `required` list; keep alternatives inside one required field (`report` is one
 string: inline Markdown or an exact report id), and never use a root `oneOf`, which
 Codex code mode renders instead of the properties. See
-[publications](../acp/publications-and-consistency.md).
+[publications](../features/publications-and-consistency/index.md).
 
 An ACP client session and an executor attempt are different identities. On
 resume or replacement, select the adapter from the actual attempt and engine;
@@ -459,7 +459,7 @@ Write every Cortex MCP stdio reply inside the per-request error handling, as
 strict UTF-8. One unencodable reply (a lone surrogate from a non-UTF-8 file
 name) used to end the whole server, and the engine then answered `Transport
 closed` to every later Cortex call of that session. See
-[failures and cancellation](../acp/failures-and-cancellation.md).
+[failures and cancellation](../features/failures-and-cancellation/index.md).
 
 Instruction compression may replace large evidence bodies with bounded links,
 but it must keep complete mandatory rules and record packet hashes. Executor
@@ -474,7 +474,7 @@ its exact version and bundle patch are supported. The current supported
 newest version is 2.0.1 (Codex CLI 0.159.1, including `gpt-6.1-sol` in its
 offline catalog). New sessions discover it; an existing session keeps its
 already running engine. claude-agent-acp 0.84.0 is already installed and
-selected. See [Codex compatibility](../acp/codex-acp-adapter.md#one-time-adapter-update-2026-09-30).
+selected. See [Codex compatibility](../features/codex-engine/index.md#one-time-adapter-update-2026-09-30).
 
 Codex code mode does not show a model the MCP JSON Schema: it renders a
 TypeScript declaration from a reduced schema. Bounds, `pattern`, `not` and
@@ -483,7 +483,7 @@ the object's fields; and a schema over `tool_input_schema_max_bytes` (5,000 by
 default) loses every description. Put a constraint in the property
 description, express presence rules as `if`/`then`/`else`, and run
 `tests/test_codex_code_mode_visibility.py` after changing an advertised
-schema. See [MCP bridge](../acp/codex-acp-adapter.md#mcp-bridge).
+schema. See [MCP bridge](../features/codex-engine/index.md#mcp-bridge).
 
 In `integrations/paseo`, a local sibling import must use its real `.ts`
 extension. `tsc`/esbuild remap a `.js` specifier to the sibling `.ts` file, so
@@ -541,7 +541,7 @@ retry recovers through the pre-existing coordinator-replacement path
 `TaskMachine.create`/`_ensure_coordinator` both check for an existing row
 before inserting one -- see
 `tests/test_engine_launch_failure_recovery.py`. The same failure shape also
-used to permanently skip publishing this task's initial pipeline on every
+used to permanently skip publishing the initial pipeline of a task on every
 retry (`_run`'s publish call was gated on the `task_orchestration` row *not*
 existing yet, but that row is committed before the engine session ever
 opens); it is now called unconditionally, relying on
@@ -632,7 +632,7 @@ native `opencode.db` in place, with no copied database credentials. The catalog
 guard (`opencode_cortex_mode_not_advertised`) still rejects a catalog without
 `cortex`. OpenCode 2.x keeps logins in `opencode.db` (`credential` table), not
 `auth.json`. See
-[the OpenCode adapter](../acp/opencode-adapter.md#evidence-and-limits).
+[the OpenCode adapter](../features/opencode-engine/index.md#evidence-and-limits).
 
 Model identities and policy are not inferred from names, versions, family labels or catalog order. A valid version-2 owner routing document must explicitly place every automatic identity; missing policy is a visible error. The packaged production-derived template is installation-only and never a runtime fallback. Existing owner/profile state is not overwritten; migration requires preview, explicit consent and digest-bound apply. Portable coordinator binding can be ambiguous across connections and must remain an error until the owner resolves it. See [settings-only model policy](../configuration.md#settings-only-model-policy).
 
@@ -648,7 +648,7 @@ can turn Send now/question-card input into explicit Stop-like interruption.
 Normal native drain during a Cortex background continuation now waits for
 session ownership rather than cancelling the controller. No Cortex Withdraw or
 separate editor was added; CLI cannot prove the rendered native interaction.
-See [the native queue contract](../acp/steering-and-questions.md#native-composer-queue-versus-captured-steering).
+See [the native queue contract](../features/steering-and-questions/index.md#native-composer-queue-versus-captured-steering).
 
 The compaction guard's recovery ratio needs a real pre-compaction size. The
 capsule size is part of the mandatory post-compaction content, so using it as
@@ -657,7 +657,7 @@ with `consecutive_low_recovery`. Without an engine-reported `usage_update.used`
 from before the compaction, the attempt is `unmeasured` and only the frequency
 and immediate-refill checks apply. A task already blocked this way stays
 blocked; the fix applies to later compactions. See
-[the compaction-loop guard](../acp/summaries-and-budgets.md#5-compaction-loop-guard).
+[the compaction-loop guard](../features/summaries-and-budgets/index.md#5-compaction-loop-guard).
 
 A long-lived process started from a Cortex sandboxed command outlives the
 command but not its scratch. The dev Paseo daemon started through
@@ -666,7 +666,7 @@ command's deleted scratch subdirectory; every engine jail it launched then
 failed in bubblewrap before ACP `initialize`, for Codex and Claude alike, and
 the agent showed only `engine_launch`. Read the engine's own `stderr.log`
 before blaming an engine version, and start daemons with `outside_command`. See
-[the dev Paseo environment](../acp/dev-paseo-environment.md).
+[the dev Paseo environment](dev-environment.md).
 
 
 ## Paid desktop rerun runtime findings (2026-10-07)
@@ -692,13 +692,13 @@ before blaming an engine version, and start daemons with `outside_command`. See
   that exact enabled ID is bare-unique; qualified IDs also work. A request-form
   verb in the same user message governs every exact identity, not labels.
   Negation, exact case/boundaries, source provenance and hard routing checks
-  remain. See [routing](../acp/routing-and-fallback.md#settings-only-routing).
+  remain. See [routing](../features/routing-and-fallback/index.md#settings-only-routing).
 - **Scope is a write reservation.** Do not list read-only dependencies in a
   writing node's scope: they unnecessarily serialize parallel writers.
 - **Worker capsule routes have separate evidence.** `task_configuration` is the
   task/coordinator snapshot. `own_worker_route` contains only this attempt's
   dispatch audit and engine-confirmed event/reference; missing confirmation
-  stays unavailable. See [capsule shape](../acp/recovery-capsules.md#nine-sections).
+  stays unavailable. See [capsule shape](../features/recovery-capsules/index.md#nine-sections).
 
 These are implementation contracts, not proof of zero errors in a later paid
 desktop workload. Qualification still requires real retained run evidence.

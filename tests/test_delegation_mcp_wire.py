@@ -5,7 +5,7 @@ channel), role-filtered in both tools/list and tools/call.
 
 Spawns the real ``src/cortex.py`` entry point as a
 subprocess (never a real engine) against a tmp project store, exactly the
-process boundary described in docs/acp/orchestration.md: this test's
+process boundary described in docs/features/orchestration/index.md: this test's
 subprocess plays the role of "an engine's own Cortex MCP child process".
 """
 from __future__ import annotations

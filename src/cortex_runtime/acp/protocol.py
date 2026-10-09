@@ -9,7 +9,7 @@ image prompt content is supported; audio remains unadvertised and rejected;
 content block is now accepted and durably stored/rejected with truthful
 availability metadata (see ``acp.replay_store.resolve_prompt_blocks``); no
 HTTP/SSE MCP transport; no other session lifecycle features
-(resume/fork/close/list -- see ``docs/acp/input-history-and-replay.md``
+(resume/fork/close/list -- see ``docs/features/input-history-and-replay/index.md``
 for why ``session/resume`` stays unsupported); and no client-request code
 path (no ``fs/*``, ``terminal/*``, or ``request_permission`` is ever emitted
 -- see ``agent.Agent``, which never constructs one).

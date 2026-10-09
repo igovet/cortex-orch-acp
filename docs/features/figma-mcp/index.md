@@ -1,0 +1,12 @@
+# Figma MCP in Cortex
+
+> Status: migrated from the former ACP reference. Statements were not re-verified line by line against source in this pass; claims without a source path are unverified until reviewed.
+
+
+**Status: unavailable through the current Cortex setup.** Do not enable a Figma entry in the owner MCP registry until the connection and authorization steps below have been observed on this host. An installed Codex Figma plugin does not by itself expose a server to Cortex.
+
+Figma's [official remote MCP server](https://developers.figma.com/docs/figma-mcp-server/remote-server-installation/) uses `https://mcp.figma.com/mcp` over HTTP and requires Figma OAuth. Cortex's current owner registry and engine bridge accept **stdio** `command`/`args` entries only; they cannot forward that URL directly. The installed Codex Figma plugin, version 11.0.0, declares an app connector in `.app.json` and no local MCP executable. Its Codex app authorization is not available as a Cortex stdio credential. `codex mcp list` also has no Figma entry on the inspected host.
+
+The maintained [`mcp-remote` bridge](https://github.com/punkpeye/mcp-remote/blob/main/README.md) can expose a remote HTTP server to a stdio MCP client and supports browser OAuth. It needs its **own** OAuth client identity. Figma's [MCP catalog](https://www.figma.com/mcp-catalog/) says new remote clients must apply for registration; [`mcp-remote` issue 186](https://github.com/punkpeye/mcp-remote/issues/186) records HTTP 403 for its unregistered client. Installing the bridge or adding a disabled registry entry therefore does not establish an operable Figma connection. No Figma registry entry, OAuth login, or credential migration was made during this assessment.
+
+To activate Figma later, obtain a Figma-approved OAuth client for the intended bridge or another Figma-supported stdio path. In a separate interactive setup, authorize that client without copying the Codex plugin's credentials. Then configure the owner-only Cortex registry, confirm a real `tools/list` and a harmless read through a current Codex and Claude ACP session, and retain the observed server/tool identities and failures. Until those checks succeed, Figma remains unverified and unavailable to Cortex. The no-paid ACP smoke and installed-plugin status are not substitutes for this live connection check.

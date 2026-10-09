@@ -1,7 +1,7 @@
 # Security policy
 
 Fresh-install model settings use the saved 2026-10-05 owner default's portable
-routing policy plus the owner-requested 2026-10-07 Haiku 5.5 addition, `claude-agent-acp/opus[1m]` coordinator at medium effort, and Russian
+routing policy plus the Haiku 5.5 addition, `claude-agent-acp/opus[1m]` coordinator at medium effort, and Russian
 message language. Existing owner settings are never replaced. Account/connection
 identities and machine-specific MCP definitions/paths are not cloned; see
 [the install snapshot boundary](docs/configuration.md#fresh-install-owner-default-snapshot).
@@ -13,13 +13,13 @@ propagated through React Native's Metro/Jest tooling. Its 15 high-severity npm
 package entries describe one advisory, not 15 proven exploitable defects.
 No patched braces release was published at this inspection. Installation and
 regression passes do not clear a nonzero audit, and `devDependencies` is not
-a security boundary. See the [dependency disposition](docs/acp/paseo-dependency-audit.md)
+a security boundary. See the [dependency disposition](docs/project/paseo-dependency-audit.md)
 for exact paths, artifact-test limits and the next upstream-fix decision.
 
 ## Current ACP boundary (1.0.0)
 
 Claude ACP 0.88.0 is separately source-qualified for system instruction delivery;
-0.78.0 and 0.87.0 remain independently registered. One owner-requested Desktop check on 0.88.0 (2026-10-08) observed its resumed scenario complete without an instruction-delivery refusal; it does not establish native-tool enforcement (see [Claude adapter support](docs/acp/claude-agent-acp-adapter.md#current-support-0880-2026-10-08) and [the Desktop evidence](docs/acp/evidence/claude-088-live-desktop-2026-10-08.md)). Unknown installed Claude
+0.78.0 and 0.87.0 remain independently registered. A Desktop check on 0.88.0 observed its resumed scenario complete without an instruction-delivery refusal; it does not establish native-tool enforcement (see [Claude adapter support](docs/features/claude-engine/index.md#current-support-0880-2026-10-08)). Unknown installed Claude
 versions cannot borrow that qualification or displace registered installs in
 discovery; pruning preserves registered installs. Critical-role dispatch excludes
 an unsupported or non-retryably unqualified engine/version across models and
@@ -34,13 +34,13 @@ controls. Its instruction and native-tool restriction forwarding was
 independently inspected; this is not paid inference/enforcement evidence.
 Old Haiku is denied by exact ID in the preset and deliberately adopted owner
 settings; the original SDK 0.3.287 install is not overwritten. See
-[adapter evidence](docs/acp/claude-agent-acp-adapter.md#current-support-0880-2026-10-08).
+[adapter evidence](docs/features/claude-engine/index.md#current-support-0880-2026-10-08).
 The prompt-free catalog refresh a new ACP session starts runs in a child process
 with its own session, so it can outlive the ACP process that requested it (Paseo
 stops discovery processes about a second after `session/new`). It is still bounded
 by the per-call refresh timeout, sends no prompt, runs one refresh per connection
 at a time and only adds a catalog snapshot. See
-[catalog refresh lifetime](docs/acp/claude-agent-acp-adapter.md#catalog-refresh-lifetime-and-deployed-runtimes).
+[catalog refresh lifetime](docs/features/claude-engine/index.md#catalog-refresh-lifetime-and-deployed-runtimes).
 
 Codex ACP 2.1.1 uses the same exact-source-guarded private patches as 2.0.1,
 with a separate evidenced registration. Unknown versions remain unsupported;
@@ -48,13 +48,13 @@ installing a newer package does not bypass those checks. Role metadata is sent
 for every qualified Codex version. Installed CLI 0.159.3 passed no-paid
 wrapper/jail tests; native shell/view-image remain disabled and native
 `apply_patch` remains jail-bounded. No paid/client enforcement or production
-Paseo/plugin update is claimed. See [Codex evidence](docs/acp/codex-acp-adapter.md#current-support-211-2026-10-07).
+Paseo/plugin update is claimed. See [Codex evidence](docs/features/codex-engine/index.md#current-support-211-2026-10-07).
 
 Cortex is an incoming ACP stdio agent. It launches Codex and Claude ACP engines,
 and the optional OpenCode v2 engine once the owner onboards it, as separate processes and stores task metadata and published Markdown under the
 single project-local `.cortex` directory. The current working tree is undergoing
 a runtime-owned orchestration rewrite and is **not release qualified**. See
-[implementation status](docs/acp/runtime-rewrite-status.md).
+[verification status](docs/project/verification.md).
 
 The model proposes plans, writes reports and submits results. The runtime validates
 plan structure, reserves dependency-ready assignments, selects configured routes,
@@ -75,10 +75,10 @@ credit requires APPROVE on the exact plan/reviewer/digest binding and a fresh
 unchanged-project observation. Stale, rejected and interrupted candidates are
 discarded; stop joins the command sequence and kills its subprocess group.
 Recovery never replays speculative diagnostic events as verification evidence.
-See [speculative verification](docs/acp/orchestration.md#speculative-verification-during-review).
+See [speculative verification](docs/features/orchestration/index.md#speculative-verification-during-review).
 No model hint can waive review. A model tool call cannot
 select a task state, accept the task or directly create an engine session.
-A model hint cannot grant a route or infer model family/quality. Eligibility, tier, effort and automatic membership come from the effective version-2 owner routing settings and current observed catalogs; the runtime also enforces pins, denies, provider policy, availability, quota and user authorization. New or renamed identities are not automatically eligible. New audits identify configured stretch policy with the neutral `stretch` key and effort basis; no historical audit is rewritten and this label grants no authorization. Policy refusals happen before worker capacity reservation or engine launch; the coordinator route-menu tool reports the named validation failure without claiming an uncertain storage write. See [settings-only routing](docs/acp/routing-and-fallback.md#settings-only-routing).
+A model hint cannot grant a route or infer model family/quality. Eligibility, tier, effort and automatic membership come from the effective version-2 owner routing settings and current observed catalogs; the runtime also enforces pins, denies, provider policy, availability, quota and user authorization. New or renamed identities are not automatically eligible. New audits identify configured stretch policy with the neutral `stretch` key and effort basis; no historical audit is rewritten and this label grants no authorization. Policy refusals happen before worker capacity reservation or engine launch; the coordinator route-menu tool reports the named validation failure without claiming an uncertain storage write. See [settings-only routing](docs/features/routing-and-fallback/index.md#settings-only-routing).
 
 Retained user-source model grants require the complete case-sensitive
 `engine/model` token or a separately configured request label. Opaque identity
@@ -109,7 +109,7 @@ After a coordinator question commits `WAITING_USER`, further coordinator text
 received in that turn is suppressed, not released by delayed tool callbacks.
 This is a display boundary only: it does not cancel engine actions, rewrite
 history, or grant authority. Ambiguous late pre-question text may also be omitted;
-see [question display ordering](docs/acp/orchestration.md#plan-submission-and-coordinator-polling).
+see [question display ordering](docs/features/orchestration/index.md#plan-submission-and-coordinator-polling).
 
 Successful runtime recovery clears the exhausted planning-cycle counter, not
 question identities or answer receipts. Only the normal exact-answer transition
@@ -130,7 +130,12 @@ correction hint and does not bind a report. Check blockers and command evidence
 are distinct. Rejected submissions retain only a safe error code and bounded
 field-path diagnostics in observability events; rejected values and report bodies
 are not retained there. Submission rejections contribute to the
-`schema_validation_errors` diagnostic alongside argument-validation failures.
+`schema_validation_errors` diagnostic alongside argument-validation failures. The loop and write measurement records are metadata only: `project_read` rows keep the path, kind and file digest; gateway and external refusals keep the operation or server, tool and error code; write rows keep byte counts. External calls record an unkeyed SHA-256 of their arguments for repeat detection, which is not redaction. External reply content (`EXTERNAL_TOOL_RESULT`) and worker-activity raw fields remain content-bearing, as documented in [observability](docs/features/observability/index.md#4-redaction-observabilityredact).
+Aggregate decisions read metadata only and retain the guarded checkpointed-store
+boundary. Missing or ambiguous identities, phase boundaries and native-tool
+classification are unavailable, not inferred success; ACP gateway echoes are not
+native command receipts. These measurements do not relax authorization, independent
+review or final verification.
 A well-shaped `tool_call_ref` alone never verifies a check.
 
 Cortex's read-only `read_skill` route can read shared skill/reference IDs and
@@ -147,7 +152,7 @@ grant general file access. Listed paths are read from their original canonical
 files with bounded UTF-8 regular-file checks and symlink-safe traversal; changed
 targets and unlisted paths fail closed. The route is not available as a
 session-path grant when that session did not receive the corresponding skill
-catalog. See [the unified system prompt](docs/acp/unified-system-prompt.md).
+catalog. See [the unified system prompt](docs/features/unified-system-prompt/index.md).
 
 Owner-initiated force-finish is a separate, non-acceptance outcome: an exact
 `/cortex-finish` command captured from the ACP/Paseo host or an exact answered
@@ -226,7 +231,7 @@ configured ID. For enabled exact identities, direct `на/on/via/with` naming or
 request-form verb in the same user message supplies request grammar; negations
 still apply. Configured labels retain conservative local grammar.
 Model prose and hints remain non-consent, and hard route
-authorization checks are unchanged. See [routing](docs/acp/routing-and-fallback.md#settings-only-routing).
+authorization checks are unchanged. See [routing](docs/features/routing-and-fallback/index.md#settings-only-routing).
 Creating a project file creates its missing parent directories only after the
 private-path, write-grant and user deny-write checks passed for the full path;
 each component is created and reopened no-follow, and a file or symlink component
@@ -292,7 +297,7 @@ The advertised worker question tool is reserved for genuine user decisions,
 not missing project access. Its question and options must use the selected chat
 language while internal worker communication stays English; these are generation
 instructions, not runtime translation or semantic enforcement of arbitrary prose. See
-[the access flow](docs/acp/orchestration.md#worker-questions-and-additional-access). The engine
+[the access flow](docs/features/orchestration/index.md#worker-questions-and-additional-access). The engine
 jail also leaves the host's real `/tmp` writable and the engine state directory
 writable apart from protected session-configuration files, so these locations
 are residual write surfaces, not denied by the project gateway. `.cortex` is hidden (for a task bound to a linked worktree, the jail root is that worktree
@@ -329,7 +334,7 @@ OpenCode v2 is launched only after the owner's explicit
 `--version` and `initialize` `agentInfo.version` are both in the `2.x.x` range, and
 only inside the engine jail. Anything else fails before a session. Its additional
 boundaries, checked by no-paid tests against the installed binary
-([OpenCode adapter](docs/acp/opencode-adapter.md)):
+([OpenCode adapter](docs/features/opencode-engine/index.md)):
 
 - **Process isolation.** Each `opencode acp` starts a loopback control server
   whose password is in its environment. The OpenCode jail has its own user,
@@ -411,7 +416,7 @@ re-verifies the connection against the on-disk registry before trusting its
 credential directory (never the ambient one); `TZ=UTC` is then applied on
 top. It never starts a model turn, and its result is only ever trusted when
 the parsed JSON itself confirms `is_error: false`, `num_turns: 0` and
-`total_cost_usd: 0` (see `docs/acp/token-and-plan-usage.md`). This is the same
+`total_cost_usd: 0` (see `docs/features/token-and-plan-usage/index.md`). This is the same
 already-established pattern `connections.account_identity` uses for `claude
 auth status` (a per-connection isolated CLI call, bounded by a short timeout,
 that never raises and never logs a credential) -- both call
@@ -492,7 +497,7 @@ it is not automatically active-task-aware. Optional `--force` explicitly marks
 stale live-state records released/terminated; `--dry-run` previews without deletion.
 Run it only with the runtime idle.
 Models/coordinators/workers must never run either deletion route on behalf of
-the owner. See [retention maintenance](docs/acp/packaging-and-onboarding.md#retention-maintenance).
+the owner. See [retention maintenance](docs/project/packaging.md#retention-maintenance).
 
 ### Access mode (Guarded and Auto)
 
@@ -596,11 +601,11 @@ digest are retained. A successful MCP envelope alone cannot certify a check: a
 passed worker check requires its own complete successful gateway-command receipt of
 the same attempt, with complete retained output and a nontrivial command; an
 engine-native call or a missing, foreign or insufficient reference keeps it
-`unverified` (see [check evidence](docs/acp/orchestration.md#check-evidence)). A
+`unverified` (see [check evidence](docs/features/orchestration/index.md#check-evidence)). A
 recorded failure is never dropped or downgraded; the runtime treats it as closed
 only after re-deriving, from its own receipts, an exact later passing rerun of the
 same command in the same attempt
-(see [check history](docs/acp/orchestration.md#check-history-and-current-outcome)).
+(see [check history](docs/features/orchestration/index.md#check-history-and-current-outcome)).
 
 ### Git and tool state in the project
 
@@ -632,9 +637,9 @@ remove exactly the relative symlink `.claude/skills/<name>` ->
 writes a file, never follows a symlinked `.claude`, `.claude/skills` or
 `.agents` component, never replaces a file or directory, and replaces a
 different existing link only after the user confirms (see
-[Project skill links](docs/acp/permissions-and-containment.md#project-skill-links)).
+[Project skill links](docs/features/permissions-and-containment/index.md#project-skill-links)).
 
-`/skill-management <request>` is the explicit coordinator command for creating, revising, or importing project skills. Imported files are untrusted input; source URL, exact revision, and license information are recorded, and the runtime retains independent review. Skill instructions do not expand assignment scopes. Repeated work may be proposed to the user through a durable question (`user_question_request` with `skill_proposal`). The runtime requires 2 to 5 retained reports as evidence, refuses duplicate proposals, and accepts only explicit, action-matched English or Russian approval/decline option pairs before persistence. A stored pair is checked again when an answer is interpreted, including after restart; reversed, misleading or unknown labels cannot approve even through text option `1`. A decline or unclear answer changes nothing in the project. Skills are never installed automatically or activated merely because files exist. Once present in the supported project layout, a skill is listed by name, description and path in the [unified system prompt](docs/acp/unified-system-prompt.md) of every Cortex engine session, which replaces the engines' own skill catalogs with the union of the project and owner skill directories either engine reads; Cortex does not guarantee selection or use. Skill text is model input and grants no additional tool access, filesystem scope, or permission. Cortex's conditional `read_skill` trigger catalogue is role-scoped guidance in the prompt and advertised tool schema; it likewise grants no access and does not cause runtime-side skill loading. Tool state inside the project (`.venv`, `node_modules/.cache`,
+`/skill-management <request>` is the explicit coordinator command for creating, revising, or importing project skills. Imported files are untrusted input; source URL, exact revision, and license information are recorded, and the runtime retains independent review. Skill instructions do not expand assignment scopes. Repeated work may be proposed to the user through a durable question (`user_question_request` with `skill_proposal`). The runtime requires 2 to 5 retained reports as evidence, refuses duplicate proposals, and accepts only explicit, action-matched English or Russian approval/decline option pairs before persistence. A stored pair is checked again when an answer is interpreted, including after restart; reversed, misleading or unknown labels cannot approve even through text option `1`. A decline or unclear answer changes nothing in the project. Skills are never installed automatically or activated merely because files exist. Once present in the supported project layout, a skill is listed by name, description and path in the [unified system prompt](docs/features/unified-system-prompt/index.md) of every Cortex engine session, which replaces the engines' own skill catalogs with the union of the project and owner skill directories either engine reads; Cortex does not guarantee selection or use. Skill text is model input and grants no additional tool access, filesystem scope, or permission. Cortex's conditional `read_skill` trigger catalogue is role-scoped guidance in the prompt and advertised tool schema; it likewise grants no access and does not cause runtime-side skill loading. Tool state inside the project (`.venv`, `node_modules/.cache`,
 `.pytest_cache`, `__pycache__`, `.mypy_cache`, `target/`, build caches) is
 writable because a writing worker's grant is the whole project, with no list of
 tools; multiply hard-linked files stay read-only unless every one of their links
@@ -715,14 +720,14 @@ no-follow open and final state checks, and timestamps older than the local
 filesystem granularity guard. Restoring mtime alone cannot hide a same-size
 write. Unknown, remote and overlay filesystems are not cached; no authorization,
 persistent revision evidence or review/verification gate is bypassed. See
-[project scope and digest caching](docs/acp/workspaces-and-integration.md).
+[project scope and digest caching](docs/features/workspaces-and-integration/index.md).
 
 The runtime creates its project `.cortex` directory owner-only (`0700`) and
 refuses a pre-existing directory with broader permissions. The refusal keeps the
 path and expected mode and tells the local owner the exact `chmod 700` command;
 it does not weaken the check or repair a pre-existing directory automatically.
 
-The [bound task inspector](docs/acp/observability.md#bound-task-inspection) is
+The [bound task inspector](docs/features/observability/index.md#bound-task-inspection) is
 metadata-only. It requires an explicit project/session/task/current owner-epoch
 binding, validates owned non-symlink storage, and takes the existing access lock
 exclusively without creating it. SQLite is read-only/immutable only after a
@@ -751,7 +756,7 @@ pins.
 
 Quota-window associations are exact owner settings, not model-family inference. Unmapped windows conservatively retain account-wide applicability, including exhaustion; missing numeric evidence is not zero. Settings validation precedes quota IO, and invalid reset policy cannot erase an engine-reported refusal. Associations cannot expand enabled/deny/provider/consent eligibility. See [the quota settings contract](docs/configuration.md#exact-quota-window-associations); install data is not a runtime overlay and existing profiles/configuration require explicit adoption.
 
-Brokered Cortex MCP channel loss is indeterminate and does not grant route fallback or permission to replay an uncertain mutation. The existing bounded recovery path requires a fresh attempt after confirming the old one is absent. Replacement MCP servers must supply fresh, request-matched tool/schema evidence before readiness; old-generation replies/exits cannot clear current failures. Incomplete or malformed tool lists fail closed. Serialization failure is contained to the request; none of these protections establish the cause of a historical production disconnect. See [failures](docs/acp/failures-and-cancellation.md). Captured steering remains immutable; native host composer queue manipulation is not a grant to erase source history. Normal queue draining waits for background continuation ownership instead of cancelling it. Explicit Stop/cancel still fences waiting prompts and unfinished work; pending, unacknowledged prompts cannot authorize dispatch after interruption. See [delivery ownership](docs/acp/steering-and-questions.md#continuation-delivery-ownership).
+Brokered Cortex MCP channel loss is indeterminate and does not grant route fallback or permission to replay an uncertain mutation. The existing bounded recovery path requires a fresh attempt after confirming the old one is absent. Replacement MCP servers must supply fresh, request-matched tool/schema evidence before readiness; old-generation replies/exits cannot clear current failures. Incomplete or malformed tool lists fail closed. Serialization failure is contained to the request; none of these protections establish the cause of a historical production disconnect. See [failures](docs/features/failures-and-cancellation/index.md). Captured steering remains immutable; native host composer queue manipulation is not a grant to erase source history. Normal queue draining waits for background continuation ownership instead of cancelling it. Explicit Stop/cancel still fences waiting prompts and unfinished work; pending, unacknowledged prompts cannot authorize dispatch after interruption. See [delivery ownership](docs/features/steering-and-questions/index.md#continuation-delivery-ownership).
 
 The Paseo queued-message config channel now retains a runtime-owned canonical
 content checksum with each source capture. A reused message identity with changed
@@ -799,4 +804,4 @@ use existing `failed`/`stop_reason` columns; no table rebuild or format change
 is needed. Paseo hides only the token alarm for non-failed, explicitly marked
 release calls. It does not infer missing usage as zero/free or suppress genuine
 unknown/failed calls. Diagnostic token availability remains honest. See
-[usage attribution](docs/acp/observability.md#2-usagecost-attribution-observabilityusage).
+[usage attribution](docs/features/observability/index.md#2-usagecost-attribution-observabilityusage).

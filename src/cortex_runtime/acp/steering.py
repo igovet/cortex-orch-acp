@@ -1,7 +1,7 @@
 """T020: steering revision counter, urgent-stop bookkeeping, and language
 selection helpers shared by ``acp.orchestrating_runtime`` and ``acp.agent``.
 
-See docs/acp/steering-and-questions.md for the full design (cancel vs stop
+See docs/features/steering-and-questions/index.md for the full design (cancel vs stop
 vs steering vs new task vs answers, delivery boundaries, question
 lifecycle, language policy, noise policy).
 """

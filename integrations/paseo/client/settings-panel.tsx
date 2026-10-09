@@ -1647,7 +1647,7 @@ type Discovery = { status: "idle" | "loading" | "error"; message?: string; found
 
 const OPENCODE_NEXT_ACTION_TEXT: Record<string, string> = {
   make_credential_dir_private:
-    "OpenCode’s login directory is not private. Make it readable only by you (see docs/acp/opencode-adapter.md, Onboarding step 2), then press Validate above.",
+    "OpenCode’s login directory is not private. Make it readable only by you (see docs/features/opencode-engine/index.md, Onboarding step 2), then press Validate above.",
   opencode_auth_login: "Log in to OpenCode once in a terminal (opencode auth login), then press Validate above.",
   refresh_catalog:
     "Registered and ready. Its models reach the selector only after a catalog refresh: open a new Cortex session, or run refresh-catalog from the setup CLI.",

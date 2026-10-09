@@ -304,6 +304,21 @@ def _read(root, args):
         os.close(fd)
 
 
+def _common_affix(old, new):
+    """G3: length of the common leading and trailing run between two
+    equal-index-addressable sequences (bytes or a list of lines), computed
+    in O(n) -- one forward scan and one backward scan, never a full diff."""
+    limit = min(len(old), len(new))
+    prefix = 0
+    while prefix < limit and old[prefix] == new[prefix]:
+        prefix += 1
+    remaining = limit - prefix
+    suffix = 0
+    while suffix < remaining and old[len(old)-1-suffix] == new[len(new)-1-suffix]:
+        suffix += 1
+    return prefix, suffix
+
+
 def _write(root,args,effects=None, *, read_state=None, require_complete_read=False):
     from .ignore_guard import protected_content
     content = protected_content(args['content']) if _parts(args['path']) == ('.gitignore',) else args['content']
@@ -347,11 +362,22 @@ def _write(root,args,effects=None, *, read_state=None, require_complete_read=Fal
         finally:
             try: os.unlink(temporary,dir_fd=parent)
             except FileNotFoundError: pass
+    # G3: changed_bytes/changed_lines from the common prefix/suffix only
+    # (O(n), no full diff); a creation has an empty previous, so both
+    # affixes are zero and changed_bytes collapses to the new size.
+    previous_text_lines = previous.decode('utf-8', errors='replace').splitlines()
+    new_text_lines = content.splitlines()
+    byte_prefix, byte_suffix = _common_affix(previous, data)
+    changed_bytes = (len(previous) - byte_prefix - byte_suffix) + (len(data) - byte_prefix - byte_suffix)
+    line_prefix, line_suffix = _common_affix(previous_text_lines, new_text_lines)
+    changed_lines = max(len(previous_text_lines) - line_prefix - line_suffix,
+                        len(new_text_lines) - line_prefix - line_suffix)
     return dict(sha256=hashlib.sha256(data).hexdigest(),byte_count=len(data),
                 previous_size_bytes=len(previous), size_bytes=len(data),
-                previous_lines=len(previous.decode('utf-8', errors='replace').splitlines()),
-                new_lines=len(content.splitlines()),
-                drastic_shrink=bool(previous and len(data) < len(previous) / 2))
+                previous_lines=len(previous_text_lines),
+                new_lines=len(new_text_lines),
+                drastic_shrink=bool(previous and len(data) < len(previous) / 2),
+                changed_bytes=changed_bytes, changed_lines=changed_lines)
 
 
 def _edit(root,args,state,effects):
@@ -515,8 +541,74 @@ def _outside(store,channel,root,operation,args,ref,owner,effects):
                 failure=failure,output=data.decode('utf-8',errors='replace')[-65536:],large_output_id=retained['id'])
 
 
+def _record_gateway_refusal(store, channel, operation, error):
+    """G2: a pre-authorization refusal before any mutation transaction is
+    open (schema validation). Operation + error code only, never the
+    rejected arguments; best-effort, so a recording failure never masks
+    the real refusal raised by the caller."""
+    try:
+        from ..observability.events import append_event
+        code = str(error)
+        append_event(store, channel.task_id, 'gateway_refusal', code, 'observed',
+                     attempt_id=channel.attempt_id, detail=dict(operation=operation, error=code))
+    except Exception:
+        pass
+
+
+def _record_gateway_refusal_tx(store, db, channel, operation, error):
+    """Same as :func:`_record_gateway_refusal`, on an already-open
+    transaction (mutation wait, scope denial, request-key conflict)."""
+    try:
+        from ..observability.events import append_event_tx
+        code = str(error)
+        append_event_tx(db, channel.task_id, 'gateway_refusal', code, 'observed',
+                         attempt_id=channel.attempt_id, detail=dict(operation=operation, error=code),
+                         created_at=store._now())
+    except Exception:
+        pass
+
+
+def _read_event_kind(result):
+    if 'entries' in result:
+        return 'dir'
+    if 'image_base64' in result:
+        return 'image'
+    if result.get('binary'):
+        return 'binary'
+    return 'text'
+
+
+def _record_project_read(store, db, channel, path, result, kind, *, error=None):
+    """G1: one observability_events row per project_read call -- bounded at
+    exactly one row per call (never per line/byte read), so write volume
+    scales with call count, not file size. Metadata only: path, sha256,
+    line range, completeness and size -- never file content."""
+    try:
+        from ..observability.events import append_event_tx
+        detail = dict(path=path, kind=kind)
+        if error is not None:
+            detail['error'] = error
+        else:
+            detail['sha256'] = result.get('sha256')
+            if kind == 'text':
+                detail['start_line'] = result.get('start_line')
+                detail['end_line'] = result.get('end_line')
+                detail['complete'] = result.get('complete')
+                detail['size_bytes'] = result.get('size_bytes')
+            elif kind in ('image', 'binary'):
+                detail['size_bytes'] = result.get('size_bytes')
+        append_event_tx(db, channel.task_id, 'project_read', kind if error is None else 'failed', 'observed',
+                         attempt_id=channel.attempt_id, detail=detail, created_at=store._now())
+    except Exception:
+        pass
+
+
 def dispatch(store,channel,operation,args):
-    validate(SCHEMAS[operation],args)
+    try:
+        validate(SCHEMAS[operation],args)
+    except StoreError as error:
+        _record_gateway_refusal(store,channel,operation,error)
+        raise
     digest=hashlib.sha256(encoded(args).encode()).hexdigest()
     key=args.get('request_key')
     auto_key=key is None and operation in {'project_write','project_edit','project_mkdir','project_delete'}
@@ -538,6 +630,7 @@ def dispatch(store,channel,operation,args):
                 result = _read(root,args)
                 from .project_files import record_read
                 record_read(db,channel,root,args,result)
+                _record_project_read(store,db,channel,args['path'],result,_read_event_kind(result))
                 db.commit()
                 return result
             except FileNotFoundError:
@@ -550,20 +643,33 @@ def dispatch(store,channel,operation,args):
                     parent_exists=False
                 except OSError as error:
                     raise StoreError('gateway_read_failure', 'path', args['path']) from error
-                return dict(exists=False,path=args['path'],sha256='absent',parent_exists=parent_exists)
+                missing=dict(exists=False,path=args['path'],sha256='absent',parent_exists=parent_exists)
+                _record_project_read(store,db,channel,args['path'],missing,'missing')
+                db.commit()
+                return missing
             except (OSError,UnicodeError) as error:
+                _record_project_read(store,db,channel,args['path'],{},'failed',error='gateway_read_failure')
+                db.commit()
                 raise StoreError('gateway_read_failure', 'path', args['path'],
                     'a readable regular file or directory',
                     'The project read failed; no mutation was attempted. Check the path, file type and read access.') from error
         from .worker_waits import check_mutation
         if operation != 'project_git':
-            check_mutation(db, channel)
+            try:
+                check_mutation(db, channel)
+            except StoreError as error:
+                _record_gateway_refusal_tx(store,db,channel,operation,error)
+                db.commit()
+                raise
         if operation in {'project_write','project_edit','project_mkdir','project_delete'}:
             # A private path is refused before anything else (a deletion
             # there once asked the user to confirm what was then refused).
             _parts(args['path'])
             if not _matches(args['path'],scopes) or _matches(args['path'],write_denials(db,channel.task_id)):
-                raise StoreError('gateway_scope_denied')
+                error=StoreError('gateway_scope_denied')
+                _record_gateway_refusal_tx(store,db,channel,operation,error)
+                db.commit()
+                raise error
         if operation=='project_skill_link':
             # The one .claude write: a skill link, never a generic grant
             # (skill_links). Every writing worker holds the whole-project
@@ -584,7 +690,10 @@ def dispatch(store,channel,operation,args):
                         (channel.task_id,channel.channel_id,key)).fetchone()
         if row:
             if row['digest']!=digest or row['operation']!=operation:
-                raise StoreError('request_key_conflict')
+                error=StoreError('request_key_conflict')
+                _record_gateway_refusal_tx(store,db,channel,operation,error)
+                db.commit()
+                raise error
             receipt=json.loads(row['result_json'])
             if not receipt.get('complete'):
                 raise StoreError('gateway_action_outcome_unknown')

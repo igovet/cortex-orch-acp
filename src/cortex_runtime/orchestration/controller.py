@@ -524,7 +524,21 @@ def _run(runtime, task_id, session_id, channel, session_ref, content, emit_updat
                 )
                 from .. import _fault_injection as fault_injection
                 fault_injection.checkpoint('t023_after_continuation_prompt')
+                # G6: pairs with COORDINATOR_TURN_STARTED above -- this
+                # prompt() call returned normally.
+                with runtime._store.connection() as db:
+                    db.execute('BEGIN IMMEDIATE')
+                    event(db, task_id, 'COORDINATOR_TURN_ENDED',
+                          dict(engine_session_id=session_ref, stop_reason=outcome.stop_reason.value))
+                    db.commit()
             except Exception as error:
+                # G6: pairs with COORDINATOR_TURN_STARTED above -- this
+                # prompt() call raised instead of returning.
+                with runtime._store.connection() as db:
+                    db.execute('BEGIN IMMEDIATE')
+                    event(db, task_id, 'COORDINATOR_TURN_ENDED',
+                          dict(engine_session_id=session_ref, failure_kind=type(error).__name__))
+                    db.commit()
                 flush()
                 if tool_emitter:
                     tool_emitter.close_group()

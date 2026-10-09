@@ -15,7 +15,7 @@
       "pinned_package_version": "2.0.1",
       "bundled_dependency": "@openai/codex",
       "bundled_dependency_version": "0.159.1",
-      "install_record_note": "Qualified versions are listed in cortex_runtime.connections.discovery.QUALIFIED_ADAPTER_VERSIONS; discovery selects the newest qualified install and connections.engine_update never prunes one. An operator-recorded cortex_runtime.engine.codex_install.CodexAcpInstall (digests re-verified by verify_install) remains the only trusted source of a launchable path -- see docs/acp/codex-acp-adapter.md.",
+      "install_record_note": "Qualified versions are listed in cortex_runtime.connections.discovery.QUALIFIED_ADAPTER_VERSIONS; discovery selects the newest qualified install and connections.engine_update never prunes one. An operator-recorded cortex_runtime.engine.codex_install.CodexAcpInstall (digests re-verified by verify_install) remains the only trusted source of a launchable path -- see docs/features/codex-engine/index.md.",
       "also_qualified_package_versions": [
         "1.12.0",
         "1.13.0"
@@ -23,7 +23,7 @@
     },
     "claude-agent-acp": {
       "pinned_package_version": "0.78.0",
-      "install_record_note": "No project-owned install exists yet; an operator-recorded cortex_runtime.engine.claude_install.ClaudeAcpInstall (digests re-verified by verify_install) is the only trusted source of a launchable path -- see docs/acp/claude-agent-acp-adapter.md."
+      "install_record_note": "No project-owned install exists yet; an operator-recorded cortex_runtime.engine.claude_install.ClaudeAcpInstall (digests re-verified by verify_install) is the only trusted source of a launchable path -- see docs/features/claude-engine/index.md."
     }
   }
 }

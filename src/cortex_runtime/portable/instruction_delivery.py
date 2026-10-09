@@ -9,7 +9,7 @@ engine+version registry that resolves one for a given adapter live outside
 ``portable/`` -- see ``engine.instruction_delivery_registry``.
 
 No ACP release exposes a universal "system prompt"/"skills" field (see
-``docs/acp/roles-and-delegation.md`` and each adapter's own evidence-status
+``docs/features/roles-and-delegation/index.md`` and each adapter's own evidence-status
 documentation: selected / configuration_applied / execution_verified are
 distinct facts, and no pinned adapter release has been shown, with live
 evidence, to treat delivered instructions as anything other than ordinary

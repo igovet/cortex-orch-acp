@@ -33,7 +33,7 @@ DEFAULT_INITIALIZE_TIMEOUT = 15.0
 # OpenCode 2.0.19 connects a session's MCP servers as session/new returns and
 # fixes the session's Code Mode tool catalog at its first prompt: a prompt
 # sent sooner than about 0.1 s after the servers' tools/list never sees them,
-# in that turn or any later one (no-paid probe, docs/acp/opencode-adapter.md).
+# in that turn or any later one (no-paid probe, docs/features/opencode-engine/index.md).
 # No ACP signal marks the registration, so after the engine's own tools/list
 # is observed through the broker, this margin (ten times the observed gap)
 # passes before create_session returns.
@@ -184,6 +184,15 @@ def _session_unusable_error() -> PortableError:
 # compaction updates are already translated into their own events.
 _DISPLAY_ONLY_UPDATES = frozenset({
     "agent_thought_chunk", "plan", "plan_update", "plan_removed",
+})
+
+# G5: the only session/update kinds that count as actual model output for
+# the FIRST_MODEL_OUTPUT milestone -- a message chunk, a thought chunk, or
+# a tool call. Anything else (available_commands_update, plan, usage_update,
+# and the other _DISPLAY_ONLY_UPDATES entries) can legitimately arrive first
+# and must never start this milestone's clock.
+_FIRST_MODEL_OUTPUT_UPDATE_KINDS = frozenset({
+    "agent_message_chunk", "agent_thought_chunk", "tool_call",
 })
 
 
@@ -1295,13 +1304,19 @@ class EngineSessionManager:
         if not isinstance(params, dict):
             return
         wire_session_id = params.get("sessionId")
-        if self._lifecycle_observer is not None and wire_session_id not in self._first_update_sessions:
-            # Count the first actual session/update, even if it has no text.
+        update = params.get("update") or {}
+        update_kind = update.get("sessionUpdate") if isinstance(update, dict) else None
+        if (self._lifecycle_observer is not None and wire_session_id not in self._first_update_sessions
+                and update_kind in _FIRST_MODEL_OUTPUT_UPDATE_KINDS):
+            # G5: only a real model-produced update (a message/thought chunk
+            # or a tool call) counts as the first model output -- never an
+            # incidental session/update such as available_commands_update,
+            # plan or usage_update, which can arrive first and would
+            # otherwise contaminate this milestone's timing.
             portable = self.correlation.portable_session_id(wire_session_id)
             if portable is not None:
-                self._lifecycle_observer('FIRST_MODEL_OUTPUT', portable)
+                self._lifecycle_observer('FIRST_MODEL_OUTPUT', portable, payload={'update_kind': update_kind})
                 self._first_update_sessions.add(wire_session_id)
-        update = params.get("update") or {}
         entry = self._update_queues.get(wire_session_id)
         event = self._translate_update(wire_session_id, update)
         if entry is None:

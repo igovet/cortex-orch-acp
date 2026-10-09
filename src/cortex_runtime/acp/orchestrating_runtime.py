@@ -1174,7 +1174,7 @@ class OrchestratingRuntime:
         self._cond = threading.Condition(self._lock)
         self._active_tasks: set[str] = set()
         # In-process caches (lost on process restart; see class docstring
-        # and docs/acp/orchestration.md "what's deferred").
+        # and docs/features/orchestration/index.md "what's deferred").
         self._coordinator_channels: dict[str, ChannelContext] = {}
         self._coordinator_sessions: dict[str, str] = {}
         self._worker_sessions: dict[tuple[str, str], str] = {}
@@ -2376,7 +2376,7 @@ class OrchestratingRuntime:
                 self._record_progress(task_id, "coordinator_recovery_new_session")
         # T020: route this prompt against any still-open coordinator
         # question *before* recording it as an ordinary user_message/
-        # steering turn -- see docs/acp/steering-and-questions.md's
+        # steering turn -- see docs/features/steering-and-questions/index.md's
         # "question lifecycle" section. Two or more open questions is never
         # guessed at: the user is asked to disambiguate with
         # /cortex-answer, and this prompt's text is not itself recorded as

@@ -1,1 +1,1 @@
-"""T029: observability and resource attribution (see docs/acp/observability.md)."""
+"""T029: observability and resource attribution (see docs/features/observability/index.md)."""

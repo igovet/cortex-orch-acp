@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Non-destructive Zed Custom Agent registration helper for Cortex (T011).
 
-Zed 1.20.1's ``agent_servers`` setting (see ``docs/acp/zed-custom-agent.md``)
+Zed 1.20.1's ``agent_servers`` setting (see ``docs/features/zed-agent/index.md``)
 registers Cortex as a separate, explicitly-selected custom agent -- never an
 automatic activation and never routed through Zed's own built-in provider
 credentials (see ``INVARIANTS.md``: "No undocumented Zed-credential
@@ -18,7 +18,7 @@ instead), and always writes a timestamped backup first (never overwriting
 a same-second prior backup: a numeric suffix is added on collision).
 
 Also prints the codeg 0.30.8 Custom Agent recipe text (``--print-codeg-recipe``
--- see ``docs/acp/codeg-custom-agent.md`` for the full, explicitly
+-- see ``docs/features/codeg-agent/index.md`` for the full, explicitly
 unverified/unknown-marked recipe; this script never attempts to write
 codeg's own configuration).
 """
@@ -225,14 +225,14 @@ def atomic_write_with_backup(path, new_text):
 
 
 CODEG_RECIPE = """\
-codeg 0.30.8 Custom Agent recipe (unverified -- see docs/acp/codeg-custom-agent.md)
+codeg 0.30.8 Custom Agent recipe (unverified -- see docs/features/codeg-agent/index.md)
 ====================================================================================
 
 codeg's own custom-agent registration path (Settings -> Agents) is documented
 upstream as supporting npx/uvx/binary distribution channels; whether it also
 accepts an arbitrary local command (the same "python3 -B <abs cortex_acp.py>"
 launch Zed uses) is NOT verified by this script and is recorded as an open
-question in docs/acp/codeg-custom-agent.md. Do not assume support.
+question in docs/features/codeg-agent/index.md. Do not assume support.
 
 Candidate manual steps (verify against your installed codeg before relying on
 them):

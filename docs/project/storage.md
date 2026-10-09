@@ -51,5 +51,5 @@ The manual CLI JSON includes `deleted_tasks`, `retention_days`,
 `vacuum_status` and `reclaimed_bytes`; measured before/after database sizes
 are `db_bytes_before`/`db_bytes_after`, and a vacuum failure adds
 `vacuum_error`. Dry runs instead include `would_delete_tasks` and
-`would_delete_orphan_sessions`. See [retention maintenance](../acp/packaging-and-onboarding.md#retention-maintenance)
+`would_delete_orphan_sessions`. See [retention maintenance](packaging.md#retention-maintenance)
 for its command and explicit thread protection.

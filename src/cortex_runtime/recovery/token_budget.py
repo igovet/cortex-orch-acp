@@ -37,7 +37,7 @@ card). It returns one of three decisions:
   critical sections) alone would not fit. This is always reported with the
   *concrete* limit that was exceeded and never silently resolved by
   truncating a constraint or by Cortex itself deciding to narrow scope --
-  see ``docs/acp/summaries-and-budgets.md`` and INVARIANTS.md: "no runtime-
+  see ``docs/features/summaries-and-budgets/index.md`` and INVARIANTS.md: "no runtime-
   owned scope decisions".
 - ``"unverified_window"`` -- mandatory content exceeds only the labeled
   default window because the route's real window is unknown (no catalog

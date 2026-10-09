@@ -235,7 +235,7 @@ def _script_trivial(options: str, script: str, depth: int) -> bool:
 def trivial_command(argv, _depth: int = 0) -> bool:
     """True when ``argv`` cannot verify any named check.
 
-    The matching rule (documented in docs/acp/orchestration.md): after
+    The matching rule (documented in docs/features/orchestration/index.md): after
     leading ``NAME=value`` assignments and the launchers ``env``,
     ``timeout``, ``nice``, ``nohup``, ``command``, ``exec`` and ``time`` are
     removed, a command is trivial when nothing is left; when its program

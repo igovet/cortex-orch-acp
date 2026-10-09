@@ -156,7 +156,7 @@ def default_scenario(**overrides) -> dict:
 #
 # These build a directory layout close enough to a real pinned
 # codex-acp/claude-agent-acp install (package.json + dist/index.js, per
-# docs/acp/codex-acp-adapter.md and docs/acp/claude-agent-acp-adapter.md)
+# docs/features/codex-engine/index.md and docs/features/claude-engine/index.md)
 # for ``install_resolution.resolve_verified_install`` to actually build and
 # verify a real install from the returned ``(node_binary, adapter_entry)``
 # launch_command alone -- but the "adapter entry" is a thin Python wrapper

@@ -3,7 +3,7 @@ concurrency exclusion, crash recovery and preservation of everything the
 migration tooling does not own.
 
 Compatibility conclusion this file exercises directly (see
-docs/acp/format-migration.md): the only versioned schema change this
+docs/project/format-migration.md): the only versioned schema change this
 runtime has ever needed is format 10 -> 11 (T005); every addition since is
 one independent, self-healing, all-or-nothing optional table group (see
 split.py's group inventory) created by ``CREATE TABLE IF NOT EXISTS`` on

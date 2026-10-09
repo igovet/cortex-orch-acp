@@ -2,7 +2,7 @@
 
 The behavior here was observed against the installed 2.0.19 binary through raw
 ACP with a loopback fake model provider -- never a paid or remote model call
-(see docs/acp/opencode-adapter.md and ``tests/test_engine_opencode*.py``).
+(see docs/features/opencode-engine/index.md and ``tests/test_engine_opencode*.py``).
 
 Configuration. OpenCode merges the owner's ``~/.config/opencode``, the
 project's ``opencode.json``/``.opencode/`` and the ``OPENCODE_CONFIG_CONTENT``

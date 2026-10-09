@@ -12,7 +12,7 @@ the adapters deliver it (``claude_adapter_acp.build_claude_session_new_meta``
 as the whole system prompt, ``codex_adapter_acp.build_codex_session_new_meta``
 as ``baseInstructions``) and remove each engine's own additions that have a
 supported switch. What an engine still adds by itself is listed in
-``docs/acp/unified-system-prompt.md``.
+``docs/features/unified-system-prompt/index.md``.
 
 Only behavior belongs here. Tool argument contracts stay in each tool's
 advertised schema, and role duties stay in the role instructions that follow

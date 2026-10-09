@@ -170,7 +170,7 @@ def _client_registration_check(zed_settings):
     data, _raw = client_config._read_strict_json(path)
     if data is None and path.exists():
         return [_check("client_registration:zed", "warn", f"{path} is not strict JSON (JSONC); cannot be checked automatically.",
-                        "Add the Cortex agent_servers entry manually; see docs/acp/zed-custom-agent.md.")]
+                        "Add the Cortex agent_servers entry manually; see docs/features/zed-agent/index.md.")]
     entry = client_config.build_entry()
     state = client_config.describe_state(data, entry)
     status_map = {"identical": "ok", "would_add": "warn", "would_replace": "warn"}

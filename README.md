@@ -27,11 +27,11 @@
 After a coordinator question commits, Cortex suppresses further text received
 in that turn, including when tool lifecycle callbacks arrive late. Details
 delivered only after the commit can also be omitted; see the
-[question display boundary](docs/acp/orchestration.md#plan-submission-and-coordinator-polling).
+[question display boundary](docs/features/orchestration/index.md#plan-submission-and-coordinator-polling).
 
 
 Fresh-install model settings use the saved 2026-10-05 owner default's portable
-routing policy plus the owner-requested 2026-10-07 Haiku 5.5 addition, `claude-agent-acp/opus[1m]` coordinator at medium effort, and Russian
+routing policy plus the Haiku 5.5 addition, `claude-agent-acp/opus[1m]` coordinator at medium effort, and Russian
 message language. Existing owner settings are never replaced. Account/connection
 identities and machine-specific MCP definitions/paths are not cloned; see
 [the install snapshot boundary](docs/configuration.md#fresh-install-owner-default-snapshot).
@@ -48,34 +48,34 @@ session's task; it assumes other processes are already dead and does not kill th
 Cleanup also removes old unbound/orphan chat sessions, then runs SQLite `VACUUM`
 after committed deletion and reports reclaimed bytes (or an honest vacuum failure).
 Invalid input and busy-store races are refused. `/clear` is host-reserved, not a Cortex alias.
-See [retention maintenance](docs/acp/packaging-and-onboarding.md#retention-maintenance)
+See [retention maintenance](docs/project/packaging.md#retention-maintenance)
 for safety details and the owner-run CLI alternative.
 
 Claude ACP's current fallback is 0.88.0, with an exact source-backed
 instruction-delivery registration and bundled SDK 0.3.293. Discovery prefers
 the newest registered install and retains it across future unqualified updates;
-critical-role dispatch excludes unsupported engine versions instead of retrying another model on them. One owner-requested paid `desktop` check on 2026-10-08 completed its resumed scenario on this adapter with `claude-agent-acp/claude-sonnet-5`; that is bounded evidence, not clean or full qualification (see [the Desktop evidence](docs/acp/evidence/claude-088-live-desktop-2026-10-08.md)). SDK 0.3.293 resolves `haiku` to Haiku 5.5 and
+critical-role dispatch excludes unsupported engine versions instead of retrying another model on them. A paid `desktop` check on 2026-10-08 completed its resumed scenario on this adapter with `claude-agent-acp/claude-sonnet-5`; that is bounded evidence, not full qualification. SDK 0.3.293 resolves `haiku` to Haiku 5.5 and
 advertises low/medium/high/xhigh/max. The default preset and production
 `default` profile enable it at Luna policy parity; old Haiku remains denied
-by exact ID. No-prompt ACP controls accepted high/xhigh/max. See [adapter support and limits](docs/acp/claude-agent-acp-adapter.md#current-support-0880-2026-10-08).
+by exact ID. No-prompt ACP controls accepted high/xhigh/max. See [adapter support and limits](docs/features/claude-engine/index.md#current-support-0880-2026-10-08).
 A Cortex runtime older than this checkout repoints Claude to the upstream SDK
 0.3.287 install at each start, where `haiku` is Haiku 4.5; the owner's production
 runtime was in that state on 2026-10-08. The catalog refresh a new session starts
 now runs in its own process, so Paseo's Refresh also saves the Claude catalog; see
-[catalog refresh lifetime](docs/acp/claude-agent-acp-adapter.md#catalog-refresh-lifetime-and-deployed-runtimes).
+[catalog refresh lifetime](docs/features/claude-engine/index.md#catalog-refresh-lifetime-and-deployed-runtimes).
 This is no-paid evidence, not live model or release qualification.
 
 Codex ACP's current fallback and exact supported release is 2.1.1.
 The owner already had it installed; checkout discovery now selects it instead
 of 2.0.1. No-paid bundle and CLI/jail checks passed; the production Paseo plugin
-was not refreshed. See [Codex support and limits](docs/acp/codex-acp-adapter.md#current-support-211-2026-10-07).
+was not refreshed. See [Codex support and limits](docs/features/codex-engine/index.md#current-support-211-2026-10-07).
 
 ## What Cortex is
 
 ACP route/effort selection retains the owner and project ceilings and any
 task-local narrowing. Automatic workers and reviewers use only eligible
 observed routes within that ceiling; a denied pin is refused, not replaced.
-See [route authorization](docs/acp/routing-and-fallback.md#pre-dispatch-enforcement).
+See [route authorization](docs/features/routing-and-fallback/index.md#pre-dispatch-enforcement).
 
 An explicit model requested by the user is the first routing priority, but it
 never overrides authorization, availability, or supported parameters. If that
@@ -86,14 +86,14 @@ Exact enabled IDs also accept direct `на/on/via/with` phrasing (for example
 `Часть 2 на gpt-6-luna:`); a request verb in the same user message governs all
 exact identities, while negations and hard policy still apply.
 Shared bare IDs grant neither engine and the plan preview explains the ambiguity;
-see [identity rules](docs/acp/routing-and-fallback.md#settings-only-routing).
+see [identity rules](docs/features/routing-and-fallback/index.md#settings-only-routing).
 Usage-based ranking switches only at observed usage
 of at least 95%; unknown usage remains unavailable, not assumed below threshold.
 
 Initial host model/provider echoes preserve the configured native effort/mode;
-they are not parameter resets. [Bound task inspection](docs/acp/observability.md#bound-task-inspection)
+they are not parameter resets. [Bound task inspection](docs/features/observability/index.md#bound-task-inspection)
 provides paged, read-only lifecycle metadata and native confirmation references.
-The [dev binding exporter](docs/acp/dev-paseo-environment.md#read-only-dev-binding) can observe one explicitly owned host agent and its guarded session/task/current-owner binding; it never starts a daemon or engine. It does not qualify a live run or replace independent review and verification. Failures retain bounded local stage/process diagnostics and complete allowlisted inspector reasons without returning a binding. Missing endpoint metadata, helper startup/output failures and storage refusals remain distinct; earlier generic errors cannot identify their historical cause. Zero child exit alone is not complete binding evidence.
+The [dev binding exporter](docs/project/dev-environment.md#read-only-dev-binding) can observe one explicitly owned host agent and its guarded session/task/current-owner binding; it never starts a daemon or engine. It does not qualify a live run or replace independent review and verification. Failures retain bounded local stage/process diagnostics and complete allowlisted inspector reasons without returning a binding. Missing endpoint metadata, helper startup/output failures and storage refusals remain distinct; earlier generic errors cannot identify their historical cause. Zero child exit alone is not complete binding evidence.
 Targeted tests can use the [fresh-process isolated launcher](docs/project/verification.md#fresh-process-isolated-targeted-launcher) with an explicitly authorized existing dependency path.
 
 Before `plan_submit`, inspect the live schema and measure complete bounded fields.
@@ -123,7 +123,7 @@ publication route up front and submit its acknowledged report identity. Decision
 brief items (including contradictions) are Markdown sections inside `markdown`,
 never separate report fields. After an inline JSON failure, correct serialization
 or use that draft route. This guidance does not
-guarantee model compliance; see [publication rules](docs/acp/publications-and-consistency.md).
+guarantee model compliance; see [publication rules](docs/features/publications-and-consistency/index.md).
 A worker whose own changes pair documentation (`docs/**.md`, `README.md`,
 `SECURITY.md`) with source or other behavior files must have read
 `documentation-sync` through Cortex `read_skill` first; otherwise the result is
@@ -151,13 +151,13 @@ under its derived key. After correcting the precondition, retry the same keyless
 write; explicit-key refusals still need a fresh key. `project_git` is context only,
 not a check receipt. Plan scopes reserve writes, not reads. Worker capsules
 separate the task/coordinator configuration from the attempt's confirmed route.
-See [file operations](docs/acp/permissions-and-containment.md).
+See [file operations](docs/features/permissions-and-containment/index.md).
 
-Cortex is an ACP v1 stdio agent. Its runtime coordinates Codex and Claude ACP workers in the project you opened, and owns task scheduling, review, verification, and completion. Task records and Markdown reports are stored in that project’s `.cortex/` directory. Workers can ask assignment-local questions and request additional exact paths: the runtime parks only that worker and resumes its same healthy session after a real answer or validated access decision, without a replacement plan. A recovered channel without retained session metadata keeps its ordinary tools; questions use task-global recovery instead of promising same-session continuation. Access requests retry writer conflicts automatically with bounded delays, then grant or refuse without a user question; path, owner-policy and read-only refusals are immediate runtime decisions. Worker questions are reserved for genuine user decisions and require question text plus every option in the selected chat language (English or Russian); worker briefs and reports stay English. The runtime relays those strings verbatim, without automatic translation or a guarantee of model compliance. Answers never override policy or widen the OS jail; see [orchestration](docs/acp/orchestration.md#worker-questions-and-additional-access). Worker briefs keep objectives, scope and dependency report references complete; long task goals and review evidence use marked previews with links to the full source. Plan verification commands are literal argv from documented project commands or scripts; shell syntax is rejected before work starts. The runtime runs them once after review, each until it exits, so the project's whole suite belongs there; workers run only the tests covering their own change. A worker check is marked passed only when its exact same-attempt `command_run` or user-confirmed `outside_command` receipt proves a complete, nontrivial command exited 0. Engine shell calls, reads and incomplete output cannot verify a check; older reports remain intact and weak historic evidence is marked separately when read.
+Cortex is an ACP v1 stdio agent. Its runtime coordinates Codex and Claude ACP workers in the project you opened, and owns task scheduling, review, verification, and completion. Task records and Markdown reports are stored in that project’s `.cortex/` directory. Workers can ask assignment-local questions and request additional exact paths: the runtime parks only that worker and resumes its same healthy session after a real answer or validated access decision, without a replacement plan. A recovered channel without retained session metadata keeps its ordinary tools; questions use task-global recovery instead of promising same-session continuation. Access requests retry writer conflicts automatically with bounded delays, then grant or refuse without a user question; path, owner-policy and read-only refusals are immediate runtime decisions. Worker questions are reserved for genuine user decisions and require question text plus every option in the selected chat language (English or Russian); worker briefs and reports stay English. The runtime relays those strings verbatim, without automatic translation or a guarantee of model compliance. Answers never override policy or widen the OS jail; see [orchestration](docs/features/orchestration/index.md#worker-questions-and-additional-access). Worker briefs keep objectives, scope and dependency report references complete; long task goals and review evidence use marked previews with links to the full source. Plan verification commands are literal argv from documented project commands or scripts; shell syntax is rejected before work starts. The runtime runs them once after review, each until it exits, so the project's whole suite belongs there; workers run only the tests covering their own change. A worker check is marked passed only when its exact same-attempt `command_run` or user-confirmed `outside_command` receipt proves a complete, nontrivial command exited 0. Engine shell calls, reads and incomplete output cannot verify a check; older reports remain intact and weak historic evidence is marked separately when read.
 
-To close a task immediately at your own decision, send `/cortex-finish` with no arguments, even while a Paseo turn is active. Cortex stops its owned work and records the closure as terminal `CANCELLED`, **not** verified `COMPLETED`; unfinished review, checks, and synthesis are not claimed as passed. An explicit close-as-is answer to a task-closure question has the same effect. See [completion and lifecycle](docs/acp/completion-and-lifecycle.md).
+To close a task immediately at your own decision, send `/cortex-finish` with no arguments, even while a Paseo turn is active. Cortex stops its owned work and records the closure as terminal `CANCELLED`, **not** verified `COMPLETED`; unfinished review, checks, and synthesis are not claimed as passed. An explicit close-as-is answer to a task-closure question has the same effect. See [completion and lifecycle](docs/features/task-lifecycle/index.md).
 
-Questions from coordinator, worker, or runtime fallback flows use the same structured question contract: worker cards require meaningful selectable choices, and Paseo presents an answer form with an "Other..." field. Related questions can be grouped into one paginated form and submitted together; every member must be answered. Tabs use short topics rather than ids; colliding labels gain a bounded numeric suffix, and header-keyed answers map back to exact question identities. Text fallback numbers follow the current open-question order used by `/cortex-answer`, with blank lines between questions; remaining questions renumber after an answer. Free-text answers and chat replies remain available, and dismissing a form does not answer or close the pending question. Hosts without the required structured-question UI may present the prompt and choices as chat text instead. After an answer is recorded, the Paseo chat echoes the pair as `Question: <question> → Answer: <answer>`, one line per batch member and prefixed with its topic when it has one. This is a runtime/UI contract, not proof that a model will always recognize when it should ask or that every ACP host renders a form. See [questions and steering](docs/acp/steering-and-questions.md).
+Questions from coordinator, worker, or runtime fallback flows use the same structured question contract: worker cards require meaningful selectable choices, and Paseo presents an answer form with an "Other..." field. Related questions can be grouped into one paginated form and submitted together; every member must be answered. Tabs use short topics rather than ids; colliding labels gain a bounded numeric suffix, and header-keyed answers map back to exact question identities. Text fallback numbers follow the current open-question order used by `/cortex-answer`, with blank lines between questions; remaining questions renumber after an answer. Free-text answers and chat replies remain available, and dismissing a form does not answer or close the pending question. Hosts without the required structured-question UI may present the prompt and choices as chat text instead. After an answer is recorded, the Paseo chat echoes the pair as `Question: <question> → Answer: <answer>`, one line per batch member and prefixed with its topic when it has one. This is a runtime/UI contract, not proof that a model will always recognize when it should ask or that every ACP host renders a form. See [questions and steering](docs/features/steering-and-questions/index.md).
 
 A real answer to a runtime recovery question starts a fresh bounded planning
 cycle, including when answered within the same host turn. The three-prompt
@@ -172,11 +172,11 @@ and its answer mapped, but the task stopped at `structured_proposal_missing`;
 batch and worker scenarios were not reached. See
 [question recovery verification](docs/project/verification.md#question-and-submission-regressions).
 
-When a planned step cannot start because another worker holds overlapping paths (in this chat or another chat of the same project) or the chat's worker slots are full, the chat shows a "Waiting" card naming the holder, the overlapping paths and when the wait began; it closes when the step starts. While the holder is a worker observed alive, the task keeps waiting rather than stopping on the 30-minute scheduler deadline. See [orchestration](docs/acp/orchestration.md).
+When a planned step cannot start because another worker holds overlapping paths (in this chat or another chat of the same project) or the chat's worker slots are full, the chat shows a "Waiting" card naming the holder, the overlapping paths and when the wait began; it closes when the step starts. While the holder is a worker observed alive, the task keeps waiting rather than stopping on the 30-minute scheduler deadline. See [orchestration](docs/features/orchestration/index.md).
 
-ACP timeline updates use bounded display projections to avoid repeatedly sending growing worker transcripts. Worker cards keep a 20-action, 4 KiB tail for generic clients; per-update and field size limits and a fixed per-card event budget (forward-only status transitions plus at most 8 progress updates, one per 30 s, so at most 13 updates per worker whatever its size) bound host event volume. Coordinator cards send changed fields only, suppress no-op updates, omit an identical MCP text mirror, and reference repeated identical outputs; unchanged context polls return a compact receipt. Coordinator and engine tool cards also have a per-task total budget: the first 150 distinct calls (or 4 MiB of card updates) get their own card with at most 10 updates each; later calls are counted on one aggregate card, sent at most 20 times per task; and up to 50 failed calls past the budget keep their own cards. The budget persists across turns and restarts, and `session/load` replays older journals within the same bound. In the scale test, 1,500 coordinator calls over four turns and a restart sent 324 card updates and 187,517 bytes, against 312 updates for 500 calls. In the recorded scale test, repeated polls were 481–483 bytes, and each Paseo worker card sent 3 updates and 16,959 bytes for 10-, 60- and 300-tool workloads. These limits reduce emitted event volume; they do not cap durable task history or guarantee constant total daemon memory. See [ACP observability and resource limits](docs/acp/observability.md#bounded-acp-event-projections).
+ACP timeline updates use bounded display projections to avoid repeatedly sending growing worker transcripts. Worker cards keep a 20-action, 4 KiB tail for generic clients; per-update and field size limits and a fixed per-card event budget (forward-only status transitions plus at most 8 progress updates, one per 30 s, so at most 13 updates per worker whatever its size) bound host event volume. Coordinator cards send changed fields only, suppress no-op updates, omit an identical MCP text mirror, and reference repeated identical outputs; unchanged context polls return a compact receipt. Coordinator and engine tool cards also have a per-task total budget: the first 150 distinct calls (or 4 MiB of card updates) get their own card with at most 10 updates each; later calls are counted on one aggregate card, sent at most 20 times per task; and up to 50 failed calls past the budget keep their own cards. The budget persists across turns and restarts, and `session/load` replays older journals within the same bound. In the scale test, 1,500 coordinator calls over four turns and a restart sent 324 card updates and 187,517 bytes, against 312 updates for 500 calls. In the recorded scale test, repeated polls were 481–483 bytes, and each Paseo worker card sent 3 updates and 16,959 bytes for 10-, 60- and 300-tool workloads. These limits reduce emitted event volume; they do not cap durable task history or guarantee constant total daemon memory. See [ACP observability and resource limits](docs/features/observability/index.md#bounded-acp-event-projections).
 
-Automatic routing uses only explicit version-2 owner settings plus currently observed engine catalogs; no model identity receives a built-in tier, effort policy, or automatic membership by name. The coordinator receives route options from that same effective settings/catalog view. `list_route_options` preserves named policy migration/validation diagnostics and their corrective action, rather than reporting a storage failure. New or renamed model IDs remain ineligible until configured. Preferences rank only within already eligible routes and do not grant eligibility. See [configuration](docs/configuration.md#settings-only-model-policy) and [routing and fallback](docs/acp/routing-and-fallback.md#settings-only-routing).
+Automatic routing uses only explicit version-2 owner settings plus currently observed engine catalogs; no model identity receives a built-in tier, effort policy, or automatic membership by name. The coordinator receives route options from that same effective settings/catalog view. `list_route_options` preserves named policy migration/validation diagnostics and their corrective action, rather than reporting a storage failure. New or renamed model IDs remain ineligible until configured. Preferences rank only within already eligible routes and do not grant eligibility. See [configuration](docs/configuration.md#settings-only-model-policy) and [routing and fallback](docs/features/routing-and-fallback/index.md#settings-only-routing).
 
 Explicit user requests must name the complete case-sensitive `engine/model`
 identity or an owner-configured request label. Keep an exact identity
@@ -197,13 +197,13 @@ Within an eligible routing tier, owner `preferred_for` model choices now rank ah
 
 A model's preference can also carry an owner-written `preferred_when` condition (for example "frontend changes without design work"). The coordinator judges each plan node against it and names the model only where it holds; elsewhere the model is an ordinary candidate. In Settings, preferred work kinds are now chosen from the work-kind list instead of typed. See [model policy](docs/configuration.md).
 
-The current Codex adapter is codex-acp 2.0.1 with Codex CLI 0.159.1, with a separately observed offline catalog. The supported Claude fallback is claude-agent-acp 0.88.0. Codex 1.12.0 and 1.13.0 remain supported fallbacks; later Codex adapters still need explicit compatibility support. This one-time update does not change the existing background installer. See [adapter compatibility](docs/acp/codex-acp-adapter.md).
+The current Codex adapter is codex-acp 2.0.1 with Codex CLI 0.159.1, with a separately observed offline catalog. The supported Claude fallback is claude-agent-acp 0.88.0. Codex 1.12.0 and 1.13.0 remain supported fallbacks; later Codex adapters still need explicit compatibility support. This one-time update does not change the existing background installer. See [adapter compatibility](docs/features/codex-engine/index.md).
 
 OpenCode v2 (`opencode acp`, any `2.x.x` release) is an optional third engine.
 It uses your native OpenCode logins and your configured custom providers
 together, with Cortex's own `cortex` agent; no alternate database or extracted
 login is used. Cortex removes OpenCode's built-in `build`/`plan` agent plugins so
-that ACP offers `cortex`; see [native logins](docs/acp/opencode-adapter.md#native-logins-and-the-2020-catalog-snapshot).
+that ACP offers `cortex`; see [native logins](docs/features/opencode-engine/index.md#native-logins-and-the-2020-catalog-snapshot).
 It is never discovered at startup and runs only after the explicit
 `python3 -B scripts/cortex_acp_setup.py add-opencode-connection` step. Automatic
 worker routing skips it unless `routing.json` opts in. It runs only inside the
@@ -212,7 +212,7 @@ engine jail, in its own user/PID/IPC namespaces, with Cortex's own configuration
 gateway reached through its `execute` tool. Catalog refresh refuses observations
 without the required `cortex` mode and preserves the previous snapshot. Imported
 provider substitutions stay in read-only jail files, not process environment values. The
-[OpenCode adapter page](docs/acp/opencode-adapter.md) lists what works, what
+[OpenCode adapter page](docs/features/opencode-engine/index.md) lists what works, what
 does not, and the no-paid evidence; no paid or live OpenCode run was made.
 
 Claude Cortex sessions disallow native shell, file/search/edit, notebook edit and
@@ -226,7 +226,7 @@ MCP `read_skill` using exactly the displayed `SKILL.md` path. The runtime
 binds each coordinator or worker channel to its own observed engine session;
 fallback and recovery use fresh channels and catalogs. Unlisted paths and
 revoked or stale session bindings fail closed. See
-[skill reads](docs/acp/unified-system-prompt.md).
+[skill reads](docs/features/unified-system-prompt/index.md).
 
 The unified role prompt keeps everyday Cortex procedures inlined. Conditional
 procedures are named with action triggers in the role and `read_skill` tool
@@ -237,7 +237,7 @@ reports, skills, checks and submissions from external code-index MCP queries and
 native workspace tools; argument contracts remain in the live tool schemas.
 This is an instruction and advertised
 contract, not proof that either model complies in a live turn. See the
-[role delivery contract](docs/acp/roles-and-delegation.md#instruction-delivery).
+[role delivery contract](docs/features/roles-and-delegation/index.md#instruction-delivery).
 
 ## Install
 
@@ -245,7 +245,7 @@ contract, not proof that either model complies in a live turn. See the
 
 The plugin lockfile currently retains an unpatched `braces` advisory propagated
 through React Native tooling (15 npm package entries, one advisory). See the
-[dependency disposition](docs/acp/paseo-dependency-audit.md); passing plugin tests
+[dependency disposition](docs/project/paseo-dependency-audit.md); passing plugin tests
 or listing packages as dev dependencies does not mean a clean security audit.
 
 If rendering fails in a plugin panel, the composer popover, or a timeline card, Paseo shows a themed fallback for that surface with reopen guidance. If the thrown value cannot safely provide text, the fallback uses `unknown error`.
@@ -285,13 +285,13 @@ paseo plugin install /absolute/path/to/cortex-orch-acp/integrations/paseo
 paseo plugin reload cortex-acp
 ```
 
-Git installs run their declared preparation hook. Local directory installs use the checkout directly; use the setup helper for a managed local Paseo installation when needed. See [Paseo onboarding and diagnostics](docs/acp/packaging-and-onboarding.md).
+Git installs run their declared preparation hook. Local directory installs use the checkout directly; use the setup helper for a managed local Paseo installation when needed. See [Paseo onboarding and diagnostics](docs/project/packaging.md).
 
 The Paseo plugin shows per-worker context and token usage on worker cards. It does not add a separate provider plan-usage button.
 Post-result releases with no reported tokens use existing usage-record columns,
 so existing stores need no schema migration. Paseo omits their false token alarm;
 genuine unknown/failed calls remain visible. Missing usage is not zero/free.
-See [usage attribution](docs/acp/observability.md#2-usagecost-attribution-observabilityusage).
+See [usage attribution](docs/features/observability/index.md#2-usagecost-attribution-observabilityusage).
 
 ### Other ACP clients
 
@@ -301,7 +301,7 @@ Register Cortex as an ACP stdio agent with this command, adapting the absolute p
 python3 -B /absolute/path/to/cortex-orch-acp/src/cortex_acp.py
 ```
 
-Use the client’s ACP agent registration settings. See [the ACP documentation index](docs/acp/index.md).
+Use the client’s ACP agent registration settings. See [the ACP documentation index](docs/project/architecture.md).
 
 ## Configuration
 
@@ -309,38 +309,38 @@ See the [configuration guide](docs/configuration.md) for JSON configuration file
 
 ### Project skills
 
-Codex can discover repository skills under `.agents/skills`; Claude Code discovers project skills under `.claude/skills`. Cortex's [`/skill-management <request>` workflow](docs/acp/skill-management.md) stores each skill in `.agents/skills/<name>/` and can expose it to Claude through a guarded relative symlink. Proactive skill proposals require an explicit user choice from runtime-validated approval and decline labels; reversed or ambiguous labels cannot authorize a change. Availability does not guarantee an engine will select or use a skill; that depends on the engine, its session policy, the model, and the task.
+Codex can discover repository skills under `.agents/skills`; Claude Code discovers project skills under `.claude/skills`. Cortex's [`/skill-management <request>` workflow](docs/features/skill-management/index.md) stores each skill in `.agents/skills/<name>/` and can expose it to Claude through a guarded relative symlink. Proactive skill proposals require an explicit user choice from runtime-validated approval and decline labels; reversed or ambiguous labels cannot authorize a change. Availability does not guarantee an engine will select or use a skill; that depends on the engine, its session policy, the model, and the task.
 
 ## Further documentation
 
-- [Packaging and onboarding](docs/acp/packaging-and-onboarding.md): install, first-run setup, diagnostics
+- [Packaging and onboarding](docs/project/packaging.md): install, first-run setup, diagnostics
 - [Configuration guide](docs/configuration.md): connections, routing, MCP servers, ssh
-- [Codex adapter](docs/acp/codex-acp-adapter.md), [Claude adapter](docs/acp/claude-agent-acp-adapter.md) and the optional [OpenCode adapter](docs/acp/opencode-adapter.md): how Cortex runs each engine
-- [Routing and fallback](docs/acp/routing-and-fallback.md): worker routing and multi-provider fallback
+- [Codex adapter](docs/features/codex-engine/index.md), [Claude adapter](docs/features/claude-engine/index.md) and the optional [OpenCode adapter](docs/features/opencode-engine/index.md): how Cortex runs each engine
+- [Routing and fallback](docs/features/routing-and-fallback/index.md): worker routing and multi-provider fallback
 - [Project storage and recovery](docs/project/storage.md): task storage, format upgrades, recovery
 - [Security](SECURITY.md): the sandbox and permission boundary
-- [Project skill management](docs/acp/skill-management.md): the explicit `/skill-management <request>` command, user-approved skill proposals from repeated work, and guarded Codex/Claude skill layout
+- [Project skill management](docs/features/skill-management/index.md): the explicit `/skill-management <request>` command, user-approved skill proposals from repeated work, and guarded Codex/Claude skill layout
 - [Verification guidance](docs/project/verification.md): check evidence rules and test commands
-- [Orchestration and worker briefs](docs/acp/orchestration.md): scheduling, review and bounded assignment context
-- [ACP documentation index](docs/acp/index.md): full reference
+- [Orchestration and worker briefs](docs/features/orchestration/index.md): scheduling, review and bounded assignment context
+- [ACP documentation index](docs/project/architecture.md): full reference
 
 
 Quota-window model applicability is also settings-only: configure exact per-engine reported labels under `quota_windows`; missing/unmapped labels conservatively remain shared, never inferred from a model family. Typed controls and independent CLI migration are described in [configuration](docs/configuration.md#exact-quota-window-associations). Automated component/API tests do not establish installed settings-screen reachability or production adoption.
 
-A crashed brokered Cortex MCP server is now detected separately from engine completion; an indeterminate channel loss cannot authorize route fallback or a same-session publication follow-up through closed tools. A replacement relay discards old readiness/tool evidence and cannot clear the known loss until its own complete `tools/list` is observed; delayed old replies and exits are fenced. Non-JSON replies and non-UTF-8 filenames no longer terminate stdio response serialization. These are implemented protections with no-paid regression coverage, not attribution of a particular production incident or proof of deployment. See [failure boundaries](docs/acp/failures-and-cancellation.md).
+A crashed brokered Cortex MCP server is now detected separately from engine completion; an indeterminate channel loss cannot authorize route fallback or a same-session publication follow-up through closed tools. A replacement relay discards old readiness/tool evidence and cannot clear the known loss until its own complete `tools/list` is observed; delayed old replies and exits are fenced. Non-JSON replies and non-UTF-8 filenames no longer terminate stdio response serialization. These are implemented protections with no-paid regression coverage, not attribution of a particular production incident or proof of deployment. See [failure boundaries](docs/features/failures-and-cancellation/index.md).
 
 Captured image steering includes a `read_source` reference and hint, including
 an identical retry after source capture committed but before steering was recorded.
 Retries preserve one steering event and requirement revision; they do not edit history.
 
-Paseo's native composer queue is distinct from Cortex's captured steering. In default `steer` mode, Enter delivers immediately, so that chat bubble has no Edit icon. Use Ctrl/Cmd+Enter while Cortex works, then the **pencil on the queued chip above the composer** to edit before delivery; Edit then clear text/attachments cancels the draft. Cortex explains this after the first successful busy-turn send and refuses changed payloads reusing an already-captured message id; send a new correction instead. Edit overwrites an existing draft; native enqueue trims surrounding whitespace. Installed 0.10.2 helper tests cover edit/resubmit and consumed identities, not rendered GUI, complete attachment restoration or reload persistence. No simulated Cortex Cancel/Edit controls were added; see [the ownership boundary](docs/acp/steering-and-questions.md#native-composer-queue-versus-captured-steering).
+Paseo's native composer queue is distinct from Cortex's captured steering. In default `steer` mode, Enter delivers immediately, so that chat bubble has no Edit icon. Use Ctrl/Cmd+Enter while Cortex works, then the **pencil on the queued chip above the composer** to edit before delivery; Edit then clear text/attachments cancels the draft. Cortex explains this after the first successful busy-turn send and refuses changed payloads reusing an already-captured message id; send a new correction instead. Edit overwrites an existing draft; native enqueue trims surrounding whitespace. Installed 0.10.2 helper tests cover edit/resubmit and consumed identities, not rendered GUI, complete attachment restoration or reload persistence. No simulated Cortex Cancel/Edit controls were added; see [the ownership boundary](docs/features/steering-and-questions/index.md#native-composer-queue-versus-captured-steering).
 
 ## Runtime store ignore protection
 
 Root `.gitignore` writes through Cortex keep a final `/.cortex/` rule,
 including after negations. Command edits are reconciled at completion and
 native edits before a fresh writable worker result is published; there is no
-universal native pre-action hook. See [the boundary and tracked-file limits](docs/acp/permissions-and-containment.md#runtime-store-ignore-protection).
+universal native pre-action hook. See [the boundary and tracked-file limits](docs/features/permissions-and-containment/index.md#runtime-store-ignore-protection).
 
 Independent review can start once all execution results are accepted, while
 finished workers' engine turns wind down. Their MCP authority is revoked at
@@ -348,17 +348,17 @@ acceptance; capacity remains occupied until confirmed exit. Review and completio
 remain bound to project digests. Verification can overlap the running reviewer;
 only an unchanged, approved binding credits its result. Stale or rejected
 candidates are discarded, and stops cancel their command sequence. See
-[orchestration](docs/acp/orchestration.md#speculative-verification-during-review).
+[orchestration](docs/features/orchestration/index.md#speculative-verification-during-review).
 Project digest captures reuse bounded in-memory hashes of unchanged files on
 recognized local filesystems without changing the manifest or drift gates;
-see [project digest caching](docs/acp/workspaces-and-integration.md).
+see [project digest caching](docs/features/workspaces-and-integration/index.md).
 
 ## Orchestration timing
 
 Use `python3 -B scripts/cortex_timeline.py --project "$PROJECT" --task "$TASK" --json`
 for a read-only, metadata-only phase breakdown of a checkpointed project store.
-Missing milestones stay missing; worker overlaps are not summed.
-See [timing observations and limits](docs/acp/observability.md#orchestration-phase-measurement).
+Missing milestones stay missing; worker overlaps are not summed. Adding `--aggregate` (optionally with repeated `--task`) prints counts, ratios and decision-gate inputs in separate engine/route/effort cohorts; incomplete chains and missing approved inputs withhold verdicts rather than becoming zero. The owner runs it outside the worker sandbox on a checkpointed store.
+See [timing observations and limits](docs/features/observability/index.md#orchestration-phase-measurement).
 
 Developer debugging can opt in to private dev-only wire traces through the
 guarded wrapper, only when starting the isolated dev daemon:
@@ -375,4 +375,4 @@ private capped files below the dev home, outside project stores and Git; stop
 the dev daemon to avoid concurrent rotation while analyzing exact history.
 Records can contain sensitive project/model content even after redaction, so
 treat the files as confidential and remove them only under the dev-home's
-normal retention procedure. See [wire-trace boundaries and limits](docs/acp/observability.md#developer-only-wire-tracing).
+normal retention procedure. See [wire-trace boundaries and limits](docs/features/observability/index.md#developer-only-wire-tracing).

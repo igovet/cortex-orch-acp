@@ -10,7 +10,7 @@ Three operations, all offline (stopped-access) and never touching Markdown:
   Never recreates a second storage root and never deletes
   ``.cortex``; refuses an unverifiable or incompatible backup.
 
-See docs/acp/format-migration.md for the compatibility and backup procedure.
+See docs/project/format-migration.md for the compatibility and backup procedure.
 """
 from __future__ import annotations
 

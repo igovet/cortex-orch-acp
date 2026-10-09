@@ -4,7 +4,7 @@ A :class:`CodexAcpInstall` is a frozen description of exactly one on-disk
 codex-acp install (Node entry point, ``@openai/codex`` adapter bundle, and
 the platform ``codex`` binary it vendors) *as discovered and recorded by a
 human operator following the manual recipe in
-``docs/acp/codex-acp-adapter.md``* -- this module never discovers or
+``docs/features/codex-engine/index.md``* -- this module never discovers or
 installs anything itself (see T031 for any future installer).
 
 :func:`verify_install` is the only place that turns a caller-held

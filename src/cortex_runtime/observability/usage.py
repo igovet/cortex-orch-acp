@@ -159,7 +159,7 @@ def usage_summary(store, task_id: str) -> dict:
         failed_calls=failed_calls, by_connection=by_connection,
         note=(
             "unknown_basis_calls are calls this engine reported no usage_update for; they are "
-            "never summed into tokens_reported as zero -- see docs/acp/observability.md. "
+            "never summed into tokens_reported as zero -- see docs/features/observability/index.md. "
             "released_after_result_calls are calls the runtime released right after an already-"
             "accepted result_submit, before the engine's own usage for that exact call arrived -- "
             "also never summed as zero, and never counted as unknown_basis_calls."

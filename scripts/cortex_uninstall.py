@@ -14,7 +14,7 @@ store (never any other file in the project, never the project's Git
 history or working changes).
 
 Never touches: a real engine's own global install/config (there is none
-Cortex owns here to begin with -- see docs/acp/packaging-and-onboarding.md
+Cortex owns here to begin with -- see docs/project/packaging.md
 for why no engine/npm/pip artifact is ever installed by this project), the
 user's actual shell/editor config, SSH/Git credentials, or anything
 outside the two computed roots above.

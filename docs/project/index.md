@@ -5,16 +5,25 @@ permissions, independent review, verification and completion. Models propose pla
 perform bounded assignments and submit reports. The one project-local `.cortex`
 store retains task metadata, immutable reports and newest-first pipeline editions.
 
+Feature behavior is documented one page per feature in the [feature index](../features/index.md).
+
+## Project pages
+
+- [Architecture overview](architecture.md)
 - [Conventions](conventions.md)
 - [Decisions](decisions.md)
 - [Gotchas](gotchas.md)
-- [Storage](storage.md)
+- [Storage and recovery](storage.md)
+- [Storage format 12 migration and rollback](format-migration.md)
+- [Security boundary audit](security.md)
 - [Verification](verification.md)
-- [Markdown reports](../features/markdown-reports/index.md)
-- [Knowledge routing](../features/knowledge-routing/index.md)
-- [Senior consultant](../features/senior-consultant/index.md)
-- [ACP architecture](../acp/index.md)
-- [Implementation and qualification status](../acp/runtime-rewrite-status.md)
+- [Automated test matrix and CI](test-matrix.md)
+- [Packaging, onboarding and diagnostics](packaging.md)
+- [Paseo plugin dependency audit](paseo-dependency-audit.md)
+- [Isolated dev Paseo environment](dev-environment.md)
+- [Configuration reference](../configuration.md)
+
+Release readiness is decided by the checks in [verification](verification.md).
 
 Tool contracts live in `src/cortex_runtime/contracts.py` and
 `src/cortex_runtime/orchestration/contracts.py`; the entry point is

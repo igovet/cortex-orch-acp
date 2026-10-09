@@ -179,7 +179,7 @@ def main():
             try:
                 for line in sys.stdin.buffer:
                     request=json.loads(line)
-                    method=request.get('method');identifier=request.get('id')
+                    method=request.get('method');identifier=request.get('id');tool=None
                     try:
                         with store.connection() as db: authorize(db)
                         if method not in {'initialize','notifications/initialized','ping','tools/list','tools/call','notifications/cancelled'}:
@@ -188,6 +188,11 @@ def main():
                         if method=='tools/call':
                             receipt_key='external:'+config['name']+':'+str(identifier)
                             digest=hashlib.sha256(encoded(request.get('params',{})).encode()).hexdigest()
+                            # Excludes _meta deliberately: a canonical identity for
+                            # {tool, arguments} alone, so the same call retried under
+                            # different client-side metadata still proves identical.
+                            arguments_sha256=hashlib.sha256(encoded(dict(
+                                name=tool,arguments=request.get('params',{}).get('arguments'))).encode()).hexdigest()
                             if tool not in allowed: raise StoreError('external_mcp_tool_denied')
                             with store.connection() as db:
                                 db.execute('BEGIN IMMEDIATE')
@@ -204,7 +209,7 @@ def main():
                                 db.execute('INSERT INTO runtime_requests VALUES(?,?,?,?,?,?)',
                                            (channel.task_id,receipt_key,channel.channel_id,'external_call',digest,
                                             encoded(dict(complete=False,read_only=tool in (config.get('read_only_tools') or ())))))
-                                event(db,channel.task_id,'EXTERNAL_TOOL_AUTHORIZED',dict(server=config['name'],tool=tool,request_id=identifier),channel.channel_id)
+                                event(db,channel.task_id,'EXTERNAL_TOOL_AUTHORIZED',dict(server=config['name'],tool=tool,request_id=identifier,arguments_sha256=arguments_sha256),channel.channel_id)
                                 db.commit()
                         with store.connection() as db:
                             db.execute('BEGIN IMMEDIATE')
@@ -245,6 +250,18 @@ def main():
                     except (StoreError,OSError,ValueError) as error:
                         if identifier is not None:
                             print(json.dumps(dict(jsonrpc='2.0',id=identifier,error=dict(code=-32001,message=str(error) if isinstance(error,StoreError) else 'external_mcp_transport_failure'))),flush=True)
+                        # Observability only: server, tool and error code -- never
+                        # arguments or reply content. A failure here must never
+                        # mask or replace the error already reported above.
+                        error_code=str(error) if isinstance(error,StoreError) else type(error).__name__
+                        try:
+                            from cortex_runtime.observability.events import append_event
+                            category='external_refusal' if error_code=='external_mcp_tool_denied' else 'external_error'
+                            append_event(store,channel.task_id,category,error_code,'observed',
+                                         attempt_id=channel.attempt_id,
+                                         detail=dict(server=config['name'],tool=tool,error=error_code))
+                        except Exception:
+                            pass
                         if isinstance(error, OSError) or str(error) in {'external_mcp_timeout','external_mcp_write_timeout','external_mcp_frame_too_large','external_mcp_response_identity_mismatch'}:
                             if child.poll() is None: child.kill()
                             break

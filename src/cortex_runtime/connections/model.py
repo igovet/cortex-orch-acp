@@ -62,7 +62,7 @@ KEY_KIND_ENV_VAR: dict[str, str] = {
 # an npm package). It is optional: never discovered at startup, onboarded
 # only by the explicit ``add-opencode-connection`` setup step, and excluded
 # from automatic worker routing unless routing.json opts in (see
-# ``engine.opencode_adapter_acp`` and docs/acp/opencode-adapter.md).
+# ``engine.opencode_adapter_acp`` and docs/features/opencode-engine/index.md).
 SUPPORTED_ENGINES: tuple[str, ...] = ("codex-acp", "claude-agent-acp", "opencode")
 
 # Optional engines are onboarded explicitly and excluded from automatic routing by default.

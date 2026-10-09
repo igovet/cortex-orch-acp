@@ -19,7 +19,7 @@ Technical storage: any path component named ``.git`` or ``.cortex`` inside
 the workspace is refused unconditionally. The task card's "own-draft area"
 carve-out for a binding's own ``.cortex`` storage is a documented,
 deliberate simplification for this task -- see
-``docs/acp/permissions-and-containment.md`` -- rather than wiring
+``docs/features/permissions-and-containment/index.md`` -- rather than wiring
 ``project_storage``'s draft classification through here, which the lead
 design flagged as optional ("if wiring that is complex, deny all
 ``.cortex`` and document").

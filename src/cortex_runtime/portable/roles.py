@@ -125,7 +125,7 @@ WORKER_ALIASES: dict[str, str] = {
 # class-selected verification sources (not new policy) and applied to every
 # worker role uniformly. The compact-source ceiling is checked against
 # skills/worker-*/SKILL.md; see tests/test_instruction_sources_portable.py.
-# See docs/acp/roles-and-delegation.md for critical-rule delivery.
+# See docs/features/roles-and-delegation/index.md for critical-rule delivery.
 WORKER_CRITICAL_RULES: tuple[str, ...] = (
     "Solve the objective in the runtime-provided assignment.",
     "If your role writes, read relevant project instructions and current documentation before nontrivial changes.",

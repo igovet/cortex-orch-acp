@@ -5,7 +5,7 @@ permanent regressions.
 Each test below either (a) reproduces an attack that *succeeded* before this
 task's fixes and now must fail closed, or (b) documents an attack that was
 already defended and asserts it stays defended. See
-``docs/acp/security-boundaries.md`` for the consolidated write-up, and
+``docs/project/security.md`` for the consolidated write-up, and
 ``.cortex/acp-migration/reports/T030_security-boundary-audit.md`` for the
 task report with exact commands/evidence.
 """

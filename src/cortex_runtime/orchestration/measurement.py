@@ -4,8 +4,12 @@ import json
 from .state import event
 
 
-def attempt_event(store, task_id, attempt_id, kind, engine_session_id):
-    """Record each milestone once per actual downstream attempt, never content."""
+def attempt_event(store, task_id, attempt_id, kind, engine_session_id, payload=None):
+    """Record each milestone once per actual downstream attempt, never content.
+
+    ``payload`` is an optional mapping of additional metadata-only fields
+    (never file/tool content) merged into the recorded event -- G5 uses it
+    to record which session/update kind was first observed."""
     if kind not in {'ENGINE_READY', 'FIRST_MODEL_OUTPUT'}:
         raise ValueError('unknown attempt milestone')
     with store.connection() as db:
@@ -28,7 +32,7 @@ def attempt_event(store, task_id, attempt_id, kind, engine_session_id):
                 "AND json_extract(payload_json,'$.attempt_id')=?",
                 (task_id, kind, attempt_id)).fetchone():
             event(db, task_id, kind, dict(assignment_ref=assignment[0], attempt_id=attempt_id,
-                                         engine_session_id=engine_session_id))
+                                         engine_session_id=engine_session_id, **dict(payload or {})))
         db.commit()
 
 

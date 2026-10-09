@@ -11,7 +11,7 @@ Selection (see ``select_language``):
    source text (Cyrillic letters >= 30% of all letters -> ``"ru"``, else
    ``"en"``). This is a *limited heuristic* covering only these Cortex
    system lines -- the coordinator model itself decides everything else it
-   says (see docs/acp/steering-and-questions.md's "language policy and
+   says (see docs/features/steering-and-questions/index.md's "language policy and
    heuristic limits" section).
 
 Never emits a worker's raw report/chunk text (that would defeat this

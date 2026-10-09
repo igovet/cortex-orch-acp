@@ -1,3 +1,68 @@
+## 2026-10-09 observability decision gates and the edit-tool decision
+
+The owner approved the following decision gates for observability measurement. They
+were fixed before any task data was collected and are not adjusted from the data.
+
+- **Validity gate.** If unmet, revise the instrumentation; do not act on branch
+  verdicts. Require at least 10 completed tasks or 30 worker attempts per engine, with
+  the same routes and efforts; at least 80% of attempts with a complete phase chain
+  (engine ready, worker completed, review and verification events). Use token criteria
+  only when unknown-basis and released-after-result calls are at most 20% of calls;
+  otherwise use wall time only. Codex re-investigation figures are always labelled
+  partial and are never compared directly with Claude's.
+- **Worker loops.** Worker execution is at least 50% of critical-path wall time
+  (excluding user waits), median tool calls per execution attempt are at least 15, and
+  estimated inference-gap time is at least 40% of worker execution time. Only then does
+  a new file-edit tool qualify, and only if `project_write` write redundancy (sum of
+  bytes written divided by sum of changed bytes) is at least 5 and `project_write` is at
+  least 30% of writes. Otherwise the branch is to promote `project_edit`.
+- **Re-investigation.** At least 25% of text reads in dependent attempts hit a
+  (path, sha) already read by another channel of the same task, and those reads are at
+  least 15% of worker execution time. Cross-task reuse is considered only if the
+  cross-task repeat ratio is at least 30%.
+- **Orchestration chain.** Coordinator turns, engine startup, review, verification,
+  synthesis and scheduler waits are at least 35% of critical-path wall time, or review
+  plus verification alone are at least 25%. A qualifying chain becomes a separate task
+  that shortens it without weakening review independence.
+- **Several branches.** Take the largest share. If two are within 5 percentage points,
+  do both, ordered by expected saving. **None qualifies:** stop; no further
+  restructuring work.
+- **Pilot criteria (not yet run).** Per engine, repeated-area group against the baseline
+  variant, 5 to 10 tasks per variant, medians with IQR reported. The primary metric is
+  cost per verified result: engine-reported tokens, or wall time when the token gate
+  fails. Continue when that improves by at least 20% and verified completions are not
+  below baseline; first-pass verification failures are at most baseline plus 1 per 10
+  tasks; median review fix cycles are at most baseline and their total at most baseline
+  plus 10%; no new blocking or high-severity review finding; median wall time to a
+  verified result is at most baseline plus 10%; the stale-pointer share is at most 20%
+  for a handoff variant; the control group cost is at most 10% worse; and Codex edits
+  go through `project_edit` or the replacement tool for at least 50% of edits, otherwise
+  the Codex result is inconclusive. Revise at a 5% to 20% gain or when only one engine
+  improves. Stop below a 5% gain or on any regression breach; fewer reads with more
+  errors is a failure.
+
+**Edit tooling.** The planned `code_apply` tool is replaced by measuring and promoting
+the existing `project_edit` (ordered exact replacements, atomic write, bounded diff,
+prior-read check), unless observability data shows a gap it cannot cover. The known
+differences, a missing `.py` syntax pre-check and no explicit `expected_sha256`
+argument, are gaps to measure, not reasons to add a tool by default.
+
+**Current verdict implementation.** `cortex_timeline.py --aggregate` evaluates
+these gates separately by dispatched engine, connection, model and parameters
+fingerprint (including effort). Only completed, exact, non-truncated execution
+chains contribute branch inputs. Missing approved inputs withhold the affected
+verdict, including unjoinable repeated-read ACP duration and unknown native-write
+share. Retained per-call text-read history supports the cross-task ratio; absent
+history is not zero. The gates are applied per cohort (engine, connection, model
+and parameters fingerprint), which is stricter than per engine. The reader does not
+compute the several-branch rule, the pilot criteria or any token-based branch; the
+owner applies them to the reported branch values. The edit field
+`code_apply_recommended` keeps its earlier name and means that the file-edit gate
+holds. See the definitions and remaining observation limits in
+[observability](../features/observability/index.md#multi-task-aggregates).
+
+---
+
 ## 2026-10-05 accepted access and prompt boundaries
 
 The owner selected the following behavior and limitations for Cortex 1.0.0:
@@ -19,8 +84,8 @@ The owner selected the following behavior and limitations for Cortex 1.0.0:
   reports-only prompt and Cortex-tool boundary; the consultant is not forced to
   Claude.
 
-These choices are documented in [ACP permissions and containment](../acp/permissions-and-containment.md),
-[roles and delegation](../acp/roles-and-delegation.md) and [security policy](../../SECURITY.md).
+These choices are documented in [ACP permissions and containment](../features/permissions-and-containment/index.md),
+[roles and delegation](../features/roles-and-delegation/index.md) and [security policy](../../SECURITY.md).
 They do not claim broader host enforcement or complete technical isolation.
 
 ---
@@ -158,7 +223,7 @@ refused request routes the node normally with its reason in
 In Paseo session bb142018 the coordinator wrote the full details, asked with
 `user_question_request`, and then, in the same turn, wrote a second full
 version of the same details (similarity 0.69). The runtime forwarded both
-(`r_5c2679466a0e`, re-checked at the then-current HEAD in `r_58fc7e6e5219`).
+(re-checked at the then-current HEAD).
 The 2026-09-27 fix below was prompt-only: it banned a *shorter* recap and
 lowered the frequency, but a same-length rewrite still happened
 intermittently.
@@ -183,7 +248,7 @@ rewritten. The prompts changed to match:
 
 ## 2026-09-28 queued, cancelled and re-reviewed workers recover instead of failing
 
-Paseo session 7bda9342 (task t_e1ff07ff2819) lost workers in three ways. All
+Paseo session 7bda9342 lost workers in three ways. All
 evidence was read from a copy of the project store.
 
 - **Capacity.** Seven Opus workers ran on a four-slot connection. The three queued
@@ -227,7 +292,7 @@ construction:
 - The hard cap remains only a last-resort guard.
 - The delivery retry path is unchanged.
 
-**2026-09-28 follow-up (P1 fix, review r_f5018dc7eebf):** a worker recipient's
+**2026-09-28 follow-up (P1 fix):** a worker recipient's
 own `own_assignment.title`/`brief`/`acceptance` and its own runtime node's
 `objective` are never subject to the tiered inline allowances above -- no
 worker-available tool can retrieve them, so compacting them into a
@@ -242,7 +307,7 @@ reference. A coordinator's cross-referenced assignment brief/node objective is
 unaffected (still resolvable via `task_get_context`, so it still compacts
 normally).
 
-See `docs/acp/recovery-capsules.md` ("Size bounds").
+See `docs/features/recovery-capsules/index.md` ("Size bounds").
 
 ## 2026-09-28 orchestration overhead and evidence optimizations
 
@@ -381,7 +446,7 @@ marker.
 
 ## 2026-09-27 per-task budget for coordinator tool cards
 
-Review `r_3fdf8c846b22` found that worker cards were bounded but
+A review found that worker cards were bounded but
 coordinator/engine tool cards were not. A coordinator making N distinct calls
 sent N retained Paseo cards, and the emitter's `seen` set grew without bound.
 The fix adds a total budget per task, not per emitter. The first 150 distinct
@@ -444,11 +509,8 @@ bounded event bytes for the tested 10- and 200-tool workload; they do not prove
 constant daemon memory or bound durable history. A live dev-Paseo heap run was
 not performed.
 
-Implementation evidence: runtime emission and race fix
-(`r_f4598d9817a2`), schema visibility and communication
-(`r_c5c2afa73253`), Paseo timeline bounds (`r_5bf00f25920a`), and the
-phone Hermes diagnosis and fix (`r_6ec2006f6af1`). Current contracts are
-documented in [ACP observability](../acp/observability.md#bounded-acp-event-projections)
+Implementation covered runtime emission and race fix, schema visibility and communication, Paseo timeline bounds, and the phone Hermes diagnosis and fix. Current contracts are
+documented in [ACP observability](../features/observability/index.md#bounded-acp-event-projections)
 and the Codex schema rendering gotcha in [gotchas](gotchas.md).
 
 ## 2026-09-26 remove the Paseo Workers composer button and popover
@@ -465,37 +527,27 @@ trimming the now-dead `orderPopoverWorkers` helper out of
 `client/worker-popover-status.ts` (its `workerPopoverStatus` export stays:
 `worker-panel.tsx` and `pipeline-model.ts` still use it). The "workers"
 workspace panel, its command-center entry, and the Pipeline panel/pill are
-unchanged. Requested via the delivered user steer captured in this task's
-capsule (`r_31708993ed23`).
+unchanged. Requested via a delivered user steer.
 
 ## 2026-09-23 audit remediation (user-approved)
 
 - D1 build-verification profile: keep it (all 23 profiles are required);
   document it as runtime-reserved — not plannable, not dispatched — since the
-  runtime itself executes command verification. Approved in
-  `list_sources`/`read_source(pq_d977d180d44f:answer)`, re-confirmed in
-  `read_source(pq_d4502996482e:answer)`.
+  runtime itself executes command verification. Approved by the user.
 - D2 retention: ship a user-run maintenance CLI, `python3 src/cortex_clear.py
   --project-root <path> --days N [--keep-thread <id>]`; the coordinator only
-  explains it. Codex-era `CODEX_*` env protection is removed. Approved in
-  `read_source(pq_d977d180d44f:answer)`, re-confirmed in
-  `read_source(pq_d4502996482e:answer)`.
+  explains it. Codex-era `CODEX_*` env protection is removed. Approved by the user.
 - D3 `docs/project/verification.md` is produced by a knowledge-harvest
-  refresh rather than hand-written, per the user, in
-  `read_source(pq_d977d180d44f:answer)`, re-confirmed in
-  `read_source(pq_d4502996482e:answer)`.
+  refresh rather than hand-written, per the user.
 - Worker routing: a route-caused failure (quota/rate limit, model
   unavailable, engine start failure, unconfirmed worker mode) is recorded
   unavailable with an expiry and retried on another available route; routing
   refusals (pin/deny/malformed `routing.json`/no available route) are named,
   non-retried blockers. Haiku workers configure only options their own
-  session offers. Required by the user in
-  `read_source(pq_d9fa85b27e5c:answer)`.
+  session offers. Required by the user.
 - Live checks for this remediation are user-authorized paid Claude-only runs
   in an isolated dev setup; the production plugin and the user's real
-  configuration are never touched. Requested via
-  `read_source(pq_bc3b03c3f491:answer)` (runtime fix to make answers visible
-  to reviewers, which this citation form now reflects).
+  configuration are never touched. Requested by the user.
 
 ## 2026-09-24 verification gap disclosure
 
@@ -525,11 +577,11 @@ Historical rule (superseded and revoked): the 2026-09-24 standing paid-call appr
 
 ## 2026-09-28 review follow-ups, prompt rollback and worker hand-off
 
-The follow-up defects and operational improvements from `r_d164a457ebcb` were
+The follow-up defects and operational improvements were
 implemented in source before this documentation update; see the linked behavior
-contracts in [ACP orchestration](../acp/orchestration.md), [unified system
-prompt](../acp/unified-system-prompt.md), [roles and delegation](../acp/roles-and-delegation.md)
-and [observability](../acp/observability.md).
+contracts in [ACP orchestration](../features/orchestration/index.md), [unified system
+prompt](../features/unified-system-prompt/index.md), [roles and delegation](../features/roles-and-delegation/index.md)
+and [observability](../features/observability/index.md).
 
 - Synthesis gaps with an explicit command require a current verified exact-argv
   `command_run`; same-name fix-lineage closure is reserved for command-less
@@ -553,6 +605,6 @@ and [observability](../acp/observability.md).
 
 ## 2026-09-30 exact model policy is owner data; installation asset is not runtime policy
 
-Following the production-derived baseline review, executable model classification and fixed model-name instruction defaults were removed. Current routing requires version-2 explicit owner settings and current catalogs. Exact engine/model identities explicitly define enabled and automatic membership, tiers and optional per-model policy. No model-name classifier, family/version table, list-position tier, seed list, or hidden installation-template overlay may fill missing settings. The public policy/model-settings-default.json is a validated install-only candidate; fresh installation writes only absent owner files, while existing settings and saved profiles require explicit digest/revision-bound preview/apply migration. The production-derived candidate retains observed policy without claiming quality validation or live qualification; portable coordinator resolution refuses ambiguous/unavailable identities. See [settings-only model policy](../configuration.md#settings-only-model-policy) and [migration](../acp/packaging-and-onboarding.md#model-policy-installation-and-explicit-migration).
+Following the production-derived baseline review, executable model classification and fixed model-name instruction defaults were removed. Current routing requires version-2 explicit owner settings and current catalogs. Exact engine/model identities explicitly define enabled and automatic membership, tiers and optional per-model policy. No model-name classifier, family/version table, list-position tier, seed list, or hidden installation-template overlay may fill missing settings. The public policy/model-settings-default.json is a validated install-only candidate; fresh installation writes only absent owner files, while existing settings and saved profiles require explicit digest/revision-bound preview/apply migration. The production-derived candidate retains observed policy without claiming quality validation or live qualification; portable coordinator resolution refuses ambiguous/unavailable identities. See [settings-only model policy](../configuration.md#settings-only-model-policy) and [migration](packaging.md#model-policy-installation-and-explicit-migration).
 
 Saved-profile deletion is explicit, revision-checked and local: selection unlink does not reset current materialized settings, deleting the final profile is allowed, and refusal/failure preserves data.

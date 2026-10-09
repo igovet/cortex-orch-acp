@@ -6,14 +6,13 @@ only an explicit user selection activates the bundled orchestrator skill.
 
 Cortex is an incoming ACP v1 stdio agent (`src/cortex_acp.py`,
 `src/cortex_runtime/acp/`), not a plugin hosted inside another
-agent's process. See `docs/acp/index.md` for the full section map. T033 removed
-the entire Codex-plugin/gateway harness (the MITM gateway, the pinned-dependency
+agent's process. See `docs/project/architecture.md` for the full section map.
+The Codex-plugin/gateway harness (the MITM gateway, the pinned-dependency
 installer, native Codex profile registration, the lifecycle hook dispatcher, the
-Codex-native `_meta` adapter, and the `.codex-plugin/` manifest) — see
-`docs/acp/packaging-and-onboarding.md`'s "What was Codex-plugin-harness-era and
-was removed" for the exact list and `SECURITY.md`'s "Current ACP boundary"
-for the current security model.
-Treat `docs/acp/*` and `SECURITY.md` as the current product references.
+Codex-native `_meta` adapter, and the `.codex-plugin/` manifest) is not part of
+the product. `SECURITY.md`'s "Current ACP boundary" describes the current security model.
+Treat `docs/project/index.md`, `docs/features/index.md` and `SECURITY.md` as the current product references.
+Documentation never references tasks, assignments or task reports.
 
 The runtime owns the task lifecycle, dependency graph, scheduling, engine routes,
 permissions, mandatory independent review, verification and completion. Models
@@ -23,8 +22,8 @@ profile instructions. Preserve all 23 profiles (22 specialists and the consultan
 and their shared report protocol. Do not reintroduce model-driven delegation,
 acceptance or compatibility routes. Model-originated mutations require dispatched,
 channel-verified MCP tools/call; runtime-owned state transitions and events commit
-transactionally. The runtime rewrite is incomplete: read
-`docs/acp/runtime-rewrite-status.md` before treating this checkout as releasable.
+transactionally. Release readiness is decided only by the checks listed in
+`docs/project/verification.md`; do not treat a checkout as releasable without them.
 
 Throughout design, implementation, qualification, and live work, use only
 capabilities that are actually supported and observable in the currently installed
@@ -72,7 +71,7 @@ backup in `.migration-backups/`. A non-initializing inspection open
 `legacy_storage_migration_required`; format 10 and unknown formats remain
 fail-closed and require the explicit migration tool where supported.
 
-Read relevant `docs/acp/` pages before nontrivial work; they define the current
+Read relevant `docs/project/` and `docs/features/` pages before nontrivial work; they define the current
 product contract. Also read applicable `docs/project/` and `docs/features/`
 pages as supplementary current summaries. The paths in the knowledge-harvest
 skill also define output conventions for a harvested target project.
@@ -87,7 +86,7 @@ Run package, profile-generation and test checks sequentially in the same
 checkout. Use the smallest meaningful tests first. Source-only checks use
 `--check` or `--dry-run`.
 
-## Current ACP-era live/model-policy rules
+## Live and model-policy rules
 
 Real-client qualification uses a throwaway Zed profile, isolated Zed
 `HOME`/XDG directories, and a separate disposable project. Do not change the
@@ -100,7 +99,7 @@ without printing credentials before relying on either engine.
 
 Default verification is no-paid: targeted pytest, the Paseo plugin type-check
 and `npm --prefix integrations/paseo run test:*` scripts, and the no-paid smoke
-harness. The 2026-09-24 standing approval is revoked. Run a paid live check
+harness. No standing approval for paid live checks exists. Run a paid live check
 only when the owner explicitly requests it for the current work and names the
 mode: `cli` (headless, through the guarded Paseo CLI) or `desktop` (the Paseo
 Electron app). Without such a request, do not launch a paid model call or a
@@ -119,7 +118,7 @@ status without printing credentials before relying on either engine.
 
 The no-paid default automated suite
 (`PYTHONDONTWRITEBYTECODE=1 python3 -B -m pytest -q`, see
-`docs/acp/test-matrix-and-ci.md`) cannot reach a paid engine and is not a
+`docs/project/test-matrix.md`) cannot reach a paid engine and is not a
 substitute for live qualification. The only paid probes are
 `scripts/cortex_codex_probe.py` and `scripts/cortex_claude_probe.py`; both
 continue to require `--i-authorize-paid-call` and `--approval-ref`; run them
@@ -142,9 +141,9 @@ permanent dev instance at ~/.paseo-dev, its separate Electron profile
 that dev home only with python3 -B scripts/cortex_paseo_clone.py while its dev daemon
 is stopped; the production home is read-only to that utility. Before using an
 isolation flag or environment variable, verify it against the installed Paseo version
-and ACP bridge. Follow [the dev Paseo environment guide](docs/acp/dev-paseo-environment.md).
+and ACP bridge. Follow [the dev Paseo environment guide](docs/project/dev-environment.md).
 Read-only package/bundle inspection on 2026-09-30 reported installed Paseo 0.10.2;
-CLI/isolation observations for 0.10.0 below are historical, not qualification of 0.10.2.
+CLI/isolation observations for 0.10.0 are historical and do not qualify 0.10.2.
 Recheck the installed CLI/bridge and guarded wrapper before live use. Invoke python3 -B scripts/cortex_paseo_dev.py --
 ...; it defaults to ~/.paseo-dev, rejects ~/.paseo, and blocks command-level endpoint
 overrides. If the installed build cannot be shown to isolate every required state and

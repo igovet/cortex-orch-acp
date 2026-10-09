@@ -420,7 +420,7 @@ class _InstructionsOnlyRole:
     the full ``RoleInstructionSet`` object itself (see
     ``EngineSessionOpener.open``'s ``instructions: str`` parameter, a
     deliberately narrow protocol boundary -- see
-    ``docs/acp/roles-and-delegation.md``)."""
+    ``docs/features/roles-and-delegation/index.md``)."""
 
     def __init__(self, body_portable: str) -> None:
         self.body_portable = body_portable
@@ -1031,7 +1031,8 @@ class EngineSessionManagerAdapter:
             if recipient == "worker" and self._store is not None:
                 from ..orchestration.measurement import attempt_event
                 manager_kwargs["lifecycle_observer"] = (
-                    lambda kind, session: attempt_event(self._store, task_id, attempt_id, kind, session))
+                    lambda kind, session, payload=None: attempt_event(
+                        self._store, task_id, attempt_id, kind, session, payload=payload))
             from ..observability.wire_trace import get_trace
             if get_trace() is not None:
                 manager_kwargs["trace_identity"] = dict(
@@ -3086,6 +3087,21 @@ class EngineSessionManagerAdapter:
         stop_reason = StopReason.END_TURN
         usage_basis = None
         usage_values: dict = {}
+        # G7: a stall-nudge or refusal continuation calls
+        # ``manager.prompt_turn`` again on this same ``prompt()`` call (see
+        # the ``continue`` sites below); each inner turn's usage_update
+        # counters are cumulative only within that one turn and restart at
+        # zero on the next, so usage_basis/usage_values above (the current
+        # turn's latest report) is banked into these accumulators at every
+        # turn boundary instead of being overwritten by the next turn.
+        accumulated_usage_values: dict = {}
+        accumulated_usage_basis = None
+        # P1 fix: whether any inner turn of this call ended with no
+        # usage_update at all (usage_basis still None when _bank_turn_usage
+        # ran for it). One turn reporting does not make a later silent turn's
+        # contribution known -- the combined total must then never be
+        # recorded as fully 'engine_reported' (see the finally block below).
+        any_turn_missing_usage = False
         call_failed = True
         # EXT-01 #4 fix (independent-review P1 #4): the per-event
         # ``cancel_event.is_set()`` check below only ever runs when this
@@ -3164,6 +3180,24 @@ class EngineSessionManagerAdapter:
 
         watcher = threading.Thread(target=_watch_for_cancel, name="engine-cancel-watch", daemon=True)
         watcher.start()
+
+        def _bank_turn_usage() -> None:
+            # G7: fold the current inner turn's latest reported usage into
+            # the running accumulators, then reset for the next turn.
+            # P1 fix: a turn that ends here with usage_basis still None never
+            # reported any usage at all -- flagging it keeps the combined
+            # total from being recorded as fully 'engine_reported' just
+            # because some *other* turn of this same call did report.
+            nonlocal usage_basis, usage_values, accumulated_usage_basis, any_turn_missing_usage
+            if usage_basis is not None:
+                accumulated_usage_basis = usage_basis
+                for key, value in usage_values.items():
+                    accumulated_usage_values[key] = accumulated_usage_values.get(key, 0) + value
+            else:
+                any_turn_missing_usage = True
+            usage_basis = None
+            usage_values = {}
+
         try:
             instruction_delivery_observed = False
             refusal_continuations = 0
@@ -3325,6 +3359,7 @@ class EngineSessionManagerAdapter:
                     _nudged.clear()
                     stop_reason = StopReason.END_TURN
                     turn_message, turn_blocks = self._STALL_NUDGE_PROMPT, None
+                    _bank_turn_usage()
                     continue
                 take_refusal = getattr(manager, "take_permission_refusal", None)
                 if (not cancel_event.is_set() and stop_reason == StopReason.CANCELLED
@@ -3333,6 +3368,7 @@ class EngineSessionManagerAdapter:
                     refusal_continuations += 1
                     stop_reason = StopReason.END_TURN
                     turn_message, turn_blocks = self._REFUSAL_CONTINUE_PROMPT, None
+                    _bank_turn_usage()
                     continue
                 break
             call_failed = False
@@ -3366,11 +3402,27 @@ class EngineSessionManagerAdapter:
             # polling a ``cancel_event`` no one will ever set again.
             _stop_watch.set()
             watcher.join(timeout=self._CANCEL_WATCH_POLL_SECONDS * 4)
-            # T029: exactly one usage_records row per prompt() call --
+            # T029/G7: exactly one usage_records row per prompt() call --
             # retry/fallback hops and recovery/clarification deliveries
             # each call prompt() again and therefore each get their own
             # row, whether this call succeeded or raised. basis='unknown'
-            # (never zero/free) when no usage_update event was ever seen.
+            # (never zero/free) when no usage_update event was ever seen in
+            # *any* inner turn of this call. A stall-nudge or refusal
+            # continuation runs more than one inner turn inside this same
+            # call; each turn's final usage was already folded into
+            # accumulated_usage_values/accumulated_usage_basis at its own
+            # turn boundary (see _bank_turn_usage), so banking the still-open
+            # final turn here and recording the accumulators sums every
+            # inner turn instead of keeping only the last one's count.
+            _bank_turn_usage()
+            if any_turn_missing_usage and accumulated_usage_basis is not None:
+                # P1 fix: at least one inner turn of this call reported no
+                # usage at all while another did -- the combined total is
+                # therefore incomplete and must never be recorded as fully
+                # 'engine_reported'. The basis vocabulary stays closed (no
+                # CHECK-constraint migration): 'unknown', never zero/free,
+                # same as a call that never saw any usage_update at all.
+                accumulated_usage_basis = UsageBasis.UNKNOWN
             if self._store is not None and task_id is not None:
                 from ..observability import usage as observability_usage
 
@@ -3396,11 +3448,11 @@ class EngineSessionManagerAdapter:
                         # stores need no CHECK-constraint migration. The stop
                         # reason and failed=False distinguish this release;
                         # real reported usage is kept, never overwritten.
-                        if usage_basis != UsageBasis.ENGINE_REPORTED:
-                            usage_basis = UsageBasis.UNKNOWN
+                        if accumulated_usage_basis != UsageBasis.ENGINE_REPORTED:
+                            accumulated_usage_basis = UsageBasis.UNKNOWN
                 observability_usage.record_call_usage(
                     self._store, task_id=task_id, attempt_id=attempt_id, engine_session_ref=session_ref,
-                    usage_basis=usage_basis, usage_values=usage_values,
+                    usage_basis=accumulated_usage_basis, usage_values=accumulated_usage_values,
                     stop_reason=recorded_stop_reason, failed=recorded_failed,
                 )
         return PromptOutcome(stop_reason, "".join(text_parts))

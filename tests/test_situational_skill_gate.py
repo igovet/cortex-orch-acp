@@ -179,7 +179,7 @@ def test_a_recorded_request_replays_without_being_gated_again(tmp_path):
 
 
 def test_path_classification():
-    assert skill_gate.is_documentation_path('docs/acp/roles.md')
+    assert skill_gate.is_documentation_path('docs/features/roles-and-delegation/index.md')
     assert skill_gate.is_documentation_path('integrations/paseo/docs/x.md')
     assert skill_gate.is_documentation_path('README.md') and skill_gate.is_documentation_path('pkg/README.md')
     assert skill_gate.is_documentation_path('SECURITY.md')

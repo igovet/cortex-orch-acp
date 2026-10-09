@@ -8,7 +8,7 @@ exposes a shared project skill in ``.agents/skills/<name>`` to Claude Code,
 which reads project skills only from ``.claude/skills``. It never writes a
 file, never follows a link and never touches any other ``.claude`` path.
 
-Rules (see docs/acp/permissions-and-containment.md, "Project skill links"):
+Rules (see docs/features/permissions-and-containment/index.md, "Project skill links"):
 
 - ``name`` is 1-64 lowercase letters, digits and single hyphens.
 - The source ``.agents/skills/<name>`` must be a real directory inside the

@@ -5,7 +5,7 @@ Mirrors ``engine.codex_install`` (T013) for the second, non-Codex engine
 on-disk claude-agent-acp install (Node entry point and the
 ``@agentclientprotocol/claude-agent-acp`` adapter bundle it names) *as
 discovered and recorded by a human operator following the manual recipe in
-``docs/acp/claude-agent-acp-adapter.md``* -- this module never discovers or
+``docs/features/claude-engine/index.md``* -- this module never discovers or
 installs anything itself; connections.engine_update owns installation.
 
 The current fallback release is 0.88.0 (Claude Agent SDK 0.3.293,

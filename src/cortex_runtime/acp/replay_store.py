@@ -18,7 +18,7 @@ Three tables:
   ``bootstrap.bootstrap_task``/``append_source_event``). Metadata only --
   never a technical channel/attempt/session id. ``trust_label`` is always
   ``'user_direct'`` here (every block on an inbound user prompt is direct
-  user input; see ``docs/acp/input-history-and-replay.md``). A stored
+  user input; see ``docs/features/input-history-and-replay/index.md``). A stored
   binary/text body (when ``availability='stored'``) lives in a
   private, owner-only file under the task's storage directory
   (``body_ref``, a bare filename resolved against
@@ -880,7 +880,7 @@ def replay_session(store, session_id: str) -> list[dict]:
     Pure read: never opens an engine session, never calls
     ``OrchestratingRuntime.start_prompt``, never mutates ``source_events``/
     ``task_events``/``reports``/``deliveries`` (see
-    ``docs/acp/input-history-and-replay.md`` and this task's "session/load
+    ``docs/features/input-history-and-replay/index.md`` and this task's "session/load
     must never ..." acceptance line -- verified in tests by DB row-count
     assertions around the call).
     """

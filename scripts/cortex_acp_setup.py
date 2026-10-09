@@ -73,7 +73,7 @@ an unrelated one:
    any version Cortex has not qualified, and registers a connection that
    references the owner's own ``~/.local/share/opencode`` login (created by
    ``opencode auth login``; never copied, never written). See
-   docs/acp/opencode-adapter.md.
+   docs/features/opencode-engine/index.md.
 10. ``print-client-recipes`` -- delegates entirely to the existing T011
    ``cortex_acp_client_config.py`` (Zed dry-run-by-default entry +
    ``--print-codeg-recipe``); this script never re-implements or
@@ -569,7 +569,7 @@ def add_connection(*, name, engine, provider, auth_mode, key_kind=None, api_key_
     ``engine.claude_install.verify_install`` against an operator-recorded
     install (see ``pinned-dependencies.json``'s own ``install_record_note``
     fields); wiring that verification step into this CLI is left for a
-    later change, not silently skipped -- see ``docs/acp/packaging-and-onboarding.md``.
+    later change, not silently skipped -- see ``docs/project/packaging.md``.
     """
     record = onboarding.create_connection(
         name=name, engine=engine, provider=provider, auth_mode=auth_mode,

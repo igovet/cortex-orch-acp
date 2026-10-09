@@ -1,4 +1,8 @@
+import re
+import subprocess
 from pathlib import Path
+
+import pytest
 
 from cortex_runtime.project_docs import (
     MAX_FILE_BYTES,
@@ -175,3 +179,155 @@ def test_worker_catalog_defers_index_and_broad_discovery_when_known_locations_ex
     assert "when the brief includes Known locations" in rendered
     assert "start by reading those current sources directly" in rendered
     assert "only if those locations are insufficient or the change touches a contract or documentation surface" in rendered
+
+
+# --- Stage 0 regression: the retired documentation subtree stays retired --
+#
+# These checks run against this real checkout (not a tmp_path fixture)
+# because they assert a repository-wide fact: the retired documentation
+# subtree built below (concatenated, never spelled out literally here) no
+# longer exists and no permitted tracked or untracked file still points at it.
+
+_PROJECT_ROOT = Path(__file__).resolve().parents[1]
+_RETIRED_DOCS_ACP = "docs" + "/" + "acp"
+
+
+def _repo_files() -> list[Path]:
+    output = subprocess.run(
+        ["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
+        cwd=_PROJECT_ROOT, capture_output=True, text=True, check=True,
+    ).stdout
+    excluded_parts = {
+        ".git", ".cortex", ".claude", ".codex", ".codebase-memory",
+        ".playwright-cli", ".playwright-mcp", "node_modules", "__pycache__",
+    }
+    paths = []
+    for name in sorted(set(output.split("\0")) - {""}):
+        relative = Path(name)
+        if excluded_parts.intersection(relative.parts):
+            continue
+        path = _PROJECT_ROOT / relative
+        # Do not follow file links or replaced directory links out of the checkout.
+        if any((_PROJECT_ROOT / parent).is_symlink() for parent in (relative, *relative.parents)):
+            continue
+        paths.append(path)
+    return paths
+
+
+def test_docs_acp_directory_does_not_exist():
+    assert not (_PROJECT_ROOT / "docs" / "acp").exists()
+
+
+def test_no_repo_file_contains_the_retired_docs_acp_path():
+    offenders = []
+    for path in _repo_files():
+        if not path.is_file():
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (UnicodeDecodeError, OSError):
+            continue
+        if _RETIRED_DOCS_ACP in text:
+            offenders.append(str(path.relative_to(_PROJECT_ROOT)))
+    assert offenders == [], offenders
+
+
+_MARKDOWN_LINK_RE = re.compile(r"\]\(([^)]+)\)")
+
+
+def test_relative_markdown_links_resolve_to_existing_files():
+    broken = []
+    for path in _repo_files():
+        if path.suffix != ".md" or not path.is_file():
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (UnicodeDecodeError, OSError):
+            continue
+        for match in _MARKDOWN_LINK_RE.finditer(text):
+            target = match.group(1).strip()
+            if not target or target.startswith("#"):
+                continue
+            if "://" in target or target.startswith("mailto:") or target.startswith("/"):
+                continue
+            # Strip an optional trailing "title" and/or #anchor; anchors are optional.
+            target = target.split(" ", 1)[0].split("#", 1)[0]
+            if not target:
+                continue
+            resolved = (path.parent / target).resolve()
+            if not resolved.exists():
+                broken.append(f"{path.relative_to(_PROJECT_ROOT)} -> {match.group(1)}")
+    assert broken == [], broken
+
+
+@pytest.mark.parametrize(
+    ("content", "check"),
+    [
+        ("# New page\n[Missing](missing.md)\n", test_relative_markdown_links_resolve_to_existing_files),
+        (_RETIRED_DOCS_ACP, test_no_repo_file_contains_the_retired_docs_acp_path),
+    ],
+)
+def test_untracked_document_is_checked_before_staging(tmp_path: Path, monkeypatch, content, check):
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    (tmp_path / "README.md").write_text("# Project\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=tmp_path, check=True)
+    page = tmp_path / "docs/features/new feature/index.md"
+    page.parent.mkdir(parents=True)
+    page.write_text(content, encoding="utf-8")
+    tracked = subprocess.run(
+        ["git", "ls-files", "-z"], cwd=tmp_path, capture_output=True,
+        text=True, check=True,
+    ).stdout.split("\0")
+    assert page.relative_to(tmp_path).as_posix() not in tracked
+    monkeypatch.setitem(globals(), "_PROJECT_ROOT", tmp_path)
+
+    with pytest.raises(AssertionError, match=re.escape(page.relative_to(tmp_path).as_posix())):
+        check()
+
+
+def test_repo_file_scan_excludes_ignored_private_generated_and_symlink_files(tmp_path: Path, monkeypatch):
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    (tmp_path / ".gitignore").write_text("ignored/\n", encoding="utf-8")
+    tracked = tmp_path / "README.md"
+    tracked.write_text("# Project\n", encoding="utf-8")
+    subprocess.run(["git", "add", ".gitignore", "README.md"], cwd=tmp_path, check=True)
+    page = tmp_path / "docs/project/new\npage.md"
+    page.parent.mkdir(parents=True)
+    page.write_text("# New page\n", encoding="utf-8")
+    invalid = f"[Missing](missing.md)\n{_RETIRED_DOCS_ACP}\n"
+    for directory in ("ignored", ".cortex", ".claude", ".codex", ".codebase-memory", "node_modules", "__pycache__"):
+        excluded = tmp_path / directory / "excluded.md"
+        excluded.parent.mkdir()
+        excluded.write_text(invalid, encoding="utf-8")
+    (tmp_path / "linked.md").symlink_to(tmp_path / ".cortex/excluded.md")
+    (tmp_path / "linked-docs").symlink_to(tmp_path / ".cortex", target_is_directory=True)
+    monkeypatch.setitem(globals(), "_PROJECT_ROOT", tmp_path)
+
+    assert _repo_files() == [tmp_path / ".gitignore", tracked, page]
+    test_no_repo_file_contains_the_retired_docs_acp_path()
+    test_relative_markdown_links_resolve_to_existing_files()
+
+
+_TASK_IDENTIFIER_RE = re.compile(r"\bT\d{3}\b")
+_REPORT_IDENTIFIER_RE = re.compile(r"\br_[0-9a-f]{12}\b")
+
+
+def test_no_task_identifiers_in_documentation():
+    targets = [
+        _PROJECT_ROOT / "AGENTS.md",
+        _PROJECT_ROOT / "README.md",
+        _PROJECT_ROOT / "SECURITY.md",
+        _PROJECT_ROOT / "PRIVACY.md",
+        _PROJECT_ROOT / "CHANGELOG.md",
+    ]
+    docs_root = _PROJECT_ROOT / "docs"
+    if docs_root.is_dir():
+        targets.extend(sorted(docs_root.rglob("*.md")))
+    offenders = []
+    for path in targets:
+        if not path.is_file():
+            continue
+        text = path.read_text(encoding="utf-8")
+        if _TASK_IDENTIFIER_RE.search(text) or _REPORT_IDENTIFIER_RE.search(text):
+            offenders.append(str(path.relative_to(_PROJECT_ROOT)))
+    assert offenders == []

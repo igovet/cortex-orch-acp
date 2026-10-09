@@ -11,7 +11,7 @@ resolvable/qualified route yet still fails the prompt explicitly (an ACP
 ``-32001`` error naming the concrete reason), never silently and never via
 a hidden provider/native fallback -- see
 ``cortex_runtime.acp.production_runtime`` and
-``docs/acp/orchestration.md``.
+``docs/features/orchestration/index.md``.
 """
 import os
 import sys

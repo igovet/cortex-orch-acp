@@ -44,8 +44,8 @@ CORTEX_STATUS = "cortex-status"
 CORTEX_MODEL = "cortex-model"
 CORTEX_EFFORT = "cortex-effort"
 CORTEX_SETUP = "cortex-setup"
-# T020 (see acp.orchestrating_runtime / acp.steering / docs/acp/steering-
-# and-questions.md): explicit, exact-prefix-only commands -- never inferred
+# T020 (see acp.orchestrating_runtime / acp.steering /
+# docs/features/steering-and-questions/index.md): explicit, exact-prefix-only commands -- never inferred
 # from free text -- for the steering/urgent-stop/question-disambiguation
 # channel.
 CORTEX_NEW_TASK = "cortex-new-task"
@@ -229,7 +229,7 @@ def build_status_text(*, config_options: Sequence[Mapping[str, object]],
 
 SETUP_GUIDANCE = (
     "No model is selectable yet for this project. To connect an engine:\n"
-    "1. Follow docs/acp/packaging-and-onboarding.md to register a pinned install "
+    "1. Follow docs/project/packaging.md to register a pinned install "
     "with the add-connection command and its --install-record option.\n"
     "2. Complete the engine's native login in the isolated directory shown by "
     "setup, or provide an API key through a private file or stdin.\n"

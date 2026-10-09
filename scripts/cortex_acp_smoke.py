@@ -352,7 +352,7 @@ def run_smoke(*, fixture_connection, report):
         # T018: loadSession/embeddedContext are now true (session/load is
         # implemented, display-only; EmbeddedResource prompt blocks are
         # accepted with truthful availability metadata) -- see
-        # docs/acp/input-history-and-replay.md. Image prompt blocks are
+        # docs/features/input-history-and-replay/index.md. Image prompt blocks are
         # accepted and forwarded opaquely; audio remains unsupported.
         report.record("initialize:loadSession_true", caps.get("loadSession") is True, detail=caps)
         prompt_caps = caps.get("promptCapabilities", {})

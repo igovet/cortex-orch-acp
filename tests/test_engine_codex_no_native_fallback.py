@@ -3,7 +3,7 @@
 F4 (T013 review): this boundary is not scoped to T013's own two new
 modules -- it is checked here for **every** ``cortex_runtime/engine/*.py``
 module (globbed, so a module added by a later task is automatically
-covered on its next run; see ``docs/acp/codex-acp-adapter.md``'s "No
+covered on its next run; see ``docs/features/codex-engine/index.md``'s "No
 native fallback" section for the scope note this test backs). No module
 under ``engine/`` may import the legacy native Codex ``_meta`` adapter
 (``cortex_runtime.codex_adapter``), ``server.py``, ``hooks.py``,

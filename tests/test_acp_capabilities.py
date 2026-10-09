@@ -29,7 +29,7 @@ def _initialize(proc):
     # T018: loadSession/embeddedContext are now truthfully advertised --
     # session/load (display-only replay) and EmbeddedResource prompt
     # content blocks are implemented; see
-    # docs/acp/input-history-and-replay.md.
+    # docs/features/input-history-and-replay/index.md.
     assert caps["loadSession"] is True
     assert caps["promptCapabilities"] == dict(image=True, audio=False, embeddedContext=True)
     assert caps["mcpCapabilities"] == dict(http=False, sse=False)

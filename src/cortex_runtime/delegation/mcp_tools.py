@@ -573,8 +573,12 @@ _OPERATION_DESCRIPTIONS = dict(
     scope_request="Report that the assignment's scope prevents completion and name the paths it needs. The task enters recovery: end this turn now and do not call plan_submit in the same turn. The runtime stops workers, then requests the new plan; it never widens scope by itself. Counts toward the three re-plans allowed since the user last spoke.",
     escalation_request="Ask for an independent senior consultation on a problem this attempt cannot resolve. The task enters recovery: end this turn now and do not call plan_submit in the same turn. The runtime stops workers, then requests the new plan with a consultation. Counts toward the three re-plans allowed since the user last spoke.",
     read_diagnostics="Read this task's own observability/usage diagnostics summary: resource caps, recovery "
-                     "latency, repeat calls, schema/validation errors, manual interventions, duplicate "
-                     "publications, tokens, and concurrency -- each with its declared unit and availability.",
+                     "latency, prompt re-delivery counts (repeat_calls), schema/validation errors, manual "
+                     "interventions, duplicate publications, tokens, concurrency, route outcomes, a per-attempt "
+                     "tool-call loop_profile (gateway/external/ACP-reported counts and inference-gap/tool-time "
+                     "estimates), a reinvestigation repeat-read ratio, write_redundancy (bytes written vs "
+                     "changed), and a critical_path wall-time breakdown by orchestration class -- each with its "
+                     "declared unit, basis and availability; an unobservable signal is reported as such, never 0.",
 )
 
 

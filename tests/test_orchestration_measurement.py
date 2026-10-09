@@ -45,7 +45,7 @@ def test_real_engine_updates_emit_one_metadata_milestone_per_attempt(machine, tm
     assignment = state.claim_ready(ch.task_id, ch.channel_id)[0]['assignment_ref']
     bind(state, ch, assignment)
     manager = _make_manager(tmp_path_factory.mktemp('engine-timing'), default_scenario())
-    manager._lifecycle_observer = lambda kind, session: attempt_event(
+    manager._lifecycle_observer = lambda kind, session, payload=None: attempt_event(
         state.store, ch.task_id, 'xa_measure', kind, session)
     try:
         manager.negotiate(REQUESTED_CAPABILITIES)

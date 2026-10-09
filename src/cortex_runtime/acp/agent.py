@@ -2356,7 +2356,7 @@ class Agent:
         gives it its own first coordinator turn -- ``session["task_id"]``
         (the active task) is never read or mutated here. Continuing this
         new task from a later ordinary prompt on the same ACP session is
-        out of this task's scope (see docs/acp/steering-and-questions.md's
+        out of this task's scope (see docs/features/steering-and-questions/index.md's
         UNKNOWNs) -- this command's own turn is this new task's only
         guaranteed turn for now."""
         text = argument.strip()
@@ -3000,7 +3000,7 @@ class Agent:
 
     def _session_load(self, request_id, params):
         """(T018) Display-only history replay -- see ``acp.replay_store``
-        module docstring and ``docs/acp/input-history-and-replay.md``.
+        module docstring and ``docs/features/input-history-and-replay/index.md``.
 
         Pure read over the durable ``acp_host_sessions``/``host_transcript``/
         ``host_updates``
