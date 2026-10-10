@@ -111,7 +111,7 @@ claiming retention that did not happen:
 | `resource` (embedded `text`/`blob`) | ≤ 10 MiB, prompt total ≤ 10 MiB | `stored` |
 | `resource` | over either cap | `too_large` (metadata only, body discarded) |
 | `resource_link` (`file://`, inside project root, owned regular file, no symlink, single hardlink) | ≤ 10 MiB, prompt total ≤ 10 MiB | `stored` (a snapshot copy, sha256-verified) |
-| `resource_link` (`file://`, outside project root) | -- | `reference_only` (uri kept, never read) |
+| `resource_link` (`file://`, outside project root and launching Paseo uploads) | -- | `reference_only` (uri kept, body never read; diagnostic reason) |
 | `resource_link` (any other scheme, e.g. `https://`) | -- | `reference_only` (never fetched) |
 | `resource_link` (symlink / non-owned / multiple hardlinks / unreadable) | -- | `inaccessible` (with a concrete `reason`) |
 
@@ -146,6 +146,42 @@ without being buffered or echoed and answered with `-32700` ("attach fewer or
 smaller images"). The reply carries the request's own `id` when the frame's
 first 64 KiB show it as a top-level integer or string member, so the client
 ends that turn instead of waiting forever; otherwise the id is `null`.
+
+## Paseo uploaded files
+
+Owner prompt text may reference an absolute upload path, including a standalone
+path after `Read`, a quoted/inline path, or Paseo's `Path: ...` attachment
+descriptor. Cortex snapshots the file into the same durable attachment store
+as a `resource_link`; file-URI links into uploads use that same path.
+Standalone and quoted paths preserve spaces; unquoted inline paths end at
+whitespace. Exact owner text is retained unchanged. Embedded attachment bodies,
+model output, worker messages and reports are never scanned for file paths.
+
+The read surface is only `<launching PASEO_HOME>/uploads/`. The installed Paseo
+0.11.1 daemon sets `PASEO_HOME` on launch and preserves it in ACP child environments;
+the Cortex load shim preserves it even when overriding the child `HOME`.
+Cortex uses that launch environment, not a path supplied in prompt metadata.
+Missing/invalid launch-home evidence does not authorize a default home.
+Production `~/.paseo/uploads` and dev `~/.paseo-dev/uploads` are **not**
+simultaneously authorized: only the launching home is eligible.
+
+Capture resolves real paths, rejects uploads-directory symlinks and escapes,
+and rechecks containment against the fixed root on the opened descriptor.
+The read-only, non-following/non-blocking descriptor must identify an owned,
+single-hardlink regular file. FIFOs, devices, directories, unreadable/missing
+files, and content over the existing 10 MiB per-file or combined prompt cap
+never produce a stored body. Rejected text references remain attachment
+metadata with an explicit reason (`outside_paseo_uploads`, `missing_upload`,
+`symlink_escape`, `paseo_home_unavailable`, or the existing capture diagnostic).
+Nothing is written into the Paseo home or uploads directory.
+
+Every worker can discover these task-scoped, `user_direct` attachments in its
+normal recovery/assignment source descriptors and `list_sources`, then page
+their retained snapshots with `read_source`. Removing the original upload does
+not remove the retained snapshot. There is no new tool, general outside-project
+file reader, or storage schema. `project_read` still accepts project paths only.
+Source-backed no-paid tests are in `tests/test_paseo_upload_attachments.py`;
+this is not a live-client or production-deployment claim.
 
 ## Trust labels
 

@@ -9,6 +9,61 @@ results. The runtime chooses what executes and whether the task can complete.
 See [verification status](../../project/verification.md) for retained test evidence
 and its automated evidence limits.
 
+## Runtime-composed synthesis
+
+Independent review and final verification remain separate mandatory gates for
+changed work. After their first-pass success on the same current digest, the
+runtime can compose metadata plus attributed report-summary quotations and
+complete without a coordinator reconciliation turn. Any open evidence gap,
+pending decision/input, repair or historical replan uses the ordinary coordinator
+path. No-change review waivers also retain that path. The runtime does not infer
+semantic conclusions from reports or translate quoted summaries.
+
+See [runtime-composed lifecycle](../task-lifecycle/index.md#runtime-composed-synthesis)
+for exact eligibility, atomicity, recovery and display limits. The distinct
+`SYNTHESIS_RUNTIME_COMPOSED` event identifies this mechanism; it does not invent
+a coordinator turn or token observation. A decline instead records a
+metadata-only `SYNTHESIS_RUNTIME_DECLINED` event with a deterministic reason
+code (see [runtime-composed lifecycle](../task-lifecycle/index.md#runtime-composed-synthesis)
+and [observability's cohort aggregates](../observability/index.md)); eligibility
+itself is unchanged.
+
+## Reviewer verification reuse
+
+The gateway's `command_run` can reuse a runtime-produced verification receipt
+only for the task's current, running review attempt and a byte-identical
+`plan.verification` argv on the same project revision digest. Completed checks
+return their actual exit code (including nonzero), completeness, digest and
+bounded output reference; output is paged with `read_large_output`, not copied
+into the response. A scoped metadata alias points to the same immutable output
+body. The receipt's `runtime_verification` records the original runtime command
+and output identities; accepted `result_submit` check evidence retains
+`evidence_source=runtime_verification` and `runtime_command_ref`.
+
+An in-flight check is polled outside the write transaction for at most five
+seconds, or the shorter requested timeout. Runtime shutdown or revoked channel
+authority ends the wait without launching another command. Shutdown commits a
+runtime-only cancellation marker for owned tasks before engine/broker teardown,
+so a gateway in a separate MCP process observes it too. If storage cannot retain
+that marker, shutdown still tears down the owned engine and MCP server; no
+successful wait cancellation receipt is inferred from the missing marker.
+Different argv/digest,
+a discarded or stale run, missing/incomplete/truncated output, launch failure or
+wait expiry uses normal command execution and its existing sandbox policy.
+Implementation workers are unaffected. Reuse validates exact runtime start/finish
+events and the retained output body; a model assertion cannot supply provenance.
+Two aliases of one runtime command cannot verify two checks of one result.
+Failure-closure ordering uses the original runtime execution start, not the later
+alias request, so returning an old receipt cannot masquerade as a new rerun.
+
+This is observation reuse, not final acceptance: speculative checks remain
+candidates until the existing controller credits the approving reviewer and
+unchanged digest. Independent diff analysis, review approval, worker teardown,
+mandatory verification and synthesis gates are unchanged. No storage-format or
+permission change is introduced. Source: `orchestration/reviewer_verification.py`,
+`orchestration/gateway.py`, `orchestration/controller.py` and
+`delegation/evidence.py` below `src/cortex_runtime/`.
+
 ## Plan submission and coordinator polling
 
 Plan task `scope` is a write reservation used to schedule overlapping writers,
@@ -187,6 +242,59 @@ to verification; REQUEST_CHANGES creates fix nodes followed by a fresh reviewer;
 BLOCK stops acceptance. Three unsuccessful review cycles block further automatic
 work. The loop never treats an ordinary final model message as a worker result.
 
+### Reviewer handoff
+
+Reviewers default to publishing their complete Markdown report inline with
+`result_submit`. The same immutable publication and shared decision brief apply;
+verdicts remain APPROVE, REQUEST_CHANGES or BLOCK. Draft publication stays
+available for genuine incremental editing and other roles. This is guidance,
+not a claim that either engine necessarily follows it.
+
+Before the existing git status/diff, the runtime adds a metadata-only
+`runtime_verified_facts` block, capped at 4,096 serialized UTF-8 bytes:
+- Current execution nodes' checks backed by verified same-attempt receipts:
+  submitted name labels, recorded outcomes, current outcomes and receipt refs.
+  Names are labels, not verified interpretations; these receipts are explicitly
+  not asserted to bind to the reviewed digest.
+- Exact planned verification argv, labelled as planned, not passing evidence.
+  The runtime itself runs that exact argv, authoritatively, on the approved
+  digest, or credits an eligible speculative run after approval; the reviewer
+  should not re-run the same argv solely to duplicate it, and never records it
+  as its own deferred or not-run check, since the runtime closes it from its
+  own receipt. Matching deferred checks close only through complete passing
+  runtime evidence and identical argv with matching author, approved and
+  current digests.
+- Changed paths and before/after kind, SHA-256 and byte size versus the current
+  plan's execution baseline, not HEAD or a claim of worker authorship. Regular
+  files use content hashes; symlinks use hashes of link text without following
+  targets and have no content size. Directories/special entries have no hash/size.
+  Deleted paths have no after metadata.
+
+Execution baselines retain path metadata with the existing revision observation.
+Older baselines without it report `baseline_unavailable`; unavailable or drifted
+captures report a diagnostic, never an observed empty change set. Tab/newline-containing
+regular and directory paths are preserved. Ambiguous unescaped symlink path/target
+boundaries or malformed manifest records make the complete metadata comparison
+unavailable (`path_metadata_unavailable` for the current capture), not partially
+observed. Link targets remain hashed, never disclosed or followed. Facts carry
+the review and capture digests; only a matching capture supplies path deltas.
+A rebound refusal refreshes the block for the new binding or explicitly reports
+refresh unavailable. The block carries no worker summaries, report bodies,
+blocker prose, file contents or command output. Existing dependency report
+references are unchanged; two-step withholding of worker interpretations is not
+implemented.
+
+Oversized entries are omitted whole with `truncated` and per-section omitted
+counts. The bounded block is retained under the review assignment's existing
+`read_large_output` access, and brief truncation retains that exact reference.
+The retained block still reports its omitted entries; it is not a complete
+inventory when truncated. This context does not replace independent analysis,
+targeted checks or final runtime verification.
+
+Source: `orchestration/reviewer_handoff.py`, `controller.py`,
+`worker_brief.py`, and `state.py`. Focused regressions:
+`tests/test_reviewer_handoff.py`.
+
 ### Targeted review fixes
 
 A reviewer may add optional structured `findings` to a REQUEST_CHANGES result:
@@ -352,7 +460,13 @@ sequence, killing the running subprocess group. Interrupted candidates cannot
 pass. Restart recovery reruns ordinary verification rather than replaying
 speculative diagnostic events. Metadata-only `SPECULATIVE_VERIFICATION_*`
 events record start, finish, discard and credit; command output stays in the
-private retained-output store, not in those events.
+private retained-output store, not in those events. The runner records
+`CHECK_EXECUTION_STARTED` for each literal command before launch. This neutral
+execution marker is diagnostic metadata, not a `VERIFICATION_*` lifecycle event;
+it cannot close a deferred check without authoritative passing verification on
+the approved digest. Closure binds execution and the gap author to that same
+current digest, regardless of publication or credit ordering. Discarded or stale
+candidates never close gaps.
 
 ### Check history and current outcome
 
@@ -428,11 +542,33 @@ as `passed` with `evidence_strength: "weak"`. Receipts written before `argv` was
 recorded read as `command_unrecorded`.
 
 At synthesis, a retained `not_run` or `unverified` check remains a gap unless
-closed by one of two explicitly distinct rules. When the gap declares a
-non-empty `command` as literal argv, only a verified, still-current
+closed by the exact-command rule or the command-less compatibility rule. When
+the gap declares a non-empty `command` as literal argv, a verified, still-current
 `command_run` pass with exactly matching argv in the same plan revision closes
 it, including across nodes; the runtime reads argv from the cited
-`tool_call_ref` receipt and keeps the task and attempt evidence checks. A
+`tool_call_ref` receipt and keeps the task and attempt evidence checks.
+Alternatively, a runtime-owned final-verification command closes a declared
+command gap only with byte-for-byte identical argv, complete exit-0 execution,
+complete untruncated retained output and a digest equal to both the gap author's
+runtime-observed revision and the current reviewed project digest. Closure reads
+the backing task-private output through no-follow descriptors: it must be a
+readable owner-only regular file with one link, exactly the recorded byte count,
+and stable identity and metadata throughout the read. Missing, shortened,
+unreadable, linked or unsafe bodies keep the gap open; validation never repairs
+or creates storage. For a reviewer,
+the runtime completion event retains the reviewed `project_digest`; for an executor,
+the exact attempt/report's `worker_publish` observation supplies the digest. Missing,
+ambiguous or different author bindings leave the gap open. Execution may precede
+the disclosure: unchanged digest bindings, not temporal order, establish eligibility.
+The verification event, execution-start binding and output must belong to this exact
+task and plan revision; model claims or unrelated worker receipts cannot supply
+that runtime evidence. The runtime retains `closed_by` with the verification
+command reference in the node result, preserving the original disclosure and
+immutable report. Context and synthesis rederive closure from evidence, never
+trust a stored `closed_by`. Failed, pending, ambiguous, missing-start, stale or
+truncated evidence keeps the gap open. Speculative verification can close a
+reviewer's later-recorded gap only after authoritative credit on the same approved
+and current digest; diagnostic starts or discarded candidates cannot close it. A
 same-name passing check in the original node or one of its later fix nodes does
 not override a different or missing command. For a legacy gap without a
 command, the compatibility rule allows a same-name passing check in that node's

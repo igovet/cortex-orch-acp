@@ -158,7 +158,8 @@ def usage_summary(store, task_id: str) -> dict:
         released_after_result_calls=released_after_result_calls,
         failed_calls=failed_calls, by_connection=by_connection,
         note=(
-            "unknown_basis_calls are calls this engine reported no usage_update for; they are "
+            "unknown_basis_calls lack a complete recognized per-call token report; context-only "
+            "usage_update notifications do not provide token expenditure. Missing calls are "
             "never summed into tokens_reported as zero -- see docs/features/observability/index.md. "
             "released_after_result_calls are calls the runtime released right after an already-"
             "accepted result_submit, before the engine's own usage for that exact call arrived -- "

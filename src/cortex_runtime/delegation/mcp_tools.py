@@ -215,9 +215,15 @@ def _worker_publish_result(store, channel: ChannelContext, args: Mapping[str, An
             name=item["name"], outcome=item["outcome"],
             tool_call_ref=item.get("tool_call_ref"), evidence=label,
         )
+        with store.connection() as db:
+            assessed = delegation_evidence.assess_check(
+                db, channel.task_id, assignment_ref, item['outcome'], item.get('tool_call_ref'))
+        if assessed.get('evidence_source') == 'runtime_verification':
+            entry['evidence_source'] = 'runtime_verification'
+            entry['runtime_command_ref'] = assessed['runtime_command_ref']
         # A pass the runtime did not accept keeps the claim and its gap; a
         # failure an exact later rerun closed keeps the closing ref.
-        for key in ("blocker", "claimed_outcome", "evidence_gap", "closed_by"):
+        for key in ("blocker", "claimed_outcome", "evidence_gap", "closed_by", "command"):
             if item.get(key):
                 entry[key] = item[key]
         checks.append(entry)

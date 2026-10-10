@@ -24,6 +24,18 @@
   </tr>
 </table>
 
+On a fully closed, unrepaired first-review path, Cortex can complete with a
+[runtime-composed synthesis](docs/features/task-lifecycle/index.md#runtime-composed-synthesis)
+instead of another coordinator model turn. Independent review, digest-bound
+verification and evidence-gap gates remain mandatory. The final text separates
+runtime metadata from quoted, attributed report summaries; pending decisions,
+gaps or replans retain coordinator reconciliation. Registry exit bookkeeping shares
+the completion transaction instead of opening a second SQLite writer; a restart
+from unfinished reconciliation retries the same gates without completing twice.
+Before composition, an already-owned post-result settlement/exit cleanup gets
+at most ten seconds outside the SQLite transaction to confirm absence; timeout
+or enduring ineligibility retains coordinator reconciliation.
+
 After a coordinator question commits, Cortex suppresses further text received
 in that turn, including when tool lifecycle callbacks arrive late. Details
 delivered only after the commit can also be omitted; see the
@@ -72,6 +84,19 @@ was not refreshed. See [Codex support and limits](docs/features/codex-engine/ind
 
 ## What Cortex is
 
+When a reviewer requests the plan's exact verification command on the same
+project digest, Cortex returns the runtime-produced receipt instead of rerunning
+it. In-flight checks are awaited for at most five seconds; mismatches, unavailable
+or discarded evidence and wait expiry execute normally. Independent diff review
+and mandatory final verification remain unchanged. See
+[reviewer verification reuse](docs/features/orchestration/index.md#reviewer-verification-reuse).
+
+After an accepted worker/reviewer result, Cortex banks the in-flight prompt's
+token report on a separate cleanup thread for up to 15 seconds before teardown
+(a turn that ends sooner settles at once).
+Missing reports stay unknown; capacity and writer locks stay reserved until
+confirmed exit. See [usage settlement](docs/features/token-and-plan-usage/index.md#coverage-and-interrupted-turns).
+
 ACP route/effort selection retains the owner and project ceilings and any
 task-local narrowing. Automatic workers and reviewers use only eligible
 observed routes within that ceiling; a denied pin is refused, not replaced.
@@ -116,10 +141,17 @@ Open failed checks return `open_failed_check` before publication or channel
 revocation. Keep the failure and cite an exact later passing rerun, or explicitly
 submit `assignment_outcome: "failed"`; changing argv does not close it. Accepted
 receipts include `node_status`, not task acceptance.
+The review brief includes a bounded runtime-facts block: verified executor
+receipts, planned verification argv (not results), and changed-path hashes/sizes
+versus the execution baseline. Worker report access, independent review and
+mandatory digest-bound verification are unchanged; see
+[reviewer handoff](docs/features/orchestration/index.md#reviewer-handoff).
 Prepare the complete report before the first submission; a summary or verdict
 alone is insufficient. Pass structured arguments, not hand-concatenated JSON.
-For code blocks or reports larger than about 3 KB, prefer the owned-draft
-publication route up front and submit its acknowledged report identity. Decision-
+Reviewers default to publishing the complete report inline with `result_submit`,
+including the shared decision brief and explicit verdict. Other roles may prefer
+the owned-draft publication route for code blocks or larger reports; it remains
+available for genuine incremental editing. Decision-
 brief items (including contradictions) are Markdown sections inside `markdown`,
 never separate report fields. After an inline JSON failure, correct serialization
 or use that draft route. This guidance does not
@@ -291,6 +323,12 @@ The Paseo plugin shows per-worker context and token usage on worker cards. It do
 Post-result releases with no reported tokens use existing usage-record columns,
 so existing stores need no schema migration. Paseo omits their false token alarm;
 genuine unknown/failed calls remain visible. Missing usage is not zero/free.
+Read-only timeline aggregates separate token coverage by engine and role;
+coordinator subtotals never fill missing worker or reviewer cost. Complete call
+reporting is not complete token expenditure: last-request-only adapter totals
+remain reported subtotals, not whole verified-result cost. Synthesis aggregates
+count unfinished reconciliation separately and withhold its share while pending;
+see [synthesis outcomes](docs/features/observability/index.md#runtime-composed-synthesis-share-and-fallback-reasons).
 See [usage attribution](docs/features/observability/index.md#2-usagecost-attribution-observabilityusage).
 
 ### Other ACP clients
@@ -333,6 +371,13 @@ Captured image steering includes a `read_source` reference and hint, including
 an identical retry after source capture committed but before steering was recorded.
 Retries preserve one steering event and requirement revision; they do not edit history.
 
+Owner-uploaded Paseo files referenced by absolute path or file URI are retained
+as task attachments. Workers use `list_sources`/`read_source`, not an
+outside-project `project_read`. Capture is read-only and confined to the
+launching Paseo home's uploads directory, with regular-file, containment and
+size checks; rejected references retain diagnostics. See
+[uploaded-file sources](docs/features/input-history-and-replay/index.md#paseo-uploaded-files).
+
 Paseo's native composer queue is distinct from Cortex's captured steering. In default `steer` mode, Enter delivers immediately, so that chat bubble has no Edit icon. Use Ctrl/Cmd+Enter while Cortex works, then the **pencil on the queued chip above the composer** to edit before delivery; Edit then clear text/attachments cancels the draft. Cortex explains this after the first successful busy-turn send and refuses changed payloads reusing an already-captured message id; send a new correction instead. Edit overwrites an existing draft; native enqueue trims surrounding whitespace. Installed 0.10.2 helper tests cover edit/resubmit and consumed identities, not rendered GUI, complete attachment restoration or reload persistence. No simulated Cortex Cancel/Edit controls were added; see [the ownership boundary](docs/features/steering-and-questions/index.md#native-composer-queue-versus-captured-steering).
 
 ## Runtime store ignore protection
@@ -347,7 +392,11 @@ finished workers' engine turns wind down. Their MCP authority is revoked at
 acceptance; capacity remains occupied until confirmed exit. Review and completion
 remain bound to project digests. Verification can overlap the running reviewer;
 only an unchanged, approved binding credits its result. Stale or rejected
-candidates are discarded, and stops cancel their command sequence. See
+candidates are discarded, and stops cancel their command sequence. Execution-start
+metadata alone never closes a deferred check; only authoritative verification on
+the approved digest can do so, with exact argv and the same gap-author and current
+project digest regardless of execution order. The retained output body must also
+be safely readable at its exact recorded length; metadata alone is insufficient. See
 [orchestration](docs/features/orchestration/index.md#speculative-verification-during-review).
 Project digest captures reuse bounded in-memory hashes of unchanged files on
 recognized local filesystems without changing the manifest or drift gates;
@@ -357,7 +406,7 @@ see [project digest caching](docs/features/workspaces-and-integration/index.md).
 
 Use `python3 -B scripts/cortex_timeline.py --project "$PROJECT" --task "$TASK" --json`
 for a read-only, metadata-only phase breakdown of a checkpointed project store.
-Missing milestones stay missing; worker overlaps are not summed. Adding `--aggregate` (optionally with repeated `--task`) prints counts, ratios and decision-gate inputs in separate engine/route/effort cohorts; incomplete chains and missing approved inputs withhold verdicts rather than becoming zero. The owner runs it outside the worker sandbox on a checkpointed store.
+Missing milestones stay missing; worker overlaps are not summed. Adding `--aggregate` (optionally with repeated `--task`) prints counts, ratios and decision-gate inputs in separate engine/route/effort cohorts; incomplete chains and missing approved inputs withhold verdicts rather than becoming zero. The reinvestigation gate counts dependent-attempt reads only, over all eligible worker execution time; independent repeats remain diagnostic. The owner runs it outside the worker sandbox on a checkpointed store.
 See [timing observations and limits](docs/features/observability/index.md#orchestration-phase-measurement).
 
 Developer debugging can opt in to private dev-only wire traces through the

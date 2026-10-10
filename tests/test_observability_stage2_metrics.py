@@ -46,6 +46,19 @@ def _insert_observation(store, task_id, attempt_id, tool_call_ref, kind, status,
         db.commit()
 
 
+def _insert_worker_channel(store, task_id, attempt_id, channel_id):
+    """A minimal, real trusted_channels row with role='worker' for
+    `attempt_id` -- enough for observability.metrics' own channel lookups
+    (it never needs a resolvable secret or a real parent).
+    """
+    with store.connection() as db:
+        db.execute(
+            'INSERT INTO trusted_channels VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+            (channel_id, 'hash', task_id, 'principal-' + channel_id, None, 'worker',
+             None, attempt_id, None, None, 0, store._now(), None, None))
+        db.commit()
+
+
 # --- loop_profile ---------------------------------------------------------
 
 def test_loop_profile_unavailable_without_any_rows(machine):
@@ -99,6 +112,68 @@ def test_loop_profile_counts_each_class_from_its_own_table_and_leaks_no_content(
     assert 'SECRET-EXTERNAL-REPLY' not in blob
 
 
+def test_inference_gap_unavailable_reason_for_fewer_than_two_spans(machine):
+    state, ch = machine
+    attempt = 'xa_single_span'
+    _insert_observation(state.store, ch.task_id, attempt, 'tc_a', 'other', 'pending',
+                        '2099-01-01T09:00:00+00:00')
+    _insert_observation(state.store, ch.task_id, attempt, 'tc_a', 'other', 'completed',
+                        '2099-01-01T09:00:02+00:00')
+    summary = metrics.diagnostics_summary(state.store, ch.task_id)
+    row = next(r for r in summary['loop_profile']['per_attempt'] if r['attempt_id'] == attempt)
+    assert row['inference_gap_share_of_execution'] is None
+    assert row['inference_gap_share_unavailable_reason'] == 'fewer than two observed ACP tool spans for this attempt'
+    assert row['inference_gap_seconds']['availability'] == 'unavailable_reason'
+    assert row['inference_gap_seconds']['reason'] == row['inference_gap_share_unavailable_reason']
+    assert row['inference_gap_seconds']['spans_without_resolved_timestamp'] == 0
+    assert row['inference_gap_seconds']['spans_marked_concurrent'] == 0
+
+
+def test_inference_gap_unavailable_reason_for_concurrent_spans(machine):
+    """Two tool calls issued before the first one's terminal event landed
+    (the real claude-agent-acp pilot shape: independent reads/searches sent
+    together) must report an explicit concurrency reason, never a bare null.
+    """
+    state, ch = machine
+    attempt = 'xa_concurrent'
+    _insert_observation(state.store, ch.task_id, attempt, 'tc_1', 'other', 'pending',
+                        '2099-01-01T09:00:00+00:00')
+    _insert_observation(state.store, ch.task_id, attempt, 'tc_2', 'other', 'pending',
+                        '2099-01-01T09:00:02+00:00')
+    _insert_observation(state.store, ch.task_id, attempt, 'tc_1', 'other', 'completed',
+                        '2099-01-01T09:00:03+00:00')
+    _insert_observation(state.store, ch.task_id, attempt, 'tc_2', 'other', 'completed',
+                        '2099-01-01T09:00:05+00:00')
+    summary = metrics.diagnostics_summary(state.store, ch.task_id)
+    row = next(r for r in summary['loop_profile']['per_attempt'] if r['attempt_id'] == attempt)
+    assert row['inference_gap_share_of_execution'] is None
+    assert 'concurrent' in row['inference_gap_share_unavailable_reason']
+    assert row['inference_gap_seconds']['spans_marked_concurrent'] == 1
+    assert row['inference_gap_seconds']['spans_without_resolved_timestamp'] == 0
+    assert row['inference_gap_seconds']['reason'] == row['inference_gap_share_unavailable_reason']
+
+
+def test_inference_gap_unavailable_reason_for_unresolved_terminal_on_incomplete_stream(machine):
+    """A span whose completion event was never recorded (an incomplete
+    stream -- the task ended, or the ACP connection dropped, before a
+    terminal tool_result_observations row landed) must report the exact
+    unresolved-timestamp reason, never silently compute a wrong gap or a
+    bare null.
+    """
+    state, ch = machine
+    attempt = 'xa_incomplete_stream'
+    _insert_observation(state.store, ch.task_id, attempt, 'tc_pending', 'other', 'pending',
+                        '2099-01-01T09:00:00+00:00')
+    _insert_observation(state.store, ch.task_id, attempt, 'tc_done', 'other', 'completed',
+                        '2099-01-01T09:00:05+00:00')
+    summary = metrics.diagnostics_summary(state.store, ch.task_id)
+    row = next(r for r in summary['loop_profile']['per_attempt'] if r['attempt_id'] == attempt)
+    assert row['inference_gap_share_of_execution'] is None
+    assert row['inference_gap_share_unavailable_reason'] == (
+        'one or more ACP tool spans lack a resolved first/terminal timestamp')
+    assert row['inference_gap_seconds']['spans_without_resolved_timestamp'] == 1
+
+
 # --- reinvestigation -------------------------------------------------------
 
 def test_reinvestigation_within_and_cross_attempt_ratios(machine):
@@ -114,8 +189,34 @@ def test_reinvestigation_within_and_cross_attempt_ratios(machine):
     assert reinvest['sample_count'] == 4
     assert reinvest['within_attempt_repeat_ratio'] == pytest.approx(1 / 4)
     assert reinvest['cross_attempt_within_task_repeat_ratio'] is None  # channels are absent
+    assert reinvest['cross_attempt_within_task_repeat_ratio_unavailable_reason']
+    row = next(r for r in reinvest['per_attempt'] if r['attempt_id'] == 'xa_1')
+    assert row['repeated_text_reads'] is None
+    assert row['repeated_text_reads_unavailable_reason']
     assert reinvest['cross_task_repeat_ratio']['availability'] == 'unavailable_reason'
     assert reinvest['partial'] is True
+
+
+def test_reinvestigation_coordinator_read_poisons_identity_for_shared_content(machine):
+    """A coordinator read is never tracked in the worker channel map by
+    design; when it reads some content before a fully channel-identified
+    worker reads the exact same content, the worker's own bucket still
+    cannot be asserted a genuine cross-channel repeat or not. The reader
+    must state the exact reason instead of leaving a bare null, for both
+    the per-attempt count and the whole-task ratio.
+    """
+    state, ch = machine
+    _insert_worker_channel(state.store, ch.task_id, 'xa_known', 'ch_known_worker')
+    _insert_read(state.store, ch.task_id, 'co_1', 'a.txt', 'sha-a')  # coordinator: unresolved channel
+    _insert_read(state.store, ch.task_id, 'xa_known', 'a.txt', 'sha-a')  # same content, known channel
+    summary = metrics.diagnostics_summary(state.store, ch.task_id)
+    reinvest = summary['reinvestigation']
+    row = next(r for r in reinvest['per_attempt'] if r['attempt_id'] == 'xa_known')
+    assert row['repeated_text_reads'] is None
+    assert 'prior read' in row['repeated_text_reads_unavailable_reason']
+    assert reinvest['cross_attempt_within_task_repeat_ratio'] is None
+    assert reinvest['cross_attempt_within_task_repeat_ratio_unavailable_reason']
+    assert 'of' in reinvest['cross_attempt_within_task_repeat_ratio_unavailable_reason']
 
 
 def test_reinvestigation_flags_partial_for_non_claude_engine(machine):

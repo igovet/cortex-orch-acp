@@ -1,8 +1,11 @@
 # Markdown reports
 
 Cortex stores immutable Markdown reports under the project-local `.cortex`
-store. A caller creates a server-owned draft, edits only the returned path and
-publishes it through the current attempt. Publication is idempotent and
+store. A worker can submit complete Markdown inline with its structured result;
+the runtime publishes it through the same owned-draft immutable-report path.
+Reviewers default to this inline route, retaining the shared decision brief and
+explicit verdict. Alternatively, a caller creates a server-owned draft, edits
+only the returned path and publishes it through the current attempt. Publication is idempotent and
 retains the draft on failure for recovery.
 
 The coordinator owns `pipeline.md`, which keeps the newest edition first and

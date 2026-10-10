@@ -343,20 +343,49 @@ def _loop_profile(store, task_id: str) -> dict:
     for attempt in attempts:
         items = sorted(ordered.get(attempt, []), key=lambda s: s['first'] if s['first'] is not None else float('inf'))
         gaps = []
-        gaps_complete = not timing_truncated and all(
-            s['first'] is not None and s['terminal'] is not None and s['terminal'] >= s['first'] for s in items)
+        spans_without_resolved_timestamp = sum(
+            1 for s in items if s['first'] is None or s['terminal'] is None or s['terminal'] < s['first'])
+        gaps_complete = not timing_truncated and spans_without_resolved_timestamp == 0
+        spans_marked_concurrent = 0
         for previous, current in zip(items, items[1:]):
             if previous['terminal'] is not None and current['first'] is not None:
                 if current['first'] >= previous['terminal']:
                     gaps.append([previous['terminal'], current['first']])
                 else:
-                    # Concurrent tools make this simple proxy ambiguous.
+                    # Concurrent tools (the model issued more than one tool
+                    # call before the first one's terminal event landed)
+                    # make this simple sequential-gap proxy ambiguous.
                     gaps_complete = False
+                    spans_marked_concurrent += 1
         clean_gaps = _subtract_intervals(gaps, waits)
         gap_sum = _interval_seconds(clean_gaps) if gaps_complete and len(items) >= 2 else None
         life = lifecycle.get(attempt, {})
         duration = life.get('execution_seconds_excluding_user_waits')
         gap_share = gap_sum / duration if gap_sum is not None and duration and gap_sum <= duration else None
+        if gap_sum is not None:
+            gap_unavailable_reason = None
+        elif timing_truncated:
+            gap_unavailable_reason = 'acp tool-result observation rows truncated for this task'
+        elif len(items) < 2:
+            gap_unavailable_reason = 'fewer than two observed ACP tool spans for this attempt'
+        elif spans_without_resolved_timestamp:
+            gap_unavailable_reason = 'one or more ACP tool spans lack a resolved first/terminal timestamp'
+        elif spans_marked_concurrent:
+            gap_unavailable_reason = ('concurrent/overlapping ACP tool spans (the model issued more than one '
+                                       'tool call before a prior one completed) make the sequential gap proxy '
+                                       'ambiguous for this attempt')
+        else:
+            gap_unavailable_reason = 'inference gap could not be established for this attempt'
+        if gap_share is not None:
+            gap_share_unavailable_reason = None
+        elif gap_sum is None:
+            gap_share_unavailable_reason = gap_unavailable_reason
+        elif duration is None:
+            gap_share_unavailable_reason = 'execution_seconds_excluding_user_waits unavailable for this attempt'
+        elif not duration:
+            gap_share_unavailable_reason = 'execution_seconds_excluding_user_waits is not positive for this attempt'
+        else:
+            gap_share_unavailable_reason = 'inference gap sum exceeds the attempt execution duration'
         counts = per_attempt.get(attempt, {})
         # ACP already includes gateway echoes; never add its count to them.
         # The complete distinct count is observed-as-reported, not exact inference steps.
@@ -375,8 +404,12 @@ def _loop_profile(store, task_id: str) -> dict:
             cortex_delegation_calls=_unavailable("ACP kind does not identify delegation versus native tools"),
             inference_gap_seconds=dict(availability='available' if gap_sum is not None else 'unavailable_reason',
                                        basis='estimated', sample_count=len(lengths), sum=gap_sum,
-                                       p50=_percentile(lengths, .5), p90=_percentile(lengths, .9)),
+                                       p50=_percentile(lengths, .5), p90=_percentile(lengths, .9),
+                                       reason=gap_unavailable_reason,
+                                       spans_without_resolved_timestamp=spans_without_resolved_timestamp,
+                                       spans_marked_concurrent=spans_marked_concurrent),
             inference_gap_share_of_execution=gap_share,
+            inference_gap_share_unavailable_reason=gap_share_unavailable_reason,
             gateway_tool_time_seconds=gateway_times.get(attempt),
             external_mcp_tool_time_seconds=external_times.get(attempt),
             gateway_duration_incomplete=attempt in gateway_invalid,
@@ -386,7 +419,12 @@ def _loop_profile(store, task_id: str) -> dict:
                 gateway_duration_rows_truncated=gateway_truncated, external_duration_rows_truncated=external_truncated,
                 note="ACP totals include gateway/external echoes and are not additive with gateway counts. "
                      "Inference gaps are estimated from complete, nonconcurrent ACP spans; "
-                     "execution shares use each execution attempt's own duration, excluding user waits.")
+                     "execution shares use each execution attempt's own duration, excluding user waits. "
+                     "A null inference_gap_share_of_execution always carries a sibling "
+                     "inference_gap_share_unavailable_reason (and inference_gap_seconds.reason) stating exactly "
+                     "why -- truncation, fewer than two observed spans, an unresolved span timestamp, or "
+                     "concurrent/overlapping spans (the model issuing more than one tool call before a prior "
+                     "one's terminal event landed) making the sequential gap proxy ambiguous for that attempt.")
 
 
 _MAX_REINVESTIGATION_ROWS = 5000
@@ -458,18 +496,25 @@ def _reinvestigation(store, task_id: str) -> dict:
         within[(attempt, key)] = within.get((attempt, key), 0) + 1
         bucket = buckets.setdefault(attempt, dict(text_reads=0, repeated_text_reads=0,
                                                   repeated_read_seconds=0.0, identity_complete=True,
+                                                  identity_incomplete_reasons=set(),
                                                   duration_complete=not spans_truncated))
         identities = by_channel.get(attempt, set())
         channel = next(iter(identities)) if len(identities) == 1 else None
         previous = seen.setdefault(key, set())
         if key in unknown_channel_keys:
             bucket['identity_complete'] = False
+            bucket['identity_incomplete_reasons'].add(
+                'a prior read of this exact content (same path+sha256) was observed from a channel that '
+                'could not be resolved to exactly one trusted worker channel')
         repeated = bool(channel and previous - {channel})
         if channel:
             previous.add(channel)
         else:
             bucket['identity_complete'] = False
             unknown_channel_keys.add(key)
+            bucket['identity_incomplete_reasons'].add(
+                "this attempt's own channel for one or more reads could not be resolved to exactly one "
+                'trusted worker channel (zero or more than one row in trusted_channels for this attempt_id)')
         if repeated:
             cross_repeat += 1
         if row['kind'] != 'text':
@@ -507,6 +552,14 @@ def _reinvestigation(store, task_id: str) -> dict:
         seconds = bucket['repeated_read_seconds'] if time_ok else None
         if seconds is not None and seconds > duration:
             seconds = None
+        if identity_ok:
+            identity_reason = None
+        elif truncated:
+            identity_reason = 'project_read history for this task is truncated'
+        elif bucket['identity_incomplete_reasons']:
+            identity_reason = '; '.join(sorted(bucket['identity_incomplete_reasons']))
+        else:
+            identity_reason = 'identity for one or more reads in this attempt could not be established'
         output.append(dict(attempt_id=attempt, stage=life.get('stage'), dependent=life.get('dependent'),
                            text_reads=bucket['text_reads'],
                            repeated_text_reads=bucket['repeated_text_reads'] if identity_ok else None,
@@ -514,17 +567,36 @@ def _reinvestigation(store, task_id: str) -> dict:
                            if identity_ok and bucket['text_reads'] else None,
                            repeated_read_seconds=seconds,
                            repeat_time_share_of_execution=seconds / duration if seconds is not None else None,
-                           duration_basis='estimated' if seconds is not None else 'unavailable_reason'))
+                           duration_basis='estimated' if seconds is not None else 'unavailable_reason',
+                           repeated_text_reads_unavailable_reason=identity_reason))
+    incomplete_buckets = [a for a, b in buckets.items() if not b['identity_complete']]
+    cross_ratio = (cross_repeat / len(reads)
+                   if all(b['identity_complete'] for b in buckets.values()) and not truncated else None)
+    if cross_ratio is not None:
+        cross_reason = None
+    elif truncated:
+        cross_reason = 'project_read history for this task is truncated'
+    elif incomplete_buckets:
+        cross_reason = (f'{len(incomplete_buckets)} of {len(buckets)} attempt(s) read content whose cross-channel '
+                         'identity could not be fully resolved (own channel unresolved, or a prior reader of the '
+                         'exact same content had an unresolved channel -- see repeated_text_reads_unavailable_reason '
+                         'per attempt)')
+    else:
+        cross_reason = 'cross-attempt identity could not be established for this task'
     return dict(unit="repeat calls / successful gateway reads", availability="available",
                 basis="observed_partial" if partial else "observed", sample_count=len(reads),
                 within_attempt_repeat_ratio=sum(n - 1 for n in within.values()) / len(reads),
-                cross_attempt_within_task_repeat_ratio=cross_repeat / len(reads)
-                if all(b['identity_complete'] for b in buckets.values()) and not truncated else None,
+                cross_attempt_within_task_repeat_ratio=cross_ratio,
+                cross_attempt_within_task_repeat_ratio_unavailable_reason=cross_reason,
                 cross_task_repeat_ratio=_unavailable("task scoped; use multi-task aggregates"),
                 engines_observed=sorted(engines) or None, partial=partial, truncated=truncated,
                 duration_rows_truncated=spans_truncated, per_attempt=output,
                 note="Repeat decisions use dependent execution text reads by a different exact channel. "
-                     "ACP time is estimated only for a unique containing read span; missing identity/time is unavailable.")
+                     "ACP time is estimated only for a unique containing read span; missing identity/time is "
+                     "unavailable. A read of content already touched by any attempt whose channel could not be "
+                     "resolved to exactly one trusted worker channel (including non-worker roles such as the "
+                     "coordinator, which this metric does not track) marks every later attempt touching that same "
+                     "content as identity-incomplete too, never a fabricated repeat/non-repeat guess.")
 
 
 _MAX_WRITE_REDUNDANCY_ROWS = 5000

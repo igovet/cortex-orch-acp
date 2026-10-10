@@ -7,6 +7,18 @@ from cortex_runtime.portable import roles
 from cortex_runtime.portable.errors import PortableError
 
 
+def test_reviewer_defaults_to_inline_report_without_weakening_shared_protocol():
+    reviewer = roles.composed_instructions(roles.load_role("worker-code-reviewer"))
+    normalized = " ".join(reviewer.split())
+    assert "Publish the complete review report inline with `result_submit` by default" in normalized
+    assert "conclusion, observed evidence, checks, contradictions, limits and next action" in normalized
+    assert "Runtime facts are context, not a substitute for your independent analysis" in normalized
+    assert "ordinary `general` report template" in normalized
+    writer = roles.composed_instructions(roles.load_role("worker-backend-dev"))
+    assert "owned draft" in writer
+    assert "ordinary `implementation` report template" in writer
+
+
 def test_known_role_ids_counts():
     ids = roles.known_role_ids()
     assert len(ids) == 35

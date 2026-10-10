@@ -337,6 +337,13 @@ def _gateway_assessment(db, task_id: str, attempt_id: str, ref: str, outcome: st
     if (saved.get("complete") is not True or receipt.get("complete") is not True
             or receipt.get("failure") is not None or type(exit_code) is not int):
         return _gap("call_incomplete", **detail)
+    if 'runtime_verification' in receipt:
+        from ..orchestration.reviewer_verification import validate_reuse, observation
+        if not validate_reuse(db, task_id, attempt_id, receipt):
+            return _gap("result_missing", **detail)
+        source = receipt['runtime_verification']['command_ref']
+        detail.update(evidence_source='runtime_verification', runtime_command_ref=source,
+                      order=observation(db, task_id, source)['started_event_id'])
     if outcome == "passed" and exit_code != 0:
         return _gap("nonzero_exit", **detail)
     if outcome == "failed" and exit_code == 0:
@@ -383,7 +390,8 @@ def assess_check(db, task_id: str, attempt_id: str, outcome: str, tool_call_ref)
     """Assess one check's cited evidence inside an open connection.
 
     Returns ``dict(strength, gap, operation?, exit_code?, order?, identity?)``
-    (``order`` is the run's authorization event id and ``identity`` its
+    (``order`` is the run's authorization event id, or the original runtime
+    execution-start event id for a reused verification observation, and ``identity`` its
     :func:`command_identity`, once a receipt is bound): ``strength`` is
     ``verified``, ``weak`` (with the :data:`EVIDENCE_GAPS` code in ``gap``)
     or ``none`` for a ``not_run``/``unverified`` disclosure. Only a ``gateway:``
@@ -410,14 +418,20 @@ def assess_checks(db, task_id: str, attempt_id: str, checks) -> list[dict]:
         if outcome in {"passed", "failed"} and isinstance(ref, str) and ref in cited:
             assessments.append(_gap("ref_already_cited"))
         else:
-            assessments.append(assess_check(db, task_id, attempt_id, outcome, ref))
+            assessed = assess_check(db, task_id, attempt_id, outcome, ref)
+            source = assessed.get('runtime_command_ref')
+            if source and source in cited:
+                assessed = _gap("ref_already_cited")
+            elif source:
+                cited.add(source)
+            assessments.append(assessed)
         if isinstance(ref, str) and ref:
             cited.add(ref)
     return assessments
 
 
 def command_history(db, task_id: str, attempt_id: str) -> list[dict]:
-    """Every gateway command run of this attempt, in authorization order.
+    """Every gateway command observation of this attempt, in execution order.
 
     Each entry is ``dict(ref, order, identity, status)``: ``status`` is
     ``passed`` (complete, exit 0, complete retained output), ``failed``
@@ -456,8 +470,8 @@ def command_history(db, task_id: str, attempt_id: str) -> list[dict]:
             status = "failed" if failed["strength"] == "verified" else "unknown"
         else:
             status = "unknown"
-        history.append(dict(ref=ref, order=row["id"], identity=passed.get("identity"), status=status))
-    return history
+        history.append(dict(ref=ref, order=passed.get('order', row['id']), identity=passed.get("identity"), status=status))
+    return sorted(history, key=lambda run: run['order'])
 
 
 def current_outcomes(db, task_id: str, attempt_id: str, checks) -> list[dict]:
@@ -594,6 +608,10 @@ def annotate_checks(db, task_id: str, attempt_id: str | None, checks) -> list[di
     annotated = []
     for check, assessment in zip(checks, assessments):
         entry = dict(check, evidence_strength=assessment["strength"])
+        for key in ('evidence_source', 'runtime_command_ref'):
+            entry.pop(key, None)
+            if assessment.get(key):
+                entry[key] = assessment[key]
         gap = check.get("evidence_gap") or assessment["gap"]
         if gap:
             entry["evidence_gap"] = gap

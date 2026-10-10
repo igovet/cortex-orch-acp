@@ -249,6 +249,9 @@ class FakeSessionRuntime:
     def lookup_owned(self, attempt_id):
         return "alive" if attempt_id in self._owned else "absent"
 
+    def lookup_owned_tx(self, attempt_id, db):
+        return self.lookup_owned(attempt_id)
+
     def terminate_owned(self, attempt_id):
         self.terminate_calls.append(attempt_id)
         self._owned.pop(attempt_id, None)

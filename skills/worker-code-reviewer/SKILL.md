@@ -80,6 +80,20 @@ names it or a specific cross-cutting risk requires it, and state that reason.
 
 ## Report and handoff
 
+Publish the complete review report inline with `result_submit` by default, without
+creating a draft or separately publishing a report. Use an owned draft only when
+incremental editing is genuinely necessary. Keep the shared decision brief:
+conclusion, observed evidence, checks, contradictions, limits and next action.
+Include an explicit verdict and findings, or state that no findings remain.
+Runtime facts are context, not a substitute for your independent analysis: a
+planned verification command is not yet evidence until it actually runs. The
+runtime already runs the plan's exact verification argv itself, authoritatively,
+on the approved digest, and states that fact in the runtime-facts block; do not
+re-run that same argv yourself solely to duplicate it, and never record it as
+your own deferred or not-run check — the runtime closes it from its own receipt.
+You stay fully independent: analyze the diff yourself and run any additional or
+narrower check your own analysis calls for. State concrete residual gaps.
+
 Report findings in severity order, exact paths and
 lines, failure scenarios, proof, coverage, contradictions, uncertainty, and
 residual risk. State the reuse key, observed artifact revision, and any new-evidence
@@ -88,7 +102,7 @@ or rerun reason.
 ## Report class selection
 
 Submit the structured result with a complete immutable report.
-Use the ordinary `verification` report template where appropriate.
+Use the ordinary `general` report template where appropriate.
 Examples are content guides, not substitutes for evidence. Include consumed
 predecessor evidence, exact inspected/changed paths, contradictions, uncertainty,
 remaining risks and exact commands with cwd and exit codes, or concrete reasons

@@ -195,6 +195,36 @@ def _withheld(reason):
     return dict(availability='unavailable_reason', reason=reason, holds=None)
 
 
+def _runtime_synthesis_outcome(db, task_id):
+    """Coordinator-hidden runtime-composed-synthesis outcome for one task.
+
+    Metadata only (event types and a reason code), never report content.
+    'unrecorded' means the task completed through the coordinator without a
+    retained SYNTHESIS_RUNTIME_DECLINED event (for example, a build before
+    that event existed) -- never guessed as a specific reason.
+    """
+    reconciled = db.execute(
+        "SELECT 1 FROM runtime_events WHERE task_id=? AND type='TASK_STATE_CHANGED' "
+        "AND json_extract(payload_json,'$.state')='RECONCILING'", (task_id,)).fetchone() is not None
+    if not reconciled:
+        return dict(reconciled=False, composed=None, fallback_reason=None)
+    composed = db.execute(
+        "SELECT 1 FROM runtime_events WHERE task_id=? AND type='SYNTHESIS_RUNTIME_COMPOSED'",
+        (task_id,)).fetchone() is not None
+    if composed:
+        return dict(reconciled=True, composed=True, fallback_reason=None)
+    completed = db.execute(
+        "SELECT 1 FROM runtime_events WHERE task_id=? AND type='TASK_STATE_CHANGED' "
+        "AND json_extract(payload_json,'$.state')='COMPLETED'", (task_id,)).fetchone() is not None
+    if not completed:
+        return dict(reconciled=True, composed=None, fallback_reason=None)
+    declined = db.execute(
+        "SELECT payload_json FROM runtime_events WHERE task_id=? AND type='SYNTHESIS_RUNTIME_DECLINED' "
+        "ORDER BY id DESC LIMIT 1", (task_id,)).fetchone()
+    reason = json.loads(declined[0])['reason'] if declined else 'unrecorded'
+    return dict(reconciled=True, composed=False, fallback_reason=reason)
+
+
 def _cohort_decision(items, cross_task):
     """Evaluate only exact completed chains, inside one route/effort cohort."""
     completed_tasks = {e['task_id'] for e, a in items if e['summary']['critical_path'].get('task_completed')}
@@ -206,6 +236,28 @@ def _cohort_decision(items, cross_task):
     ratio = len(eligible) / len(items) if items else None
     enough = len(completed_tasks) >= _VALIDITY_MIN_TASKS or len(items) >= _VALIDITY_MIN_ATTEMPTS
     valid = bool(enough and ratio is not None and ratio >= _VALIDITY_MIN_CHAIN_RATIO)
+    # Runtime-composed-synthesis share: per distinct task in this cohort, not
+    # gated by the worker-loop validity threshold above (it is a coordinator
+    # hand-off outcome, not a worker-loop sample).
+    synthesis_by_task = {}
+    for e, _a in items:
+        synthesis_by_task.setdefault(e['task_id'], e.get('runtime_synthesis'))
+    reconciled_outcomes = [s for s in synthesis_by_task.values() if s and s['reconciled']]
+    composed_count = sum(1 for s in reconciled_outcomes if s['composed'])
+    fallback_reasons = {}
+    pending_count = 0
+    for s in reconciled_outcomes:
+        if not s['composed']:
+            if s['fallback_reason'] is None:
+                pending_count += 1
+            else:
+                fallback_reasons[s['fallback_reason']] = fallback_reasons.get(s['fallback_reason'], 0) + 1
+    runtime_synthesis = dict(
+        reconciled_tasks=len(reconciled_outcomes), composed_tasks=composed_count,
+        pending_tasks=pending_count,
+        # Keep the all-reconciled denominator, but withhold its unfinished share.
+        share=(composed_count / len(reconciled_outcomes)) if reconciled_outcomes and not pending_count else None,
+        fallback_reasons=fallback_reasons)
     calls = [e.get('usage_by_attempt', {}).get(a['attempt_id']) for e, a in items]
     calls_known = bool(calls) and all(c is not None for c in calls)
     call_count = sum(c['calls'] for c in calls) if calls_known else None
@@ -251,10 +303,14 @@ def _cohort_decision(items, cross_task):
         read = next((r for r in reinvest.get('per_attempt', []) if r['attempt_id'] == attempt_id), {})
         execution_seconds.append(attempt.get('execution_seconds_excluding_user_waits'))
         if attempt.get('dependent') is None:
+            # Unknown dependency status is never treated as 0 or skipped;
+            # it stays an explicit unknown input to the mean.
             repeated_counts.append(None)
             text_counts.append(None)
             repeat_seconds.append(None)
-        elif attempt.get('dependent'):
+        elif attempt.get('dependent') is True:
+            # The prospectively approved gate counts dependent reads only.
+            # Independent observations remain in the per-attempt diagnostics.
             full = not reinvest.get('truncated') and not reinvest.get('duration_rows_truncated')
             repeated_counts.append(read.get('repeated_text_reads') if full else None)
             text_counts.append(read.get('text_reads') if full else None)
@@ -315,7 +371,8 @@ def _cohort_decision(items, cross_task):
                               phase_chain_complete_ratio=ratio, chain_valid=ratio is not None and ratio >= _VALIDITY_MIN_CHAIN_RATIO,
                               token_calls=call_count, unknown_or_released_calls=unknown_count,
                               unknown_token_ratio=unknown_ratio, token_criteria_usable=token_usable, valid=valid),
-                inputs=inputs, branches=dict(worker_loops=worker, reinvestigation=reinvest, orchestration_chain=orchestration))
+                inputs=inputs, branches=dict(worker_loops=worker, reinvestigation=reinvest, orchestration_chain=orchestration),
+                runtime_synthesis=runtime_synthesis)
 
 
 def _aggregate_decision(per_task, cross_task=None):
@@ -343,23 +400,57 @@ def _aggregate_decision(per_task, cross_task=None):
     # Keep the old top-level shape useful for single-cohort consumers, without
     # turning several incomparable populations into a single sample/verdict.
     if len(cohorts) == 1 and not unattributed:
-        top = {k: cohorts[0][k] for k in ('validity', 'inputs', 'branches')}
+        top = {k: cohorts[0][k] for k in ('validity', 'inputs', 'branches', 'runtime_synthesis')}
         top['validity'] = dict(top['validity'], total_tasks=len(per_task))
     else:
         top = dict(validity=dict(total_tasks=len(per_task), total_attempts=sum(e['attempts'] for e in per_task),
                                  enough_samples=False, valid=False, token_criteria_usable=False),
                    inputs=dict(cross_task_repeat_ratio={k: v for k, v in cross_task.items() if k != 'per_attempt'}),
                    branches=dict(worker_loops=None, reinvestigation=None, orchestration_chain=None,
-                                 note='withheld: use per-cohort verdicts; no pooled engine/route/effort decision'))
+                                 note='withheld: use per-cohort verdicts; no pooled engine/route/effort decision'),
+                   runtime_synthesis=dict(note='withheld: use per-cohort runtime_synthesis; several cohorts present'))
     top['branches'].setdefault('note', 'Unavailable inputs withhold the affected branch, never false.')
     return dict(unit='metadata counts, ratios and durations only', **top, cohorts=cohorts,
                 unattributed_attempts=unattributed,
                 cross_task_repeat_ratio={k: v for k, v in cross_task.items() if k != 'per_attempt'},
                 per_task=[dict(task_id=e['task_id'], attempts=e['attempts'],
-                               phase_chain_complete=_phase_chain_complete(e['summary']), tokens_basis=e['tokens_basis'])
+                               phase_chain_complete=_phase_chain_complete(e['summary']), tokens_basis=e['tokens_basis'],
+                               runtime_synthesis=e.get('runtime_synthesis'))
                           for e in per_task],
                 note="Validity and decisions are per engine/connection/model/parameters fingerprint. "
                      "Only exact completed non-truncated execution chains contribute branch inputs.")
+
+
+def _token_coverage(db, task_ids):
+    """Complete metadata-only coverage by engine/role, not a pooled cost estimate."""
+    buckets = {}
+    for task_id in task_ids:
+        for row in db.execute(
+                "SELECT u.basis,u.tokens_json,u.failed,u.stop_reason,"
+                "(SELECT engine FROM attempt_route_audit a WHERE a.attempt_id=u.attempt_id "
+                "ORDER BY recorded_at DESC LIMIT 1) AS engine,"
+                "CASE WHEN substr(u.attempt_id,1,3)='co_' THEN 'coordinator' ELSE "
+                "COALESCE((SELECT n.stage FROM delegation_provisioning p JOIN runtime_nodes n "
+                "ON n.task_id=p.task_id AND n.assignment_ref=p.idempotency_key "
+                "WHERE p.task_id=u.task_id AND p.attempt_id=u.attempt_id LIMIT 1),'unattributed') END AS role "
+                "FROM usage_records u WHERE u.task_id=?", (task_id,)):
+            role = 'worker' if row['role'] == 'execution' else row['role']
+            key = (row['engine'] or 'unattributed', role)
+            bucket = buckets.setdefault(key, dict(engine=key[0], role=role, calls=0,
+                reported_calls=0, unknown_calls=0, released_after_result_calls=0, tokens_reported={}))
+            bucket['calls'] += 1
+            if row['basis'] == 'unknown':
+                field = ('released_after_result_calls' if not row['failed']
+                         and row['stop_reason'] == 'released_after_result' else 'unknown_calls')
+                bucket[field] += 1
+            else:
+                bucket['reported_calls'] += 1
+                for field, value in json.loads(row['tokens_json']).items():
+                    bucket['tokens_reported'][field] = bucket['tokens_reported'].get(field, 0) + value
+    for bucket in buckets.values():
+        bucket['unknown_token_ratio'] = (
+            bucket['unknown_calls'] + bucket['released_after_result_calls']) / bucket['calls']
+    return [buckets[key] for key in sorted(buckets)]
 
 
 def read_aggregates(project, task_ids=None, max_tasks=MAX_AGGREGATE_TASKS):
@@ -387,6 +478,7 @@ def read_aggregates(project, task_ids=None, max_tasks=MAX_AGGREGATE_TASKS):
                 tokens_basis=(summary.get('tokens') or {}).get('availability'),
                 summary=summary,
                 usage_by_attempt={},
+                runtime_synthesis=_runtime_synthesis_outcome(db, task_id),
             ))
             usage = per_task[-1]['usage_by_attempt']
             for row in db.execute(
@@ -398,7 +490,10 @@ def read_aggregates(project, task_ids=None, max_tasks=MAX_AGGREGATE_TASKS):
                     (task_id,)):
                 usage[row['attempt_id']] = dict(calls=row['calls'], unknown=row['unknown'], released=row['released'])
         cross_task = observability_metrics._cross_task_reads(store)
-    return _aggregate_decision(per_task, cross_task)
+        token_coverage = _token_coverage(db, ids)
+    result = _aggregate_decision(per_task, cross_task)
+    result['token_coverage'] = token_coverage
+    return result
 
 
 def main(argv=None):

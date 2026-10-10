@@ -27,8 +27,44 @@ def _submit(store, worker, key='result', **extra):
     return mcp_tools.dispatch(store, worker, 'result_submit', args)
 
 
+class _SettlingSessionRuntime(FakeSessionRuntime):
+    """Offers ``finish_owned``: like the production adapter, teardown of a
+    result-bearing attempt waits (bounded) for its turn to end off the
+    scheduler path, so the controller skips the in-flight fence."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.finish_calls = []
+        self._turn_ended = {}
+
+    def _ended(self, attempt_id):
+        with self._lock:
+            return self._turn_ended.setdefault(attempt_id, threading.Event())
+
+    def prompt(self, session_ref, *args, **kwargs):
+        attempt_id = self.sessions[session_ref]['attempt_id']
+        try:
+            return super().prompt(session_ref, *args, **kwargs)
+        finally:
+            if attempt_id:
+                self._ended(attempt_id).set()
+
+    def finish_owned(self, attempt_id):
+        with self._lock:
+            if attempt_id in self.finish_calls:
+                return
+            self.finish_calls.append(attempt_id)
+        ended = self._ended(attempt_id)
+
+        def settle():
+            ended.wait(15)
+            self.terminate_owned(attempt_id)
+        threading.Thread(target=settle, name='fake-result-settlement', daemon=True).start()
+
+
+@pytest.mark.parametrize('settling', [False, True], ids=['fenced', 'settling'])
 @pytest.mark.parametrize('ending', ['normal', 'transport_eof', 'prompt_timeout', 'exception', 'cancelled'])
-def test_review_starts_before_result_worker_exits(tmp_path, ending):
+def test_review_starts_before_result_worker_exits(tmp_path, ending, settling):
     store = Store(tmp_path / '.cortex', project_root=tmp_path)
     task = bootstrap_task(store, SourceEvent(origin='early-review', event_id=ending), 'Implement feature', 'owner')
     reviewer_started = threading.Event()
@@ -91,7 +127,8 @@ def test_review_starts_before_result_worker_exits(tmp_path, ending):
             return PromptOutcome(StopReason.END_TURN, '')
         return behavior
 
-    engine = FakeSessionRuntime(store, router, connection_id='cn_early_review', capacity_limit=4)
+    engine_type = _SettlingSessionRuntime if settling else FakeSessionRuntime
+    engine = engine_type(store, router, connection_id='cn_early_review', capacity_limit=4)
     runtime = OrchestratingRuntime(store, engine, FakeWorkspace(), FakeConfigSnapshotSource(),
                                    allow_unqualified_delivery=True)
     try:
@@ -102,6 +139,8 @@ def test_review_starts_before_result_worker_exits(tmp_path, ending):
         runtime.shutdown()
     assert outcome == StopReason.END_TURN
     assert observations == ['review-before-release']
+    if settling:
+        assert implementation['channel'].attempt_id in engine.finish_calls
     assert not (tmp_path / 'late.txt').exists()
     context = TaskMachine(store).context(task.task_id)
     assert context['state'] == 'COMPLETED', context
@@ -115,6 +154,37 @@ def test_review_starts_before_result_worker_exits(tmp_path, ending):
     released = next(i for i, row in enumerate(rows) if row[0] == 'WORKER_RELEASED'
                     and json.loads(row[1])['attempt_id'] == implementation['channel'].attempt_id)
     assert started < released
+
+
+def test_result_worker_without_settlement_capability_keeps_the_in_flight_fence(tmp_path, monkeypatch):
+    """An engine without ``finish_owned`` is never terminated mid-turn.
+
+    Bypassing this fence for every result-bearing attempt tore the worker down
+    before review could observe it alive, so each early-review case above
+    waited out its 15-second guard instead of failing fast.
+    """
+    from cortex_runtime.orchestration import recovery
+
+    store = Store(tmp_path / '.cortex', project_root=tmp_path)
+    task = bootstrap_task(store, SourceEvent(origin='fence', event_id='one'), 'Implement', 'owner')
+    coordinator = resolve_channel(store, task.channel_id, task.secret)
+    worker, assignment = provision_fixture(store, coordinator)
+    _submit(store, worker)
+    runtime = object.__new__(OrchestratingRuntime)
+    runtime._store = store
+    runtime._lock = threading.Lock()
+    runtime._worker_turns_in_flight = {assignment}
+    runtime._terminated_attempts = set()
+    runtime._cleanup_isolated_workspace_if_integrated = lambda *_: None
+    runtime._notify = lambda: None
+    terminated = []
+    runtime._engine = SimpleNamespace(terminate_owned=terminated.append)
+    monkeypatch.setattr(recovery, 'release_observed', lambda *_: True)
+    runtime._terminate_completed_workers(task.task_id)
+    assert terminated == []
+    runtime._worker_turns_in_flight.clear()  # the turn ended
+    runtime._terminate_completed_workers(task.task_id)
+    assert terminated == [worker.attempt_id]
 
 
 def test_lingering_reservations_still_limit_reviewer_capacity(tmp_path):

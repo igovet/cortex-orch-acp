@@ -34,7 +34,18 @@ writable surfaces; the project gateway does not mediate native writes there.
 This boundary, including visibility of `/run/user`, is an accepted owner
 decision, not a claim that those paths are permission-card protected.
 A revoked or expired channel terminates the process. Engines therefore keep their
-native tools, `AGENTS.md`/`CLAUDE.md` loading and skills.
+native tools, `AGENTS.md`/`CLAUDE.md` loading and skills. The one bounded
+exception is a worker channel revoked by acceptance of that attempt's own current
+(non-superseded) result: the 1 s authority watchdog
+(`delegation.live_adapters._jail_for`, `engine.process.EngineProcess._watch_authority`)
+lets the in-flight turn end for at most 20 seconds, so its final token report can
+arrive, before it terminates the engine. The post-result settlement normally
+tears the engine down as soon as the turn ends and within 15 seconds (see
+[token coverage](../token-and-plan-usage/index.md#coverage-and-interrupted-turns)).
+Native tools can still act in that window; late project changes invalidate the
+digest-bound review, verification or completion gate. Any other revocation, an
+unprovable result cause and explicit cancellation, stop or replanning still
+terminate at once.
 
 The engine environment and each `command_run` receive the owner's own
 ssh-agent (`SSH_AUTH_SOCK`, only a socket the owner owns), so ssh uses the

@@ -18,6 +18,55 @@ for exact paths, artifact-test limits and the next upstream-fix decision.
 
 ## Current ACP boundary (1.0.0)
 
+Runtime-composed synthesis is a runtime-only completion path, not a model-facing
+acceptance API. It requires completed nodes, first-pass independent APPROVE and
+complete exact final-verification receipts on the current digest, no open
+evidence gaps or pending decisions/input, and no repair or historical replan.
+Existing report-integrity, project-drift and worker-session absence gates still
+apply. Metadata and escaped attributed report-summary quotations are the only
+text sources; quoted prose is not promoted to verified semantic fact. Composition
+and completion commit atomically. Registry termination bookkeeping reuses that
+same SQLite writer; worker liveness and cancellation are rechecked before commit.
+Before composition, the controller may await already-owned post-result cleanup
+for at most ten seconds outside the SQLite transaction; it neither terminates
+workers nor restores authority. Cancellation interrupts the wait; unknown
+liveness or timeout cannot authorize completion. Every existing gate is retried
+before commit. A missing transaction-safe engine gate retains coordinator reconciliation.
+Recovery retries unfinished reconciliation under the same gates, and reuses
+already committed synthesis without another completion event. No permission,
+storage-format or host API expansion is introduced. See
+[runtime-composed lifecycle](docs/features/task-lifecycle/index.md#runtime-composed-synthesis).
+
+Reviewer command reuse is limited to the current review attempt, byte-identical
+plan verification argv and the same project digest. The runtime verifies its own
+execution events and complete retained output, issues an attempt-scoped output
+alias, and labels the receipt and result evidence as runtime-produced, not as a
+reviewer execution. Shutdown and revoked authority interrupt the bounded wait;
+implementation workers execute normally. This does not credit speculative checks
+as final verification or relax independent review. See
+[reviewer verification reuse](docs/features/orchestration/index.md#reviewer-verification-reuse).
+
+Post-result token settlement waits at most 15 seconds on an owned cleanup
+thread for the exact prompt consumer to record usage; a turn that ends sooner
+settles at once. It does not restore the
+completed worker's channel authority, release capacity or the writer lock before
+confirmed process exit, or postpone explicit cancellation. Cleanup is bound to
+the original manager, not a replacement. Unknown consumption remains unknown;
+see [usage settlement](docs/features/token-and-plan-usage/index.md#coverage-and-interrupted-turns).
+The read-only synthesis aggregate keeps unfinished reconciliation explicit and
+withholds its share; it never turns a pending outcome into a completed fallback
+or acceptance evidence. This reporting change grants no completion authority.
+
+Reviewer handoff adds only runtime-observed metadata, not new authority:
+verified executor command receipts (not asserted to match the review digest),
+planned verification argv explicitly labelled as not results, and changed-path
+hashes/sizes against the execution baseline. The block excludes worker prose,
+file contents and command output; missing or changed observations are diagnostic,
+not an empty successful comparison. Reviewers publish inline through the existing
+immutable-report path. Their independence, worker report access and mandatory
+digest-bound verification remain unchanged. See
+[reviewer handoff](docs/features/orchestration/index.md#reviewer-handoff).
+
 Claude ACP 0.88.0 is separately source-qualified for system instruction delivery;
 0.78.0 and 0.87.0 remain independently registered. A Desktop check on 0.88.0 observed its resumed scenario complete without an instruction-delivery refusal; it does not establish native-tool enforcement (see [Claude adapter support](docs/features/claude-engine/index.md#current-support-0880-2026-10-08)). Unknown installed Claude
 versions cannot borrow that qualification or displace registered installs in
@@ -52,7 +101,23 @@ Paseo/plugin update is claimed. See [Codex evidence](docs/features/codex-engine/
 
 Cortex is an incoming ACP stdio agent. It launches Codex and Claude ACP engines,
 and the optional OpenCode v2 engine once the owner onboards it, as separate processes and stores task metadata and published Markdown under the
-single project-local `.cortex` directory. The current working tree is undergoing
+single project-local `.cortex` directory.
+
+Owner input may reference uploaded files as plain-text absolute paths or file
+URIs. Capture can read only the launching `PASEO_HOME/uploads` in addition to
+the existing project attachment surface; it does not grant workers direct
+outside-project filesystem access. Missing launch-home evidence grants nothing.
+Production and dev upload homes are never both enabled. Realpath validation and
+fixed-root opened-descriptor checks reject symlink escapes; a read-only,
+non-following/non-blocking descriptor must be an owned single-hardlink regular
+file within the existing 10 MiB file/prompt limits. No Paseo files are modified.
+Only accepted owner prompt/steering text is scanned, never model output, reports
+or embedded attachment contents. Rejections retain explicit source diagnostics;
+accepted snapshots inherit the existing `user_direct` label and task-scoped
+`list_sources`/`read_source` paging. See
+[the upload boundary](docs/features/input-history-and-replay/index.md#paseo-uploaded-files).
+
+The current working tree is undergoing
 a runtime-owned orchestration rewrite and is **not release qualified**. See
 [verification status](docs/project/verification.md).
 
@@ -75,6 +140,11 @@ credit requires APPROVE on the exact plan/reviewer/digest binding and a fresh
 unchanged-project observation. Stale, rejected and interrupted candidates are
 discarded; stop joins the command sequence and kills its subprocess group.
 Recovery never replays speculative diagnostic events as verification evidence.
+Execution-start metadata is diagnostic only, not a verification lifecycle event.
+A speculative run can close a deferred check only after authoritative credit on
+the approved digest, with exact argv and a digest matching both the gap author's
+runtime-observed publication or review binding and the current project. Execution
+ordering does not substitute for or override those revision bindings.
 See [speculative verification](docs/features/orchestration/index.md#speculative-verification-during-review).
 No model hint can waive review. A model tool call cannot
 select a task state, accept the task or directly create an engine session.
@@ -177,7 +247,15 @@ reader blocked on still-open stdin. SIGTERM records the disconnect synchronously
 
 For `result_submit`, a model-supplied `checks[].command` on a completed check
 is descriptive, never evidence. Only the runtime derives `closed_by` from real
-same-attempt command receipts; malformed fields get path-specific corrections.
+same-attempt command receipts for failed-check history; malformed fields get
+path-specific corrections. A declared-command not_run/unverified gap can also
+close by the runtime's own final-verification receipt with identical argv,
+complete exit-0 execution and untruncated output on the current reviewed digest,
+matching the gap author's runtime-observed publication or reviewed digest;
+execution ordering is irrelevant on that unchanged binding. The durable closure
+reference is rederived from runtime events, revision observations and output
+metadata, never accepted from a model or trusted
+merely because a stored result carries `closed_by`.
 A new result with an open failure is refused with `open_failed_check` before
 publication, request recording or channel revocation. Only an explicit
 `assignment_outcome: "failed"` intentionally submits that failed assignment;
@@ -313,7 +391,13 @@ or `CLAUDE_CONFIG_DIR`, the owner's real one for a native account) stays writabl
 except the files and directories that configure later sessions (settings, hooks,
 instructions, skills, agents, commands, rules); absent ones are first created
 neutral on the host so none can be planted, and installed plugins are hidden. A
-revoked or expired channel terminates the process. Inside the jail Codex runs with
+revoked or expired channel terminates the process. The one bounded exception is a
+worker channel revoked by acceptance of that attempt's own current result: the
+watchdog lets the in-flight turn end for at most 20 seconds so its final token
+report can arrive, and the post-result settlement normally tears the engine down
+when the turn ends, within 15. Native tools can still act in that window; such late project changes
+invalidate the digest-bound review, verification or completion gate as above.
+Explicit cancellation, stop and replanning terminate at once. Inside the jail Codex runs with
 full access, since its own sandbox cannot start there; its approval policy is
 pinned to `untrusted` so each command still reaches the permission bridge, which
 allows it unless it deletes (see [Access mode](#access-mode-guarded-and-auto)).
@@ -797,11 +881,25 @@ copying the output. Unknown exception codes are redacted, not accepted by prefix
 Zero exit requires a complete canonical exact-identity/digest binding envelope;
 missing evidence or extra fields never become success. Diagnostics never return a binding or authorize another read, retry,
 checkpoint or migra
+## Deferred-check retained evidence
+
+Deferred-check closure verifies the retained task-private output body, not just
+its SQLite metadata. It opens every directory and the body without following
+symlinks, checks owner-only storage and a regular single-link file, reads exactly
+the recorded byte count, and rechecks file identity and metadata. Missing,
+unreadable, shortened or unsafe bodies retain the disclosed gap. Validation is
+read-only: it never creates storage or repairs permissions. No format migration,
+new authority or relaxation of independent review is involved.
+
 ## Usage-record compatibility
 
 Post-result releases retain the original closed SQLite basis vocabulary and
 use existing `failed`/`stop_reason` columns; no table rebuild or format change
 is needed. Paseo hides only the token alarm for non-failed, explicitly marked
 release calls. It does not infer missing usage as zero/free or suppress genuine
-unknown/failed calls. Diagnostic token availability remains honest. See
+unknown/failed calls. Interrupted-turn accounting retains only recognized
+nonnegative integer token fields from the exact final response observed within
+the existing cleanup bound; it never reads native account transcripts or treats
+context occupancy as cost. Engine/role coverage remains metadata-only and does
+not change permission, acceptance, termination or storage-format contracts. See
 [usage attribution](docs/features/observability/index.md#2-usagecost-attribution-observabilityusage).

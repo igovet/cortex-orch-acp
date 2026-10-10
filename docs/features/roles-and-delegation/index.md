@@ -45,7 +45,11 @@ selects instructions; it does not replace runtime authorization.
 
 Worker report examples, predecessor evidence and command-result requirements are
 specified once in the shared protocol; specializations retain only domain-specific
-handoff content. Publication transport arguments remain in tool descriptions,
+handoff content. Reviewers default to inline immutable report publication with
+an explicit verdict and the complete shared decision brief; the general report
+example does not impose a length limit. Owned drafts remain available for genuine
+incremental editing and other roles. See [reviewer handoff](../orchestration/index.md#reviewer-handoff).
+Publication transport arguments remain in tool descriptions,
 not profile instructions. `tool-discipline` is common call/evidence guidance;
 `tool-discipline-worker` contains project reservations and command receipt duties.
 The coordinator reads `skill-management` for activation and approved proposals;

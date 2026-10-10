@@ -51,7 +51,7 @@
       "description": "Code reviewer for correctness, regressions, security, performance, and missing tests.",
       "select_when": "A completed or proposed change needs independent defect-focused review.",
       "avoid_when": "The primary need is implementation, planning, or broad repository discovery.",
-      "report_template": "verification",
+      "report_template": "general",
       "access_class": "read_only"
     },
     {

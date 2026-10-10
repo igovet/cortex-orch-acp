@@ -1607,7 +1607,9 @@ class Agent:
         # bodies instead of recording anything new).
         staged_blocks = []
         if raw_blocks:
-            resolved_blocks = acp_replay_store.resolve_prompt_blocks(raw_blocks, self._session_workspace(session))
+            resolved_blocks = acp_replay_store.resolve_prompt_blocks(
+                raw_blocks, self._session_workspace(session), environ=self.environ,
+            )
             image_failures = [
                 capture for capture in resolved_blocks
                 if capture.kind == "image" and capture.availability != "stored"
@@ -2760,7 +2762,9 @@ class Agent:
             raise RpcError(-32602, "This session no longer owns the task.")
         if acp_steering.is_stopped(store, task_id):
             raise RpcError(-32602, "The task has been stopped.")
-        resolved_blocks = acp_replay_store.resolve_prompt_blocks(content, self._session_workspace(session))
+        resolved_blocks = acp_replay_store.resolve_prompt_blocks(
+            content, self._session_workspace(session), environ=self.environ,
+        )
         image_failures = [
             capture for capture in resolved_blocks
             if capture.kind == "image" and capture.availability != "stored"

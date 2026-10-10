@@ -209,6 +209,16 @@ def _is_refusal(result, params) -> bool:
     return str(kinds.get(outcome.get("optionId")) or "").startswith("reject")
 
 
+def _token_values(usage) -> dict:
+    """Only nonnegative integer ACP token fields, never context or metadata."""
+    fields = {"inputTokens", "outputTokens", "totalTokens", "thoughtTokens",
+              "cachedReadTokens", "cachedWriteTokens"}
+    if not isinstance(usage, dict):
+        return {}
+    return {key: value for key, value in usage.items()
+            if key in fields and isinstance(value, int) and not isinstance(value, bool) and value >= 0}
+
+
 def context_usage_update(update) -> dict | None:
     """The ACP ``usage_update`` context fill, or None unless both counts are
     real non-negative integers (a missing size is not a zero-sized window)."""
@@ -352,6 +362,8 @@ class EngineSessionManager:
         # overlap in time with, a later turn on the same session.
         self._active_turn_token: dict[str, object] = {}
         self._turn_call_done: dict[str, threading.Event] = {}
+        self._turn_outcomes: dict[str, dict] = {}
+        self._abandoned_turn_usage: dict[str, dict] = {}
         self._poisoned_sessions: set[str] = set()
         # F2 (T012 review): which engine_session_id currently has a
         # prompt_turn actively streaming, so release() can deliver a
@@ -1042,6 +1054,7 @@ class EngineSessionManager:
             raise _fail("unknown_engine_session", "engine_session_id is not a live session on this engine instance.")
         session_lock = self._session_locks.setdefault(engine_session_id, threading.Lock())
         session_lock.acquire()
+        self._abandoned_turn_usage.pop(engine_session_id, None)
         self._in_flight_prompt[engine_session_id] = True
         lock_released = False
         turn_gen = self._prompt_turn_locked(wire_session_id, prompt, prompt_blocks)
@@ -1085,6 +1098,12 @@ class EngineSessionManager:
         self.cancel_wire(wire_session_id)
         done_event = self._turn_call_done.get(wire_session_id)
         completed = done_event.wait(self._abandon_wait_seconds) if done_event is not None else True
+        if completed:
+            outcome = self._turn_outcomes.get(wire_session_id, {})
+            result = outcome.get("result")
+            values = _token_values(result.get("usage")) if isinstance(result, dict) else {}
+            if values:
+                self._abandoned_turn_usage[engine_session_id] = values
         if not completed:
             self._poisoned_sessions.add(engine_session_id)
             self._process.logs.observe(
@@ -1102,6 +1121,13 @@ class EngineSessionManager:
         except Exception:  # noqa: BLE001 - best-effort cleanup only
             pass
 
+    def take_abandoned_usage(self, engine_session_id: str) -> dict | None:
+        """Consume only the final response captured during bounded abandonment.
+
+        Never wait, inspect another turn, or convert context occupancy to usage.
+        """
+        return self._abandoned_turn_usage.pop(engine_session_id, None)
+
     def _prompt_turn_locked(self, wire_session_id: str, prompt: str, prompt_blocks=None):
         self._permission_refusals.discard(wire_session_id)
         update_queue: "queue.Queue" = queue.Queue(maxsize=self._update_queue_maxsize)
@@ -1113,6 +1139,7 @@ class EngineSessionManager:
         self._turn_call_done[wire_session_id] = call_done
         try:
             outcome: dict = {}
+            self._turn_outcomes[wire_session_id] = outcome
 
             def run_call():
                 try:
@@ -1189,8 +1216,7 @@ class EngineSessionManager:
             # ACP PromptResponse.usage: the engine's own token counts for
             # this turn (inputTokens, outputTokens, cached*, totalTokens).
             usage = result.get("usage")
-            values = {key: value for key, value in usage.items()
-                      if isinstance(value, int) and not isinstance(value, bool)} if isinstance(usage, dict) else {}
+            values = _token_values(usage)
             if values:
                 yield EngineEvent(kind=EngineEventKind.USAGE_UPDATE, usage_basis=UsageBasis.ENGINE_REPORTED,
                                   usage_values=values)
@@ -1200,6 +1226,8 @@ class EngineSessionManager:
             if self._active_turn_token.get(wire_session_id) is token:
                 self._active_turn_token.pop(wire_session_id, None)
             self._turn_call_done.pop(wire_session_id, None)
+            if self._turn_outcomes.get(wire_session_id) is outcome:
+                self._turn_outcomes.pop(wire_session_id, None)
 
     def cancel(self, engine_session_id: str) -> None:
         wire_session_id = self.correlation.wire_session_id(engine_session_id)
@@ -1257,6 +1285,7 @@ class EngineSessionManager:
         self._session_external_mcp_inventory.pop(engine_session_id, None)
         self._session_locks.pop(engine_session_id, None)
         self._poisoned_sessions.discard(engine_session_id)
+        self._abandoned_turn_usage.pop(engine_session_id, None)
         if wire_session_id is not None:
             self._clear_streamed_terminal_output(wire_session_id)
             self._update_queues.pop(wire_session_id, None)
@@ -1406,8 +1435,7 @@ class EngineSessionManager:
                 tool_call_raw_output=raw_output,
             )
         if kind == "usage_update":
-            usage = update.get("usage") or {}
-            values = {key: value for key, value in usage.items() if isinstance(value, int)}
+            values = _token_values(update.get("usage"))
             # T035 FINDING-03 fix: a `usage_update` notification whose
             # `usage` payload yields no recognized integer token field
             # (empty dict, or only non-integer/unrecognized keys) is not

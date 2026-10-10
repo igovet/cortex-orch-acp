@@ -213,7 +213,8 @@ def _open_resource_link(raw_path: str):
     return fd, None
 
 
-def _resolve_resource_link_block(index: int, block: Mapping[str, Any], project_root: str | None, total: int) -> tuple[BlockCapture, int]:
+def _resolve_resource_link_block(index: int, block: Mapping[str, Any], project_root: str | None, total: int,
+                                 *, fixed_root: Path | None = None) -> tuple[BlockCapture, int]:
     from urllib.parse import unquote, urlsplit
 
     name = block.get("name")
@@ -232,7 +233,7 @@ def _resolve_resource_link_block(index: int, block: Mapping[str, Any], project_r
     if not raw_path.startswith("/"):
         return BlockCapture(index, "resource_link", mime, name, uri, "inaccessible", "non_absolute_file_uri", None), total
     try:
-        root = Path(project_root).resolve(strict=True)
+        root = fixed_root if fixed_root is not None else Path(project_root).resolve(strict=True)
     except (OSError, RuntimeError):
         return BlockCapture(index, "resource_link", mime, name, uri, "inaccessible", "unresolvable_path", None), total
     # TOCTOU-safe from here on: open once (final component never followed
@@ -256,7 +257,7 @@ def _resolve_resource_link_block(index: int, block: Mapping[str, Any], project_r
             # Genuinely outside the project root (by the fd's own kernel-
             # verified real path, not a re-walked string) -- a legitimate
             # reference, never fetched: no bytes are read below.
-            return BlockCapture(index, "resource_link", mime, name, uri, "reference_only", None, None), total
+            return BlockCapture(index, "resource_link", mime, name, uri, "reference_only", "outside_allowed_attachment_roots", None), total
         if stat.S_ISLNK(info.st_mode):
             return BlockCapture(index, "resource_link", mime, name, uri, "inaccessible", "symlink_path", None), total
         if not stat.S_ISREG(info.st_mode):
@@ -296,6 +297,87 @@ def _resolve_resource_link_block(index: int, block: Mapping[str, Any], project_r
     return BlockCapture(index, "resource_link", mime, name, uri, "stored", None, body, is_text), total + len(body)
 
 
+def _paseo_upload_root(environ: Mapping[str, str] | None) -> Path | None:
+    """Only the launch environment supplies authority, never prompt metadata.
+
+    Installed Paseo sets PASEO_HOME on daemon launch and preserves it in ACP
+    children. No default is inferred for other ACP clients or missing signals.
+    """
+    if environ is None or not environ.get("PASEO_HOME"):
+        return None
+    raw = environ["PASEO_HOME"]
+    if raw == "~" or raw.startswith("~/"):
+        home = environ.get("HOME")
+        if not home or not Path(home).is_absolute():
+            return None
+        raw = home + raw[1:]
+    if not Path(raw).is_absolute():
+        return None
+    try:
+        return Path(raw).resolve(strict=True) / "uploads"
+    except (OSError, RuntimeError):
+        return None
+
+
+def _resolve_paseo_upload(index: int, raw_path: str, root: Path | None, total: int,
+                          *, mime: str | None = None, name: str | None = None) -> tuple[BlockCapture, int]:
+    """Validate before opening; the shared resolver also checks the opened fd."""
+    uri = Path(raw_path).as_uri()
+    name = name or Path(raw_path).name
+
+    def rejected(reason):
+        return BlockCapture(index, "resource_link", mime, name, uri, "inaccessible", reason, None), total
+
+    if root is None:
+        return rejected("paseo_home_unavailable")
+    try:
+        Path(os.path.abspath(raw_path)).relative_to(root)
+    except ValueError:
+        return rejected("outside_paseo_uploads")
+    try:
+        # An uploads-directory symlink must not enlarge the launch-home boundary.
+        if root.resolve(strict=True) != root:
+            return rejected("symlink_escape")
+        real = Path(raw_path).resolve(strict=True)
+        real.relative_to(root)
+    except FileNotFoundError:
+        return rejected("missing_upload")
+    except ValueError:
+        return rejected("symlink_escape")
+    except (OSError, RuntimeError):
+        return rejected("unresolvable_path")
+    capture, updated = _resolve_resource_link_block(
+        index, dict(uri=uri, name=name, mimeType=mime), str(root), total, fixed_root=root,
+    )
+    if capture.availability == "reference_only":
+        # A directory was swapped after validation; the fd check refused it.
+        return rejected("symlink_escape")
+    return capture, updated
+
+
+def _prompt_file_paths(text: str) -> list[str]:
+    """Recognize owner-supplied absolute paths, including Paseo's Path: line.
+
+    Full path lines and quoted paths preserve spaces; inline unquoted paths
+    end at whitespace. Never parse bodies of embedded resources or attachments.
+    """
+    paths: list[str] = []
+    pattern = r"""(?<![\w:/])(?:`(/[^`\r\n]+)`|"(/[^"\r\n]+)"|'(/[^'\r\n]+)'|(/[^\s`"'<>]+))"""
+    for line in text.splitlines():
+        line = line.strip()
+        if line.startswith("Path: "):
+            candidates = [line[6:].strip().strip("`\"'")]
+        elif line.startswith("/"):
+            candidates = [line]
+        else:
+            candidates = [next(value for value in match.groups() if value)
+                          for match in re.finditer(pattern, line)]
+        for path in candidates:
+            if path.startswith("/") and path not in paths:
+                paths.append(path)
+    return paths
+
+
 def _resolve_resource_block(index: int, block: Mapping[str, Any], total: int) -> tuple[BlockCapture, int]:
     resource = block.get("resource") or {}
     uri = resource.get("uri") if isinstance(resource, dict) else None
@@ -321,7 +403,8 @@ def _resolve_resource_block(index: int, block: Mapping[str, Any], total: int) ->
     return BlockCapture(index, "resource", mime, None, uri, "stored", None, body, is_text), total + len(body)
 
 
-def resolve_prompt_blocks(blocks: Sequence[Mapping[str, Any]], project_root: str | None) -> list[BlockCapture]:
+def resolve_prompt_blocks(blocks: Sequence[Mapping[str, Any]], project_root: str | None,
+                          *, environ: Mapping[str, str] | None = None) -> list[BlockCapture]:
     """Resolve every non-text content block of one accepted prompt into a
     :class:`BlockCapture`, truthfully classifying availability -- never
     claiming a body is retained when it was not. Enforces the per-block
@@ -332,9 +415,10 @@ def resolve_prompt_blocks(blocks: Sequence[Mapping[str, Any]], project_root: str
     durable capture transaction opens (see ``bootstrap.bootstrap_task``/
     ``append_source_event`` and ``acp.agent``).
 
-    Only called for blocks that already passed ``protocol``'s type/shape
-    validation (``resource``/``resource_link``/``image``); text blocks contribute
-    nothing here (their exact text is already the report body).
+    Only called on accepted owner input, never on model output or reports.
+    Validated text blocks retain their exact report body; absolute file paths
+    additionally become attachment snapshots only inside the launching Paseo
+    home's uploads directory. The launch environment is not prompt-controlled.
 
     Never raises: any unexpected per-block failure (anything not already
     classified by a specific ``except`` clause in the per-kind resolvers) is
@@ -345,6 +429,9 @@ def resolve_prompt_blocks(blocks: Sequence[Mapping[str, Any]], project_root: str
     """
     results: list[BlockCapture] = []
     total = 0
+    upload_root = _paseo_upload_root(environ)
+    text_paths: list[str] = []
+    linked_paths: set[str] = set()
     for index, block in enumerate(blocks):
         kind = block.get("type") if isinstance(block, dict) else None
         try:
@@ -374,11 +461,40 @@ def resolve_prompt_blocks(blocks: Sequence[Mapping[str, Any]], project_root: str
             elif kind == "resource":
                 capture, total = _resolve_resource_block(index, block, total)
             elif kind == "resource_link":
-                capture, total = _resolve_resource_link_block(index, block, project_root, total)
+                from urllib.parse import unquote, urlsplit
+
+                parts = urlsplit(block.get("uri") or "")
+                raw_path = unquote(parts.path)
+                if parts.scheme == "file" and parts.netloc in ("", "localhost"):
+                    linked_paths.add(raw_path)
+                if (parts.scheme == "file" and parts.netloc in ("", "localhost")
+                        and upload_root is not None
+                        and raw_path.startswith(str(upload_root) + "/")):
+                    capture, total = _resolve_paseo_upload(
+                        index, raw_path, upload_root, total,
+                        mime=block.get("mimeType"), name=block.get("name"),
+                    )
+                else:
+                    capture, total = _resolve_resource_link_block(index, block, project_root, total)
+            elif kind == "text":
+                for path in _prompt_file_paths(block.get("text") or ""):
+                    if path not in text_paths:
+                        text_paths.append(path)
+                continue
             else:
                 continue
         except Exception:
             capture = BlockCapture(index, kind or "unknown", None, None, None, "inaccessible", "capture_error", None)
+        results.append(capture)
+    for path in text_paths:
+        if path in linked_paths:
+            continue
+        index = len(blocks) + len(results)
+        try:
+            capture, total = _resolve_paseo_upload(index, path, upload_root, total)
+        except Exception:
+            capture = BlockCapture(index, "resource_link", None, None, None,
+                                   "inaccessible", "capture_error", None)
         results.append(capture)
     return results
 

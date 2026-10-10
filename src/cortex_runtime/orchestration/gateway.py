@@ -96,7 +96,7 @@ SCHEMAS = {
                             content=text('Complete Markdown including the required first line from create_draft.',1000000),
                             request_key=text('Unique action identity.',128))),
     'command_run': obj(dict(argv=array(text('Literal command argument. Only scoped workers may run commands; coordinators and consultants cannot execute them. No implicit shell.',16384),
-                                       'Command as argv, run without a shell. Only scoped workers may run commands.', maximum=128, minimum=1),
+                                       'Command as argv, run without a shell. Only scoped workers may run commands. For the current reviewer, exact plan verification argv at the same project digest reuses a runtime-produced receipt; an in-flight run is awaited for at most five seconds (or the shorter requested timeout). Otherwise the command executes normally.', maximum=128, minimum=1),
                             timeout_seconds=timeout('Optional maximum runtime in seconds, including child processes. Omit to run until the command exits.'),
                             request_key=text('Unique action identity; ambiguous interrupted calls are never re-executed automatically.',128)), required=['argv','request_key']),
     'outside_write': obj(dict(path=text('Absolute path OUTSIDE the project (inside it, write with your own tools). The user confirms first; the parent directory must exist.',4096),
@@ -719,7 +719,10 @@ def dispatch(store,channel,operation,args):
             from .artifacts import project_git_evidence
             result=project_git_evidence(store,channel.task_id,owner,root,args['kind'])
         elif operation=='command_run':
-            result=_command(store,channel,root,scopes,args,ref,owner,effects)
+            from .reviewer_verification import reuse
+            result=reuse(store,channel,root,args,ref,owner)
+            if result is None:
+                result=_command(store,channel,root,scopes,args,ref,owner,effects)
         elif operation in {'outside_write','outside_command'}:
             result=_outside(store,channel,root,operation,args,ref,owner,effects)
         else:

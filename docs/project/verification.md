@@ -16,7 +16,20 @@ Runtime/protocol changes use focused tests and the no-paid smoke harness where
 applicable. The Cortex-specific live policy and isolation rules remain below
 and in `AGENTS.md`, not in portable coordinator guidance. Close every
 check that can be performed in the authorized environment. An unrun or
-unverified check needs a concrete blocker, and synthesis discloses it.
+unverified check needs a concrete blocker, and synthesis discloses it unless
+closed by retained exact evidence. Runtime final verification can close a
+declared-command gap with identical argv, complete exit-0 execution and
+untruncated runtime-owned output on the current reviewed revision, with a digest
+matching the gap author's runtime-observed publication or review binding. Execution
+order does not matter when those digests match. The runtime retains the command
+reference as `closed_by` and rederives it on reads and synthesis; missing/different
+author bindings, model claims, failed/incomplete evidence and stale revisions do
+not close it.
+A speculative run is eligible only after authoritative credit on the approved
+digest; its `CHECK_EXECUTION_STARTED` marker alone is diagnostic and never closes
+a gap. Discarded candidates remain ineligible.
+See [check closure](../features/orchestration/index.md#check-history-and-current-outcome)
+and `tests/test_deferred_check_closure.py`.
 
 ## Targeted tests for a task
 

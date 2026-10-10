@@ -1616,6 +1616,15 @@ class OrchestratingRuntime:
         # First, so every turn and worker the teardown interrupts reads it
         # as transport loss rather than a failure (see transport_lost).
         self._shutting_down.set()
+        from ..orchestration.reviewer_verification import cancel_waits
+        with self._lock:
+            owned_tasks = tuple(self._coordinator_sessions)
+        try:
+            cancel_waits(self._store, owned_tasks)
+        except Exception:
+            # A storage failure must not prevent engine/broker teardown. The
+            # gateway wait is still bounded and the owned MCP process is killed.
+            pass
         shutdown = getattr(self._engine, "shutdown", None)
         if shutdown is not None:
             # Capacity-aware SessionRuntime (see
@@ -4489,7 +4498,8 @@ class OrchestratingRuntime:
                 "SELECT DISTINCT assignment_ref FROM task_events WHERE task_id=? AND event_type='assignment_failed'",
                 (task_id,),
             ).fetchall()
-        attempt_ids: set[str] = {row["assignment_ref"] for row in results if row["assignment_ref"]}
+        result_attempts = {row["assignment_ref"] for row in results if row["assignment_ref"]}
+        attempt_ids: set[str] = set(result_attempts)
         for row in failures:
             hash_ref = row["assignment_ref"]
             if not hash_ref:
@@ -4500,17 +4510,24 @@ class OrchestratingRuntime:
                 ).fetchone()
             if prov is not None and prov["attempt_id"]:
                 attempt_ids.add(prov["attempt_id"])
+        finish = getattr(self._engine, "finish_owned", None)
         with self._lock:
             in_flight = set(self._worker_turns_in_flight)
             with self._store.connection() as db:
-                attempt_ids = {a for a in attempt_ids if not (row := db.execute(
+                attempt_ids = {a for a in attempt_ids if (a in result_attempts and finish is not None) or not (row := db.execute(
                     'SELECT idempotency_key FROM delegation_provisioning WHERE attempt_id=?',(a,)
                 ).fetchone()) or row[0] not in in_flight}
             newly_terminal = [a for a in attempt_ids if a not in self._terminated_attempts]
             self._terminated_attempts.update(newly_terminal)
         for attempt_id in newly_terminal:
             try:
-                self._engine.terminate_owned(attempt_id)
+                if attempt_id in result_attempts and finish is not None:
+                    # The accepted result unlocks dispatch immediately. Banking
+                    # the final prompt usage and confirmed-exit cleanup run off
+                    # this controller path; capacity/containment stay reserved.
+                    finish(attempt_id)
+                else:
+                    self._engine.terminate_owned(attempt_id)
                 from ..orchestration.recovery import release_observed
                 if not release_observed(self,task_id,attempt_id):
                     with self._lock:

@@ -49,6 +49,13 @@ def _evidence_references(review_evidence, assignment_ref):
                     "arguments": {"large_output_id": output_id, "offset": 0},
                 })
                 break
+    for record in records:
+        if record.get("kind") == "runtime_verified_facts" and record.get("large_output_id"):
+            references.append({
+                "kind": "runtime_verified_facts",
+                "tool": "read_large_output",
+                "arguments": {"large_output_id": record["large_output_id"], "offset": 0},
+            })
     return references
 
 

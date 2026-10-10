@@ -152,13 +152,39 @@ def _option_mapping_for(engine: str):
 # StoreError from resolve_channel is transient store/infra, never revocation.
 _CHANNEL_AUTHORITY_LOST_CODES = frozenset({"channel_unknown", "channel_revoked", "channel_expired"})
 
+# Result acceptance revokes the attempt's worker channel in the same
+# transaction (orchestration.state), while the turn that called result_submit
+# is still running: its final PromptResponse -- the only per-turn token report
+# either installed adapter sends -- has not arrived yet. The 1 s authority
+# watchdog used to SIGTERM the engine right then, so every live worker and
+# reviewer call ended in transport_eof with unknown usage. For a revocation
+# caused by the attempt's own published result the watchdog therefore waits at
+# most this long. It exceeds EngineSessionManagerAdapter._RESULT_SETTLE_SECONDS
+# by more than one watchdog poll plus controller latency, so the owned
+# post-result settlement normally performs the teardown; this is only the
+# backstop when no settlement runs. Explicit cancellation, stop and replanning
+# still terminate at once through terminate_owned.
+_RESULT_REVOCATION_GRACE_SECONDS = 20.0
+
+
+def _result_published(store, task_id, attempt_id) -> bool:
+    """Whether this attempt published a result that is still current."""
+    with store.connection() as db:
+        return db.execute(
+            "SELECT 1 FROM task_events WHERE task_id=? AND assignment_ref=? "
+            "AND event_type='worker_result' AND superseded=0 LIMIT 1",
+            (task_id, attempt_id),
+        ).fetchone() is not None
+
 
 def _jail_for(store, channel_credentials) -> dict:
     """The engine jail for one channel: exactly the scopes its gateway grants.
 
     The coordinator, reviewers and read-only roles get none, so their whole
     project is read-only; so does a worker without a running assignment.
-    The process lives while the channel does.
+    The process lives while the channel does, except that a worker channel
+    revoked by its own accepted result lets the in-flight turn settle for at
+    most ``_RESULT_REVOCATION_GRACE_SECONDS``.
     """
     from ..contracts import StoreError
     from ..orchestration.gateway import _authority
@@ -177,6 +203,22 @@ def _jail_for(store, channel_credentials) -> dict:
             except StoreError:
                 scopes = []
 
+    settling_since: list[float] = []
+
+    def result_settling() -> bool:
+        # Bounded from the first revoked observation, and only for this
+        # worker attempt's own current result. Anything unproven fails closed.
+        if channel.role != "worker" or not channel.attempt_id:
+            return False
+        if not settling_since:
+            try:
+                if not _result_published(store, channel.task_id, channel.attempt_id):
+                    return False
+            except Exception:  # noqa: BLE001 - an unprovable cause never extends authority
+                return False
+            settling_since.append(time.monotonic())
+        return time.monotonic() - settling_since[0] < _RESULT_REVOCATION_GRACE_SECONDS
+
     def alive():
         try:
             resolve_channel(store, channel_id, secret)
@@ -189,7 +231,10 @@ def _jail_for(store, channel_credentials) -> dict:
             # engine, and racing it against any writer would otherwise kill a
             # perfectly live engine -- surfacing later as a spurious
             # ``transport_eof``. Stay alive and re-check on the next poll.
-            return str(error) not in _CHANNEL_AUTHORITY_LOST_CODES
+            code = str(error)
+            if code not in _CHANNEL_AUTHORITY_LOST_CODES:
+                return True
+            return code == "channel_revoked" and result_settling()
 
     return {"scopes": list(scopes), "readonly": list(readonly), "alive": alive}
 
@@ -2609,6 +2654,20 @@ class EngineSessionManagerAdapter:
             attempt_ids = list(self._sessions)
         for attempt_id in attempt_ids:
             self.terminate_owned(attempt_id)
+        self._join_result_settlements()
+
+    def _join_result_settlements(self) -> None:
+        """Let post-result teardown already in progress finish before shutdown
+        returns. The shared wait is bounded; a teardown still stuck after it
+        is left as a daemon rather than awaited forever."""
+        with self._lock:
+            threads = list(getattr(self, "_result_settlements", {}).values())
+        deadline = time.monotonic() + self._SETTLEMENT_SHUTDOWN_JOIN_SECONDS
+        for thread in threads:
+            if (not isinstance(thread, threading.Thread) or thread.ident is None
+                    or thread is threading.current_thread()):
+                continue
+            thread.join(max(0.0, deadline - time.monotonic()))
 
     def lookup_owned(self, attempt_id: str) -> str:
         """"alive"/"absent"/"unknown" for the process owned by
@@ -2633,6 +2692,28 @@ class EngineSessionManagerAdapter:
         state = recovery_registry.probe_liveness(row)
         if state == "absent":
             recovery_registry.mark_terminated(self._store, attempt_id, "lookup_owned_absent")
+        return state
+
+    def lookup_owned_tx(self, attempt_id: str, db) -> str:
+        """The same liveness gate using the caller's SQLite transaction.
+
+        Absence bookkeeping must not acquire a second writer while synthesis
+        holds BEGIN IMMEDIATE. The caller owns commit/rollback.
+        """
+        with self._lock:
+            if attempt_id in self._sessions:
+                return "alive"
+        if self._store is None:
+            return "absent"
+        from ..recovery import registry as recovery_registry
+
+        row = db.execute("SELECT * FROM attempt_process_registry WHERE attempt_id=?",
+                         (attempt_id,)).fetchone()
+        if row is None:
+            return "absent"
+        state = recovery_registry.probe_liveness(dict(row))
+        if state == "absent":
+            recovery_registry.mark_terminated_tx(db, attempt_id, "lookup_owned_absent")
         return state
 
     def invalidate_owner_epoch(self, attempt_id: str, new_epoch) -> None:
@@ -2674,8 +2755,113 @@ class EngineSessionManagerAdapter:
             return
         manager.invalidate_epoch(binding.workspace_binding_id, str(new_epoch))
 
-    def terminate_owned(self, attempt_id: str) -> None:
+    # The turn that called result_submit usually still writes a closing
+    # message; its PromptResponse is the only token carrier and nothing can
+    # deliver it after teardown. Live v5/v6 dev runs: natural tails 2.5-4.9 s
+    # after the result, and 4 of 25 turns were cut by the former 5 s bound.
+    # A turn that ends sooner settles at once; this only bounds a hung one.
+    _RESULT_SETTLE_SECONDS = 15.0
+    # How often a settlement wait re-checks shutdown, and how long shutdown
+    # waits in total for settlement teardown already in progress.
+    _SETTLE_POLL_SECONDS = 0.05
+    _SETTLEMENT_SHUTDOWN_JOIN_SECONDS = 5.0
+
+    def finish_owned(self, attempt_id: str) -> None:
+        """Bank a result-bearing prompt off the scheduler path before teardown.
+
+        The prompt consumer owns usage recording. Capacity and the writer lock
+        remain held until the usual confirmed-exit cleanup; explicit cancellation
+        still uses terminate_owned immediately. Shutdown interrupts the wait.
+        """
+        shutdown = getattr(self, "_shutdown_event", None)
         with self._lock:
+            done = getattr(self, "_prompt_done", {}).get(attempt_id)
+            manager = self._managers.get(attempt_id)
+            settling = getattr(self, "_result_settlements", None)
+            if settling is None:
+                settling = self._result_settlements = {}
+            if attempt_id in settling:
+                return
+            if (done is not None and not done.is_set() and manager is not None
+                    and not (shutdown is not None and shutdown.is_set())):
+                thread = threading.Thread(
+                    target=self._finish_result_prompt, args=(attempt_id, manager, done),
+                    name="engine-result-settlement", daemon=True,
+                )
+                settling[attempt_id] = thread
+            else:
+                thread = None
+        if thread is None:
+            self.terminate_owned(attempt_id)
+        else:
+            try:
+                thread.start()
+            except BaseException:
+                with self._lock:
+                    settling.pop(attempt_id, None)
+                raise
+
+    def result_settlement_pending(self, attempt_id: str) -> bool:
+        """Whether this adapter still owns post-result usage/exit cleanup.
+
+        This is only a wait hint, never proof of engine absence or usage credit.
+        Keep it true through teardown; lookup_owned remains the liveness gate.
+        """
+        with self._lock:
+            return attempt_id in getattr(self, "_result_settlements", {})
+
+    def _await_result_prompt(self, done) -> tuple[bool, bool]:
+        """Wait for the consumer to record usage: (settled, interrupted by shutdown)."""
+        shutdown = getattr(self, "_shutdown_event", None)
+        deadline = time.monotonic() + self._RESULT_SETTLE_SECONDS
+        while not done.is_set():
+            if shutdown is not None and shutdown.is_set():
+                return False, True
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            done.wait(min(remaining, self._SETTLE_POLL_SECONDS))
+        return done.is_set(), False
+
+    def _finish_result_prompt(self, attempt_id, manager, done) -> None:
+        settled, interrupted = self._await_result_prompt(done)
+        try:
+            # Cancellation/replacement may already have terminated this manager.
+            # Never act on another incarnation or invoke cross-process cleanup.
+            with self._lock:
+                still_owned = self._managers.get(attempt_id) is manager
+                task_id = self._attempt_task.get(attempt_id)
+                session_id = self._sessions.get(attempt_id)
+            if still_owned:
+                try:
+                    # Shutdown is not a settlement timeout: ordinary teardown
+                    # only; the consumer's own row stays unknown if unrecorded.
+                    if self._store is not None and task_id is not None and not interrupted:
+                        from . import events
+                        events.append_event(
+                            self._store, task_id, "progress",
+                            f"usage_settlement:{attempt_id}:{session_id}",
+                            dict(kind="usage_settlement", attempt_id=attempt_id,
+                                 engine_session_ref=session_id,
+                                 outcome="prompt_recorded" if settled else "timeout",
+                                 reason=None if settled else "post_result_prompt_settlement_timeout",
+                                 # Teardown ends the engine before its only token
+                                 # carrier: this call's usage cannot arrive.
+                                 usage_coverage=None if settled else "unavailable",
+                                 timeout_seconds=self._RESULT_SETTLE_SECONDS),
+                            origin="runtime", assignment_ref=attempt_id,
+                        )
+                finally:
+                    self.terminate_owned(attempt_id, expected_manager=manager)
+        finally:
+            with self._lock:
+                self._result_settlements.pop(attempt_id, None)
+            self._notify_activity()
+
+    def terminate_owned(self, attempt_id: str, *, expected_manager=None) -> None:
+        with self._lock:
+            if expected_manager is not None and self._managers.get(attempt_id) is not expected_manager:
+                return
             manager = self._managers.pop(attempt_id, None)
             session_id = self._sessions.pop(attempt_id, None)
             reservation_id = self._reservations.pop(attempt_id, None)
@@ -3073,6 +3259,11 @@ class EngineSessionManagerAdapter:
         if manager is None:
             raise RuntimeError(f"prompt() called on an unopened/terminated session {session_ref!r}.")
         task_id = self._attempt_task.get(attempt_id)
+        prompt_done = threading.Event()
+        with self._lock:
+            if not hasattr(self, "_prompt_done"):
+                self._prompt_done = {}
+            self._prompt_done[attempt_id] = prompt_done
         if self._store is not None:
             from . import deliveries as delegation_deliveries
 
@@ -3102,6 +3293,7 @@ class EngineSessionManagerAdapter:
         # contribution known -- the combined total must then never be
         # recorded as fully 'engine_reported' (see the finally block below).
         any_turn_missing_usage = False
+        turn_events = None
         call_failed = True
         # EXT-01 #4 fix (independent-review P1 #4): the per-event
         # ``cancel_event.is_set()`` check below only ever runs when this
@@ -3184,17 +3376,17 @@ class EngineSessionManagerAdapter:
         def _bank_turn_usage() -> None:
             # G7: fold the current inner turn's latest reported usage into
             # the running accumulators, then reset for the next turn.
-            # P1 fix: a turn that ends here with usage_basis still None never
-            # reported any usage at all -- flagging it keeps the combined
+            # A turn ending with absent or UNKNOWN token usage contributes
+            # an unknown amount -- flagging it keeps the combined
             # total from being recorded as fully 'engine_reported' just
             # because some *other* turn of this same call did report.
             nonlocal usage_basis, usage_values, accumulated_usage_basis, any_turn_missing_usage
+            if usage_basis is None or usage_basis == UsageBasis.UNKNOWN:
+                any_turn_missing_usage = True
             if usage_basis is not None:
                 accumulated_usage_basis = usage_basis
                 for key, value in usage_values.items():
                     accumulated_usage_values[key] = accumulated_usage_values.get(key, 0) + value
-            else:
-                any_turn_missing_usage = True
             usage_basis = None
             usage_values = {}
 
@@ -3206,7 +3398,8 @@ class EngineSessionManagerAdapter:
                 _last_event[0] = time.monotonic()
                 _open_tools.clear()
                 saw_turn_end = False
-                for event in manager.prompt_turn(session_ref, turn_message, prompt_blocks=turn_blocks):
+                turn_events = manager.prompt_turn(session_ref, turn_message, prompt_blocks=turn_blocks)
+                for event in turn_events:
                     _last_event[0] = time.monotonic()
                     if not instruction_delivery_observed and self._store is not None:
                         instruction_delivery_observed = True
@@ -3402,6 +3595,18 @@ class EngineSessionManagerAdapter:
             # polling a ``cancel_event`` no one will ever set again.
             _stop_watch.set()
             watcher.join(timeout=self._CANCEL_WATCH_POLL_SECONDS * 4)
+            # Close explicitly: abandonment may settle the exact wire call
+            # within the manager's existing cleanup bound. Its final response
+            # can contain usage that never reached this event iterator.
+            if turn_events is not None:
+                close = getattr(turn_events, "close", None)
+                if close is not None:
+                    close()
+            take_usage = getattr(manager, "take_abandoned_usage", None)
+            final_usage = take_usage(session_ref) if take_usage is not None else None
+            if final_usage:
+                usage_basis = UsageBasis.ENGINE_REPORTED
+                usage_values = final_usage
             # T029/G7: exactly one usage_records row per prompt() call --
             # retry/fallback hops and recovery/clarification deliveries
             # each call prompt() again and therefore each get their own
@@ -3455,4 +3660,9 @@ class EngineSessionManagerAdapter:
                     usage_basis=accumulated_usage_basis, usage_values=accumulated_usage_values,
                     stop_reason=recorded_stop_reason, failed=recorded_failed,
                 )
+            # Teardown waits for recording, not merely for the wire response.
+            prompt_done.set()
+            with self._lock:
+                if self._prompt_done.get(attempt_id) is prompt_done:
+                    self._prompt_done.pop(attempt_id, None)
         return PromptOutcome(stop_reason, "".join(text_parts))

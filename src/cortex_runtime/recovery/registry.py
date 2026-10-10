@@ -140,18 +140,23 @@ def bind_engine_session_ref(store, attempt_id: str, engine_session_ref: str) -> 
             raise
 
 
+def mark_terminated_tx(db, attempt_id: str, reason: str) -> None:
+    """Bookkeep confirmed absence on the caller's transaction; never commit it."""
+    row = db.execute(
+        "SELECT terminated_at FROM attempt_process_registry WHERE attempt_id=?", (attempt_id,),
+    ).fetchone()
+    if row is not None and row["terminated_at"] is None:
+        db.execute(
+            "UPDATE attempt_process_registry SET terminated_at=?, termination_reason=? WHERE attempt_id=?",
+            (_now(), reason, attempt_id),
+        )
+
+
 def mark_terminated(store, attempt_id: str, reason: str) -> None:
     with store.connection() as db:
         db.execute("BEGIN IMMEDIATE")
         try:
-            row = db.execute(
-                "SELECT terminated_at FROM attempt_process_registry WHERE attempt_id=?", (attempt_id,),
-            ).fetchone()
-            if row is not None and row["terminated_at"] is None:
-                db.execute(
-                    "UPDATE attempt_process_registry SET terminated_at=?, termination_reason=? WHERE attempt_id=?",
-                    (_now(), reason, attempt_id),
-                )
+            mark_terminated_tx(db, attempt_id, reason)
             db.commit()
         except BaseException:
             db.rollback()

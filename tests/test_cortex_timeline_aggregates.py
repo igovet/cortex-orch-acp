@@ -29,6 +29,7 @@ def test_aggregate_over_one_task_is_structurally_sound_and_invalid_by_default(ma
     assert result['branches']['note']
     assert result['per_task'] == [dict(
         task_id=ch.task_id, attempts=0, phase_chain_complete=False, tokens_basis='unavailable_reason',
+        runtime_synthesis=dict(reconciled=False, composed=None, fallback_reason=None),
     )]
 
 
@@ -301,7 +302,53 @@ def test_repeat_read_population_is_call_weighted_and_time_uses_all_execution_att
     entries[0]['summary']['critical_path']['per_attempt'][0]['dependent'] = False
     entries[0]['summary']['critical_path']['per_attempt'][0]['execution_seconds_excluding_user_waits'] = 1000
     result = timeline._aggregate_decision(entries)
+    # Only dependent repeats count, over all worker execution time.
+    assert result['inputs']['mean_cross_attempt_within_task_repeat_ratio'] == 1
     assert result['inputs']['mean_repeat_read_share_of_worker_execution'] == pytest.approx(90 / 1450)
+    assert result['branches']['reinvestigation']['holds'] is False
+
+
+def test_all_independent_attempts_cannot_satisfy_the_dependent_read_gate():
+    entries = [_entry(i) for i in range(10)]
+    for entry in entries:
+        entry['summary']['critical_path']['per_attempt'][0]['dependent'] = False
+    result = timeline._aggregate_decision(entries)
+    assert result['validity']['valid']
+    assert result['inputs']['mean_cross_attempt_within_task_repeat_ratio'] is None
+    assert result['inputs']['mean_repeat_read_share_of_worker_execution'] is None
+    assert result['branches']['reinvestigation']['holds'] is None
+    assert result['branches']['reinvestigation']['availability'] == 'unavailable_reason'
+    # The raw independent measurements remain diagnostic, not discarded.
+    assert entries[0]['summary']['reinvestigation']['per_attempt'][0]['repeated_text_reads'] == 3
+
+
+def test_independent_repeats_do_not_raise_a_mixed_cohorts_gate_inputs():
+    entries = [_entry(i) for i in range(10)]
+    entries[0]['summary']['critical_path']['per_attempt'][0]['dependent'] = False
+    entries[0]['summary']['reinvestigation']['per_attempt'][0].update(
+        text_reads=1000, repeated_text_reads=1000, repeated_read_seconds=50)
+    for entry in entries[1:]:
+        entry['summary']['reinvestigation']['per_attempt'][0].update(
+            text_reads=10, repeated_text_reads=1, repeated_read_seconds=1)
+    result = timeline._aggregate_decision(entries)
+    assert result['inputs']['mean_cross_attempt_within_task_repeat_ratio'] == .1
+    assert result['inputs']['mean_repeat_read_share_of_worker_execution'] == pytest.approx(9 / 500)
+    assert result['branches']['reinvestigation']['holds'] is False
+
+
+def test_unknown_dependent_status_withholds_the_ratio_never_zero():
+    """An attempt whose dependency status could not be established
+    (`dependent is None`) must withhold the whole cohort ratio as unknown,
+    never be dropped silently or coerced to 0."""
+    entries = [_entry(i) for i in range(10)]
+    for e in entries:
+        e['summary']['reinvestigation']['per_attempt'][0].update(
+            text_reads=10, repeated_text_reads=3, repeated_read_seconds=5)
+    entries[0]['summary']['critical_path']['per_attempt'][0]['dependent'] = None
+    result = timeline._aggregate_decision(entries)
+    assert result['inputs']['mean_cross_attempt_within_task_repeat_ratio'] is None
+    assert result['inputs']['mean_repeat_read_share_of_worker_execution'] is None
+    assert result['branches']['reinvestigation']['availability'] == 'unavailable_reason'
 
 
 def test_truncated_phase_summary_is_rejected_even_with_a_cached_complete_flag():
@@ -311,6 +358,143 @@ def test_truncated_phase_summary_is_rejected_even_with_a_cached_complete_flag():
     result = timeline._aggregate_decision(entries)
     assert result['validity']['phase_chain_complete_ratio'] == .7
     assert result['branches']['worker_loops']['holds'] is None
+
+
+# --- Runtime-composed-synthesis share and fallback reasons ----------------
+
+def _entry_with_synthesis(i, runtime_synthesis, **kwargs):
+    entry = _entry(i, **kwargs)
+    entry['runtime_synthesis'] = runtime_synthesis
+    return entry
+
+
+def test_cohort_reports_runtime_synthesis_share_and_fallback_reasons():
+    entries = [_entry_with_synthesis(i, dict(reconciled=True, composed=True, fallback_reason=None))
+               for i in range(7)]
+    entries += [_entry_with_synthesis(i, dict(reconciled=True, composed=False, fallback_reason='open_check'))
+                for i in range(7, 9)]
+    entries.append(_entry_with_synthesis(9, dict(reconciled=True, composed=False, fallback_reason='unrecorded')))
+    result = timeline._aggregate_decision(entries)
+    cohort_rs = result['cohorts'][0]['runtime_synthesis']
+    assert cohort_rs == dict(reconciled_tasks=10, composed_tasks=7, pending_tasks=0, share=pytest.approx(0.7),
+                             fallback_reasons=dict(open_check=2, unrecorded=1))
+    # Single-cohort passthrough keeps the same shape at the top level.
+    assert result['runtime_synthesis'] == cohort_rs
+
+
+def test_cohort_runtime_synthesis_excludes_not_yet_reconciled_tasks():
+    entries = [_entry_with_synthesis(i, dict(reconciled=False, composed=None, fallback_reason=None))
+               for i in range(10)]
+    result = timeline._aggregate_decision(entries)
+    assert result['cohorts'][0]['runtime_synthesis'] == dict(
+        reconciled_tasks=0, composed_tasks=0, pending_tasks=0, share=None, fallback_reasons={})
+
+
+@pytest.mark.parametrize('fallback_reason', [None, 'worker_live', 'unrecorded'])
+def test_pending_synthesis_stays_incomplete_and_json_serializable(fallback_reason):
+    pending = _entry_with_synthesis(
+        0, dict(reconciled=True, composed=False, fallback_reason=None),
+        complete=False, task_completed=False)
+    entries = [pending, pending]  # Several attempts/rows must not duplicate a task.
+    if fallback_reason is not None:
+        entries.append(_entry_with_synthesis(
+            1, dict(reconciled=True, composed=False, fallback_reason=fallback_reason)))
+        entries.append(_entry_with_synthesis(
+            2, dict(reconciled=True, composed=True, fallback_reason=None)))
+    result = timeline._aggregate_decision(entries)
+    # Exercise the entire CLI JSON shape and its exact sorting policy.
+    payload = json.loads(json.dumps(result, sort_keys=True))
+    synthesis = payload['cohorts'][0]['runtime_synthesis']
+    assert synthesis == dict(
+        reconciled_tasks=1 if fallback_reason is None else 3,
+        composed_tasks=0 if fallback_reason is None else 1,
+        pending_tasks=1, share=None,
+        fallback_reasons={} if fallback_reason is None else {fallback_reason: 1})
+    assert payload['runtime_synthesis'] == synthesis
+
+
+@pytest.mark.parametrize('declined', [False, True])
+def test_read_aggregates_keeps_unfinished_reconciliation_pending(machine, declined):
+    from cortex_runtime.orchestration.state import transition, event
+    state, ch = machine
+    with state.store.connection() as db:
+        db.execute('BEGIN')
+        transition(db, ch.task_id, 'VERIFYING')
+        transition(db, ch.task_id, 'RECONCILING')
+        if declined:
+            event(db, ch.task_id, 'SYNTHESIS_RUNTIME_DECLINED',
+                  dict(revision=0, reason='worker_live'))
+        db.commit()
+    result = timeline.read_aggregates(state.store.project_root, [ch.task_id])
+    outcome = result['per_task'][0]['runtime_synthesis']
+    assert outcome == dict(reconciled=True, composed=None, fallback_reason=None)
+    entry = _entry_with_synthesis(0, outcome, complete=False, task_completed=False)
+    synthesis = timeline._aggregate_decision([entry])['runtime_synthesis']
+    assert synthesis['pending_tasks'] == 1
+    assert synthesis['fallback_reasons'] == {}
+    assert synthesis['share'] is None
+
+
+def test_mixed_cohorts_withhold_a_pooled_runtime_synthesis_verdict():
+    entries = ([_entry_with_synthesis(i, dict(reconciled=True, composed=True, fallback_reason=None))
+               for i in range(5)]
+               + [_entry_with_synthesis(i, dict(reconciled=True, composed=False, fallback_reason='worker_live'),
+                                       engine='codex-acp') for i in range(5, 10)])
+    result = timeline._aggregate_decision(entries)
+    assert len(result['cohorts']) == 2
+    assert result['cohorts'][0]['runtime_synthesis']['composed_tasks'] == 5
+    assert result['cohorts'][1]['runtime_synthesis']['fallback_reasons'] == dict(worker_live=5)
+    assert 'note' in result['runtime_synthesis']
+
+
+def test_read_aggregates_reports_runtime_synthesis_outcome_for_a_real_task(machine):
+    from cortex_runtime.orchestration.state import transition, event
+    state, ch = machine
+    with state.store.connection() as db:
+        db.execute('BEGIN')
+        transition(db, ch.task_id, 'VERIFYING')
+        transition(db, ch.task_id, 'RECONCILING')
+        event(db, ch.task_id, 'SYNTHESIS_RUNTIME_COMPOSED',
+              dict(revision=0, text='x', language='en', not_verified=[]))
+        transition(db, ch.task_id, 'COMPLETED')
+        db.commit()
+    result = timeline.read_aggregates(state.store.project_root, [ch.task_id])
+    assert result['per_task'][0]['runtime_synthesis'] == dict(
+        reconciled=True, composed=True, fallback_reason=None)
+
+
+def test_read_aggregates_marks_a_coordinator_completion_without_a_decline_event_unrecorded(machine):
+    from cortex_runtime.orchestration.state import transition
+    state, ch = machine
+    with state.store.connection() as db:
+        db.execute('BEGIN')
+        transition(db, ch.task_id, 'VERIFYING')
+        transition(db, ch.task_id, 'RECONCILING')
+        # Completed by the coordinator with no retained SYNTHESIS_RUNTIME_COMPOSED
+        # or SYNTHESIS_RUNTIME_DECLINED event: the reason is explicitly unrecorded,
+        # never guessed.
+        transition(db, ch.task_id, 'COMPLETED')
+        db.commit()
+    result = timeline.read_aggregates(state.store.project_root, [ch.task_id])
+    assert result['per_task'][0]['runtime_synthesis'] == dict(
+        reconciled=True, composed=False, fallback_reason='unrecorded')
+
+
+def test_read_aggregates_reports_a_declined_reason_for_a_real_task(machine):
+    from cortex_runtime.orchestration.state import transition, event
+    state, ch = machine
+    with state.store.connection() as db:
+        db.execute('BEGIN')
+        transition(db, ch.task_id, 'VERIFYING')
+        transition(db, ch.task_id, 'RECONCILING')
+        event(db, ch.task_id, 'SYNTHESIS_RUNTIME_DECLINED',
+              dict(revision=0, reason='open_check', reasons=[dict(code='open_check', node='N0',
+                                                                  check='scoped test', outcome='not_run')]))
+        transition(db, ch.task_id, 'COMPLETED')
+        db.commit()
+    result = timeline.read_aggregates(state.store.project_root, [ch.task_id])
+    assert result['per_task'][0]['runtime_synthesis'] == dict(
+        reconciled=True, composed=False, fallback_reason='open_check')
 
 
 def test_read_aggregates_counts_unknown_and_released_calls_with_null_stop_reason(machine):

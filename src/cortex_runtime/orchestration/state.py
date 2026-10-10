@@ -139,8 +139,10 @@ def _record_execution_baseline(db, task_id):
     a model's claim that nothing changed."""
     revision = db.execute('SELECT revision FROM runtime_tasks WHERE task_id=?', (task_id,)).fetchone()['revision']
     observed = _observe_project(db, task_id)
+    from .reviewer_handoff import path_metadata
     event(db, task_id, 'EXECUTION_BASELINE', dict(revision=revision, kind=observed['kind'], head=observed['head'],
-                                                  revision_digest=observed['dirty_digest']))
+                                                  revision_digest=observed['dirty_digest'],
+                                                  path_metadata=path_metadata(observed)))
 
 
 def review_waiver(db, task_id, revision, nodes):
@@ -444,6 +446,71 @@ def targeted_fixes(tasks, scopes, findings, report_ref=None):
     return targets, None
 
 
+def synthesis_checks(db, task_id, revision):
+    """Shared current check assessments and unresolved disclosed gaps."""
+    def normalized(name):
+        return ' '.join(str(name).split()).casefold()
+
+    rows = db.execute(
+        'SELECT node_id,assignment_ref,result_json FROM runtime_nodes '
+        'WHERE task_id=? AND revision=? AND result_json IS NOT NULL',
+        (task_id, revision),
+    ).fetchall()
+    from ..delegation.evidence import assess_checks, current_outcomes
+    from .check_closure import retain_runtime_closures
+    closures = retain_runtime_closures(db, task_id, revision)
+
+    checks = []
+    for row in rows:
+        result_checks = json.loads(row['result_json']).get('checks', [])
+        provision = db.execute(
+            'SELECT attempt_id FROM delegation_provisioning WHERE task_id=? AND idempotency_key=?',
+            (task_id, row['assignment_ref']),
+        ).fetchone() if row['assignment_ref'] else None
+        outcomes = current_outcomes(db, task_id, provision['attempt_id'], result_checks) if provision else None
+        assessments = assess_checks(db, task_id, provision['attempt_id'], result_checks) if provision else None
+        for index, check in enumerate(result_checks):
+            checks.append((row['node_id'], check, outcomes[index] if outcomes else None,
+                           assessments[index] if assessments else None,
+                           closures.get((row['assignment_ref'], index))))
+
+    def fix_origin(node):
+        match = re.fullmatch(r'_fix_(\d+)_([A-Za-z][A-Za-z0-9_-]*)', node)
+        return (match.group(2), int(match.group(1))) if match else (node, -1)
+
+    def same_lineage(gap_node, pass_node):
+        if gap_node == pass_node:
+            return True
+        gap_origin, gap_cycle = fix_origin(gap_node)
+        pass_origin, pass_cycle = fix_origin(pass_node)
+        return gap_origin == pass_origin and pass_cycle >= 0 and pass_cycle >= gap_cycle
+
+    passes = [(node, check, current, assessment) for node, check, current, assessment, _ in checks
+              if check.get('outcome') == 'passed' and current is not None
+              and current['outcome'] == 'passed' and assessment['strength'] == 'verified']
+    gaps = {}
+    for node, check, _, _, runtime_closure in checks:
+        if runtime_closure or check.get('outcome') not in {'not_run', 'unverified'}:
+            continue
+        name = normalized(check['name'])
+        command = check.get('command')
+        if command:
+            resolved = isinstance(command, list) and any(
+                assessment.get('identity') == ('command_run', tuple(command), None)
+                for _, _, _, assessment in passes
+            )
+        else:
+            # Compatibility for retained gaps without a declared command.
+            resolved = any(
+                same_lineage(node, passed_node) and normalized(passed_check['name']) == name
+                for passed_node, passed_check, _, _ in passes
+            )
+        if not resolved:
+            gaps[name] = check['name']
+
+    return checks, gaps
+
+
 def validate_scope(scope):
     if not isinstance(scope, list) or not scope or len(scope) > 64:
         raise StoreError('invalid_assignment_scope')
@@ -651,12 +718,15 @@ class TaskMachine:
                     )
 
             from ..delegation.evidence import annotate_checks
+            from .check_closure import runtime_gap_closures, apply_runtime_closures
+            closures = runtime_gap_closures(db, task_id, task['revision'])
             for node in value_nodes:
                 result = node['result']
                 if isinstance(result, dict) and result.get('checks'):
                     attempt_id = attempts_by_assignment.get(node['assignment_ref'])
                     result['checks'] = annotate_checks(
-                        db, task_id, attempt_id, result['checks']
+                        db, task_id, attempt_id,
+                        apply_runtime_closures(result['checks'], node['assignment_ref'], closures)
                     )
 
         value = task_value
@@ -1047,10 +1117,17 @@ class TaskMachine:
             assignment_ref=assignment_ref, revision_digest=observed['dirty_digest'],
             rebound_from=binding['revision_digest'], rebind=rebinds + 1, refused_request_key=request_key))
         db.commit()
+        from .reviewer_handoff import review_runtime_facts
+        try:
+            facts = review_runtime_facts(self.store, task_id, assignment_ref,
+                                         task_workspace.task_root(db, task_id))
+            refreshed = ' Refreshed runtime facts (metadata only): ' + encoded(facts)
+        except (StoreError, OSError):
+            refreshed = ' Runtime facts refresh unavailable; inspect the current project independently.'
         raise StoreError('review_project_revision_changed', 'project revision', binding['revision_digest'],
                          'the project revision this review is bound to',
                          'The project changed while you reviewed it; the review is now bound to the current revision. '
-                         'Re-check what changed (project_git diff), then submit your verdict again with a new request_key.')
+                         'Re-check what changed (project_git diff), then submit your verdict again with a new request_key.' + refreshed)
 
     def record_result(self, task_id, assignment_ref, result, request_key=None):
         with self.store.connection() as db:
@@ -1064,6 +1141,9 @@ class TaskMachine:
                 retained = json.loads(node['result_json'])
                 retained.pop('report_digest', None)
                 retained.pop('project_digest', None)
+                for check in retained.get('checks', []):
+                    if check.get('outcome') in {'not_run', 'unverified'}:
+                        check.pop('closed_by', None)
                 if encoded(retained) != encoded(result):
                     raise StoreError('conflicting_assignment_result')
                 return
@@ -1199,62 +1279,8 @@ class TaskMachine:
             if not task or task['state'] != 'RECONCILING':
                 raise StoreError('synthesis_not_expected')
 
-            def normalized(name):
-                return ' '.join(str(name).split()).casefold()
-
-            rows = db.execute(
-                'SELECT node_id,assignment_ref,result_json FROM runtime_nodes '
-                'WHERE task_id=? AND revision=? AND result_json IS NOT NULL',
-                (channel.task_id, task['revision']),
-            ).fetchall()
-            from ..delegation.evidence import assess_checks, current_outcomes
-
-            checks = []
-            for row in rows:
-                result_checks = json.loads(row['result_json']).get('checks', [])
-                provision = db.execute(
-                    'SELECT attempt_id FROM delegation_provisioning WHERE task_id=? AND idempotency_key=?',
-                    (channel.task_id, row['assignment_ref']),
-                ).fetchone() if row['assignment_ref'] else None
-                outcomes = current_outcomes(db, channel.task_id, provision['attempt_id'], result_checks) if provision else None
-                assessments = assess_checks(db, channel.task_id, provision['attempt_id'], result_checks) if provision else None
-                for index, check in enumerate(result_checks):
-                    checks.append((row['node_id'], check, outcomes[index] if outcomes else None,
-                                   assessments[index] if assessments else None))
-
-            def fix_origin(node):
-                match = re.fullmatch(r'_fix_(\d+)_([A-Za-z][A-Za-z0-9_-]*)', node)
-                return (match.group(2), int(match.group(1))) if match else (node, -1)
-
-            def same_lineage(gap_node, pass_node):
-                if gap_node == pass_node:
-                    return True
-                gap_origin, gap_cycle = fix_origin(gap_node)
-                pass_origin, pass_cycle = fix_origin(pass_node)
-                return gap_origin == pass_origin and pass_cycle >= 0 and pass_cycle >= gap_cycle
-
-            passes = [(node, check, current, assessment) for node, check, current, assessment in checks
-                      if check.get('outcome') == 'passed' and current is not None
-                      and current['outcome'] == 'passed' and assessment['strength'] == 'verified']
-            gaps = {}
-            for node, check, _, _ in checks:
-                if check.get('outcome') not in {'not_run', 'unverified'}:
-                    continue
-                name = normalized(check['name'])
-                command = check.get('command')
-                if command:
-                    resolved = isinstance(command, list) and any(
-                        assessment.get('identity') == ('command_run', tuple(command), None)
-                        for _, _, _, assessment in passes
-                    )
-                else:
-                    # Compatibility for retained gaps without a declared command.
-                    resolved = any(
-                        same_lineage(node, passed_node) and normalized(passed_check['name']) == name
-                        for passed_node, passed_check, _, _ in passes
-                    )
-                if not resolved:
-                    gaps[name] = check['name']
+            checks, gaps = synthesis_checks(db, channel.task_id, task['revision'])
+            normalized = lambda name: ' '.join(str(name).split()).casefold()
             for index, item in enumerate(not_verified):
                 if not item['blocker'].strip():
                     raise StoreError('synthesis_blocker_required', f'arguments.not_verified[{index}].blocker',
@@ -1265,7 +1291,7 @@ class TaskMachine:
             if missing:
                 raise StoreError('synthesis_gaps_undisclosed', 'arguments.not_verified', ', '.join(missing)[:160],
                                  'every retained not_run or unverified check by its exact name, each with its blocker',
-                                 'A gap with a declared command closes only after a verified command_run with exactly matching argv; a command-less gap may close by a verified same-name pass in its node or later fix. Close these gaps with replan_request if they can be verified; otherwise list each exact name in not_verified with its concrete blocker: ' + '; '.join(missing))
+                                 'A gap with a declared command closes after a verified command_run with exactly matching argv or a complete passing runtime final-verification receipt with identical argv, bound to the gap author\'s observed publication or reviewed digest and the current approved project digest, regardless of execution order; a command-less gap may close by a verified same-name pass in its node or later fix. Close these gaps with replan_request if they can be verified; otherwise list each exact name in not_verified with its concrete blocker: ' + '; '.join(missing))
             stored = text if not not_verified else (
                 text.rstrip() + '\n\n## Not verified\n\n' +
                 '\n'.join(f"- {item['item']} — blocker: {item['blocker']}" for item in not_verified)
@@ -1313,6 +1339,8 @@ class TaskMachine:
             failures = db.execute("SELECT COUNT(*) FROM runtime_events WHERE task_id=? AND type='VERIFICATION_FAILED'",
                                   (task_id,)).fetchone()[0]
             if passed:
+                from .check_closure import retain_runtime_closures
+                retain_runtime_closures(db, task_id, task['revision'])
                 transition(db, task_id, 'RECONCILING')
             elif failures <= MAX_VERIFICATION_REPAIRS:
                 # A wrong or failing check goes back to the coordinator with

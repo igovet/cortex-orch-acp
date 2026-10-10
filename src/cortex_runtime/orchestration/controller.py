@@ -39,6 +39,9 @@ _COORDINATOR_SESSION_DEAD_KINDS = frozenset({
 # the fingerprint does not cover. Permission cards keep the _POLL_SECONDS tick.
 _POLL_SECONDS = .1
 _RECONCILE_SECONDS = 2.0
+# Allow owned post-result settlement teardown plus exit cleanup, never an
+# unbounded wait for an arbitrary live or unknown worker.
+_SYNTHESIS_SETTLE_SECONDS = 10.0
 
 
 _VERIFICATION_OUTPUT_TAIL_BYTES = 2500
@@ -114,10 +117,23 @@ def _verification_observation(runtime, task_id, context, expected, emit_tool_cal
             with tempfile.TemporaryFile() as output:
                 from .sandbox import compact_argv
                 launch, launch_fds = compact_argv(command, fds)
+                with runtime._store.connection() as db:
+                    db.execute('BEGIN IMMEDIATE')
+                    # Execution metadata is diagnostic until authoritative credit;
+                    # never emit a verification lifecycle event from this runner.
+                    event(db, task_id, 'CHECK_EXECUTION_STARTED', dict(
+                        command_ref=ref, argv=argv, revision=context['revision'],
+                        revision_digest=digest, index=index))
+                    started_event_id = db.execute('SELECT last_insert_rowid()').fetchone()[0]
+                    db.commit()
                 try:
                     proc = subprocess.Popen(launch, stdout=output, stderr=subprocess.STDOUT, pass_fds=launch_fds,
                                             env={'PATH': '/usr/bin:/bin'}, start_new_session=True)
                 except Exception as error:
+                    with runtime._store.connection() as db:
+                        db.execute('BEGIN IMMEDIATE')
+                        event(db, task_id, 'CHECK_EXECUTION_ABORTED', dict(command_ref=ref, run_id=run_id))
+                        db.commit()
                     if trace is not None:
                         trace.record("verification", "in", dict(launch_error=type(error).__name__),
                                      task_id=task_id, command_ref=ref)
@@ -163,8 +179,14 @@ def _verification_observation(runtime, task_id, context, expected, emit_tool_cal
         failed = interrupted or code != 0 or not unchanged
         observed = dict(argv=argv,exit_code=code,complete=not interrupted and unchanged,
                         revision_digest=digest,large_output_id=saved['id'],
+                        command_ref=ref,started_event_id=started_event_id,
                         # The full output is retained separately; this excerpt is only for repair context.
                         output_tail=output_tail if failed else None)
+        with runtime._store.connection() as db:
+            db.execute('BEGIN IMMEDIATE')
+            event(db, task_id, 'CHECK_EXECUTION_FINISHED',
+                  dict({k: v for k, v in observed.items() if k != 'output_tail'}, run_id=run_id))
+            db.commit()
         checks.append(observed)
         if emit_tool_call:
             raw_output = {key: value for key, value in observed.items() if key != 'output_tail'}
@@ -224,7 +246,7 @@ class _SpeculativeVerification:
         with self.runtime._store.connection() as db:
             db.execute('BEGIN IMMEDIATE')
             event(db, self.task_id, 'SPECULATIVE_VERIFICATION_' + kind,
-                  dict(binding=self.binding, **payload))
+                  dict(binding=self.binding, run_id=self.run_id, **payload))
             db.commit()
 
     def start(self, context, assignment_ref, digest):
@@ -235,12 +257,13 @@ class _SpeculativeVerification:
         self.binding = binding
         self.cancel = threading.Event()
         self.observed = None
+        self.run_id = time.monotonic_ns()
         self._event('STARTED')
         def work():
             try:
                 self.observed = _verification_observation(
                     self.runtime, self.task_id, context, digest, self.emit_tool_call,
-                    self.cancel, time.monotonic_ns())
+                    self.cancel, self.run_id)
             except Exception:
                 # Never a pass or a lifecycle mutation from the command thread.
                 self.observed = dict(stale=True, blocker='speculative_verification_error')
@@ -305,6 +328,53 @@ class _SpeculativeVerification:
             self.observed = None
 
 
+def _synthesis_workers_absent(runtime, task_id, cancel_event, db):
+    """Completion liveness checks must use the completion writer connection."""
+    lookup = getattr(runtime._engine, 'lookup_owned_tx', None)
+    # An engine without a transaction-safe gate retains coordinator synthesis.
+    if lookup is None:
+        return False
+    with runtime._lock:
+        if runtime._running.get(task_id) or cancel_event.is_set():
+            return False
+        workers = db.execute("SELECT attempt_id FROM delegation_provisioning WHERE task_id=? AND role_id!='orchestrator'",
+                             (task_id,)).fetchall()
+        return all(lookup(row['attempt_id'], db) == 'absent' for row in workers)
+
+
+def _await_synthesis_settlement(runtime, task_id, cancel_event):
+    """Await owned post-result cleanup without holding a SQLite transaction.
+
+    This cannot authorize completion: the caller retries every composition and
+    transaction-safe liveness gate afterwards. Never terminate an engine here.
+    """
+    pending = getattr(runtime._engine, 'result_settlement_pending', None)
+    if pending is None or getattr(runtime._engine, 'lookup_owned_tx', None) is None:
+        return
+    with runtime._lock:
+        if runtime._running.get(task_id):
+            return
+    with runtime._store.connection() as db:
+        task = db.execute('SELECT state,synthesis FROM runtime_tasks WHERE task_id=?', (task_id,)).fetchone()
+        if not task or task['state'] != 'RECONCILING' or task['synthesis'] is not None:
+            return
+        attempts = [row[0] for row in db.execute(
+            "SELECT attempt_id FROM delegation_provisioning WHERE task_id=? AND role_id!='orchestrator'",
+            (task_id,))]
+    deadline = time.monotonic() + _SYNTHESIS_SETTLE_SECONDS
+    while not cancel_event.is_set() and not _transport_lost(runtime, task_id):
+        states = [(attempt, runtime._engine.lookup_owned(attempt)) for attempt in attempts]
+        if any(state not in {'alive', 'absent'} for _, state in states):
+            return
+        live = [attempt for attempt, state in states if state == 'alive']
+        if not live or any(not pending(attempt) for attempt in live):
+            return
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return
+        cancel_event.wait(min(_POLL_SECONDS, remaining))
+
+
 def run(runtime, task_id, session_id, channel, session_ref, content, emit_update,
         cancel_event, language, host_elicitor=None, *, emit_tool_call=None,
         emit_display_update=None, prompt_blocks=None, initial_project_docs_context=None):
@@ -353,6 +423,7 @@ def _run(runtime, task_id, session_id, channel, session_ref, content, emit_updat
     capacity_wait_started = None
     failure_stop_reason = StopReason.END_TURN
     reopened = False
+    runtime_synthesis_emitted = False
     while True:
         if cancel_event.is_set() or _transport_lost(runtime, task_id):
             speculation.close('task_stopped')
@@ -407,6 +478,18 @@ def _run(runtime, task_id, session_id, channel, session_ref, content, emit_updat
             from .pipeline import publish
             publish(runtime._store, channel, context)
             published_states.add(publication_key)
+        if state == 'RECONCILING':
+            _await_synthesis_settlement(runtime, task_id, cancel_event)
+            if cancel_event.is_set() or _transport_lost(runtime, task_id):
+                continue
+            from .synthesis import complete as compose_synthesis
+            def workers_absent(db):
+                return _synthesis_workers_absent(runtime, task_id, cancel_event, db)
+            synthesis = compose_synthesis(machine, task_id, language, workers_absent)
+            if synthesis is not None:
+                emit_update(synthesis)
+                runtime_synthesis_emitted = True
+                continue
         if state in {'PLANNING', 'RECONCILING'}:
             key = (state, context['revision'])
             if prompted.get(key,0)>=3:
@@ -629,12 +712,15 @@ def _run(runtime, task_id, session_id, channel, session_ref, content, emit_updat
                 review_evidence = []
                 if node['stage'] == 'review':
                     from .artifacts import project_git_evidence
+                    from .reviewer_handoff import review_runtime_facts
                     try:
                         machine.start_review(task_id, node['assignment_ref'])
                     except StoreError as error:
                         # Never a crashed turn: ask the user with the reason.
                         machine.move(task_id, 'BLOCKED', blocker=str(error))
                         break
+                    review_evidence.append(review_runtime_facts(
+                        runtime._store, task_id, node['assignment_ref'], runtime._task_workspace_root(task_id)))
                     for kind in ('status', 'diff'):
                         ref = f"review:{node['assignment_ref']}:{kind}"
                         if emit_tool_call:
@@ -655,7 +741,8 @@ def _run(runtime, task_id, session_id, channel, session_ref, content, emit_updat
                 dispatch_assignment(runtime._store, channel, dict(
                     title=node['objective'][:200], brief=brief, role=node['role'],
                     acceptance='Publish a truthful immutable report and structured result. '
-                               + ('Include a review verdict.' if node['stage'] == 'review' else 'Complete the assigned objective.'),
+                               + ('Publish the complete review report inline with result_submit and include a review verdict.'
+                                  if node['stage'] == 'review' else 'Complete the assigned objective.'),
                     request_key=node['request_key']))
             # A step that cannot start is shown, with what holds it, instead
             # of a silent chat; the card closes when the wait ends.
@@ -829,6 +916,16 @@ def _run(runtime, task_id, session_id, channel, session_ref, content, emit_updat
             runtime._set_state(task_id, 'waiting_for_user', wait_reason=question.get('blocker') or 'user_question')
             return failure_stop_reason
         if state in {'COMPLETED', 'FAILED', 'BLOCKED', 'CANCELLED'}:
+            if state == 'COMPLETED' and not runtime_synthesis_emitted:
+                with runtime._store.connection() as db:
+                    composed = db.execute("SELECT payload_json FROM runtime_events WHERE task_id=? "
+                                          "AND type='SYNTHESIS_RUNTIME_COMPOSED' ORDER BY id DESC LIMIT 1",
+                                          (task_id,)).fetchone()
+                recorded = json.loads(composed[0]) if composed else {}
+                if (recorded.get('revision') == context['revision']
+                        and recorded.get('text') == context['synthesis']):
+                    emit_update(context['synthesis'])
+                    runtime_synthesis_emitted = True
             runtime._set_state(task_id, 'accepted' if state == 'COMPLETED' else state.lower(),
                                wait_reason=context['blocker'])
             labels = {'COMPLETED':'Завершено','FAILED':'Ошибка выполнения','BLOCKED':'Выполнение заблокировано','CANCELLED':'Отменено'}

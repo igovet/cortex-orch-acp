@@ -22,6 +22,79 @@ the exact answer receipt, revision zero, no plan, nodes or worker provisioning,
 and no blocker/cancellation. It cannot certify implementation or tests, replace
 an existing plan, or skip required review. It never schedules a reviewer.
 
+## Runtime-composed synthesis
+
+On a fully closed first-review path, `orchestration/synthesis.py` composes the
+final text in RECONCILING without another coordinator model turn. All current
+plan nodes must be completed, independent review must be APPROVE on the current
+digest, and the latest final verification must pass on that digest with exact,
+unique runtime execution bindings and complete retained output. Deferred checks
+must be closed by the existing evidence rules; open not_run, unverified or failed
+checks keep the coordinator path. A no-change review waiver is not eligible.
+
+Pending owner input (including claimed but undelivered input), steering, questions,
+consent, access waits, meaningful runtime proposals or ask_user_required prevents
+composition. Repair paths and any replan in task history also prevent it. The
+stored `review_cycle` counts the initial review as 1: a second review or
+REVIEW_CHANGES_REQUESTED is a repair, not the initial review itself. Verification
+failure/revision, reopened work and returns to the coordinator are conservative
+fallbacks too.
+
+The deterministic text contains baseline-to-approved changed-path metadata,
+check receipts and closure attribution, final verification argv/outcomes, and
+linked, quoted worker/reviewer submitted report summaries. Summaries remain
+authors' claims, never runtime semantic judgements; English/Russian labels follow
+the task chat language, while quotations stay untranslated and escaped as data.
+Missing baseline metadata or text over 48 KiB falls back rather than truncating.
+
+Synthesis, `SYNTHESIS_RUNTIME_COMPOSED` and COMPLETED commit in one transaction,
+under the unchanged report-integrity/project-digest completion gates and confirmed
+absence of worker sessions. Before attempting composition, the controller waits
+up to ten seconds for live workers whose post-result settlement/teardown is
+already owned by the adapter. The wait is outside any SQLite transaction, never
+terminates an engine, and is interrupted by cancellation or transport loss.
+Unknown liveness, enduring live work or deadline expiry retains the normal
+fallback; confirmed absence only permits retrying all existing composition,
+digest, input, review and verification gates. Engines without an owned-settlement
+query do not wait. The live adapter's registry termination bookkeeping
+uses the completion transaction's SQLite connection, never a second writer.
+Liveness and cancellation are checked again after composition and integrity
+checks; a now-live or unknown worker keeps coordinator reconciliation. An engine
+without this transaction-safe liveness gate also retains the coordinator path.
+
+An interrupted pre-commit attempt rolls back. On the next runtime start, a task
+left in RECONCILING after VERIFICATION_PASSED retries these same gates: eligible
+work completes through runtime synthesis, otherwise it is handed to the
+coordinator. Committed synthesis is reused without another completion or synthesis
+event. Display uses
+the existing ACP assistant-message path and retained pipeline, not a new host API.
+Automated tests cover emission and recovery, not rendered Desktop qualification.
+
+For declines covered by its fixed vocabulary, `orchestration/synthesis.py`
+records a durable, metadata-only `SYNTHESIS_RUNTIME_DECLINED` event in the same
+transaction, at most once per plan revision (idempotent across recovery and
+replay; a repeat attempt that finds one already recorded writes nothing more).
+Its payload carries deterministic codes for the covered failing conditions --
+`worker_live`, `replan_history`, `repair_path`, `pending_input`,
+`node_incomplete`, `review_not_approved`, `verification_not_passed` or
+`open_check` (with the node id, check name and current outcome, never check
+content) -- as the first covered `reason` plus a `reasons` list. This is not
+an exhaustive explanation of every fallback. The early liveness short-circuit
+records only `worker_live`, without evaluating other reasons. Missing baseline
+comparison metadata and oversized text have no reason code and can return
+without any decline event; post-composition integrity/liveness failure or
+interruption rolls back without one too. A previously recorded event is not
+updated by later attempts, even if conditions change or composition later succeeds.
+Eligibility itself is unchanged. The event is never written when the
+coordinator has already supplied its own synthesis text, since the gate was then
+never attempted. `scripts/cortex_timeline.py --aggregate` reports, per
+engine/route/effort cohort, the share of reconciled tasks the runtime actually
+composed and a tally of fallback reasons; a completed task with neither a
+`SYNTHESIS_RUNTIME_COMPOSED` nor a `SYNTHESIS_RUNTIME_DECLINED` event (for
+example, an unrecorded current-build fallback above or a build predating this
+event) is tallied as the
+explicit `unrecorded` reason, never guessed.
+
 Additional states are BLOCKED, FAILED, CANCELLED, WAITING_USER and RECOVERING.
 A direct EXECUTING → COMPLETED transition is rejected. Model-facing APIs do not
 accept state transitions or task acceptance decisions.
@@ -52,9 +125,15 @@ failed check fails its node unless an exact later rerun of the same command in
 the same attempt closed it; the failure stays in the result as history with
 `closed_by` (see
 [check history](../orchestration/index.md#check-history-and-current-outcome)). Synthesis is refused while a retained not_run or unverified check
-of the current plan revision is neither passed by a later result under the same
-name nor listed in synthesis not_verified with its blocker. The runtime renders
-that list into the synthesis as "Not verified". Each blocker must name the
+of the current plan revision is neither closed under the
+[exact-command or command-less compatibility rules](../orchestration/index.md#check-history-and-current-outcome)
+nor listed in synthesis not_verified with its blocker. Runtime final verification
+can close a declared-command gap only with identical argv, complete exit-0
+execution and untruncated runtime-owned evidence bound to both the gap author's
+runtime-observed publication or review digest and the current reviewed project
+digest, regardless of execution order. Its durable `closed_by` is rederived during recovery and
+synthesis; it never upgrades the worker's original disclosure to a claimed pass.
+The runtime renders that list into the synthesis as "Not verified". Each blocker must name the
 concrete condition that prevented the check; "not run", "out of scope"
 or "not requested" alone is insufficient. A documented policy requiring an
 explicit owner request can be a concrete blocker when the missing request is

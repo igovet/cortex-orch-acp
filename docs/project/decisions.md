@@ -552,9 +552,10 @@ unchanged. Requested via a delivered user steer.
 ## 2026-09-24 verification gap disclosure
 
 A structured unrun or unverified worker check carries a concrete blocker. At
-synthesis, retained gaps from the current plan revision must either have a
-same-name passing result or appear in the structured not-verified list with a
-blocker. The runtime renders the list into the stored synthesis. This prevents
+synthesis, retained gaps from the current plan revision must either close
+under the [exact-command or command-less compatibility rules](../features/orchestration/index.md#check-history-and-current-outcome)
+or appear in the structured not-verified list with a blocker. The runtime
+renders the list into the stored synthesis. This prevents
 silent omission while leaving the coordinator able to replan verifiable gaps.
 
 ## 2026-09-24 standing live-call approval and isolated Paseo decision
@@ -584,8 +585,13 @@ prompt](../features/unified-system-prompt/index.md), [roles and delegation](../f
 and [observability](../features/observability/index.md).
 
 - Synthesis gaps with an explicit command require a current verified exact-argv
-  `command_run`; same-name fix-lineage closure is reserved for command-less
-  legacy gaps. Broad fallback fix cycles preserve direct plan dependency edges
+  `command_run` or a runtime-owned final-verification command with identical
+  argv, complete exit-0 execution, untruncated output and the current reviewed
+  digest matching the gap author's runtime-observed publication or review binding,
+  regardless of execution order. Only authoritative credit makes a speculative
+  run eligible. Closure references are durable but rederived, not trusted as claims. Same-name fix-lineage closure is reserved
+  for command-less legacy gaps. Broad fallback fix cycles preserve direct plan
+  dependency edges
   while retaining parallelism between independent branches.
 - The skill-catalog frontmatter reader remains a bounded stdlib scalar reader,
   not a general YAML parser or new YAML dependency.

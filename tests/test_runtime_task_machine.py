@@ -316,7 +316,7 @@ def test_retired_model_controls_not_advertised():
 
 
 @pytest.mark.parametrize("scenario", ["success", "advice", "fix", "review_block", "verification_fail", "synthesis_drift", "post_review_drift", "elicitation", "text_question", "worker_question", "replan", "scope", "escalation", "result_recovery", "result_correction", "check_history"])
-def test_composed_runtime_executes_plan_review_verification_synthesis(tmp_path, scenario):
+def test_composed_runtime_executes_plan_review_verification_synthesis(tmp_path, scenario, monkeypatch):
     """A model cannot finish the task; the runtime drives every required stage."""
     import threading
     import uuid
@@ -328,6 +328,9 @@ def test_composed_runtime_executes_plan_review_verification_synthesis(tmp_path, 
 
     store = Store(tmp_path / '.cortex', project_root=tmp_path)
     task = bootstrap_task(store, SourceEvent(origin='test', event_id='runtime'), 'Inspect an empty project', 'owner')
+    if scenario == 'synthesis_drift':
+        # This scenario exercises drift during the model reconciliation path.
+        monkeypatch.setattr('cortex_runtime.orchestration.synthesis.complete', lambda *args: None)
     calls = []
     reviews = []
     questions = []
@@ -524,6 +527,11 @@ def test_composed_runtime_executes_plan_review_verification_synthesis(tmp_path, 
         if scenario=='escalation':
             expected.insert(3,'worker')
             assert any(n['role']=='worker-senior-consultant' for n in context['nodes'])
+        if scenario in {'success', 'elicitation', 'text_question', 'result_recovery'}:
+            expected.pop()  # fully closed first review now uses runtime synthesis
+            with store.connection() as db:
+                assert db.execute("SELECT 1 FROM runtime_events WHERE task_id=? AND type='SYNTHESIS_RUNTIME_COMPOSED'",
+                                  (task.task_id,)).fetchone()
         assert calls == expected
         assert any('COMPLETED' in text for text in output)
     elif scenario in {'synthesis_drift', 'post_review_drift'}:
@@ -641,7 +649,8 @@ def test_worker_finishing_during_a_scheduler_pass_is_not_treated_as_lost(tmp_pat
             "SELECT payload_json FROM runtime_events WHERE task_id=? AND type IN "
             "('RETURNED_TO_COORDINATOR','ASSIGNMENT_RETRIED')", (task.task_id,))]
     assert returned == []
-    assert calls == ['coordinator', 'worker', 'worker', 'coordinator']
+    assert calls == ['coordinator', 'worker', 'worker']
+    assert final['synthesis'].startswith('# Runtime-composed synthesis')
 
 
 def test_question_requires_exact_real_answer_and_retries_share_identity(machine):

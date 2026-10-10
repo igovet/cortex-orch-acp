@@ -269,16 +269,34 @@ final successful attempt.
 
 `portable.engine_contract.UsageBasis` (`OBSERVED`/`ENGINE_REPORTED`/
 `ESTIMATED`/`UNKNOWN`) is the wire vocabulary;
-`engine.session_manager` already translates a `usage_update` wire event
-into `EngineEvent(usage_basis=UsageBasis.ENGINE_REPORTED,
-usage_values={...})` for both pinned adapters. `delegation.live_adapters
-.prompt()` now consumes those events (previously dropped entirely) and,
+`engine.session_manager` translates recognized token fields in a settled
+`session/prompt` response (or a token-bearing `usage_update`) into
+`EngineEvent(usage_basis=UsageBasis.ENGINE_REPORTED, usage_values={...})`.
+Top-level `usage_update.used/size` is context occupancy only. Field values are
+copied unchanged; their scope is the adapter's: Claude reports the whole turn,
+Codex only the turn's last model request (see
+[adapter token semantics](../token-and-plan-usage/index.md#adapter-token-semantics)).
+`delegation.live_adapters.prompt()` consumes token events and,
 when the engine reported nothing during the call, persists
 `basis='unknown'` with empty `tokens_json` — never `0`/free.
 
-The runtime can release a worker after its accepted `result_submit`,
-interrupting the in-flight engine turn before its own per-call usage
-arrives. When teardown raises and the exact attempt already has a
+After an accepted `result_submit`, the runtime gives the exact worker/reviewer
+prompt consumer up to 15 seconds to persist usage on a separate cleanup thread;
+a turn that ends sooner settles at once.
+Dispatch is not synchronously blocked by this banking, but capacity and writer
+locks remain reserved until confirmed exit. Explicit cancellation bypasses the
+grace period; a timeout retains a `usage_settlement` progress diagnostic with
+reason `post_result_prompt_settlement_timeout` and `usage_coverage:
+"unavailable"` (teardown ends the engine before its only token carrier).
+Runtime shutdown interrupts the wait without that diagnostic and waits a
+bounded time for settlement teardown already in progress. The jailed engine's
+authority watchdog does not preempt this: a channel revoked by the attempt's own
+accepted result keeps the engine for at most 20 seconds, so the turn's final
+`PromptResponse.usage` can be recorded as `engine_reported` with stop reason
+`end_turn`; any other revocation still terminates at once.
+See [settlement and historical evidence limits](../token-and-plan-usage/index.md#coverage-and-interrupted-turns).
+Teardown can still interrupt an unfinished turn before its per-call usage arrives.
+When teardown raises and the exact attempt already has a
 `worker_result`, `prompt()` records `failed=False` and
 `stop_reason='released_after_result'`. Without a real figure the basis
 stays `unknown` with empty tokens; an already-observed `engine_reported`
@@ -675,7 +693,13 @@ The output has two parts:
   parameters fingerprint (including effort). Missing route identity is unattributed,
   not pooled. The validity gate requires 10 completed tasks or 30 execution attempts
   and at least 80% exact completed, non-truncated phase chains per cohort.
-- `validity`: token coverage counts calls, not tasks. Unknown-basis plus
+- `token_coverage`: complete retained-call counts and known token-field subtotals
+  by audited engine and role, including coordinator and review. Missing engine
+  or role evidence stays explicitly unattributed. Released calls remain missing
+  for cost coverage even when the UI omits their alarm. Known subtotals never
+  represent full verified-result cost with missing calls. See
+  [interrupted-turn accounting](../token-and-plan-usage/index.md#coverage-and-interrupted-turns).
+- `validity`: execution-worker token coverage counts calls, not tasks. Unknown-basis plus
   released-after-result calls must be at most 20% of that cohort's calls before
   token criteria are usable; missing call coverage withholds token criteria.
 - `branches`: each cohort evaluates only its eligible execution chains. Missing
@@ -692,7 +716,12 @@ The output has two parts:
     reads is at least 25% and the repeated-read share of worker-execution time is at
     least 15%. `cross_task_reuse_considered` is `true` only when a retained per-call
     cross-task repeat ratio is at least 30%, and `null` without usable history.
-    Codex read evidence stays `partial` and is never pooled with Claude's.
+    The read-count population is dependent attempts only; the time denominator
+    is all eligible worker execution. Independent repeats remain descriptive
+    per-attempt observations and cannot satisfy this gate. No dependent reads
+    withholds the branch rather than manufacturing zero. Unknown dependency
+    status also withholds it. Codex read evidence stays `partial` and is never
+    pooled with Claude's.
   - `orchestration_chain`: holds when the orchestration share of critical-path
     wall time is at least 35%, or review plus verification is at least 25%.
   The top-level verdict mirrors a cohort only when there is exactly one cohort and
@@ -836,4 +865,36 @@ Stop the writer before exact analysis: concurrent rotation can change which
 generations a reader sees. Rotation, explicit gaps or missing IDs prevent
 claims of complete retained history. Traces are debugging data, never
 acceptance evidence or substitutes for independent review and verified receipts.
-Production's metadata-only observations and timeline reader are unchanged.
+
+## Runtime-composed-synthesis share and fallback reasons
+
+`scripts/cortex_timeline.py --aggregate` reads, per engine/connection/model/
+parameters-fingerprint cohort, the already-retained
+`SYNTHESIS_RUNTIME_COMPOSED`/`SYNTHESIS_RUNTIME_DECLINED` events (see
+[runtime-composed synthesis](../task-lifecycle/index.md#runtime-composed-synthesis))
+for every task that reached RECONCILING: each cohort's `runtime_synthesis`
+reports `reconciled_tasks`, `composed_tasks`, `pending_tasks`, their `share`, and a
+`fallback_reasons` tally keyed by the decline's first reason code
+(`worker_live`, `replan_history`, `repair_path`, `pending_input`,
+`node_incomplete`, `review_not_approved`, `verification_not_passed`,
+`open_check`), plus the explicit `unrecorded` key for a completed task with
+neither event retained. This includes current-build missing-baseline or
+oversized-text returns and post-composition rollback, not just older builds.
+Decline reasons are not exhaustive: the early live-worker short-circuit records
+only `worker_live`, and an event retained once per revision is not updated by
+later attempts. A temporary condition recorded on an earlier attempt need not
+explain the final fallback; `unrecorded` is absence of retained diagnostics, not
+an inferred cause. An unfinished reconciliation carries
+`reconciled=True`/`composed=None`/`fallback_reason=None`, even if a decline
+was already recorded. It counts only in `reconciled_tasks` and `pending_tasks`,
+never as fallback or `unrecorded`. The share uses all reconciled tasks as its
+denominator but stays `null` while any are pending (or none are reconciled),
+rather than treating missing outcomes as failures or excluding them to inflate
+success. Completed-only cohorts retain their existing share. A task not yet reconciled carries
+`reconciled=False`/`composed=None`/`fallback_reason=None` and is excluded from
+the cohort's counts. Several cohorts withhold a pooled verdict the same way the
+existing branch decisions do; read each cohort's own `runtime_synthesis`. This
+is metadata only (event types and reason codes): never a report body, path
+content or raw log.
+Runtime event production and the reader's guarded read-only snapshot boundary
+are unchanged.
