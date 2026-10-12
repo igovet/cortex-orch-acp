@@ -698,9 +698,9 @@ def test_paseo_access_mode_is_the_session_mode_and_language_stays_an_option(tmp_
     agent.client_info = {"name": "Paseo"}
     result = agent._session_new(dict(cwd=str(project), mcpServers=[]))
     session_id = result["sessionId"]
-    assert result["modes"]["currentModeId"] == "guarded"
-    assert [mode["id"] for mode in result["modes"]["availableModes"]] == ["guarded", "auto"]
-    assert [mode["name"] for mode in result["modes"]["availableModes"]] == ["Guarded mode", "Auto mode"]
+    assert result["modes"]["currentModeId"] == "development"
+    assert [mode["id"] for mode in result["modes"]["availableModes"]] == ["development", "guarded", "auto"]
+    assert [mode["name"] for mode in result["modes"]["availableModes"]] == ["Development mode", "Guarded mode", "Auto mode"]
     # One control only: no duplicate access option for Paseo.
     assert "access_mode" not in {option["id"] for option in result["configOptions"]}
     language = next(option for option in result["configOptions"] if option["id"] == "language")
@@ -713,9 +713,9 @@ def test_paseo_access_mode_is_the_session_mode_and_language_stays_an_option(tmp_
     assert {"sessionUpdate": "current_mode_update", "currentModeId": "auto"} in updates
     assert agent.sessions[session_id]["pending_access_mode"] == "auto"
     # Never persisted as a user default: the language default is untouched
-    # and a new session starts Guarded.
+    # and a new session starts Development, independently of this choice.
     assert "access_mode" not in configuration_store.read_user_defaults(environ)["defaults"]
-    assert agent._session_new(dict(cwd=str(project), mcpServers=[]))["modes"]["currentModeId"] == "guarded"
+    assert agent._session_new(dict(cwd=str(project), mcpServers=[]))["modes"]["currentModeId"] == "development"
 
     agent._session_set_mode(42, dict(sessionId=session_id, modeId="ru"))
     response = next(item for item in transport.responses if item.get("id") == 42)

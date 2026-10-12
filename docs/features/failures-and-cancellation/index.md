@@ -133,6 +133,49 @@ Reservations release only on observed process absence. Unknown engine liveness
 remains a blocker; a terminal event alone never proves process exit. Terminal card
 updates are retained and replayed if the client disconnected before seeing them.
 
+## Terminal resource cleanup
+
+`OrchestratingRuntime.start_prompt` and explicit `answer_question` turns check
+durable terminal state in their exit paths and invoke task-owned teardown for
+COMPLETED, FAILED and CANCELLED.
+It does not call the task cancellation transition for successful or failed work.
+Unexpected prompt exceptions run the same resource cleanup and propagate the
+original failure; the persisted task remains available to fenced recovery.
+Ordinary waiting, paused/recoverable or steering prompt returns are not terminal.
+
+Cleanup first revokes channels of exactly its owned coordinator/worker attempts,
+including queued and partial opens, then stops their engines. Revoked coordinators
+cannot mint new worker channels while provisioning unwinds. Cached worker sessions
+are matched to exact attempts, not a replacement's updated assignment row. Cleanup
+drops stale coordinator/requester caches and records scope release only on observed
+absence. Shutdown runs outside SQLite transactions and the general runtime lock;
+a per-task resource lock serializes cleanup with replacement-turn admission.
+Explicit-answer continuations adopt their current session before opening an engine;
+answers that only wake an already-active worker do not take over that turn.
+Old-connection EOF and stale turn generations cannot clean up replacement resources.
+Repeated stop on a terminal task retries teardown without changing
+its outcome. Unconfirmed cleanup retains reservations/quarantine and a
+metadata-only `resource_cleanup` progress diagnostic; it is not successful exit
+evidence.
+
+`EngineProcess` retains the launched Linux session/group identity, waits for
+active group members as well as its reaped leader, and escalates TERM to KILL
+even when the leader exited first. Unreadable identity remains unknown and is not
+signalled. The runtime cannot reap grandchildren whose OS parent is elsewhere;
+zombies are inactive, and descendants that leave the owned group are outside this
+observation. Brokers and terminal-bridge children keep their separate owned
+shutdown paths. Partial-launch writer locks release only after confirmed exit.
+
+Unexpected ACP prompt errors include exception class and source basename/line
+in the error message as well as its data, since a host may discard data.
+Exception messages, credentials and raw logs are excluded. This identifies the
+observed failure, not the historical cause of a generic error.
+
+The incoming ACP process is connection-owned and may serve multiple sessions.
+It shuts down on host EOF/writer-close/SIGTERM; a prompt return alone does not
+authorize exiting the host connection. Local fake-process tests qualify teardown
+and writer reuse, not paid engine or rendered client behavior.
+
 ## 4. Disconnect
 
 The transport's reader EOF event signals that input ended, not that its

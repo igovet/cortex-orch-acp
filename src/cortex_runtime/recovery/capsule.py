@@ -575,7 +575,7 @@ _ENVIRONMENT_BACKGROUND = (
 )
 
 
-def _worker_environment(role_id: str | None, stage: str | None, offered: list[str] | None) -> str:
+def _worker_environment(role_id: str | None, stage: str | None, offered: list[str] | None, *, development=False) -> str:
     if role_id is None or offered is None:
         return (
             "The runtime could not resolve this assignment's role, stage or offered tools, so this capsule "
@@ -599,14 +599,21 @@ def _worker_environment(role_id: str | None, stage: str | None, offered: list[st
             + "Never reach a refused action another way: say exactly what you need through ask_question, or "
             "report it as a blocker."
         )
+    outside = (
+        "In Development, ordinary brokered commands can use authorized host resources without a routine card. "
+        "Direct file writes outside the project and exceptional commands retain their consent routes. "
+        "Host capability is not permission for deletion, production/shared mutations, publication, credentials or paid checks; "
+        "Docker and arbitrary code can bypass filesystem masks. "
+        if development else
+        "Anything outside the project needs an explicit permission request the user accepts: "
+        "outside_write for a file, outside_command for a command that changes things outside. "
+    )
     return (
         _ENVIRONMENT_RUNS_AS_USER
         + "Your declared scope is the work area agreed with the other workers for coordination: make your "
         "changes there. The runtime does not wall off the rest of the project (only paths the user protected "
         "are refused), so before changing a project path outside your declared scope, ask for it with "
-        "access_request. Anything outside the project needs an explicit permission request the user accepts: "
-        "outside_write for a file, outside_command for a command that changes things outside; a refusal is "
-        "final. Deleting a project file asks the user too. "
+        "access_request. " + outside + "A refusal is final. Deleting a project file asks the user too. "
         + _ENVIRONMENT_BACKGROUND
         + "Never reach a refused action another way: say exactly what you need through access_request or "
         "ask_question, or report it as a blocker."
@@ -624,8 +631,10 @@ def _section_pipeline_and_assignments(db, task_id: str, recipient: dict) -> dict
         # differs by engine), so the capsule states nothing about them.
         if recipient['role'] != 'coordinator':
             role_id, stage = _assignment_profile(db, task_id, recipient['attempt_id'])
+            from ..orchestration.gateway import _command_policy
             section['runtime']['environment'] = _worker_environment(
-                role_id, stage, _offered_tool_names('worker', role_id, stage))
+                role_id, stage, _offered_tool_names('worker', role_id, stage),
+                development=_command_policy(db, task_id)['mode'] == 'development')
         sql = 'SELECT task_id,node_id,role,stage,objective,dependencies_json,scope_json,status,assignment_ref FROM runtime_nodes WHERE task_id=? AND revision=?'
         values = [task_id,task['revision']]
         if recipient['role'] != 'coordinator':

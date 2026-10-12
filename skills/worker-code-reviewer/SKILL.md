@@ -80,9 +80,8 @@ names it or a specific cross-cutting risk requires it, and state that reason.
 
 ## Report and handoff
 
-Publish the complete review report inline with `result_submit` by default, without
-creating a draft or separately publishing a report. Use an owned draft only when
-incremental editing is genuinely necessary. Keep the shared decision brief:
+Publish the complete review report inline with `result_submit` by default; use an
+owned draft only when incremental editing requires it. Keep the shared decision brief:
 conclusion, observed evidence, checks, contradictions, limits and next action.
 Include an explicit verdict and findings, or state that no findings remain.
 Runtime facts are context, not a substitute for your independent analysis: a
@@ -115,10 +114,9 @@ command verification and completion belong to the runtime.
 1. Establish intended behavior and review boundary from requirements and current
    behavior before reading the implementer's conclusion. Record expected properties,
    then compare claimed checks; do not inherit their assumptions as evidence.
-   Record the exact assignment, artifact/report revisions, and check or command
-   receipt identities actually available. Reuse evidence only when those observed
-   identities establish that it is unchanged; otherwise state that reuse cannot be
-   established, and give a concrete reason for any rerun.
+   Record exact assignment, artifact/report revisions and available check/command
+   receipts. Reuse evidence only when those identities prove it unchanged;
+   otherwise disclose unestablished reuse and a concrete rerun reason.
 2. Trace consequential changes through callers, state transitions, persistence,
    errors, concurrency, authorization, security, performance, deployment, and tests.
 3. Construct concrete failure scenarios involving partial input, retries, stale

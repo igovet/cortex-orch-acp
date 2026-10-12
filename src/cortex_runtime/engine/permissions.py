@@ -12,6 +12,7 @@ Deletion is recognized lexically from what the engine declares: ACP's
 hides an ``rm`` invocation from that text is outside this fence.
 """
 import re
+import shlex
 import threading
 
 CANCELLED_OUTCOME = {'outcome': {'outcome': 'cancelled'}}
@@ -32,7 +33,7 @@ _DELETION_COMMAND = re.compile(
     r"(?:\S*/)?rm\b",
 )
 _SHELL_SCRIPT_ARGUMENT = re.compile(
-    r"\b(?:sh|bash)\s+-c\s+(?:'([^']*)'|\"([^\"]*)\"|([^\s;&|]+))"
+    r"\b(?:sh|bash)\s+-[A-Za-z]*c[A-Za-z]*\s+(?:'([^']*)'|\"([^\"]*)\"|([^\s;&|]+))"
 )
 _FIND_EXEC_RM = re.compile(r"\bfind\b[^;&|]*\s-exec(?:dir)?\s+(?:\S*/)?rm\b")
 #: A deletion waits for a person, not a host round trip.
@@ -54,6 +55,142 @@ def _command_text(tool_call: dict) -> str:
     elif isinstance(raw, str):
         parts.append(raw)
     return "\n".join(parts)
+
+
+def _wrapped_command(argv, executable):
+    """Skip wrapper options and known option values without flattening argv."""
+    value_options = {
+        'env': {'-u', '--unset', '-C', '--chdir', '-a', '--argv0'},
+        'sudo': {'-u', '--user', '-g', '--group', '-h', '--host', '-p', '--prompt',
+                 '-C', '--close-from', '-T', '--command-timeout', '-R', '--chroot',
+                 '-D', '--chdir', '-r', '--role', '-t', '--type'},
+        'xargs': {'-a', '--arg-file', '-d', '--delimiter', '-E', '-I', '-L',
+                  '-n', '--max-args', '-P', '--max-procs', '-s', '--max-chars',
+                  '--process-slot-var'},
+        'exec': {'-a'},
+    }
+    at = 1
+    while at < len(argv):
+        arg = argv[at]
+        if arg == '--':
+            at += 1
+            break
+        if arg in value_options[executable]:
+            at += 2
+        elif arg.startswith('-'):
+            at += 1
+        else:
+            break
+    if executable in {'env', 'sudo'}:
+        while at < len(argv) and re.match(r'^[A-Za-z_][A-Za-z0-9_]*=', argv[at]):
+            at += 1
+    return argv[at:]
+
+
+def _shell_script(argv, executable):
+    """Locate -c text without mistaking option operands or script argv for it."""
+    value_options = {'-o', '+o'}
+    if executable == 'bash':
+        value_options |= {'-O', '+O', '--rcfile', '--init-file'}
+    at = 1
+    while at < len(argv):
+        arg = argv[at]
+        if arg == '--' or not arg.startswith(('-', '+')) or arg in {'-', '+'}:
+            break
+        short_value_option = (re.fullmatch(r'[-+][A-Za-z]*[oO]', arg)
+                              and arg[0] + arg[-1] in value_options)
+        if arg in value_options or short_value_option:
+            at += 2
+            continue
+        if re.fullmatch(r'-[A-Za-z]*c[A-Za-z]*', arg):
+            return argv[at + 1] if at + 1 < len(argv) else None
+        at += 1
+    return None
+
+
+def _shell_command_argv(command):
+    """Strip only raw shell prefixes, before quote removal can disguise literals."""
+    at = 0
+    assignments = False
+    while at < len(command):
+        while at < len(command) and command[at].isspace():
+            at += 1
+        # One lexical word: quoted whitespace and escaped characters stay inside it.
+        word = re.match(r"""(?:[^\s'"\\]+|\\[\s\S]|'[^']*'|"(?:[^"\\]|\\[\s\S])*")+""",
+                        command[at:])
+        if word is None:
+            break
+        raw = word.group()
+        if re.match(r'^[A-Za-z_][A-Za-z0-9_]*=', raw):
+            assignments = True
+        elif not assignments and raw in {'if', 'then', 'elif', 'else', 'while',
+                                         'until', 'do', '!', '{', '}'}:
+            pass
+        else:
+            break
+        at += word.end()
+    return shlex.split(command[at:], comments=True)
+
+
+def _shell_command_deletion(script):
+    """Inspect lexical command positions, preserving quotes and escaped separators."""
+    if is_deletion({"toolCall": {"rawInput": {"command": script.lstrip()}}}):
+        return True
+    start = 0
+    quote = None
+    escaped = comment = False
+    commands = []
+    for at, char in enumerate(script):
+        if comment:
+            if char != '\n':
+                continue
+            comment = False
+        if escaped:
+            escaped = False
+        elif char == '\\' and quote != "'":
+            escaped = True
+        elif quote:
+            if char == quote:
+                quote = None
+        elif char in {"'", '"'}:
+            quote = char
+        elif char == '#' and (at == start or script[at - 1].isspace()):
+            comment = True
+        elif char in ';&|\n()':
+            commands.append(script[start:at])
+            start = at + 1
+    commands.append(script[start:])
+    for command in commands:
+        try:
+            words = _shell_command_argv(command)
+        except ValueError:
+            # Malformed declarations were already checked by the legacy matcher.
+            continue
+        if declared_command_deletion(words):
+            return True
+    return False
+
+
+def declared_command_deletion(argv) -> bool:
+    """Lexical declaration only: neither interpreters nor daemons are a firewall."""
+    # Only executable positions and explicit shell scripts carry command syntax.
+    while argv:
+        executable = argv[0].rsplit('/', 1)[-1]
+        if executable == 'rm':
+            return True
+        if executable in {'env', 'sudo', 'xargs', 'exec'}:
+            argv = _wrapped_command(argv, executable)
+            continue
+        if executable in {'sh', 'bash', 'dash', 'zsh'}:
+            script = _shell_script(argv, executable)
+            return script is not None and _shell_command_deletion(script)
+        if executable == 'find':
+            return any(
+                declared_command_deletion(argv[at + 1:])
+                for at, arg in enumerate(argv) if arg in {'-exec', '-execdir'}
+            )
+        return False
+    return False
 
 
 def is_deletion(params) -> bool:

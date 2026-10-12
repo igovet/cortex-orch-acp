@@ -59,6 +59,11 @@ def observation(db, task_id, command_ref):
 def _usable(db, task_id, check):
     if not check or check.get('complete') is not True or type(check.get('exit_code')) is not int:
         return False
+    from .. import task_workspace
+    if check.get('profile', 'restricted') != 'restricted':
+        return False
+    if check.get('cwd') not in (None, task_workspace.task_root(db, task_id)):
+        return False
     run_id = check.get('run_id')
     invalid = db.execute(
         "SELECT 1 FROM runtime_events WHERE task_id=? AND "
@@ -75,7 +80,7 @@ def _usable(db, task_id, check):
     if len(starts) != 1 or starts[0]['id'] != check.get('started_event_id'):
         return False
     start = json.loads(starts[0]['payload_json'])
-    if any(start.get(k) != check.get(k) for k in ('argv', 'revision_digest', 'command_ref')):
+    if any(start.get(k) != check.get(k) for k in ('argv', 'revision_digest', 'command_ref', 'cwd', 'profile')):
         return False
     saved = db.execute(
         "SELECT * FROM large_outputs WHERE id=? AND task_id=?",
@@ -90,6 +95,11 @@ def _usable(db, task_id, check):
 
 def validate_reuse(db, task_id, attempt_id, receipt):
     """Verify runtime provenance without accepting an executor's assertion."""
+    if receipt.get('profile', 'restricted') != 'restricted':
+        return False
+    from .. import task_workspace
+    if receipt.get('cwd') not in (None, task_workspace.task_root(db, task_id)):
+        return False
     origin = receipt.get('runtime_verification')
     if not isinstance(origin, dict):
         return False
@@ -115,6 +125,9 @@ def validate_reuse(db, task_id, attempt_id, receipt):
 
 def reuse(store, channel, root, args, ref, owner):
     from .gateway import _authority
+    from pathlib import Path
+    if args.get('cwd') is not None and args['cwd'] != str(Path(root).resolve()):
+        return None
     deadline = time.monotonic() + min(WAIT_SECONDS, args.get('timeout_seconds', WAIT_SECONDS))
     with store.connection() as db:
         review = _review(db, channel.task_id, channel.attempt_id)
@@ -194,7 +207,8 @@ def reuse(store, channel, root, args, ref, owner):
             "FROM large_outputs WHERE id=? AND task_id=?",
             (output_id, owner, ref, store._now(), check['large_output_id'], channel.task_id))
         db.commit()
-    return dict(tool_call_ref=ref, argv=check['argv'], exit_code=check['exit_code'], complete=True,
+    return dict(tool_call_ref=ref, argv=check['argv'], cwd=str(Path(root).resolve()), profile='restricted',
+                exit_code=check['exit_code'], complete=True,
                 failure=None, revision_digest=check['revision_digest'], large_output_id=output_id,
                 output='', output_truncated=False, output_inline_omitted=True,
                 runtime_verification=dict(source='runtime', command_ref=check['command_ref'],

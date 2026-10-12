@@ -332,8 +332,12 @@ def _gateway_assessment(db, task_id: str, attempt_id: str, ref: str, outcome: st
         return _gap("call_incomplete" if pending else "receipt_missing", operation=operation)
     saved, receipt = receipts[0]
     exit_code = receipt.get("exit_code")
+    identity_receipt = receipt
+    if operation == "command_run" and "cwd" not in receipt:
+        from .. import task_workspace
+        identity_receipt = dict(receipt, cwd=task_workspace.task_root(db, task_id), profile="restricted")
     detail = dict(operation=operation, exit_code=exit_code if type(exit_code) is int else None,
-                  order=order, identity=command_identity(operation, receipt))
+                  order=order, identity=command_identity(operation, identity_receipt))
     if (saved.get("complete") is not True or receipt.get("complete") is not True
             or receipt.get("failure") is not None or type(exit_code) is not int):
         return _gap("call_incomplete", **detail)
@@ -370,16 +374,16 @@ def _gateway_assessment(db, task_id: str, attempt_id: str, ref: str, outcome: st
 
 def command_identity(operation, receipt) -> tuple | None:
     """The identity of one command run: its operation, exact argv and
-    working directory. ``command_run`` always runs in the task's working
-    tree, so its scope is fixed for an attempt; an ``outside_command`` names
-    its own ``cwd`` in the receipt. ``None`` when the receipt does not record
+    working directory and effective command profile. Legacy ``command_run``
+    receipts without cwd are mapped to the task root by gateway assessment;
+    they can never close an outside-cwd or Development run. ``None`` when the receipt does not record
     the argv or (for ``outside_command``) the cwd: such a run cannot be
     matched to any other."""
     argv = receipt.get("argv") if isinstance(receipt, dict) else None
     if not isinstance(argv, list) or not argv or not all(isinstance(word, str) for word in argv):
         return None
     if operation == "command_run":
-        return (operation, tuple(argv), None)
+        return (operation, tuple(argv), receipt.get("cwd"), receipt.get("profile", "restricted"))
     cwd = receipt.get("cwd")
     if operation == "outside_command" and isinstance(cwd, str) and cwd:
         return (operation, tuple(argv), cwd)

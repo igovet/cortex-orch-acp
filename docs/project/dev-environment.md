@@ -31,6 +31,13 @@ Until plugin-reload recovery is qualified for the deployed version, apply plugin
 
 Historical 0.9.2 observation only: a plugin reload with an active worker closed the provider connection, the shim forwarded SIGTERM, Cortex recorded `host_disconnected` with `trigger: sigterm`, and Paseo did not reload the session until the next prompt. This recovery behavior has not been requalified for 0.10.0; do not reproduce it against active work without a separately authorized, isolated check. Start the daemon and the `gui` helper outside the Cortex command sandbox (a Cortex worker uses `outside_command`). A daemon started through `command_run` keeps that command's mount namespace and `TMPDIR`; Cortex deletes the command's scratch, including the directory mounted over `/var/tmp`, when the command ends, so every engine jail the daemon later launches fails in bubblewrap (`Can't bind mount ... on /newroot/var/tmp: ... No such file or directory` in the engine's `stderr.log`) and each agent reports `engine_launch` (live, 2026-10-06). The guarded wrapper therefore refuses `start`, `onboard`, `daemon start`, `daemon run` and `gui` when `/var/tmp` is a Cortex sandbox scratch mount; stop such a daemon and start it again from `outside_command`. The `gui` helper blocks until Electron exits, so run it detached; SIGTERM to the helper stops its Electron and Xvfb.
 
+Development command mounts use the real host `/var/tmp`, unlike restricted
+commands and engine jails, which retain their per-run scratch view. Do not infer
+that this alone qualifies a long-lived daemon launch or grants paid/live authority:
+use the guarded dev wrapper and the explicit owner-selected mode below. Switching
+access modes or stopping a CLI does not clean up a daemon, Docker resources or
+detached children. See [command profiles](../features/permissions-and-containment/index.md#access-mode-development-guarded-and-auto).
+
 ## Paid live testing only on request
 
 Default verification is no-paid. The 2026-09-24 standing approval was revoked

@@ -5,6 +5,7 @@ Not installed-daemon/native/paid evidence. No enforcement reader is mocked.
 import fcntl
 import json
 import os
+import re
 from pathlib import Path
 import select
 import socket
@@ -75,7 +76,38 @@ def test_discovery_refusals_non_mutating(bound, tmp_path, change):
 
 def line(process):
     assert select.select([process.stdout], [], [], 10)[0], 'fixture did not become ready'
-    return json.loads(process.stdout.readline())
+    raw = process.stdout.readline()
+    if not raw:
+        exit_code = process.wait(timeout=10)
+        # Only a bounded error identifier, never Node paths, logs or message bodies.
+        diagnostic = process.stderr.read(8192)
+        code = re.search(r'\b(ERR_[A-Z_]+)\b', diagnostic)
+        allowed = {'ERR_MODULE_NOT_FOUND', 'ERR_UNKNOWN_FILE_EXTENSION', 'ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING'}
+        reason = code.group(1) if code and code.group(1) in allowed else 'no_protocol_output'
+        raise AssertionError(f'fixture exited before protocol output: exit={exit_code}; reason={reason}')
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        raise AssertionError('fixture emitted invalid protocol JSON') from None
+
+
+@pytest.mark.parametrize('output,diagnostic,reason', [
+    ('', "Error [ERR_MODULE_NOT_FOUND]: private path and token", 'ERR_MODULE_NOT_FOUND'),
+    ('', 'private path and token', 'no_protocol_output'),
+    ('', 'Error [ERR_PRIVATE_TOKEN]: private path and token', 'no_protocol_output'),
+    ('not-json', '', 'invalid protocol JSON'),
+])
+def test_wire_protocol_startup_failure_is_sanitized(output, diagnostic, reason):
+    with subprocess.Popen([sys.executable, '-B', '-c',
+                           'import sys; print(sys.argv[1]) if sys.argv[1] else None; '
+                           'print(sys.argv[2], file=sys.stderr); sys.exit(1)',
+                           output, diagnostic], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                          text=True) as process:
+        with pytest.raises(AssertionError, match=reason) as error:
+            line(process)
+        process.communicate(timeout=10)
+        assert process.returncode == 1
+        assert 'private' not in str(error.value) and 'token' not in str(error.value)
 
 
 @pytest.fixture

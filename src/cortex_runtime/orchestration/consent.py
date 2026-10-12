@@ -81,6 +81,7 @@ _TITLES = {
     'outside_write': {'en': 'Confirm: write {subject}', 'ru': 'Confirm: запись {subject}'},
     'outside_command': {'en': 'Confirm: {subject}', 'ru': 'Confirm: {subject}'},
     'project_delete': {'en': 'Confirm: delete {subject}', 'ru': 'Confirm: удаление {subject}'},
+    'command_delete': {'en': 'Confirm: deletion command {subject}', 'ru': 'Confirm: команда удаления {subject}'},
     'project_skill_link': {'en': 'Confirm: replace skill link {subject}', 'ru': 'Confirm: замена ссылки на скилл {subject}'},
 }
 
@@ -98,7 +99,7 @@ def _ask(runtime, task_id, row, language) -> None:
         return
     template = _TITLES.get(row['kind'], {}).get(language) or _TITLES.get(row['kind'], {}).get('en') or '{subject}'
     params = dict(
-        toolCall=dict(toolCallId=f"cortex-consent:{row['id']}", kind='delete' if row['kind'] == 'project_delete' else 'other',
+        toolCall=dict(toolCallId=f"cortex-consent:{row['id']}", kind='delete' if row['kind'] in {'project_delete','command_delete'} else 'other',
                       title=template.format(subject=row['subject'][:600]),
                       rawInput=dict(kind=row['kind'], subject=row['subject'])),
         options=[dict(optionId='allow', name='Allow' if language != 'ru' else 'Разрешить', kind='allow_once'),
@@ -114,6 +115,6 @@ def _ask(runtime, task_id, row, language) -> None:
 
 
 def subject_of(kind: str, args: dict) -> str:
-    if kind == 'outside_command':
+    if kind in {'outside_command','command_delete'}:
         return ' '.join(json.dumps(a) if ' ' in a else a for a in args['argv']) + (f"  (cwd {args['cwd']})" if args.get('cwd') else '')
     return args['path']

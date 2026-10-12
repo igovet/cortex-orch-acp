@@ -9,6 +9,14 @@ Source map (the paths below exist in the checkout; the descriptions were taken f
 - `src/cortex_runtime/engine/`: outgoing engine adapters for Codex, Claude and the optional OpenCode v2 engine.
 - `src/cortex_runtime/contracts.py` and `src/cortex_runtime/orchestration/contracts.py`: tool contracts.
 
+Fresh ACP sessions durably initialize Development in the project store. The
+host-side MCP broker supplies host-writable command mounts only for authorized
+writing workers, with retained cwd/profile/policy receipts; engine processes,
+read-only roles and automatic verification keep their existing jails. This is a
+trusted-local-development boundary, not adversarial containment from Docker or
+arbitrary owner code. Legacy/missing/unreadable state stays Guarded; explicit
+client choices are preserved. See [access modes](../features/permissions-and-containment/index.md#access-mode-development-guarded-and-auto).
+
 Feature behavior is described in the [feature index](../features/index.md); project-wide rules are in [conventions](conventions.md), [storage](storage.md), [security](security.md) and [verification](verification.md).
 
 The no-paid startup smoke in `scripts/cortex_acp_smoke.py` launches the production entry point in an isolated temporary project and host configuration. It checks ACP framing and schema without an engine call. Its optional `--fixture-connection` mode installs one isolated fake connection and an explicit version-2 routing entry for a placeholder identity; it does not exercise a paid engine or real configuration. The Zed setup helper in `scripts/cortex_acp_client_config.py` defaults to a dry run and requires explicit consent for a write.

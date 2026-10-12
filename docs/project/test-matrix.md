@@ -20,6 +20,23 @@ and `tests/test_no_hardcoded_model_names.py` (current template-derived prompt/sc
 
 Positive mode/permission/session/fallback fixtures must write the minimum exact version-2 owner policy into disposable project or HOME/XDG roots. `tests/model_policy_fixtures.py` supplies opt-in helpers; no global autouse production template or unknown-model enablement is permitted. Keep missing/malformed/denied policy cases separate. `tests/test_delegation_mcp_tools.py`, `tests/test_stdio.py` and `tests/test_delegation_worker_mode_floor.py` cover actionable route-menu diagnostics and refusal before capacity/engine launch.
 
+## Local plugin prerequisites
+
+Before the default suite or `tests/test_qualification_binding.py` and
+`tests/test_cortex_test_isolated.py`, run sequentially:
+
+```
+npm --prefix integrations/paseo ci
+npm --prefix integrations/paseo run typecheck
+```
+
+The local fake endpoint needs the locked `ws` and `@getpaseo/protocol/messages`
+imports. Plugin test scripts require Node support for `--experimental-strip-types`.
+Missing startup output is a failure, never a successful binding or a skip.
+Ordinary and isolated Python startup forms both exercise the complete no-paid
+binding matrix with fresh scratch outside every repository; see
+[verification sequencing](verification.md#sequencing).
+
 ## The non-paid default command
 
 ```

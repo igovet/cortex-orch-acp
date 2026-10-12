@@ -99,6 +99,13 @@ Additional states are BLOCKED, FAILED, CANCELLED, WAITING_USER and RECOVERING.
 A direct EXECUTING → COMPLETED transition is rejected. Model-facing APIs do not
 accept state transitions or task acceptance decisions.
 
+After a terminal runtime decision, `OrchestratingRuntime.start_prompt` tears down
+task-owned engines without changing that decision. Cleanup is outside completion
+transactions; reservations still require observed absence. A waiting turn is not
+terminal, and an unexpected prompt exception stops owned work without inventing
+COMPLETED/FAILED/CANCELLED. See
+[terminal cleanup](../failures-and-cancellation/index.md#terminal-resource-cleanup).
+
 An explicit owner force-finish is **not** verified completion. `/cortex-finish`
 or an unambiguous answer to a task-closure question stops task-owned work and
 leaves the task terminal `CANCELLED`, with a `USER_FORCE_FINISHED` event recording
@@ -127,7 +134,10 @@ the same attempt closed it; the failure stays in the result as history with
 [check history](../orchestration/index.md#check-history-and-current-outcome)). Synthesis is refused while a retained not_run or unverified check
 of the current plan revision is neither closed under the
 [exact-command or command-less compatibility rules](../orchestration/index.md#check-history-and-current-outcome)
-nor listed in synthesis not_verified with its blocker. Runtime final verification
+nor listed in synthesis not_verified with its blocker. A worker command receipt
+closes a declared-command gap only with identical argv, the task working tree as
+its effective cwd and the restricted profile; Development cannot substitute.
+Runtime final verification
 can close a declared-command gap only with identical argv, complete exit-0
 execution and untruncated runtime-owned evidence bound to both the gap author's
 runtime-observed publication or review digest and the current reviewed project

@@ -251,7 +251,7 @@ def readonly_test_cache(command, scratch, environ):
     command[at:at] = ['--setenv', 'PYTEST_ADDOPTS', options.strip()]
 
 
-def as_owner(command, environ):
+def as_owner(command, environ, *, writable_home=False):
     """Run a sandbox command as the owner would in their terminal, in place.
 
     Their name and groups resolve, HOME is their real one (read-only, mounted
@@ -264,7 +264,7 @@ def as_owner(command, environ):
     mounts = [arg for name in ('/etc/passwd', '/etc/group') if Path(name).is_file()
               for arg in ('--ro-bind', name, name)]
     has_home = home.startswith('/') and Path(home).is_dir()
-    if has_home:
+    if has_home and not writable_home:
         mounts += ['--ro-bind', home, home]
         mounts += [arg for path in tool_state_dirs(home) for arg in ('--bind', path, path)]
     # After the scratch /tmp mount (a HOME under /tmp must stay read-only),
@@ -360,7 +360,7 @@ def git_metadata_mounts(root: Path):
     return writable, readonly, watched
 
 
-def _configured_hooks_dir(root: Path) -> Path | None:
+def _configured_hooks_dir(root: Path, *, include_external=False) -> Path | None:
     """``core.hooksPath`` when it names an existing directory inside the
     project (otherwise it is already read-only, or absent)."""
     import subprocess
@@ -376,7 +376,7 @@ def _configured_hooks_dir(root: Path) -> Path | None:
         return None
     path = Path(os.path.expanduser(value))
     path = Path(os.path.normpath(path if path.is_absolute() else root / path))
-    if path == root or root not in path.parents or not path.is_dir():
+    if path == root or (not include_external and root not in path.parents) or not path.is_dir():
         return None
     return path
 
@@ -649,6 +649,98 @@ def gateway_command(root, scratch, argv, scopes, reveal=frozenset(), system_root
         guard.close()
         if git_guard is not None:
             git_guard.extend(guard.removed)
+
+
+def protected_host_paths(root, environ):
+    """Known control-plane locations; not a hostile-code isolation guarantee."""
+    root = Path(root).resolve(strict=True)
+    home = Path(environ.get('HOME') or str(Path.home()))
+    config = Path(environ.get('XDG_CONFIG_HOME') or home / '.config')
+    state = Path(environ.get('XDG_STATE_HOME') or home / '.local/state')
+    data = Path(environ.get('XDG_DATA_HOME') or home / '.local/share')
+    paths = {config / 'cortex', state / 'cortex', home / '.paseo', config / 'Paseo',
+             home / '.codex', home / '.claude', config / 'opencode', data / 'opencode',
+             home / '.gitconfig', home / '.git-credentials'}
+    for key in ('CODEX_HOME', 'CLAUDE_CONFIG_DIR'):
+        if environ.get(key):
+            path = Path(environ[key])
+            if not path.is_absolute() or not path.exists():
+                raise StoreError('command_protection_unavailable')
+            paths.add(path)
+    installed = Path(__file__).resolve().parents[3]
+    if installed != root and root not in installed.parents:
+        paths.add(installed)
+    from ..project_storage import logical_project_root
+    paths.add(Path(logical_project_root(str(root))) / '.cortex')
+    hooks = _configured_hooks_dir(root, include_external=True)
+    if hooks is not None:
+        paths.add(hooks)
+    resolved = set()
+    for path in paths:
+        if not path.exists() and not path.is_symlink():
+            continue
+        try:
+            real = path.resolve(strict=True)
+        except (OSError, RuntimeError) as error:
+            raise StoreError('command_protection_unavailable') from error
+        if real == root:
+            raise StoreError('command_protection_overlaps_workspace')
+        resolved.add(real)
+    return sorted(resolved)
+
+
+@contextmanager
+def development_command(root, scratch, argv, scopes, *, environ, readonly=(), git_guard=None):
+    """Host-writable brokered commands; engine/verification jails are unchanged.
+
+    Docker, outside aliases and same-user programs can bypass direct masks.
+    """
+    if '.' not in scopes:
+        raise StoreError('gateway_scope_denied')
+    with gateway_command(root, scratch, argv, scopes, system_root=True, readonly=readonly,
+                         reveal=frozenset({'.git'}), git_writable=True, git_guard=git_guard) as (command, fds):
+        at = command.index('--ro-bind')
+        if command[at:at+3] != ['--ro-bind', '/', '/']:
+            raise StoreError('command_protection_unavailable')
+        command[at] = '--bind'
+        at = command.index('/var/tmp')
+        del command[at-2:at+1]
+        as_owner(command, environ, writable_home=True)
+        overlays = []
+        for path in protected_host_paths(root, environ):
+            overlays += (['--tmpfs', str(path), '--remount-ro', str(path)]
+                         if path.name == '.cortex' and path.is_dir()
+                         else ['--ro-bind', str(path), str(path)])
+        # Parent protection precedes task grants, so a host-created worktree
+        # beneath a protected installation remains its own writable task tree.
+        at = command.index('--ro-bind', _dev_index(command) + 1)
+        command[at:at] = overlays
+        overlays = []
+        for path in protected_host_paths(root, environ):
+            if Path(root).resolve() in path.parents:
+                overlays += (['--tmpfs', str(path), '--remount-ro', str(path)]
+                             if path.name == '.cortex' and path.is_dir()
+                             else ['--ro-bind', str(path), str(path)])
+        from .gateway import PRIVATE
+        for current, dirs, files in os.walk(root, followlinks=False):
+            for name in list(dirs) + files:
+                path = Path(current) / name
+                if name in PRIVATE:
+                    if name in dirs:
+                        dirs.remove(name)
+                    if path.is_symlink():
+                        try:
+                            target = path.resolve(strict=True)
+                        except (OSError, RuntimeError) as error:
+                            raise StoreError('command_protection_unavailable') from error
+                        if target == Path(root).resolve():
+                            raise StoreError('command_protection_overlaps_workspace')
+                        overlays += (['--tmpfs', str(target), '--remount-ro', str(target)]
+                                     if target.is_dir() and name != '.git'
+                                     else ['--ro-bind', str(target), str(target)])
+        at = command.index('--chdir')
+        command[at:at] = overlays
+        yield command, fds
 
 
 # What an engine state directory holds that configures later sessions, the

@@ -431,6 +431,8 @@ class ProvisioningService:
                         remediation="This channel's ownership epoch no longer matches the task's current owner; re-issue a channel under the current epoch before delegating.",
                         retry_eligible=False,
                     )
+                from ..orchestration.gateway import channel_authority
+                channel_authority(db, channel)
                 row = _row(db, idempotency_key)
                 if row is None:
                     assignment_id = identifier("a_")
@@ -664,6 +666,10 @@ class ProvisioningService:
             with self._store.connection() as db:
                 db.execute("BEGIN IMMEDIATE")
                 try:
+                    # Cleanup may have revoked the parent while workspace
+                    # provisioning was in flight. Never mint fresh authority then.
+                    from ..orchestration.gateway import channel_authority
+                    channel_authority(db, coordinator_channel)
                     _record_effect(db, idempotency_key, "channel", "intent", dict(attempt_id=attempt_id))
                     channel_id, secret = issue_channel_tx(
                         db, row["task_id"], "worker", row["owner_epoch"],

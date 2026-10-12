@@ -846,7 +846,7 @@ class Agent:
         acp_sessions.create_session(store, session_id, project, self.client_info, self.client_capabilities, stripped_servers,
                                     workspace_root=workspace)
         session = dict(
-            project=project, workspace=workspace, task_id=None, channel=None, active=None, lock=threading.Lock(),
+            session_id=session_id, project=project, workspace=workspace, task_id=None, channel=None, active=None, lock=threading.Lock(),
             owner_epoch=None, pending_selection=None, default_selection=None,
             pending_language=None, pending_access_mode=None,
             client_capabilities=dict(self.client_capabilities),
@@ -1388,11 +1388,11 @@ class Agent:
 
     def _current_access_mode_for_session(self, store, session):
         """The task's recorded access mode once a task exists, else this
-        session's own not-yet-applied choice, else Guarded. Never read from
-        user defaults: every new session starts Guarded."""
+        session's durable client choice or fresh default. Legacy or unreadable
+        state is Guarded; user-wide settings are never rewritten."""
         if session["task_id"] is not None:
             return configuration_access_mode.current(store, session["task_id"])
-        return configuration_access_mode.normalize(session.get("pending_access_mode"))
+        return acp_sessions.session_access_mode(store, session.get("session_id"))
 
     def _access_modes_for_session(self, session, store):
         """ACP ``modes`` for Paseo, whose composer mode control (the access
@@ -1409,6 +1409,7 @@ class Agent:
         task's next recorded revision, read by the runtime at every
         permission request and worker open."""
         if session["task_id"] is None:
+            acp_sessions.select_session_access(store, session_id, value, origin)
             session["pending_access_mode"] = value
         else:
             configuration_access_mode.switch(store, session["task_id"], value, origin=origin, session_id=session_id)
@@ -1652,7 +1653,6 @@ class Agent:
                 # brand-new task's own (empty) override instead of the
                 # choice the session is carrying.
                 session_language = self._current_language_for_session(store, session)
-                session_access_mode = session.get("pending_access_mode")
                 result = bootstrap_task(store, source_event, text, owner_ref=origin, blocks=staged_blocks, meta=meta,
                                         workspace_root=session.get("workspace"))
                 session["task_id"] = result.task_id
@@ -1673,14 +1673,8 @@ class Agent:
                 # English.
                 if session_language is not None:
                     acp_steering.set_language_override(store, result.task_id, session_language)
-                # Likewise the access mode the user picked before the
-                # first prompt; a session that never picked one leaves the
-                # new task Guarded.
-                if session_access_mode is not None:
-                    configuration_access_mode.switch(
-                        store, result.task_id, session_access_mode,
-                        origin="acp_pre_task_selection", session_id=session_id)
-                    session["pending_access_mode"] = None
+                # bind_task atomically carried the durable default/client choice.
+                session["pending_access_mode"] = None
             else:
                 result = append_source_event(store, source_event, text, session["task_id"], blocks=staged_blocks, meta=meta)
                 if result.owner_epoch is not None:
@@ -1840,7 +1834,7 @@ class Agent:
                     # not only into ``data``/the durable diagnostic file.
                     message = "The engine failed to start for this task (stage: engine_launch)."
                 else:
-                    message = "The runtime failed while processing this prompt."
+                    message = f"The runtime failed while processing this prompt (failure: {detail})."
                 self._reply_error(request_id, -32603, message, data={"failure": detail})
                 observe(self.environ, "session/prompt", "runtime_error")
                 return
@@ -2096,7 +2090,9 @@ class Agent:
             options = self._config_options_for_session(session, store)
             _reply(acp_commands.build_status_text(
                 config_options=options, connection_setup_summary=self._connection_setup_summary(connections),
-                execution_mode="direct-user (no OS filesystem isolation)"))
+                execution_mode=("engine jail; writer commands: host-writable masks (not hostile-code isolation)"
+                    if self._current_access_mode_for_session(store, session) == configuration_access_mode.DEVELOPMENT
+                    else "engine jail; commands: restricted filesystem mounts")))
             return
         if command_id == acp_commands.CORTEX_SETUP:
             connections = self._selectable_entries_and_connections(session["project"])[1]
@@ -3131,7 +3127,7 @@ class Agent:
             with store.connection() as db:
                 restored_epoch = _current_owner_epoch_obj(db, durable["task_id"])
             self.sessions[session_id] = dict(
-                project=project, workspace=workspace, task_id=durable["task_id"], channel=None, active=None, lock=threading.Lock(),
+                session_id=session_id, project=project, workspace=workspace, task_id=durable["task_id"], channel=None, active=None, lock=threading.Lock(),
                 owner_epoch=restored_epoch, pending_selection=None, default_selection=None,
                 pending_language=None, pending_access_mode=None,
                 client_capabilities=dict(self.client_capabilities),

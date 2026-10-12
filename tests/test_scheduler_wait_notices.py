@@ -123,7 +123,7 @@ def holder_process(state, holder_task, *, pid=None, start_ticks=None):
                    (ref, holder_task, 'a_holder', 'xa_holder', 'worker-data-engineer', 'ready', 'ready', 1, stamp, stamp))
         db.commit()
     record_process_launch(state.store, attempt_id='xa_holder', task_id=holder_task, role='worker', pid=pid,
-                          pgid=pid, start_ticks=start_ticks or process_identity.read_start_ticks(pid),
+                          pgid=os.getpgid(pid), start_ticks=start_ticks or process_identity.read_start_ticks(pid),
                           boot_id=process_identity.read_boot_id(), launch_command_digest='test')
 
 
@@ -153,6 +153,25 @@ def test_a_gone_or_unverified_holder_keeps_the_deadline(machine, ending):
             mark_terminated(state.store, 'xa_holder', 'process_exited')
     waiting_backtest(state, ch)
     assert not wait_notices.waiting_on_live_holders(state.store, ch.task_id)
+
+
+def test_unknown_holder_is_not_released_as_absent(machine, monkeypatch):
+    from cortex_runtime.recovery import registry
+    state, ch = machine
+    other = second_task(state, ['.tmp/**'])
+    holder_process(state, other.task_id)
+    waiting_backtest(state, ch)
+    monkeypatch.setattr(registry, 'probe_liveness', lambda row: 'unknown')
+    # Unknown is not observed alive (so it keeps the bounded wait deadline),
+    # but neither the notice nor the scheduler can claim absence or release.
+    assert not wait_notices.waiting_on_live_holders(state.store, ch.task_id)
+    assert state.claim_ready(ch.task_id, ch.channel_id) == []
+    with state.store.connection() as db:
+        row = db.execute("SELECT terminated_at FROM attempt_process_registry WHERE attempt_id='xa_holder'").fetchone()
+        assert row['terminated_at'] is None
+        assert not db.execute("SELECT 1 FROM runtime_events WHERE task_id=? AND type='WORKER_RELEASED'",
+                              (other.task_id,)).fetchone()
+    assert state.get_state(ch.task_id) == 'EXECUTING'
 
 
 def test_a_capacity_wait_keeps_the_deadline(machine):

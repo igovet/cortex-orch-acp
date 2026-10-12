@@ -160,6 +160,13 @@ can use it directly instead of repeating `list_projects`. If resolution fails or
 the named project is unavailable, workers use the normal project-list fallback;
 no project identity is guessed.
 
+Writing-worker command guidance distinguishes ordinary Development host
+capability from task authorization: deletion, production/shared mutations,
+publication, credential changes and paid checks still require explicit authority.
+The recovery capsule follows the effective task mode without broadening read-only
+roles. Docker and arbitrary owner code can bypass filesystem masks; the prompt
+never promises hostile-code isolation. See [permissions](../permissions-and-containment/index.md#access-mode-development-guarded-and-auto).
+
 The senior-consultant prompt is a separate worker variant: it is limited to the
 consultation packet and retained reports, and does not advertise code-index or
 project-source investigation. No external MCP servers are attached to consultant

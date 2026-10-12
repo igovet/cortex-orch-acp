@@ -125,6 +125,29 @@ def _expected_rows(source, table, task, project):
     raise AssertionError(table)
 
 
+def test_split_preserves_session_defaults_and_task_mode_without_backfill(tmp_path):
+    from cortex_runtime.acp import sessions
+    from cortex_runtime.configuration import access_mode
+    source = tmp_path / "global"
+    source.mkdir(mode=0o700)
+    project = tmp_path / "project"
+    project.mkdir()
+    store = Store(source)
+    task, _ = _create(store, project, "access")
+    sessions.create_session(store, "fresh", str(project), {}, {}, [])
+    sessions.select_session_access(store, "fresh", "auto", "acp_set_mode")
+    sessions.bind_task(store, "fresh", task)
+    sessions.create_session(store, "legacy", str(project), {}, {}, [])
+    with store.connection() as db:
+        db.execute("DELETE FROM acp_session_access_defaults WHERE session_id='legacy'")
+        db.commit()
+    split_project(source, project, tmp_path / "backup.sqlite3", access_stopped=True)
+    selected = Store(project / ".cortex", project_root=project)
+    assert sessions.session_access_mode(selected, "fresh") == "auto"
+    assert sessions.session_access_mode(selected, "legacy") == "guarded"
+    assert access_mode.current(selected, task) == "auto"
+
+
 def test_split_preserves_all_selected_metadata_and_never_copies_markdown(tmp_path):
     source_dir = tmp_path / "global"; source_dir.mkdir(mode=0o700)
     first = tmp_path / "first"; second = tmp_path / "second"; first.mkdir(); second.mkdir()

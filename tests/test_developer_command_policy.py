@@ -73,7 +73,8 @@ def test_worker_git_test_and_build_commands(worker, repo):
 
 
 @pytest.mark.requires_bwrap
-def test_worker_real_docker_client_reaches_unix_socket(worker, tmp_path):
+@pytest.mark.parametrize("mode", ["guarded", "development"])
+def test_worker_real_docker_client_reaches_unix_socket(worker, tmp_path, mode, monkeypatch):
     docker = shutil.which('docker')
     if docker is None:
         pytest.skip('real Docker CLI is not installed')
@@ -100,11 +101,15 @@ def test_worker_real_docker_client_reaches_unix_socket(worker, tmp_path):
                 self.wfile.write(body)
 
     socket = tmp_path / 'docker.sock'
+    from cortex_runtime.configuration import access_mode
+    store, channel = worker
+    access_mode.switch(store, channel.task_id, mode, origin="acp_set_mode")
+    monkeypatch.setenv("DOCKER_HOST", f"unix://{socket}")
     with UnixStreamServer(str(socket), Handler) as server:
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         try:
-            result = run(worker, [docker, '-H', f'unix://{socket}', 'version',
+            result = run(worker, [docker, 'version',
                                   '--format', '{{.Server.Version}}'], 'docker')
         finally:
             server.shutdown()

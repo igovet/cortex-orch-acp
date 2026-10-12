@@ -312,6 +312,24 @@ _TASK_IDENTIFIER_RE = re.compile(r"\bT\d{3}\b")
 _REPORT_IDENTIFIER_RE = re.compile(r"\br_[0-9a-f]{12}\b")
 
 
+def test_development_links_and_legacy_access_anchors_are_source_backed():
+    from cortex_runtime.configuration import access_mode
+    assert access_mode.FRESH_SESSION_DEFAULT == "development"
+    feature = _PROJECT_ROOT / "docs/features/permissions-and-containment/index.md"
+    assert "## Access mode: Development, Guarded and Auto" in feature.read_text()
+    assert '<a id="access-mode-guarded-and-auto"></a>' in feature.read_text()
+    assert '<a id="access-mode-guarded-and-auto"></a>' in (_PROJECT_ROOT / "SECURITY.md").read_text()
+    matched = 0
+    for path in _repo_files():
+        if path.suffix != ".md":
+            continue
+        for target in re.findall(r"\]\(([^)]+#access-mode-development-guarded-and-auto)\)", path.read_text()):
+            resolved = (path.parent / target.split("#")[0]).resolve()
+            assert resolved == feature
+            matched += 1
+    assert matched >= 8
+
+
 def test_no_task_identifiers_in_documentation():
     targets = [
         _PROJECT_ROOT / "AGENTS.md",

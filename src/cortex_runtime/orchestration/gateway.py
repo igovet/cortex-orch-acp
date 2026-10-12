@@ -12,6 +12,7 @@ import json
 import os
 from pathlib import Path, PurePosixPath
 import stat
+import sqlite3
 import subprocess
 import tempfile
 import time
@@ -97,6 +98,7 @@ SCHEMAS = {
                             request_key=text('Unique action identity.',128))),
     'command_run': obj(dict(argv=array(text('Literal command argument. Only scoped workers may run commands; coordinators and consultants cannot execute them. No implicit shell.',16384),
                                        'Command as argv, run without a shell. Only scoped workers may run commands. For the current reviewer, exact plan verification argv at the same project digest reuses a runtime-produced receipt; an in-flight run is awaited for at most five seconds (or the shorter requested timeout). Otherwise the command executes normally.', maximum=128, minimum=1),
+                            cwd=text('Absolute existing working directory. Omitted: task working tree. Outside-tree cwd requires a writing worker in Development; private and protected targets are refused, never retried outside the sandbox.',4096),
                             timeout_seconds=timeout('Optional maximum runtime in seconds, including child processes. Omit to run until the command exits.'),
                             request_key=text('Unique action identity; ambiguous interrupted calls are never re-executed automatically.',128)), required=['argv','request_key']),
     'outside_write': obj(dict(path=text('Absolute path OUTSIDE the project (inside it, write with your own tools). The user confirms first; the parent directory must exist.',4096),
@@ -198,9 +200,9 @@ def _authority(db, channel):
                       (channel.task_id,channel.attempt_id,task['revision'])).fetchone()
     if not node or node['status'] != 'running':
         raise StoreError('gateway_assignment_inactive')
-    # A writing worker may change the whole project (the owner's rule: all of
-    # the project, nothing outside it without consent); the plan's scope only
-    # describes the work. Reviewers and read-only roles write nothing.
+    # Writing grants cover the project; declared scope coordinates the work.
+    # Host command capability and action consent are handled separately.
+    # Reviewers and read-only roles receive no writing grant.
     return ([] if node['stage']=='review' or node['role'] in READ_ONLY else ['.']), node['assignment_ref']
 
 
@@ -416,56 +418,152 @@ def _edit(root,args,state,effects):
     return result
 
 
+def _command_policy(db, task_id):
+    from ..configuration import access_mode
+    try:
+        row = db.execute("SELECT id,mode,origin FROM access_mode_events WHERE task_id=? "
+                         "AND kind IN ('initialized','switched') ORDER BY id DESC LIMIT 1",
+                         (task_id,)).fetchone()
+    except sqlite3.Error:
+        row = None
+    return dict(mode=access_mode.normalize(row['mode'] if row else None),
+                revision=row['id'] if row else None, origin=row['origin'] if row else 'legacy_guarded',
+                denied=list(write_denials(db, task_id)))
+
+
+@contextmanager
+def _command_cwd(root, args, development):
+    path = Path(args.get('cwd') or root)
+    if not path.is_absolute() or '..' in path.parts or any(p in PRIVATE for p in path.parts):
+        raise StoreError('gateway_command_cwd_denied')
+    path = Path(os.path.normpath(str(path)))
+    root = Path(root).resolve(strict=True)
+    if path != root and root not in path.parents and not development:
+        raise StoreError('gateway_command_cwd_denied')
+    from .sandbox import protected_host_paths
+    if development:
+        for protected in protected_host_paths(root, os.environ):
+            in_task = path == root or root in path.parents
+            if path == protected or (protected in path.parents and not (in_task and protected in root.parents)):
+                raise StoreError('gateway_command_cwd_denied')
+    fd = os.open('/', _DIRECTORY)
+    try:
+        for part in path.parts[1:]:
+            next_fd = os.open(part, _DIRECTORY, dir_fd=fd)
+            os.close(fd)
+            fd = next_fd
+        yield str(path), fd
+    finally:
+        os.close(fd)
+
+
+def _run_command_process(store, channel, launch, fds, output, effects, limit, *,
+                         policy=None, env=None, cwd=None, directory=None):
+    """One authority-watched process group for both command routes."""
+    from .sandbox import compact_argv
+    proc = None
+    failure = None
+    try:
+        with store.connection() as db:
+            db.execute('BEGIN IMMEDIATE')
+            granted, _ = _authority(db, channel)
+            if policy and not granted:
+                raise StoreError('gateway_scope_denied')
+            if policy and _command_policy(db, channel.task_id) != policy:
+                raise StoreError('execution_policy_changed')
+            if directory:
+                path, fd = directory
+                saved, current = os.fstat(fd), os.stat(path, follow_symlinks=False)
+                if (saved.st_dev, saved.st_ino) != (current.st_dev, current.st_ino):
+                    raise StoreError('gateway_command_cwd_changed')
+            actual, actual_fds = compact_argv(launch, fds)
+            effects['possible'] = True
+            try:
+                proc = subprocess.Popen(actual, stdout=output, stderr=subprocess.STDOUT,
+                                        pass_fds=actual_fds, env=env or {'PATH':'/usr/bin:/bin'},
+                                        cwd=cwd, start_new_session=True)
+            except OSError:
+                effects['possible'] = False
+                raise
+            finally:
+                for extra in set(actual_fds) - set(fds):
+                    os.close(extra)
+            db.commit()
+        deadline = None if limit is None else time.monotonic() + limit
+        while proc.poll() is None:
+            if deadline is not None and time.monotonic() >= deadline:
+                failure = 'timeout'; break
+            with store.connection() as db:
+                try:
+                    granted, _ = _authority(db, channel)
+                except StoreError:
+                    failure = 'authority_revoked'; break
+                if policy and not granted:
+                    failure = 'authority_revoked'; break
+                if policy and _command_policy(db, channel.task_id) != policy:
+                    failure = 'execution_policy_changed'; break
+            time.sleep(.05)
+    finally:
+        # Includes launch-transaction/observation failure after Popen succeeded.
+        if proc is not None:
+            if proc.poll() is None:
+                import signal
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            proc.wait()
+    return proc.returncode, failure
+
+
 def _command(store,channel,root,scopes,args,ref,owner,effects):
-    from .sandbox import as_owner, gateway_command, with_umask
+    from .sandbox import as_owner, gateway_command, development_command, with_umask
     from . import ssh_askpass
     from .ignore_guard import snapshot, enforce
     ignore_before = snapshot(root) if scopes else None
-    with tempfile.TemporaryDirectory(prefix='cortex-command-') as scratch, tempfile.TemporaryFile() as output, \
+    with store.connection() as db:
+        _authority(db, channel)
+        policy = _command_policy(db, channel.task_id)
+    development = bool(scopes and policy['mode'] == 'development')
+    from ..engine.permissions import declared_command_deletion
+    if declared_command_deletion(args['argv']):
+        if not scopes:
+            raise StoreError('gateway_scope_denied')
+        from . import consent
+        def still_allowed():
+            with store.connection() as db: _authority(db, channel)
+        if not consent.request(store, channel, 'command_delete',
+                               consent.subject_of('command_delete', args), still_allowed=still_allowed):
+            raise StoreError('deletion_not_confirmed')
+    with _command_cwd(root, args, development) as (cwd, cwd_fd), tempfile.TemporaryDirectory(prefix='cortex-command-') as scratch, tempfile.TemporaryFile() as output, \
             tempfile.TemporaryDirectory(prefix='cortex-askpass-') as askpass_dir:
-        # The whole host read-only, as the worker's own jailed shell sees it.
+        # The command profile is separate from the unchanged engine jail.
         with store.connection() as db: denied=write_denials(db,channel.task_id)
         # Git sees the project's repository: read-only, or with a writing
         # grant updatable except its configuration and hooks (see sandbox).
         planted=[]
-        with gateway_command(root,scratch,with_umask(args['argv']),scopes,system_root=True,readonly=denied,
-                             reveal=frozenset({'.git'}),git_writable=True,git_guard=planted) as (command,fds):
-            # A worker's shell is the owner's shell, still scope-confined.
-            as_owner(command,os.environ)
+        mount = (development_command(root, scratch, with_umask(args['argv']), scopes,
+                                     environ=os.environ, readonly=denied, git_guard=planted)
+                 if development else gateway_command(root, scratch, with_umask(args['argv']), scopes,
+                                     system_root=True, readonly=denied, reveal=frozenset({'.git'}),
+                                     git_writable=True, git_guard=planted))
+        with mount as (command,fds):
+            if not development:
+                as_owner(command,os.environ)
+            command[command.index('--chdir') + 1] = cwd
             if not scopes:
                 from .sandbox import readonly_test_cache
                 readonly_test_cache(command, scratch, os.environ)
             # Opt-in: ssh asks for a password in a desktop dialog.
             ssh_askpass.apply(command,os.environ,Path(askpass_dir))
-            with store.connection() as db:
-                db.execute('BEGIN IMMEDIATE')
-                _authority(db,channel)
-                effects['possible'] = True
-                from .sandbox import compact_argv
-                launch,launch_fds=compact_argv(command,fds)
-                try:
-                    proc=subprocess.Popen(launch,stdout=output,stderr=subprocess.STDOUT,pass_fds=launch_fds,env={'PATH':'/usr/bin:/bin'},start_new_session=True)
-                finally:
-                    for extra in set(launch_fds)-set(fds): os.close(extra)
-                db.commit()
-            failure=None
-            # No default limit: a long build or backfill runs to completion;
-            # a stop/cancel still ends it through the authority check below.
-            limit=clamp_timeout(args.get('timeout_seconds'))
-            deadline=None if limit is None else time.monotonic()+limit
-            try:
-                while proc.poll() is None:
-                    if deadline is not None and time.monotonic()>=deadline:
-                        failure='timeout'; break
-                    with store.connection() as db:
-                        try: _authority(db,channel)
-                        except StoreError: failure='authority_revoked'; break
-                    time.sleep(.05)
-            finally:
-                if proc.poll() is None:
-                    import signal
-                    os.killpg(proc.pid,signal.SIGKILL)
-                code=proc.wait()
+            identity = os.fstat(cwd_fd)
+            current = os.stat(cwd, follow_symlinks=False)
+            if (identity.st_dev, identity.st_ino) != (current.st_dev, current.st_ino):
+                raise StoreError('gateway_command_cwd_changed')
+            code, failure = _run_command_process(
+                store, channel, command, (*fds, cwd_fd), output, effects,
+                clamp_timeout(args.get('timeout_seconds')), policy=policy if development else None,
+                directory=(cwd, cwd_fd))
         output.seek(0)
         data=output.read()
     if scopes:
@@ -487,7 +585,9 @@ def _command(store,channel,root,scopes,args,ref,owner,effects):
     record_tool_result_observed(store,channel.task_id,channel.attempt_id,ref,'execute','Gateway command',
                                 'completed' if code==0 and not failure else 'failed')
     # argv is retained so a check citing this receipt can be matched against it.
-    return dict(tool_call_ref=ref,argv=list(args['argv']),exit_code=code,complete=failure is None,failure=failure,
+    return dict(tool_call_ref=ref,argv=list(args['argv']),cwd=cwd,
+                profile='development' if development else 'restricted', access_policy=policy,
+                exit_code=code,complete=failure is None,failure=failure,
                 output=data.decode('utf-8',errors='replace'),large_output_id=retained['id'])
 
 
@@ -520,12 +620,17 @@ def _outside(store,channel,root,operation,args,ref,owner,effects):
         return dict(path=str(resolved),byte_count=len(data),sha256=hashlib.sha256(data).hexdigest())
     with tempfile.TemporaryFile() as output:
         try:
-            done=subprocess.run(args['argv'],cwd=str(resolved),stdout=output,stderr=subprocess.STDOUT,
-                                timeout=clamp_timeout(args.get('timeout_seconds')) or 600)
-            code,failure=done.returncode,None
-        except subprocess.TimeoutExpired:
-            code,failure=None,'timeout'
+            from .sandbox import _SECRET_ENV
+            from .ssh_askpass import host_agent_env
+            environment = {k:v for k,v in os.environ.items() if not _SECRET_ENV.search(k)}
+            environment.update(host_agent_env(os.environ))
+            code, failure = _run_command_process(
+                store, channel, args['argv'], (), output, effects,
+                clamp_timeout(args.get('timeout_seconds')) or 600,
+                env=environment, cwd=str(resolved))
         except OSError as error:
+            if effects['possible']:
+                raise  # A late error cannot be relabelled as a non-start.
             code,failure=None,f'not_started:{error.strerror}'
         output.seek(0); data=output.read()
     try:
@@ -538,7 +643,7 @@ def _outside(store,channel,root,operation,args,ref,owner,effects):
                             source_ref=ref,data=data,exit_code=code,failure=failure)
     # cwd completes the command's identity (delegation.evidence.command_identity).
     return dict(tool_call_ref=ref,argv=list(args['argv']),cwd=str(resolved),exit_code=code,complete=failure is None,
-                failure=failure,output=data.decode('utf-8',errors='replace')[-65536:],large_output_id=retained['id'])
+                failure=failure,profile='outside_confirmed',output=data.decode('utf-8',errors='replace'),large_output_id=retained['id'])
 
 
 def _record_gateway_refusal(store, channel, operation, error):

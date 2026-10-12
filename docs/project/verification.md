@@ -50,6 +50,30 @@ and the profile-generation check below) and package payload
 it belongs in `plan.verification`, which the runtime runs once after review,
 with no time limit.
 
+## Development command verification
+
+Focused default/provenance/gateway regressions include
+`tests/test_development_commands.py` and `tests/test_access_mode.py`, alongside
+permission, engine-floor, command-evidence, session recovery and format/split tests.
+The test-only unjailed launch replacement covers real subprocess receipts and
+cancellation, not real filesystem containment or Docker. Execute the marked real
+bubblewrap cases where namespaces are supported; a nested-sandbox skip remains
+unverified containment. Docker qualification uses only disposable project-local
+inputs and uniquely named disposable images/containers/volumes, never production
+workloads, daemon reconfiguration, privileged containers or host-root bind probes.
+Daemon-side path visibility, cleanup and identity must be observed separately.
+Paid CLI/desktop checks still require an explicit owner request naming the mode.
+
+## Terminal resource regressions
+
+`tests/test_terminal_resource_cleanup.py` uses disposable stores, real local fake
+ACP subprocesses and the project advisory writer lock to check terminal/error/
+disconnect teardown, another task's writer acquisition, repeated cleanup,
+partial launch quarantine, unknown identity and surviving group descendants.
+It does not qualify paid engine behavior or a host's rendered chat lifecycle.
+Existing transport, recovery, completion and usage-settlement tests cover adjacent
+EOF/SIGTERM, cancellation and transaction boundaries.
+
 ## No-paid default test suite
 
 ```
@@ -121,7 +145,21 @@ specialists and the consultant) and their shared report protocol.
 ## Sequencing
 
 Run package, profile-generation and test checks sequentially in the same
-checkout. Use the smallest meaningful tests first.
+checkout. Use the smallest meaningful tests first. Before any Python checks that
+spawn the local Paseo fake endpoint (including the default suite), prepare the
+checkout-local plugin prerequisites in order:
+
+```
+npm --prefix integrations/paseo ci
+npm --prefix integrations/paseo run typecheck
+```
+
+The endpoint imports `ws` and `@getpaseo/protocol/messages` from the locked local
+dependencies; missing imports fail startup, not binding qualification. The Node
+scripts also require a Node version supporting `--experimental-strip-types`.
+These no-paid prerequisites do not install a production plugin or qualify a live
+daemon. See [isolated startup](#fresh-process-isolated-targeted-launcher)
+for interpreter-compatible dependencies and disposable HOME/TMPDIR requirements.
 
 ## Diagnostics (no model call)
 
@@ -344,13 +382,16 @@ at Python startup. Obtain explicit permission first for NEW scratch outside ever
 Git repository and for reading the existing interpreter-compatible dependency
 path; no installation or credential copying is needed. Create private owned
 mode-0700 scratch and `home`, `config`, `state`, `cache`, `tmp` child directories
-before invoking the launcher. For the current Python 3.12 toolchain, the explicit
-existing dependency path is `/home/igovet/.local/lib/python3.12/site-packages`;
-verify compatibility/existence rather than assuming it on another machine.
+before invoking the launcher. Set `DEPENDENCIES` to the canonical existing
+`site-packages` for the active Python major/minor (for example the checkout
+virtualenv's matching directory). Verify interpreter and pytest locations before
+changing HOME; do not borrow another Python version's packages or rely on
+in-process conftest imports in a child. Both ordinary and isolated startup forms
+are covered by `tests/test_cortex_test_isolated.py`.
 
 ```bash
 python3 -B scripts/cortex_test_isolated.py --environment-root "$SCRATCH" \
-  --dependency-path /home/igovet/.local/lib/python3.12/site-packages tests/test_package.py
+  --dependency-path "$DEPENDENCIES" tests/test_package.py
 ```
 
 The launcher rejects root, aliased/public/foreign/Git scratch, incompatible or

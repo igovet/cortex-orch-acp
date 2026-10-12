@@ -41,7 +41,7 @@ Choosing provider+model always resolves to one concrete
 -- see ``acp.agent._apply_config_selection``); an unsupported value is
 refused, never silently accepted.
 
-``access_mode`` (category ``mode``) carries the user's Guarded/Auto access
+``access_mode`` (category ``mode``) carries the user's Development/Guarded/Auto access
 mode (``configuration.access_mode``); Paseo receives the same choice as ACP
 ``modes`` instead (see ``access_mode_state``). None of these are ever
 emitted for team/spend/summarizer settings.
@@ -100,7 +100,7 @@ _ENGINE_DEFAULT_VALUE = "default"
 # set_language_override (per-task) and acp.commands.CORTEX_LANGUAGE (the
 # slash-command equivalent for a host without SessionConfigOption support).
 LANGUAGE_OPTION_ID = "language"
-# The user's Guarded/Auto access mode (configuration.access_mode).
+# The user's Development/Guarded/Auto access mode (configuration.access_mode).
 ACCESS_MODE_OPTION_ID = "access_mode"
 _LANGUAGE_VALUES = ("auto", "en", "ru")
 _LANGUAGE_NAMES = {"auto": "Auto (detect from your messages)", "en": "English", "ru": "Russian"}
@@ -559,7 +559,7 @@ def build_language_option(current_value: str | None, *, as_mode: bool = False) -
 
 def build_access_mode_option(current_value: str | None) -> dict:
     """The ``access_mode`` SessionConfigOption (category ``mode``):
-    ``guarded`` (the default) or ``auto`` -- see
+    ``development``, ``guarded`` or ``auto`` -- see
     ``configuration.access_mode``. An unknown stored value is shown as
     ``guarded``, never as ``auto``."""
     current = configuration_access_mode.normalize(current_value)

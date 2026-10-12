@@ -143,9 +143,9 @@ def bind_engine_session_ref(store, attempt_id: str, engine_session_ref: str) -> 
 def mark_terminated_tx(db, attempt_id: str, reason: str) -> None:
     """Bookkeep confirmed absence on the caller's transaction; never commit it."""
     row = db.execute(
-        "SELECT terminated_at FROM attempt_process_registry WHERE attempt_id=?", (attempt_id,),
+        "SELECT terminated_at,termination_reason FROM attempt_process_registry WHERE attempt_id=?", (attempt_id,),
     ).fetchone()
-    if row is not None and row["terminated_at"] is None:
+    if row is not None and (row["terminated_at"] is None or row["termination_reason"] == "timeout_alive"):
         db.execute(
             "UPDATE attempt_process_registry SET terminated_at=?, termination_reason=? WHERE attempt_id=?",
             (_now(), reason, attempt_id),
@@ -174,13 +174,15 @@ def lookup_process(store, attempt_id: str) -> dict | None:
 def probe_liveness(row: dict) -> str:
     """``"alive"``/``"absent"``/``"unknown"`` for an already-fetched
     ``attempt_process_registry`` row (see :func:`lookup_process`). A row
-    already marked ``terminated_at`` is always ``"absent"`` -- this
-    process (or an earlier one) already confirmed its exit; never
-    re-probed."""
-    if row.get("terminated_at") is not None:
+    marked with a confirmed exit is absent. Older timeout_alive markers
+    are not exit evidence and must be re-probed."""
+    if row.get("terminated_at") is not None and row.get("termination_reason") != "timeout_alive":
         return "absent"
     from ..engine import process_identity
 
+    if row.get("role") in {"worker", "coordinator"} and row.get("pgid") == row["pid"]:
+        return process_identity.probe_group(process_identity.ProcessIdentity(
+            row["pid"], row["pgid"], row["start_ticks"], row["boot_id"]))
     return process_identity.probe(row["pid"], row["start_ticks"], row["boot_id"])
 
 

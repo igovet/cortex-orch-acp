@@ -99,6 +99,18 @@ def test_finished_receipt_and_result_attribution(tmp_path, monkeypatch, exit_cod
         assert context_checks[0]['runtime_command_ref'] == observed['checks'][0]['command_ref']
 
 
+def test_reuse_rejects_outside_cwd_and_host_profile(tmp_path):
+    runtime, task, machine, _, reviewer, _, digest = fixture(tmp_path)
+    observed = observe(runtime, task, machine, digest)
+    check = observed["checks"][0]
+    with runtime._store.connection() as db:
+        assert reviewer_verification._usable(db, task.task_id, check)
+        assert not reviewer_verification._usable(db, task.task_id, dict(check, profile="development"))
+        assert not reviewer_verification._usable(db, task.task_id, dict(check, cwd=str(tmp_path.parent)))
+    assert reviewer_verification.reuse(runtime._store, reviewer, str(tmp_path),
+        dict(argv=ARGV, cwd=str(tmp_path.parent)), "fixture", "owner") is None
+
+
 def test_in_flight_waits_without_reexecuting(tmp_path, monkeypatch):
     runtime, task, machine, _, reviewer, assignment, digest = fixture(tmp_path)
     started, release = threading.Event(), threading.Event()

@@ -15,6 +15,17 @@ containment limitations that remain -- accurately stated, not implied away.
 Detailed rationale for pre-existing mechanisms lives in the tasks that built
 them (linked inline); this page does not restate their design docs.
 
+## Current brokered command boundary
+
+Fresh ACP sessions initialize Development for writing-worker host commands;
+engine and automatic-verification jails remain unchanged. Direct runtime/private,
+Git and owner-denied path protections reduce accidental effects, not arbitrary
+owner-code or Docker-daemon authority. Legacy sessions/tasks and unreadable state
+remain Guarded, and explicit client choices persist without owner-settings changes.
+See [current permission semantics](../features/permissions-and-containment/index.md#access-mode-development-guarded-and-auto),
+not the historical containment assertions below. Real namespace skips do not
+qualify containment, and stopping a CLI does not roll back daemon resources.
+
 ## Enforced boundaries and where they live
 
 | Boundary | Enforcement point |

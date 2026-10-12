@@ -133,5 +133,6 @@ def test_actual_fresh_python_startup_imports_and_pytest_exit_propagation(tmp_pat
                     '--environment-root', str(scratch), '--dependency-path', str(deps),
                     'tests/test_qualification_binding.py']
         result = subprocess.run(argv, cwd=ROOT, env=env, capture_output=True, text=True, timeout=60)
-        assert result.returncode == 0, f'{form} binding matrix exit={result.returncode}'
+        assert result.returncode == 0, (f'{form} binding matrix exit={result.returncode}\n'
+                                       + result.stdout + result.stderr)
         assert '[100%]' in result.stdout and 'failed' not in result.stdout and 'error' not in result.stdout

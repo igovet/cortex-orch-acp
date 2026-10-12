@@ -40,6 +40,9 @@ def test_smoke_without_connections_exits_clean(tmp_path):
     checks_by_name = {check["name"]: check for check in report["checks"]}
     assert checks_by_name["initialize:image_prompt_capability"]["status"] == "pass"
     assert checks_by_name["session/new:no_model_option_without_connections"]["status"] == "pass"
+    access = checks_by_name["session/new:access_mode_option_shape"]["detail"]
+    assert access["currentValue"] == "development"
+    assert {option["value"] for option in access["options"]} == {"development", "guarded", "auto"}
     assert report["versions"]["protocol_version"] == 1
     assert report["versions"]["cortex_version"] != "unknown"
 

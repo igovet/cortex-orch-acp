@@ -485,6 +485,8 @@ def synthesis_checks(db, task_id, revision):
         pass_origin, pass_cycle = fix_origin(pass_node)
         return gap_origin == pass_origin and pass_cycle >= 0 and pass_cycle >= gap_cycle
 
+    from .. import task_workspace
+    command_cwd = task_workspace.task_root(db, task_id)
     passes = [(node, check, current, assessment) for node, check, current, assessment, _ in checks
               if check.get('outcome') == 'passed' and current is not None
               and current['outcome'] == 'passed' and assessment['strength'] == 'verified']
@@ -496,7 +498,7 @@ def synthesis_checks(db, task_id, revision):
         command = check.get('command')
         if command:
             resolved = isinstance(command, list) and any(
-                assessment.get('identity') == ('command_run', tuple(command), None)
+                assessment.get('identity') == ('command_run', tuple(command), command_cwd, 'restricted')
                 for _, _, _, assessment in passes
             )
         else:

@@ -14,10 +14,9 @@ to make implementation pass.
 
 ## Specialist workflow
 
-For risk-driven independent verification, derive expected properties from assigned
-requirements and current behavior before comparing the implementer's conclusion.
-Choose checks that distinguish competing explanations and report which observation
-would change the readiness conclusion. Avoid inheriting the implementation's oracle.
+Derive expected properties from assigned requirements and current behavior before
+comparing the implementer's conclusion; never inherit its oracle. Choose checks
+that distinguish competing explanations and state what would change readiness.
 
 1. Map each acceptance criterion and changed contract to relevant positive,
    negative, boundary, transition, permission, concurrency, retry, and recovery cases.
@@ -30,14 +29,12 @@ would change the readiness conclusion. Avoid inheriting the implementation's ora
    code and contracts; name that selection in the report and classify outcomes.
    The runtime runs the whole suite once in final verification; add a broader
    check only for a named cross-cutting risk.
-   Record the exact assignment, artifact/report revisions, and check or command
-   receipt identities actually available. Reuse evidence only when those observed
-   identities establish that it is unchanged; otherwise state that reuse cannot be
-   established, and give a concrete reason for any rerun.
-6. For visible UI or keyboard-focus claims, exercise the rendered page with a
-   browser and keyboard when that capability is available. Source inspection
-   and test output alone do not establish visibility; if the rendered check is
-   unavailable, mark the claim unverified and name the missing surface.
+   Record exact assignment, artifact/report revisions and available check/command
+   receipts. Reuse evidence only when those identities prove it unchanged;
+   otherwise disclose unestablished reuse and a concrete rerun reason.
+6. Verify visible UI and keyboard focus in the rendered page with browser and
+   keyboard when available. Source/tests alone cannot prove visibility; if the
+   rendered check is unavailable, mark it unverified and name the missing surface.
 
 ## Quality criteria
 

@@ -122,11 +122,16 @@ its own start time (`/proc/<pid>/stat` field 22) and the current boot id
 (`/proc/sys/kernel/random/boot_id`); `recovery.registry` persists this
 triple per attempt (`attempt_process_registry`, additive). A fresh
 adapter's `lookup_owned` for an attempt it never itself opened reads this
-record back: matching pid+start-time+boot-id → `"alive"`; a different boot
-id, a gone pid, or a mismatched start time (pid reuse) → `"absent"`;
-anything unreadable (permission boundary, non-Linux) → `"unknown"`.
+record back: matching pid+start-time+boot-id identifies the launched engine.
+For private coordinator/worker groups, `process_identity.probe_group` also checks
+active group members: a gone leader alone is not absence. A reboot, reused
+leader identity or observed inactive group establishes absence; unreadable
+observations remain unknown. Inactive zombies are not writers and are reaped by
+their OS parent. Group-escaped descendants are not covered. Older
+`timeout_alive` termination markers are re-probed, never treated as exit proof.
 `terminate_owned` for such a cross-process attempt signals the recorded
-process group directly (SIGTERM, grace, SIGKILL) and only reports a
+process group only after positive liveness/identity observation (SIGTERM, grace,
+SIGKILL; unknown liveness is not signalled) and only reports a
 confirmed exit once the same identity probe reports `"absent"` again —
 otherwise ambiguous, exactly like a same-process `EngineProcess`'s own
 unconfirmed termination.

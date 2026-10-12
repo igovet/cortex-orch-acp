@@ -17,8 +17,8 @@ Every channel-bound engine process runs in the engine jail
 explicitly writable for owner/process interoperability. `/run/user` remains
 visible inside the engine jail, including user-session sockets; it is not an
 isolation boundary. `/var/tmp` is instead a private, writable, per-run
-directory, and `HOME` and `TMPDIR`/`TMP`/`TEMP` use private per-process
-scratch. See
+directory. `TMPDIR`/`TMP`/`TEMP` use private per-process scratch;
+HOME is the owner's real read-only home with selected writable caches. See
 [SECURITY.md](../../../SECURITY.md#tool-access-and-containment). The project is
 read-only for the coordinator, reviewers and read-only roles. Writing workers
 receive a whole-project writable mount; their declared scopes coordinate parallel
@@ -134,54 +134,83 @@ argument text are never an authority. Channeled engine sessions cannot enable AC
 filesystem or terminal bridges, which would act outside the jail. The trusted
 engine binary runs as the local user and can read what that user can read.
 
-## Access mode: Guarded and Auto
+<a id="access-mode-guarded-and-auto"></a>
+## Access mode: Development, Guarded and Auto
 
-`configuration.access_mode` holds one mode per task. The user sets it from the
-client: Paseo gets ACP `modes` (`guarded`, `auto`) and switches with
-`session/set_mode`, which its composer shows as the shield, decorated by the
-plugin (`withAccessModeVisuals`: Guarded `ShieldCheck`/safe, Auto
-`ShieldOff`/dangerous, neither marked unattended); Zed and other clients get the
-`access_mode` config option (category `mode`) and `session/set_config_option`.
-No MCP tool reaches it. A choice made before the first prompt waits in the ACP
-session and becomes the task's first revision; afterwards each switch is the
-task's next append-only revision in `access_mode_events` (origin
-`acp_config_option`, `acp_set_mode` or `acp_pre_task_selection`, plus the ACP
-session id). No revision, an unknown value or an unreadable table all read as
-Guarded, and nothing is stored in user defaults, so every new session starts
-Guarded.
+Fresh ACP sessions start **Development**, durably recorded with session creation.
+Paseo receives ACP `modes` and `session/set_mode`; other clients receive the
+`access_mode` config option. The existing plugin forwards unrecognized mode
+ids unchanged; Development has no custom plugin visual in this release. No
+rendered client claim follows from that source behavior.
 
-| | Guarded (default) | Auto |
-| --- | --- | --- |
-| Native deletion reported to the bridge | permission card | runtime selects the offered allow option |
-| `project_delete` and replacing a different link with `project_skill_link` (`orchestration.consent`) | permission card | auto-approved without a per-action card |
-| `outside_write` and `outside_command` | permission card; no allow means refused | auto-approved without a per-action card, including with no connected client (owner-selected behavior) |
-| No client connected | refused | allowed |
-| Worker engine mode | floor: Claude `default`, Codex `agent` | most permissive offered: Claude `bypassPermissions` → `acceptEdits` → `default`; Codex `agent-full-access` → `agent` |
-| Coordinator engine mode | floor | floor |
-| Jail, `.cortex`/`.git` protection, gateway role/policy/path checks (not declared-scope write checks), subagent ban, stale-binding refusal, external MCP allowlist | enforced | enforced |
+Only client controls can select a mode. The additive
+`acp_session_access_defaults` record does not backfill old sessions or rewrite
+user-wide settings. Pre-task choices persist and win at atomic, idempotent task
+binding. `access_mode_events` records initialization and later switches.
+Load/reconnect preserves durable choices. Legacy sessions/tasks without a record,
+non-ACP task creation, unknown values or unreadable configuration stay Guarded.
+No model-facing mode or execution-profile setter exists.
 
-Both approval paths reach one choke point,
-`OrchestratingRuntime.permission_requester_for_task`; in Auto it returns
-`access_mode.auto_approve` instead of the connection's host requester. Every
-refusal that is not the user's to give is decided before that point and is
-unchanged. In particular, Auto's no-card approval of outside-project writes
-and commands is a deliberate owner choice; Guarded continues to require an
-accepted permission-card response and fails closed if it is absent, denied,
-malformed, cancelled or times out. The worker mode is chosen in
-`EngineSessionManagerAdapter._apply_worker_mode_floor` and confirmed over the
-wire exactly like the floor (confirm-or-fail). With Claude
-`bypassPermissions`, the engine no longer sends permission requests, so the
-bridge no longer sees that worker's native calls; subagent tools are still
-removed at launch. Codex keeps sending requests because its approval policy is
-pinned. A worker keeps the engine mode it was confirmed in: switching back to
-Guarded affects new cards and new workers, not an already running permissive
-worker. Automatic answers are recorded by tool-call id and kind only.
+| Behavior | Development (fresh-session default) | Guarded | Auto (explicit legacy choice) |
+| --- | --- | --- | --- |
+| Writing-worker ordinary command | host-writable masks, no routine outside-resource card | restricted mounts | restricted mounts |
+| Read-only/reviewer command and automatic verification | restricted | restricted | restricted |
+| Engine jail and worker mode floor | unchanged | unchanged | jail unchanged; most permissive offered worker mode |
+| Declared deletion and exceptional outside actions | consent; missing/refused answer blocks effects | same | existing automatic approval |
+| Channel, role, revocation, owner deny, review and completion gates | retained | retained | retained |
 
-Covered by `tests/test_access_mode.py` (default Guarded, recorded switches,
-refusal of non-user origins, auto-approval with no host, consent in both modes,
-subagent/stale-binding/gateway refusals in Auto, worker mode confirmation) and
-`integrations/paseo/server/provider-access-mode.test.ts`. Paseo's actual shield
-rendering and an Auto run against a paid engine have not been observed live.
+Development is trusted local development, **not a hostile-code sandbox**.
+`sandbox.development_command` uses `--bind / /`, real HOME and /var/tmp,
+owner devices, groups and shared network. It retains task-private, Git and
+denied-path overlays and protects known existing runtime/configuration/native
+engine locations and the production Paseo home/profile. Parent protections precede
+the bound task's grant, allowing host-created worktrees under those parents.
+Missing or invalid explicitly configured engine-state targets fail closed.
+Optional locations absent at preparation are not a promise about future files.
+
+Docker resolves paths on the daemon host; existing socket access is already
+possible with read-only client mounts. Daemon privilege, rootless/remote context,
+host aliases, outside hardlinks, shared process access and arbitrary code can
+circumvent direct masks. No privilege escalation, endpoint substitution,
+credential copying or daemon installation is implicit. Docker login and
+credential/configuration changes are separately authorized work.
+
+Host capability never authorizes deletion, production/shared-system mutation,
+publication, credential changes or paid checks. Declared `rm` commands receive
+gateway consent via `command_delete`; denial starts no process. Read-only
+roles cannot use a declared deletion command, even with owner approval.
+The gateway preserves argv boundaries: literal `echo`/`printf` arguments containing
+`;`, `|`, newlines or `rm` text are not executable declarations. It recognizes
+`env`, `sudo`, `xargs` and `exec` argv wrappers, `find -exec`/`-execdir`, and explicit
+`sh`/`bash`/`dash`/`zsh` command scripts, including leading script whitespace.
+Shell option operands such as `-o pipefail` are skipped before locating `-c`.
+Supported wrappers also apply inside explicit shell command positions, including
+`sh -c 'env rm file'` and nested `env dash -c 'rm file'`. Simple unquoted
+assignment prefixes and command-position control words (`if`, `then`, `elif`,
+`else`, `while`, `until`, `do`, `!` and groups) are recognized before argv
+dispatch. Examples include `sh -c 'LABEL=fixture rm fixture'` and
+`sh -c 'if true; then env rm fixture; fi'`. Quoted/escaped prefix-like words
+and ordinary arguments are not shell prefixes. Rejected consent precedes
+working-directory preparation, command mounts and process launch.
+Shell text remains lexical matching, not complete shell interpretation. The
+classifier is not a semantic firewall for interpreters, scripts or Docker effects.
+Auto retains its existing approval behavior and engine-mode confirmation.
+Development does not select Claude bypassPermissions or re-enable Codex shells.
+
+Commands retain cwd/profile/policy provenance. Observed Development policy or
+denial changes terminate the owned command group with incomplete
+`execution_policy_changed` evidence. Revocation/cancellation and timeouts still
+stop the group. Neither termination nor switching to Guarded rolls back files,
+detached processes, containers, volumes or daemon builds. No incomplete command
+is automatically rerun. Earlier explicit Auto workers keep their confirmed
+engine mode until they end.
+
+Coverage: `tests/test_access_mode.py`, `tests/test_development_commands.py`,
+gateway/permission/evidence tests and real `requires_bwrap` cases. Test-only
+unjailed launch replacement establishes receipts/cancellation, not containment
+or real Docker operation. A namespace skip is an unverified containment result;
+no-paid smoke and source tests do not qualify a rendered client or paid engine.
+
 
 ## Channel and filesystem authority
 
@@ -340,8 +369,11 @@ in the shared `.agents/skills` directory.
 
 Covered by `tests/test_project_skill_links.py`.
 
-`command_run` requires Linux bubblewrap. It runs as the owner (read-only real
-HOME with its tool caches writable, credential-free environment, shared network)
+`command_run` requires Linux bubblewrap and has no silent unsandboxed fallback.
+Its effective mounts depend on [access mode](#access-mode-development-guarded-and-auto).
+Restricted commands use read-only real HOME with writable tool caches; Development
+writers use real writable host resources. Both filter Cortex/credential environment
+variables and retain validated owner SSH-agent access and shared network
 and mounts the project read-only except for writing workers, who receive the
 whole project writable regardless of their narrower declared coordination work
 area; reviewers and read-only roles receive no writable project paths. `.cortex`, `.codex`
@@ -349,8 +381,8 @@ and `.claude` are masked, including nested ones; the project's `.git` is visible
 (see below). A command runs until it exits unless it sets `timeout_seconds`, and
 is killed when authority is revoked. There is no unsandboxed fallback.
 `timeout_seconds` advertises only a minimum of 1 on `command_run` and
-`outside_command`; the runtime stays unbounded by default (omit the field to
-run until the command exits). An enormous value is not refused on the field —
+`outside_command`. Ordinary `command_run` is unbounded when timeout is omitted;
+exceptional `outside_command` preserves its 600-second default. An enormous value is not refused on the field —
 it is clamped internally to a ~68-year ceiling (`gateway.TIMEOUT_CEILING_SECONDS`,
 `2**31-1` seconds) before it reaches the deadline/subprocess-timeout arithmetic,
 so it can never overflow or crash; it behaves as effectively unbounded.
