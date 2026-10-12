@@ -274,7 +274,10 @@ Independently of the route, every client also receives the user's access
 mode: Zed as the `access_mode` config option, Paseo as ACP `modes` (its mode
 control) — see
 [permissions](../permissions-and-containment/index.md#access-mode-guarded-and-auto).
-`session/set_mode` sets only that mode.
+`session/set_mode` sets only that mode. Fresh ACP sessions initialize Development
+for brokered writing-worker host commands; Guarded and explicit Auto remain
+selectable. Development does not change the Codex engine jail, native-tool policy
+or worker engine mode floor; see the permission page for Docker/alias limits.
 
 The `/cortex-model <route label or route id>` slash command still selects
 a whole route (any provider) at once, for a host with no

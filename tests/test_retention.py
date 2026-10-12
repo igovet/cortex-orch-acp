@@ -50,6 +50,46 @@ def test_committed_deletion_recovers_after_restart(tmp_path):
     assert not (tmp_path/'.cortex'/task).exists()
 
 
+@pytest.mark.parametrize('replay', [False, True])
+@pytest.mark.parametrize('legacy', [False, True])
+def test_retention_session_access_defaults_only_for_deleted_task(tmp_path, replay, legacy):
+    from cortex_runtime.acp import sessions
+    store = Store(tmp_path / '.cortex', project_root=str(tmp_path))
+    tasks = [call_store(store, 'create_task', dict(project_root=str(tmp_path),
+             request=key, request_key=key))['task_id'] for key in ('old', 'kept')]
+    for sid in ('old', 'kept', 'unbound'):
+        sessions.create_session(store, sid, str(tmp_path), {}, {}, [])
+        sessions.select_session_access(store, sid, 'auto', 'acp_set_mode')
+    sessions.bind_task(store, 'old', tasks[0])
+    sessions.bind_task(store, 'kept', tasks[1])
+    with store.connection() as db:
+        if legacy:
+            db.execute("DELETE FROM acp_session_access_defaults WHERE session_id='old'")
+        before = [tuple(row) for row in db.execute(
+            "SELECT * FROM acp_session_access_defaults WHERE session_id!='old' ORDER BY session_id")]
+        if replay:
+            db.execute('INSERT INTO pending_deletions VALUES (?)', (tasks[0],))
+    if replay:
+        store = Store(store.directory, project_root=str(tmp_path))
+        with pytest.raises(StoreError, match='task_not_bound'):
+            call_store(store, 'list_reports', dict(task_id=tasks[0]))
+    else:
+        preview = clear_tasks(store, str(tmp_path), 0, dry_run=True, keep_task_ids=(tasks[1],),
+                              keep_session_ids=('unbound',))
+        assert preview['would_delete_tasks'] == 1
+        result = clear_tasks(store, str(tmp_path), 0, keep_task_ids=(tasks[1],),
+                             keep_session_ids=('unbound',))
+        assert result['deleted_tasks'] == 1
+    with store.connection() as db:
+        assert not db.execute("SELECT 1 FROM acp_host_sessions WHERE session_id='old'").fetchone()
+        after = [tuple(row) for row in db.execute(
+            "SELECT * FROM acp_session_access_defaults ORDER BY session_id")]
+        assert after == before
+        assert db.execute('PRAGMA foreign_key_check').fetchall() == []
+    assert sessions.session_access_mode(store, 'kept') == 'auto'
+    assert sessions.session_access_mode(store, 'unbound') == 'auto'
+
+
 def test_retention_command_uses_only_selected_project_store(tmp_path, monkeypatch, capsys):
     import json
     project=tmp_path/'project';project.mkdir()
@@ -571,6 +611,11 @@ def test_orphan_transcripts_use_last_activity_and_reclaim_file(tmp_path, force, 
     _retention_session(store, tmp_path, 'recent-update', old, update=recent)
     _retention_session(store, tmp_path, 'recent-close', old, closed=recent)
     _retention_session(store, foreign, 'foreign', old, transcript=old)
+    from cortex_runtime.acp.sessions import select_session_access
+    select_session_access(store, 'invoking', 'auto', 'acp_set_mode')
+    with store.connection() as db:
+        defaults = {row['session_id']: tuple(row) for row in db.execute(
+            'SELECT * FROM acp_session_access_defaults')}
     # Legacy corruption: a host session can reference a task already absent.
     import sqlite3
     with sqlite3.connect(store.path) as db:
@@ -591,6 +636,8 @@ def test_orphan_transcripts_use_last_activity_and_reclaim_file(tmp_path, force, 
         remaining = {row[0] for row in db.execute('SELECT session_id FROM acp_host_sessions')}
         expected = {'invoking', 'recent-text', 'recent-update', 'recent-close', 'foreign'} | (set() if force else {'loaded'})
         assert remaining == expected
+        assert {row['session_id']: tuple(row) for row in db.execute(
+            'SELECT * FROM acp_session_access_defaults')} == {sid: defaults[sid] for sid in expected}
         for table in ('host_transcript', 'host_updates'):
             assert not {row[0] for row in db.execute(f'SELECT session_id FROM {table}')} - expected
         assert db.execute('PRAGMA foreign_key_check').fetchall() == []

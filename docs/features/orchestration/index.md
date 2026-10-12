@@ -483,9 +483,11 @@ log. The excerpt is display-only; the retained output remains the complete
 verification evidence. Existing exit-code, interruption and project-integrity
 checks still determine whether verification passes.
 
-A command's **identity** is its operation, its exact `argv` and its scope:
-`command_run` always runs in the task's working tree; an `outside_command`
-receipt records its `cwd`, which is part of the identity. A receipt without
+A command's **identity** is its operation, exact `argv` and effective `cwd`;
+`command_run` also includes its restricted or Development profile. Restricted
+commands run in the task's working tree; Development may select another `cwd`.
+Legacy `command_run` receipts without `cwd` map only to the task root and
+restricted profile. An `outside_command` receipt records its `cwd` too. A receipt without
 `argv` (or an `outside_command` receipt without `cwd`) has no identity and
 matches nothing. A run the gateway rejected before executing it
 (`TOOL_REJECTED`) is not history.
@@ -544,8 +546,9 @@ recorded read as `command_unrecorded`.
 At synthesis, a retained `not_run` or `unverified` check remains a gap unless
 closed by the exact-command rule or the command-less compatibility rule. When
 the gap declares a non-empty `command` as literal argv, a verified, still-current
-`command_run` pass with exactly matching argv in the same plan revision closes
-it, including across nodes; the runtime reads argv from the cited
+restricted `command_run` pass with exactly matching argv and the task's working
+tree as its effective cwd in the same plan revision closes it, including across
+nodes. Development or different-cwd receipts cannot substitute for that check; the runtime reads argv from the cited
 `tool_call_ref` receipt and keeps the task and attempt evidence checks.
 Alternatively, a runtime-owned final-verification command closes a declared
 command gap only with byte-for-byte identical argv, complete exit-0 execution,

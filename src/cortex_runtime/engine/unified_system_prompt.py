@@ -476,7 +476,9 @@ _NATIVE_TOOLS = (
 )
 _WORKER_COMMANDS = (
     "- Treat shell command text as code: quote arguments, never expose a secret through command output, "
-    "and avoid blocking waits longer than a minute."
+    "and avoid blocking waits longer than a minute. Ordinary host command capability is not consent "
+    "to delete data, change credentials, mutate production/shared systems, publish or run paid checks. "
+    "Docker and arbitrary same-user programs can bypass direct filesystem masks; never claim hostile-code isolation."
 )
 _WORKER_EVIDENCE = (
     "- Run reportable checks through Cortex MCP `command_run` (or its advertised approved outside-command "

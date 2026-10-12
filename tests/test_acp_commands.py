@@ -422,7 +422,7 @@ def test_cortex_status_never_mutates_configuration(tmp_path, monkeypatch):
     after = ConfigurationService(store).history(task_id)
     assert before == after == ()
     text = transport.notifications[-1]["params"]["update"]["content"]["text"]
-    assert "- execution: direct-user (no OS filesystem isolation)" in text
+    assert "- execution: engine jail; writer commands: host-writable masks (not hostile-code isolation)" in text
 
 
 def test_status_execution_mode_and_command_text_replay_after_reconnect(tmp_path, monkeypatch):
@@ -443,7 +443,7 @@ def test_status_execution_mode_and_command_text_replay_after_reconnect(tmp_path,
     updates = [item["params"]["update"] for item in replay_transport.notifications]
     assert [item["sessionUpdate"] for item in updates] == ["user_message_chunk", "agent_message_chunk"]
     assert updates[0]["content"]["text"] == "/cortex-status"
-    assert "- execution: direct-user (no OS filesystem isolation)" in updates[1]["content"]["text"]
+    assert "- execution: engine jail; writer commands: host-writable masks (not hostile-code isolation)" in updates[1]["content"]["text"]
 
 
 def test_cortex_setup_guidance_never_contains_a_secret(tmp_path, monkeypatch):

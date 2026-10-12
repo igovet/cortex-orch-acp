@@ -17,6 +17,11 @@ engine is confirmed gone and the reservation is released or safely reclaimed.
 A finished, failed or cancelled worker's write scope is likewise held until
 its engine's reservation is released on a confirmed exit, in every task of the
 project, so a dead worker of an abandoned task never blocks new work.
+Terminal task and unexpected prompt-error cleanup also stop owned engines
+without requiring manual stop. Partial-launch writer locks remain held through
+shutdown and stay quarantined when exit cannot be confirmed; a leader exit alone
+does not release a group with active children. See
+[cleanup boundaries](../failures-and-cancellation/index.md#terminal-resource-cleanup).
 
 All project operations by Cortex MCP tools use the authenticated runtime gateway.
 Native-tool disabling is engine-specific, not a uniform guarantee: Claude's native
@@ -31,8 +36,15 @@ only through partial ACP tool-call events rather than the gateway (see
 Coordinator, consultant and review roles are read-only; other
 workers may write only within their assigned scopes. File replacement checks an
 expected hash or absence and rejects private paths, symlinks and hardlinks.
-Commands have read-only mounts except explicitly reserved existing write roots,
-no inherited credentials or network, and bounded deadlines. Ambiguous effects retain
+Direct private/Git/denied-path overlays are not a guarantee against arbitrary host
+code, outside aliases or Docker. A project digest does not cover outside resources.
+Writing-worker commands in fresh-session Development use host-writable mounts
+through the broker; Guarded, explicit Auto and read-only/reviewer commands retain
+restrictive mounts. Command environments filter Cortex/credential variables but
+use owner toolchains, validated SSH-agent access and shared network. Ordinary
+commands have no default deadline; exceptional outside commands default to 600
+seconds. Declared scope is coordination, not the writing worker's whole-project
+OS grant. See [access modes and limitations](../permissions-and-containment/index.md#access-mode-development-guarded-and-auto). Ambiguous effects retain
 an unresolved receipt and cannot be replayed as though nothing happened.
 
 External editors can still change project files. Review binds the complete observed

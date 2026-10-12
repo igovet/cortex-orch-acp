@@ -1,6 +1,6 @@
-"""The user's Guarded/Auto access mode (``configuration.access_mode``).
+"""Client-owned Development/Guarded/Auto access modes.
 
-Guarded is the default everywhere. Auto is only ever set by the user's own
+Guarded remains the fail-closed legacy fallback; fresh ACP sessions use Development. Auto is only ever set by the user's own
 client, is recorded as a revision, lets the runtime answer approval prompts
 itself and opens workers in the most permissive engine mode their session
 offers -- while every refusal that is not the user's to give still holds.
@@ -289,8 +289,8 @@ def _open_worker(tmp_path, access, mode_options=None):
     kwargs = {} if mode_options is None else dict(mode_options=mode_options)
     environ, connection = _connection_and_config(tmp_path, **kwargs)
     row = _propose_and_apply(store, task_id, epoch, connection)
-    if access == "auto":
-        access_mode.switch(store, task_id, "auto", origin="acp_set_mode")
+    if access in {"auto", "development"}:
+        access_mode.switch(store, task_id, access, origin="acp_set_mode")
     adapter = EngineSessionManagerAdapter(
         lambda t: connection, lambda t: str(tmp_path), environ=environ, call_timeout=10.0, store=store)
     session_ref = adapter.open(
@@ -304,6 +304,10 @@ def _open_worker(tmp_path, access, mode_options=None):
 
 def test_worker_opened_in_auto_is_confirmed_in_the_most_permissive_offered_mode(tmp_path):
     assert _open_worker(tmp_path, "auto") == "agent-full-access"
+
+
+def test_worker_opened_in_development_keeps_floor_with_fake_engine(tmp_path):
+    assert _open_worker(tmp_path, "development") == "agent"
 
 
 def test_worker_opened_in_guarded_keeps_the_floor(tmp_path):
@@ -326,9 +330,9 @@ def test_zed_gets_an_access_option_and_a_mid_task_switch_is_recorded(tmp_path, m
     session_id = result["sessionId"]
     assert "modes" not in result
     option = next(item for item in result["configOptions"] if item["id"] == "access_mode")
-    assert (option["category"], option["currentValue"]) == ("mode", "guarded")
+    assert (option["category"], option["currentValue"]) == ("mode", "development")
     assert [(item["value"], item["name"]) for item in option["options"]] == [
-        ("guarded", "Guarded mode"), ("auto", "Auto mode")]
+        ("development", "Development mode"), ("guarded", "Guarded mode"), ("auto", "Auto mode")]
     store, task_id = _bootstrap_task_for_session(agent, session_id, tmp_path)
 
     agent._session_set_config_option(5, dict(sessionId=session_id, configId="access_mode", value="auto"))
@@ -336,7 +340,7 @@ def test_zed_gets_an_access_option_and_a_mid_task_switch_is_recorded(tmp_path, m
     assert next(item for item in response["result"]["configOptions"] if item["id"] == "access_mode")["currentValue"] == "auto"
     assert access_mode.current(store, task_id) == "auto"
     assert [(row["origin"], row["detail"]["session_id"]) for row in access_mode.history(store, task_id)] == [
-        ("acp_config_option", session_id)]
+        ("runtime_session_default", session_id), ("acp_config_option", session_id)]
 
     agent._session_set_config_option(6, dict(sessionId=session_id, configId="access_mode", value="everything"))
     assert "error" in next(item for item in transport.responses if item.get("id") == 6)
@@ -360,7 +364,22 @@ def test_pre_task_choice_becomes_the_new_tasks_first_revision(tmp_path, monkeypa
     assert agent.sessions[session_id]["pending_access_mode"] is None
 
 
-def test_a_session_that_never_chose_leaves_its_task_guarded(tmp_path, monkeypatch):
+@pytest.mark.parametrize("selected", [None, "guarded", "auto"])
+def test_taskless_reconnect_preserves_default_or_explicit_choice(tmp_path, monkeypatch, selected):
+    environ = _isolate(tmp_path, monkeypatch)
+    project = tmp_path / "project"
+    project.mkdir()
+    agent, _transport = _new_agent(tmp_path, environ)
+    session_id = agent._session_new(dict(cwd=str(project), mcpServers=[]))["sessionId"]
+    if selected:
+        agent._session_set_config_option(3, dict(sessionId=session_id, configId="access_mode", value=selected))
+    loader, _ = _new_agent(tmp_path, environ)
+    loader._session_load(4, dict(sessionId=session_id, cwd=str(project), mcpServers=[]))
+    store = loader._store_for(str(project))
+    assert loader._current_access_mode_for_session(store, loader.sessions[session_id]) == (selected or "development")
+
+
+def test_fresh_session_durably_initializes_development(tmp_path, monkeypatch):
     environ = _isolate(tmp_path, monkeypatch)
     project = tmp_path / "project"
     project.mkdir()
@@ -370,5 +389,5 @@ def test_a_session_that_never_chose_leaves_its_task_guarded(tmp_path, monkeypatc
     agent._workers[-1].join(timeout=10)
     store = agent._store_for(agent.sessions[session_id]["project"])
     task_id = agent.sessions[session_id]["task_id"]
-    assert access_mode.current(store, task_id) == "guarded"
-    assert access_mode.history(store, task_id) == []
+    assert access_mode.current(store, task_id) == "development"
+    assert [row["kind"] for row in access_mode.history(store, task_id)] == ["initialized"]

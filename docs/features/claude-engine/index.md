@@ -235,6 +235,11 @@ is refused. See `delegation.live_adapters
 .EngineSessionManagerAdapter._apply_worker_mode_floor` and
 `tests/test_delegation_worker_mode_floor.py`.
 
+Fresh ACP sessions initialize Development for brokered writing-worker host
+commands. This leaves the Claude engine jail, disallowed native tools and worker
+mode floor unchanged; it is not bypassPermissions. Explicit Auto retains its
+separate offered-mode behavior. See [access modes and Docker limits](../permissions-and-containment/index.md#access-mode-development-guarded-and-auto).
+
 ## Evidence status
 
 `engine.claude_adapter_acp.build_claude_evidence_status` returns a

@@ -420,8 +420,11 @@ def test_expected_manager_guard_is_atomic_before_detaching_replacement(tmp_path)
 
 class _GatedManager:
     """Engine manager whose teardown the test can hold open."""
-    def __init__(self, gate=None):
+    def __init__(self, gate=None, *, confirms_exit=True):
         self.gate = gate
+        self._exited = threading.Event()
+        self._process = SimpleNamespace(wait_exited=lambda timeout: self._exited.is_set())
+        self.confirms_exit = confirms_exit
         self.entered = threading.Event()
         self.shutdowns = []
 
@@ -430,6 +433,8 @@ class _GatedManager:
         self.entered.set()
         if self.gate is not None:
             self.gate.wait(10)
+        if self.confirms_exit:
+            self._exited.set()
 
 
 def _settling_adapter(store, task_id, attempt, manager):
@@ -447,9 +452,10 @@ def _settlement_events(store, attempt):
             (f"usage_settlement:{attempt}:%",)).fetchall()]
 
 
-def test_shutdown_cancels_a_settlement_whose_usage_never_arrives(tmp_path):
+@pytest.mark.parametrize("confirms_exit", [True, False])
+def test_shutdown_cancels_a_settlement_whose_usage_never_arrives(tmp_path, confirms_exit):
     store, task_id = _task(tmp_path)
-    manager = _GatedManager()
+    manager = _GatedManager(confirms_exit=confirms_exit)
     adapter = _settling_adapter(store, task_id, "xa_never", manager)
     started = time.monotonic()
     adapter.finish_owned("xa_never")
@@ -461,8 +467,14 @@ def test_shutdown_cancels_a_settlement_whose_usage_never_arrives(tmp_path):
     assert time.monotonic() - started < 3
     assert not cleanup.is_alive()  # no settlement wait outlives shutdown
     assert manager.shutdowns == [2.0]  # torn down exactly once
-    assert "xa_never" not in adapter._managers and not adapter._result_settlements
+    assert ("xa_never" not in adapter._managers) == confirms_exit
+    assert not adapter._result_settlements
     assert _settlement_events(store, "xa_never") == []  # shutdown is not a timeout
+    if not confirms_exit:
+        # Unconfirmed absence retains ownership for an explicit later retry.
+        assert adapter._managers["xa_never"] is manager
+        adapter.terminate_owned("xa_never")
+        assert manager.shutdowns == [2.0, 2.0]
 
 
 def test_shutdown_waits_for_settlement_teardown_already_in_progress(tmp_path):
@@ -518,3 +530,48 @@ def test_finish_after_shutdown_tears_down_without_a_settlement_wait(tmp_path):
     adapter.finish_owned("xa_late")
     assert time.monotonic() - started < 1
     assert manager.shutdowns == [2.0] and not adapter._result_settlements
+
+
+def test_shutdown_cannot_delegate_to_an_unstarted_settlement(tmp_path, monkeypatch):
+    store, task_id = _task(tmp_path)
+    manager = _GatedManager()
+    adapter = _settling_adapter(store, task_id, "xa_starting", manager)
+    entered, release, stopped = threading.Event(), threading.Event(), threading.Event()
+    real_start = threading.Thread.start
+
+    def controlled_start(thread):
+        if thread.name == "engine-result-settlement":
+            entered.set()
+            assert release.wait(5)
+        return real_start(thread)
+
+    monkeypatch.setattr(threading.Thread, "start", controlled_start)
+    finisher = threading.Thread(target=lambda: adapter.finish_owned("xa_starting"))
+    finisher.start()
+    assert entered.wait(5)
+    stopper = threading.Thread(target=lambda: (adapter.shutdown(), stopped.set()))
+    stopper.start()
+    try:
+        assert not stopped.wait(0.2)
+    finally:
+        release.set()
+        finisher.join(5)
+        stopper.join(5)
+    assert not finisher.is_alive() and not stopper.is_alive()
+    assert stopped.is_set() and manager.shutdowns == [2.0]
+    assert not adapter._managers and not adapter._result_settlements
+    assert not adapter._result_settlement_managers
+
+
+def test_shutdown_does_not_skip_a_settlement_managers_replacement(tmp_path):
+    store, task_id = _task(tmp_path)
+    original, replacement = _GatedManager(), _GatedManager()
+    adapter = _settling_adapter(store, task_id, "xa_replaced", original)
+    adapter.finish_owned("xa_replaced")
+    cleanup = adapter._result_settlements["xa_replaced"]
+    with adapter._lock:
+        adapter._managers["xa_replaced"] = replacement
+    adapter.shutdown()
+    assert not cleanup.is_alive()
+    assert original.shutdowns == [] and replacement.shutdowns == [2.0]
+    assert not adapter._managers and not adapter._result_settlement_managers

@@ -24,6 +24,20 @@
   </tr>
 </table>
 
+Terminal tasks automatically tear down their owned coordinator/worker engines;
+`COMPLETED` and `FAILED` are not relabeled `CANCELLED`. Unexpected prompt errors
+and host disconnects also stop owned work without certifying a task outcome.
+Cleanup revokes the owned channels before shutdown, even if exit cannot be
+confirmed. Old-connection EOF and stale turn cleanup cannot claim a replacement
+turn, including one continued by an explicit answer.
+Writer locks and capacity release only after observed exit; unknown liveness
+remains a blocker. Shutdown reuses an already-owned usage-settlement teardown
+without retrying its exact manager in the same shutdown. A waiting or interrupted
+turn is not task completion; its background-worker host requesters remain available.
+The incoming ACP connection remains host-owned until it closes; Cortex does not
+exit an open multi-session connection merely because one prompt returned.
+See [cleanup and disconnects](docs/features/failures-and-cancellation/index.md#terminal-resource-cleanup).
+
 On a fully closed, unrepaired first-review path, Cortex can complete with a
 [runtime-composed synthesis](docs/features/task-lifecycle/index.md#runtime-composed-synthesis)
 instead of another coordinator model turn. Independent review, digest-bound
@@ -59,6 +73,8 @@ then use `/cortex-clear days 1 force confirm`. Force always keeps the invoking
 session's task; it assumes other processes are already dead and does not kill them.
 Cleanup also removes old unbound/orphan chat sessions, then runs SQLite `VACUUM`
 after committed deletion and reports reclaimed bytes (or an honest vacuum failure).
+Session access-default rows are removed only with their deleted sessions;
+surviving sessions keep their defaults and explicit selections.
 Invalid input and busy-store races are refused. `/clear` is host-reserved, not a Cortex alias.
 See [retention maintenance](docs/project/packaging.md#retention-maintenance)
 for safety details and the owner-run CLI alternative.
@@ -120,6 +136,9 @@ they are not parameter resets. [Bound task inspection](docs/features/observabili
 provides paged, read-only lifecycle metadata and native confirmation references.
 The [dev binding exporter](docs/project/dev-environment.md#read-only-dev-binding) can observe one explicitly owned host agent and its guarded session/task/current-owner binding; it never starts a daemon or engine. It does not qualify a live run or replace independent review and verification. Failures retain bounded local stage/process diagnostics and complete allowlisted inspector reasons without returning a binding. Missing endpoint metadata, helper startup/output failures and storage refusals remain distinct; earlier generic errors cannot identify their historical cause. Zero child exit alone is not complete binding evidence.
 Targeted tests can use the [fresh-process isolated launcher](docs/project/verification.md#fresh-process-isolated-targeted-launcher) with an explicitly authorized existing dependency path.
+Before Python binding checks or the default suite, run checkout-local
+`npm --prefix integrations/paseo ci` then `npm --prefix integrations/paseo run typecheck`;
+see [verification sequencing](docs/project/verification.md#sequencing).
 
 Before `plan_submit`, inspect the live schema and measure complete bounded fields.
 The objective property description exposes its Unicode code-point limit even
@@ -167,6 +186,29 @@ If a reminder's database lookup or observation fails after a write commits,
 the successful write receipt carries `skill_hint_unavailable` instead of a write error.
 
 A text `project_read` pages by 1-based line: `offset` is a line number, `limit` is at most 2000 lines, and `line_numbers` is on by default. Each result stays under 24,000 bytes. A line longer than 2000 characters is flagged as truncated and never counts as read. Complete coverage is kept per channel. `project_write` replaces an existing file only with the `full_content_sha256` from that complete read; a partial page's `sha256` identifies those bytes and never authorizes an overwrite. The new `project_edit` applies up to 64 ordered exact replacements atomically, after any prior text read of the unchanged file. An append replaces a unique tail anchor. Each successful write or edit clears the channel's read coverage. Receipts show previous and new size and lines and a `drastic_shrink` flag. A file with a line over 2000 characters cannot be fully read, so `project_edit` is the only route to change it.
+
+## Development command access
+
+Fresh ACP sessions durably start **Development**: writing workers can use ordinary
+host resources, Docker/Compose, SDK/cache state and authorized outside-project
+working directories through the receipt-producing command gateway without routine
+approval cards. Engine jails, read-only roles, channel/revocation gates, owner
+denials, independent review and runtime completion remain in place.
+
+This is trusted local development, **not hostile-code OS isolation**. Direct
+filesystem masks cannot stop arbitrary owner code or a Docker daemon from
+bypassing them. Host capability is not permission for deletion, production/shared
+changes, publication, credentials or paid checks; declared deletion commands
+still require consent, including `env rm`, `sh -c 'env rm file'` and
+`bash -o pipefail -c 'rm file'`. Simple shell assignment prefixes and
+conditional/loop command positions are recognized too, for example
+`sh -c 'LABEL=fixture rm fixture'` and `sh -c 'if true; then env rm fixture; fi'`.
+Literal `echo`/`printf` argv arguments are not shell commands. Select **Guarded**
+for restrictive future command mounts.
+Explicit **Auto** keeps its earlier approval semantics. Legacy sessions/tasks and
+unknown/unreadable configuration remain Guarded; reconnect preserves durable
+choices without rewriting owner settings. Stopping a command does not roll back
+Docker or outside-project effects. See [permissions and containment](docs/features/permissions-and-containment/index.md#access-mode-development-guarded-and-auto).
 
 Root `.gitignore` repair reads exact full text internally, never display pages. Edit receipts describe the protected committed bytes. Diff matching is input-budgeted; oversized inputs return `diff_omitted: "input_budget"` and `diff_truncated: true` without blocking the edit.
 

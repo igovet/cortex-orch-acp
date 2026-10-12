@@ -39,7 +39,10 @@ cleanup; transactional `pending_deletions`/`finish_deletions` still recover
 committed filesystem deletion after interruption. Preview does not replay those
 intents. Only linked task artifacts/drafts are removed, never unrelated drafts.
 Old unbound/orphan ACP host sessions are removed with their transcript/update
-and session-workspace rows. Their last activity is the maximum of creation,
+and session-workspace/access-default rows. Bound-task retention deletes session
+access defaults before their host-session parents; surviving sessions retain their
+stored defaults and explicit mode selections. Orphan-session last activity is the
+maximum of creation,
 close and latest transcript/update timestamps; invoking and (unless forced)
 loaded sessions are excluded. Preview includes `would_delete_orphan_sessions`.
 After anything is deleted and committed, `VACUUM` runs outside a transaction

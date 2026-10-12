@@ -399,8 +399,8 @@ def run_smoke(*, fixture_connection, report):
             report.record(
                 "session/new:access_mode_option_shape",
                 access_mode_option is not None
-                and access_mode_values == {"guarded", "auto"}
-                and access_mode_option.get("currentValue") == "guarded",
+                and access_mode_values == {"development", "guarded", "auto"}
+                and access_mode_option.get("currentValue") == "development",
                 detail=access_mode_option)
 
         _line, commands_notification = session.recv()

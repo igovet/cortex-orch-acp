@@ -15,6 +15,9 @@ from .acp.replay_store import REPLAY_SCHEMA
 from .acp.questions_store import PENDING_QUESTIONS_SCHEMA
 from .acp.steering import TASK_LANGUAGE_SCHEMA, TASK_STOPPED_SCHEMA
 from .acp.sessions import ACP_SESSION_SCHEMA
+from .configuration.access_mode import SCHEMA as ACCESS_MODE_SCHEMA
+
+_ACCESS_TABLES = frozenset({"acp_session_access_defaults", "access_mode_events"})
 from .catalog.store import CATALOG_SCHEMA
 from .configuration.store import CONFIGURATION_SCHEMA
 from .contracts import StoreError
@@ -184,6 +187,8 @@ _SELECTIONS = {
     "configuration_revisions": "SELECT x.* FROM configuration_revisions x JOIN tasks t ON t.id=x.task_id WHERE t.project_root=?",
     "project_configuration_defaults": "SELECT x.* FROM project_configuration_defaults x WHERE x.project_root=?",
     "acp_host_sessions": "SELECT x.* FROM acp_host_sessions x WHERE x.project_root=?",
+    "acp_session_access_defaults": "SELECT x.* FROM acp_session_access_defaults x JOIN acp_host_sessions s ON s.session_id=x.session_id WHERE s.project_root=?",
+    "access_mode_events": "SELECT x.* FROM access_mode_events x JOIN tasks t ON t.id=x.task_id WHERE t.project_root=?",
     "delegation_provisioning": "SELECT x.* FROM delegation_provisioning x JOIN tasks t ON t.id=x.task_id WHERE t.project_root=?",
     "delegation_effects": "SELECT x.* FROM delegation_effects x JOIN delegation_provisioning p ON p.idempotency_key=x.idempotency_key JOIN tasks t ON t.id=p.task_id WHERE t.project_root=?",
     "work_requirements": "SELECT x.* FROM work_requirements x JOIN tasks t ON t.id=x.task_id WHERE t.project_root=?",
@@ -241,7 +246,7 @@ _SELECTIONS = {
 _COPY_ORDER = (
     "tasks", "runtime_tasks", "runtime_nodes", "runtime_events", "runtime_requests", "thread_bindings", "task_owners", "trusted_channels", "source_events",
     "task_route_selections", "configuration_revisions", "project_configuration_defaults",
-    "acp_host_sessions",
+    "acp_host_sessions", "acp_session_access_defaults", "access_mode_events",
     "delegation_provisioning", "delegation_effects",
     "work_requirements", "work_requirement_revisions", "work_assignments",
     "work_assignment_predecessors", "work_assignment_attempts", "work_graph_operations",
@@ -452,7 +457,7 @@ def _observability_present(db):
 def _expected_layout():
     db = sqlite3.connect(":memory:")
     try:
-        db.executescript(SCHEMA + IDENTITY_SCHEMA + CATALOG_SCHEMA + CONFIGURATION_SCHEMA + ACP_SESSION_SCHEMA + DELEGATION_SCHEMA + WORK_GRAPH_SCHEMA + TASK_EVENTS_SCHEMA + RUNTIME_SCHEMA + CAPACITY_SCHEMA + EVIDENCE_SCHEMA + REPLAY_SCHEMA + PENDING_QUESTIONS_SCHEMA + TASK_LANGUAGE_SCHEMA + TASK_STOPPED_SCHEMA + CONTEXT_GENERATIONS_SCHEMA + PROCESS_REGISTRY_SCHEMA + LARGE_OUTPUT_SCHEMA + WORKSPACE_SCHEMA + INTEGRATION_SCHEMA + ROUTING_SCHEMA + OBSERVABILITY_SCHEMA)
+        db.executescript(SCHEMA + IDENTITY_SCHEMA + CATALOG_SCHEMA + CONFIGURATION_SCHEMA + ACP_SESSION_SCHEMA + ACCESS_MODE_SCHEMA + DELEGATION_SCHEMA + WORK_GRAPH_SCHEMA + TASK_EVENTS_SCHEMA + RUNTIME_SCHEMA + CAPACITY_SCHEMA + EVIDENCE_SCHEMA + REPLAY_SCHEMA + PENDING_QUESTIONS_SCHEMA + TASK_LANGUAGE_SCHEMA + TASK_STOPPED_SCHEMA + CONTEXT_GENERATIONS_SCHEMA + PROCESS_REGISTRY_SCHEMA + LARGE_OUTPUT_SCHEMA + WORKSPACE_SCHEMA + INTEGRATION_SCHEMA + ROUTING_SCHEMA + OBSERVABILITY_SCHEMA)
         tables = _table_names(db)
         columns = {
             table: tuple(tuple(row) for row in db.execute(f"PRAGMA table_xinfo({_identifier(table)})"))
@@ -462,7 +467,7 @@ def _expected_layout():
             table: tuple(tuple(row) for row in db.execute(f"PRAGMA foreign_key_list({_identifier(table)})"))
             for table in tables
         }
-        core = tables - _RUNTIME_TABLES - _IDENTITY_TABLES - _CATALOG_TABLES - _CONFIGURATION_TABLES - _ACP_TABLES - _DELEGATION_TABLES - _WORK_GRAPH_TABLES - _TASK_EVENTS_TABLES - _CAPACITY_TABLES - _EVIDENCE_TABLES - _PERMISSION_RECEIPT_TABLES - _REPLAY_TABLES - _QUESTIONS_TABLES - _LANGUAGE_TABLES - _STOPPED_TABLES - _GENERATIONS_TABLES - _PROCESS_REGISTRY_TABLES - _BUDGET_TABLES - _WORKSPACE_TABLES - _ROUTING_TABLES - _OBSERVABILITY_TABLES
+        core = tables - _RUNTIME_TABLES - _IDENTITY_TABLES - _CATALOG_TABLES - _CONFIGURATION_TABLES - _ACP_TABLES - _ACCESS_TABLES - _DELEGATION_TABLES - _WORK_GRAPH_TABLES - _TASK_EVENTS_TABLES - _CAPACITY_TABLES - _EVIDENCE_TABLES - _PERMISSION_RECEIPT_TABLES - _REPLAY_TABLES - _QUESTIONS_TABLES - _LANGUAGE_TABLES - _STOPPED_TABLES - _GENERATIONS_TABLES - _PROCESS_REGISTRY_TABLES - _BUDGET_TABLES - _WORKSPACE_TABLES - _ROUTING_TABLES - _OBSERVABILITY_TABLES
         return core, columns, foreign_keys
     finally:
         db.close()
@@ -511,6 +516,7 @@ def _validate_format(db):
         | (_CATALOG_TABLES if catalog_present else set())
         | (_CONFIGURATION_TABLES if configuration_present else set())
         | (_ACP_TABLES if acp_present else set())
+        | (actual & _ACCESS_TABLES)
         | (_DELEGATION_TABLES if delegation_present else set())
         | (_WORK_GRAPH_TABLES if graph_present else set())
         | runtime_names
@@ -767,7 +773,7 @@ def _create_destination(source_db, temporary, project_root):
         # a fresh store: core SCHEMA plus the identity tables,
         # regardless of whether the (possibly legacy, pre-T005) source has
         # them. A legacy source simply leaves them empty in the destination.
-        target.executescript("BEGIN IMMEDIATE;\n" + SCHEMA + IDENTITY_SCHEMA + CATALOG_SCHEMA + CONFIGURATION_SCHEMA + ACP_SESSION_SCHEMA + DELEGATION_SCHEMA + WORK_GRAPH_SCHEMA + TASK_EVENTS_SCHEMA + RUNTIME_SCHEMA + CAPACITY_SCHEMA + EVIDENCE_SCHEMA + REPLAY_SCHEMA + PENDING_QUESTIONS_SCHEMA + TASK_LANGUAGE_SCHEMA + TASK_STOPPED_SCHEMA + CONTEXT_GENERATIONS_SCHEMA + PROCESS_REGISTRY_SCHEMA + LARGE_OUTPUT_SCHEMA + WORKSPACE_SCHEMA + INTEGRATION_SCHEMA + ROUTING_SCHEMA + OBSERVABILITY_SCHEMA +
+        target.executescript("BEGIN IMMEDIATE;\n" + SCHEMA + IDENTITY_SCHEMA + CATALOG_SCHEMA + CONFIGURATION_SCHEMA + ACP_SESSION_SCHEMA + ACCESS_MODE_SCHEMA + DELEGATION_SCHEMA + WORK_GRAPH_SCHEMA + TASK_EVENTS_SCHEMA + RUNTIME_SCHEMA + CAPACITY_SCHEMA + EVIDENCE_SCHEMA + REPLAY_SCHEMA + PENDING_QUESTIONS_SCHEMA + TASK_LANGUAGE_SCHEMA + TASK_STOPPED_SCHEMA + CONTEXT_GENERATIONS_SCHEMA + PROCESS_REGISTRY_SCHEMA + LARGE_OUTPUT_SCHEMA + WORKSPACE_SCHEMA + INTEGRATION_SCHEMA + ROUTING_SCHEMA + OBSERVABILITY_SCHEMA +
                              f"PRAGMA application_id={APPLICATION_ID};\nCOMMIT;")
         target.execute("BEGIN IMMEDIATE")
         source_identity_present = _identity_present(source_db)
@@ -800,7 +806,9 @@ def _create_destination(source_db, temporary, project_root):
             placeholders = ",".join("?" for _ in columns)
             insert = ("INSERT INTO " + _identifier(table) + " (" +
                       ",".join(map(_identifier, columns)) + ") VALUES (" + placeholders + ")")
-            if table in _RUNTIME_TABLES and table not in _table_names(source_db):
+            if table in _ACCESS_TABLES and table not in _table_names(source_db):
+                rows = ()  # Additive defaults never backfill legacy authority.
+            elif table in _RUNTIME_TABLES and table not in _table_names(source_db):
                 rows = ()
             elif table in _IDENTITY_TABLES and not source_identity_present:
                 # No identity rows exist to carry; leave the destination's

@@ -1,3 +1,26 @@
+## 2026-10-12 brokered Development command capability
+
+Use Development as the durable fresh-ACP-session default, not Auto. Ordinary
+writing-worker commands use host-writable resources through the existing host-side
+broker, while engines, read-only/review commands and runtime verification retain
+their existing jails. Channel/epoch/role/revocation, owner denials, review and
+completion remain runtime decisions. Declared deletion and exceptional actions
+retain consent; capability does not authorize hazardous/production/publication
+effects. Lexical command classification cannot enforce arbitrary program intent.
+
+Full existing Docker-daemon access and arbitrary owner code are incompatible with
+a guarantee of hostile-code private-store isolation. Direct masks reduce accidental
+effects, not daemon-mediated effects, alternate aliases, outside hardlinks or
+same-user process access. Do not claim both full Docker and adversarial containment.
+Stopping CLI processes does not roll back daemon or outside state.
+
+Reject making Auto the default (it confuses capability with blanket approval),
+removing every engine jail (unnecessarily broadens native/role authority), or
+depending on uninstalled proxy/VM/host APIs. Keep old sessions/tasks without
+initialization Guarded, preserve explicit choices and fail closed on unknown or
+unreadable state. New initialization is additive project-local SQLite metadata;
+owner settings are never silently replaced. See [permissions](../features/permissions-and-containment/index.md#access-mode-development-guarded-and-auto).
+
 ## 2026-10-09 observability decision gates and the edit-tool decision
 
 The owner approved the following decision gates for observability measurement. They

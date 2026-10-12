@@ -119,3 +119,57 @@ def probe(pid: int, start_ticks: str, boot_id: str) -> str:
         # cannot be verified, so a same-pid coincidence is not trusted.
         return "unknown"
     return "alive" if current_start_ticks == start_ticks else "absent"
+
+
+def probe_group(identity: ProcessIdentity) -> str:
+    """Observe the launched private session, including a surviving group child.
+
+    Linux keeps the session/group ID reserved while members survive. A reused
+    leader PID or reboot disproves the old identity. Zombies cannot perform
+    work; their parent, not this non-parent observer, owns wait/reaping.
+    Unreadable observations remain unknown, never a reason to signal.
+    """
+    import os
+
+    if identity.pid != identity.pgid:
+        return "unknown"
+    boot = read_boot_id()
+    if boot is None:
+        return "unknown"
+    if boot != identity.boot_id:
+        return "absent"
+    leader_ticks = read_start_ticks(identity.pid)
+    if leader_ticks is not None and leader_ticks != identity.start_ticks:
+        return "absent"
+    try:
+        os.killpg(identity.pgid, 0)
+    except ProcessLookupError:
+        return "absent"
+    except OSError:
+        return "unknown"
+    try:
+        entries = os.listdir("/proc")
+    except OSError:
+        return "unknown"
+    unknown = False
+    for entry in entries:
+        if not entry.isdigit():
+            continue
+        try:
+            with open(f"/proc/{entry}/stat") as handle:
+                rest = handle.read().rsplit(")", 1)[1].split()
+            if len(rest) < 20:
+                unknown = True
+                continue
+            if int(rest[2]) != identity.pgid:
+                continue
+            if (int(rest[3]) != identity.pid
+                    or int(rest[19]) < int(identity.start_ticks)):
+                return "unknown"
+            if rest[0] not in {"Z", "X"}:
+                return "alive"
+        except FileNotFoundError:
+            continue
+        except (OSError, ValueError, IndexError):
+            unknown = True
+    return "unknown" if unknown else "absent"

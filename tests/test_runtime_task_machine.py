@@ -32,7 +32,7 @@ def plan(count=1):
                 verification=[['python3', '-B', '-m', 'pytest', '-q']])
 
 
-def _verified_pass_for_node(state, coordinator, node_id, command):
+def _verified_pass_for_node(state, coordinator, node_id, command, **command_options):
     from uuid import uuid4
     from cortex_runtime.trusted_channel import issue_channel_tx, resolve_channel
     from cortex_runtime.delegation import mcp_tools
@@ -57,7 +57,7 @@ def _verified_pass_for_node(state, coordinator, node_id, command):
         db.commit()
     worker = resolve_channel(state.store, worker_id, secret)
     receipt = mcp_tools.dispatch(state.store, worker, 'command_run',
-                                 dict(argv=command, request_key='synthesis-command'))
+                                 dict(argv=command, request_key='synthesis-command', **command_options))
     assert receipt['exit_code'] == 0
     return receipt['tool_call_ref']
 
@@ -238,7 +238,11 @@ def test_fix_node_same_name_different_command_leaves_gap_open(tmp_path):
                                   [dict(item='tests', blocker='The frontend command did not run.')])['recorded']
 
 
-def test_exact_verified_command_closes_only_its_declared_gap(tmp_path):
+@pytest.mark.parametrize('mode,cwd_matches,worktree', [
+    ('guarded', True, False), ('guarded', True, True),
+    ('development', True, False), ('development', False, False),
+])
+def test_exact_verified_command_closes_only_its_declared_gap(tmp_path, mode, cwd_matches, worktree):
     from cortex_runtime.trusted_channel import resolve_channel
 
     store = Store(tmp_path / '.cortex', project_root=tmp_path)
@@ -246,11 +250,25 @@ def test_exact_verified_command_closes_only_its_declared_gap(tmp_path):
     state = TaskMachine(store)
     state.create(task.task_id, 'Verify')
     channel = resolve_channel(store, task.channel_id, task.secret)
+    if worktree:
+        from cortex_runtime import task_workspace
+        workspace = tmp_path / 'workspace'
+        workspace.mkdir()
+        with store.connection() as db:
+            task_workspace.record_task(db, channel.task_id, str(workspace))
+            db.commit()
     state.submit_plan(channel, plan(3), 'command-gap-plan')
     state.move(channel.task_id, 'EXECUTING')
     state.claim_ready(channel.task_id, channel.channel_id)
-    command = ['python3', '-B', '-c', 'print("verified")']
-    ref = _verified_pass_for_node(state, channel, 'N1', command)
+    from cortex_runtime.configuration import access_mode
+    access_mode.switch(store, channel.task_id, mode, origin='acp_set_mode')
+    command = ['python3', '-B', '-c', 'assert 2 + 2 == 4']
+    options = {}
+    if not cwd_matches:
+        other = tmp_path / 'other-cwd'
+        other.mkdir()
+        options['cwd'] = str(other)
+    ref = _verified_pass_for_node(state, channel, 'N1', command, **options)
     with state.store.connection() as db:
         db.execute("UPDATE runtime_tasks SET state='RECONCILING' WHERE task_id=?", (channel.task_id,))
         db.execute("UPDATE runtime_nodes SET result_json=? WHERE task_id=? AND node_id='N0'",
@@ -266,9 +284,12 @@ def test_exact_verified_command_closes_only_its_declared_gap(tmp_path):
     with pytest.raises(StoreError, match='synthesis_gaps_undisclosed') as error:
         state.submit_synthesis(channel, 'Verified')
     assert 'frontend tests' in error.value.correction
-    assert 'backend tests' not in error.value.correction
-    assert state.submit_synthesis(channel, 'Verified',
-                                  [dict(item='frontend tests', blocker='The frontend command did not run.')])['recorded']
+    closes_backend = mode == 'guarded' and cwd_matches
+    assert ('backend tests' not in error.value.correction) == closes_backend
+    gaps = [dict(item='frontend tests', blocker='The frontend command did not run.')]
+    if not closes_backend:
+        gaps.append(dict(item='backend tests', blocker='Only a different command profile or cwd ran.'))
+    assert state.submit_synthesis(channel, 'Verified', gaps)['recorded']
 
 
 def test_cannot_skip_review_or_complete_with_chat(machine):

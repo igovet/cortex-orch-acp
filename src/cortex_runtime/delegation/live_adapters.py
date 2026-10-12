@@ -738,6 +738,8 @@ class EngineSessionManagerAdapter:
         # A delivery refusal is version-wide, not a reason to try another model.
         self._unqualified_instruction_routes: set[tuple[str, str, str]] = set()
         self._workspace_locks: dict[str, object] = {}
+        self._termination_locks: dict[str, threading.Lock] = {}
+        self._result_settlement_managers: dict[str, object] = {}
         # T017 (fresh review, MEDIUM): a queued open must observe
         # cancellation promptly instead of polling forever.
         self._cancelled_attempts: set[str] = set()
@@ -964,6 +966,7 @@ class EngineSessionManagerAdapter:
         reservation_id = None
         with self._lock:
             self._opening.add(attempt_id)
+            self._attempt_task[attempt_id] = task_id
         if self._store is not None:
             from . import capacity as delegation_capacity
 
@@ -990,7 +993,9 @@ class EngineSessionManagerAdapter:
         # confirmed-vs-ambiguous distinction this reuses verbatim from
         # ``terminate_owned``.
         manager = None
+        session_id = None
         workspace_lock = None
+        workspace_lock_acquired = False
         try:
             # A direct project worker owns the project writer lock for the
             # complete engine lifetime.  Taking it only around launch would
@@ -1000,6 +1005,7 @@ class EngineSessionManagerAdapter:
                     timeout=self._workspace_lock_timeout_seconds
                 )
                 workspace_lock.__enter__()
+                workspace_lock_acquired = True
             # T035 FINDING-13 #3: a cancellation that lands while this
             # attempt was only queued for capacity is already handled inside
             # _reserve_capacity_blocking (never reaches here at all); this
@@ -1109,11 +1115,35 @@ class EngineSessionManagerAdapter:
             # session itself on a capture problem.
             self._capture_catalog_observation(manager, record, session_id)
         except BaseException as error:
-            if workspace_lock is not None:
+            # Retain ownership while teardown runs, even before session/new.
+            with self._lock:
+                if manager is not None:
+                    self._managers[attempt_id] = manager
+                if reservation_id is not None:
+                    self._reservations[attempt_id] = reservation_id
+                if workspace_lock_acquired:
+                    self._workspace_locks[attempt_id] = workspace_lock
+            if self._store is not None and manager is not None:
+                try:
+                    # A failed initialize/session/new still needs a durable
+                    # owner identity if its bounded shutdown is unconfirmed.
+                    self._record_process_identity(record, session_id, task_id, attempt_id, launch)
+                except Exception:
+                    pass
+            exited = False
+            try:
+                exited = self._cleanup_failed_open(manager, reservation_id)
+            except Exception:
+                # Preserve the launch error and quarantine the owned resources.
+                pass
+            if exited and workspace_lock_acquired:
                 workspace_lock.__exit__(None, None, None)
-            self._cleanup_failed_open(manager, reservation_id)
             with self._lock:
                 self._opening.discard(attempt_id)
+                if exited:
+                    self._managers.pop(attempt_id, None)
+                    self._reservations.pop(attempt_id, None)
+                    self._workspace_locks.pop(attempt_id, None)
             if is_worker and manager is not None:
                 self._record_dispatch_route_failure(error, record, route_model, task_id, attempt_id)
             raise
@@ -1180,9 +1210,14 @@ class EngineSessionManagerAdapter:
                     self.terminate_owned(attempt_id)
                     self._record_dispatch_route_failure(error, record, route_model, task_id, attempt_id)
                     raise
+        try:
+            self._check_not_cancelled(attempt_id, task_id)
+        except QueuedOpenCancelled:
+            self.terminate_owned(attempt_id)
+            raise
         return session_id
 
-    def _cleanup_failed_open(self, manager, reservation_id) -> None:
+    def _cleanup_failed_open(self, manager, reservation_id) -> bool:
         """EXT-01 #8: undo a partially-completed :meth:`open` -- capacity
         already reserved, and possibly a real ``EngineProcess`` already
         spawned by ``manager.negotiate``/``manager.create_session`` -- that
@@ -1211,18 +1246,20 @@ class EngineSessionManagerAdapter:
         ordinary unconfirmed ``terminate_owned`` uses."""
         if manager is not None:
             manager.shutdown(grace=2.0)
+        process = getattr(manager, "_process", None) if manager is not None else None
+        exited = process is None or bool(process.wait_exited(0))
         if reservation_id is None or self._store is None:
-            return
+            return exited
         from . import capacity as delegation_capacity
 
-        process = getattr(manager, "_process", None) if manager is not None else None
         if process is None:
             delegation_capacity.release_confirmed(self._store, reservation_id, "never_started")
-        elif bool(process.wait_exited(0)):
+        elif exited:
             delegation_capacity.release_confirmed(self._store, reservation_id, "process_exited")
         else:
             delegation_capacity.mark_ambiguous(self._store, reservation_id, "timeout_alive")
         self._notify_activity()
+        return exited
 
     def _capture_catalog_observation(self, manager, record, session_id) -> None:
         """T035: parse this real session's own observed ``configOptions``
@@ -1703,7 +1740,7 @@ class EngineSessionManagerAdapter:
         pid = getattr(popen, "pid", None)
         if pid is None:
             return
-        identity = process_identity.capture(pid)
+        identity = getattr(process, "_group_identity", None) or process_identity.capture(pid)
         if identity is None:
             return
         import hashlib
@@ -2610,6 +2647,12 @@ class EngineSessionManagerAdapter:
         if task_id in self._cancelled_tasks:
             raise QueuedOpenCancelled("task")
 
+    def owned_attempts(self, task_id: str) -> tuple[str, ...]:
+        """Exact task-owned opens, sessions and quarantined workspace locks."""
+        with self._lock:
+            active = self._opening | set(self._managers) | set(self._workspace_locks)
+            return tuple(a for a in active if self._attempt_task.get(a) == task_id)
+
     def cancel_task(self, task_id: str) -> None:
         """Cancel every queued open for ``task_id`` promptly."""
         self._cancelled_tasks.add(task_id)
@@ -2648,12 +2691,20 @@ class EngineSessionManagerAdapter:
         """Signal every queued open to abort, then terminate every owned
         engine process with a confirmed/ambiguous release (never a
         reservation leak)."""
-        self._shutdown_event.set()
-        self._notify_activity()
         with self._lock:
-            attempt_ids = list(self._sessions)
-        for attempt_id in attempt_ids:
-            self.terminate_owned(attempt_id)
+            self._shutdown_event.set()
+            # A started settlement already owns teardown of its exact manager.
+            # Do not retry that manager during this shutdown if exit is unknown.
+            settling = getattr(self, "_result_settlement_managers", {})
+            attempts = [(attempt, manager) for attempt, manager in self._managers.items()
+                        if settling.get(attempt) is not manager]
+        self._notify_activity()
+        for attempt_id, manager in attempts:
+            try:
+                self.terminate_owned(attempt_id, expected_manager=manager)
+            except Exception:
+                # One ambiguous child must not strand other owned sessions.
+                continue
         self._join_result_settlements()
 
     def _join_result_settlements(self) -> None:
@@ -2680,7 +2731,7 @@ class EngineSessionManagerAdapter:
         that module and ``engine.process_identity`` -- a bare "no record in
         memory" no longer means "absent" the way it did pre-T023)."""
         with self._lock:
-            if attempt_id in self._sessions:
+            if attempt_id in self._sessions or attempt_id in getattr(self, "_managers", {}):
                 return "alive"
         if self._store is None:
             return "absent"
@@ -2701,7 +2752,7 @@ class EngineSessionManagerAdapter:
         holds BEGIN IMMEDIATE. The caller owns commit/rollback.
         """
         with self._lock:
-            if attempt_id in self._sessions:
+            if attempt_id in self._sessions or attempt_id in getattr(self, "_managers", {}):
                 return "alive"
         if self._store is None:
             return "absent"
@@ -2788,18 +2839,23 @@ class EngineSessionManagerAdapter:
                     target=self._finish_result_prompt, args=(attempt_id, manager, done),
                     name="engine-result-settlement", daemon=True,
                 )
+                owners = getattr(self, "_result_settlement_managers", None)
+                if owners is None:
+                    owners = self._result_settlement_managers = {}
                 settling[attempt_id] = thread
+                owners[attempt_id] = manager
+                # Publish and start under the same lock: shutdown must never
+                # delegate cleanup to a thread that has not started yet.
+                try:
+                    thread.start()
+                except BaseException:
+                    settling.pop(attempt_id, None)
+                    owners.pop(attempt_id, None)
+                    raise
             else:
                 thread = None
         if thread is None:
             self.terminate_owned(attempt_id)
-        else:
-            try:
-                thread.start()
-            except BaseException:
-                with self._lock:
-                    settling.pop(attempt_id, None)
-                raise
 
     def result_settlement_pending(self, attempt_id: str) -> bool:
         """Whether this adapter still owns post-result usage/exit cleanup.
@@ -2856,9 +2912,23 @@ class EngineSessionManagerAdapter:
         finally:
             with self._lock:
                 self._result_settlements.pop(attempt_id, None)
+                owners = getattr(self, "_result_settlement_managers", {})
+                if owners.get(attempt_id) is manager:
+                    owners.pop(attempt_id, None)
             self._notify_activity()
 
     def terminate_owned(self, attempt_id: str, *, expected_manager=None) -> None:
+        # Repeated stop/result/disconnect cleanup must not race shutdown and
+        # unlock a writer while another cleanup still owns its manager.
+        with self._lock:
+            locks = getattr(self, "_termination_locks", None)
+            if locks is None:
+                self._termination_locks = locks = {}
+            lock = locks.setdefault(attempt_id, threading.Lock())
+        with lock:
+            self._terminate_owned(attempt_id, expected_manager=expected_manager)
+
+    def _terminate_owned(self, attempt_id: str, *, expected_manager=None) -> None:
         with self._lock:
             if expected_manager is not None and self._managers.get(attempt_id) is not expected_manager:
                 return
@@ -2882,18 +2952,29 @@ class EngineSessionManagerAdapter:
             workspace_locks = getattr(self, "_workspace_locks", None)
             workspace_lock = workspace_locks.get(attempt_id) if workspace_locks is not None else None
         if self._store is not None:
-            from .session_skills import revoke_session_skills
+            try:
+                from .session_skills import revoke_session_skills
 
-            skill_session = session_id
-            if skill_session is None:
-                from ..recovery import registry as recovery_registry
+                skill_session = session_id
+                if skill_session is None:
+                    from ..recovery import registry as recovery_registry
 
-                process_row = recovery_registry.lookup_process(self._store, attempt_id)
-                skill_session = process_row["engine_session_ref"] if process_row is not None else None
-            if skill_session is not None:
-                revoke_session_skills(self._store, skill_session)
+                    process_row = recovery_registry.lookup_process(self._store, attempt_id)
+                    skill_session = process_row["engine_session_ref"] if process_row is not None else None
+                if skill_session is not None:
+                    revoke_session_skills(self._store, skill_session)
+            except Exception:
+                # Failed metadata invalidation must not bypass process teardown.
+                pass
         if manager is not None:
-            manager.shutdown(grace=2.0)
+            try:
+                manager.shutdown(grace=2.0)
+            except Exception:
+                with self._lock:
+                    self._managers[attempt_id] = manager
+                    if reservation_id is not None:
+                        self._reservations[attempt_id] = reservation_id
+                raise
             exited = None
             process = getattr(manager, "_process", None)
             # shutdown() above already waited up to its own grace for exit;
@@ -2905,9 +2986,8 @@ class EngineSessionManagerAdapter:
             if self._store is not None:
                 from ..recovery import registry as recovery_registry
 
-                recovery_registry.mark_terminated(
-                    self._store, attempt_id, "process_exited" if exited else "timeout_alive",
-                )
+                if exited:
+                    recovery_registry.mark_terminated(self._store, attempt_id, "process_exited")
         elif self._store is not None:
             # T023: no same-process manager owns this attempt -- either it
             # was launched by a *different* process (a restart), or it was
@@ -2930,6 +3010,11 @@ class EngineSessionManagerAdapter:
                 reservation_id = delegation_capacity.reservation_for_attempt(self._store, attempt_id)
         else:
             exited = None
+        if manager is not None and not exited:
+            with self._lock:
+                self._managers[attempt_id] = manager
+                if reservation_id is not None:
+                    self._reservations[attempt_id] = reservation_id
         if workspace_lock is not None:
             if exited:
                 workspace_lock.__exit__(None, None, None)
@@ -2985,9 +3070,12 @@ class EngineSessionManagerAdapter:
         row = recovery_registry.lookup_process(self._store, attempt_id)
         if row is None:
             return False
-        if recovery_registry.probe_liveness(row) == "absent":
+        state = recovery_registry.probe_liveness(row)
+        if state == "absent":
             recovery_registry.mark_terminated(self._store, attempt_id, "already_absent")
             return True
+        if state != "alive":
+            return False
         try:
             os.killpg(row["pgid"], signal.SIGTERM)
         except (ProcessLookupError, PermissionError, OSError):
@@ -2998,6 +3086,12 @@ class EngineSessionManagerAdapter:
                 recovery_registry.mark_terminated(self._store, attempt_id, "process_exited")
                 return True
             time.sleep(0.05)
+        state = recovery_registry.probe_liveness(row)
+        if state == "absent":
+            recovery_registry.mark_terminated(self._store, attempt_id, "process_exited")
+            return True
+        if state != "alive":
+            return False
         try:
             os.killpg(row["pgid"], signal.SIGKILL)
         except (ProcessLookupError, PermissionError, OSError):

@@ -18,6 +18,30 @@ for exact paths, artifact-test limits and the next upstream-fix decision.
 
 ## Current ACP boundary (1.0.0)
 
+Owner-triggered retention removes session access-default rows before deleted host
+sessions, without changing surviving defaults or explicit access choices. The
+foreign-key boundary and committed-deletion recovery remain in force; this grants
+no model-callable deletion authority. Local no-paid binding tests require plugin
+`npm ci` and type-check before Python execution; absent endpoint output is a
+failure, never qualification evidence. See [verification sequencing](docs/project/verification.md#sequencing).
+
+Terminal task cleanup, unexpected prompt exceptions and definitive host disconnects
+stop only exactly task-owned opens and engines. Their coordinator/worker channels
+are revoked before shutdown; a surviving process does not retain gateway authority.
+Partial opens are included, and revoked coordinators cannot issue new worker channels.
+Per-task admission/cleanup serialization and turn-generation fencing keep old EOF
+or cleanup from revoking a replacement's channels or removing its host requesters.
+Teardown does not alter verified
+COMPLETED/FAILED outcomes or replay uncertain actions. Worker locks and capacity
+remain quarantined until exit is observed, including active members of the
+launched Linux process group after its leader exits. Unknown identity is never
+signalled; no process-name matching or cleanup of user Docker resources is used.
+Partial-launch locks survive unconfirmed shutdown. Orphan zombies are not active
+writers; their OS parent owns reaping. Descendants that escape the owned group
+are not covered by that group observation. The incoming ACP process still serves
+its host connection until EOF/writer-close/SIGTERM, not just prompt end. See
+[cleanup boundaries](docs/features/failures-and-cancellation/index.md#terminal-resource-cleanup).
+
 Runtime-composed synthesis is a runtime-only completion path, not a model-facing
 acceptance API. It requires completed nodes, first-pass independent APPROVE and
 complete exact final-verification receipts on the current digest, no open
@@ -51,7 +75,11 @@ thread for the exact prompt consumer to record usage; a turn that ends sooner
 settles at once. It does not restore the
 completed worker's channel authority, release capacity or the writer lock before
 confirmed process exit, or postpone explicit cancellation. Cleanup is bound to
-the original manager, not a replacement. Unknown consumption remains unknown;
+the original manager, not a replacement. Shutdown hands off to that exact owned
+settlement once, with a bounded join; uncertain exit retains quarantine rather
+than causing a second teardown in the same shutdown. Declared-command evidence
+gaps require the task-root restricted profile as well as identical argv; a
+Development or different-cwd receipt cannot close them. Unknown consumption remains unknown;
 see [usage settlement](docs/features/token-and-plan-usage/index.md#coverage-and-interrupted-turns).
 The read-only synthesis aggregate keeps unfinished reconciliation explicit and
 withholds its share; it never turns a pending outcome into a completed fallback
@@ -522,17 +550,17 @@ whole project writable for a writing worker; that jail grant is broader than
 the worker's runtime-declared assignment scope. Additional access requests
 update only the declared-scope writer reservations after runtime validation,
 not the OS jail. Private `.cortex`, `.codex` and `.claude` paths are masked,
-and the project's `.git` is visible as described below. A worker's `command_run` runs as the owner: their user and
+and the project's `.git` is visible as described below. The restrictive command profile runs as the owner: their user and
 group names resolve, their real HOME is mounted read-only (so its dotfiles and
 credentials are readable by the command), the runtime's environment is passed on
 except `CORTEX_*` and credential-like variables (token, secret, password, API key,
 auth, cookie, session; a commit author's `GIT_AUTHOR_NAME`/`_EMAIL`/`_DATE` are
-identity and pass), and the host network is shared. Supplementary groups show
-as `nogroup` inside the user namespace, `/run` (and so the Docker socket) is not
-mounted, and `sudo` does not work. External MCP
+identity and pass), and the host network, devices, supplementary groups and
+session sockets remain visible. Read-only mounts
+alone do not prevent mutating Docker socket requests; there is no implicit privilege escalation. External MCP
 servers and automatic verification get no HOME, network or inherited environment
-unless explicitly granted. Hardlinked writable
-files are rejected. Draft writes require the exact owned unpublished draft ID.
+unless explicitly granted. External hardlinks in the task tree are mounted
+read-only where identified; this is not a host-wide alias guarantee. Draft writes require the exact owned unpublished draft ID.
 File actions and command starts recheck authority at the transaction boundary; running
 commands and external servers are terminated on observed revocation.
 Missing continuation-session metadata on a recovered channel does not revoke its
@@ -583,66 +611,72 @@ Run it only with the runtime idle.
 Models/coordinators/workers must never run either deletion route on behalf of
 the owner. See [retention maintenance](docs/project/packaging.md#retention-maintenance).
 
-### Access mode (Guarded and Auto)
+<a id="access-mode-guarded-and-auto"></a>
+### Access mode (Development, Guarded and Auto)
 
-Each task has an access mode (`configuration.access_mode`). **Guarded** is the
-default and the behavior described above: the runtime asks the user on a
-permission card before native deletion of declared `rm` invocations (including
-direct `rm`, `sudo rm`, `xargs rm`, and similar forms), before `project_delete`,
-and before every `outside_write` and `outside_command`; no answer, a timeout, a
-disconnect or a refusal means the action does not happen. In **Auto**, these
-consent-gated operations are auto-approved without a per-action user card (even
-when no client is connected). The owner-selected Auto behavior is to permit outside-project effects without
-a permission card. Guarded mode continues to require explicit accepted consent
-and refuses when consent is absent or fails. Non-`rm` commands such
-as `git clean`, `git commit`, `docker`, `python`, and `pytest` continue without
-a permission card in Guarded mode. Workers run in the engine mode that routes
-each mutating tool call through `session/request_permission` (Claude `default`,
-Codex `agent`).
+Fresh ACP sessions durably start **Development**. A writing worker's ordinary
+`command_run` uses host-writable mounts, real HOME, real /var/tmp, owner devices,
+groups and shared network through the channel-bound host broker. Docker/Compose,
+SDK/cache state and authorized outside-project cwd need no routine permission
+card merely for crossing the project boundary. Engines themselves stay jailed;
+read-only roles, reviewers and automatic verification stay restricted.
 
-**Auto** changes exactly two things:
+This is **trusted local development, not hostile-code isolation**. Direct masks
+hide the bound task's private runtime storage and protect Git configuration,
+user-denied project paths, known existing Cortex configuration/runtime/engine
+locations and the production Paseo home/profile. A task worktree beneath a
+protected parent keeps its own grant. These mounts do not make arbitrary owner
+code, alternate host aliases, hardlinks outside the tree, process access or Docker
+unable to circumvent them. The daemon resolves bind paths in its own namespace;
+rootful Docker may have host-root authority, rootless Docker still has owner
+authority, and remote contexts have their own authority. No endpoint switching,
+sudo, group change, daemon installation or credential copying is implicit.
 
-- Those user-approval prompts are answered by the runtime instead of the user:
-  it selects the request's own offered allow option (one-shot preferred), for
-  the coordinator and for every worker, whether or not a client is connected.
-  A request that offers no allow option is still cancelled. Each automatic
-  answer is recorded in the task's `access_mode_events` table by tool-call id
-  and kind only, never the command or path text.
-- A worker opened while the task is in Auto is confirmed in the most permissive
-  engine mode its own session offers: Claude `bypassPermissions` (else
-  `acceptEdits`, else `default`), Codex `agent-full-access` (else `agent`).
-  The mode is confirmed over the wire or the worker does not run. With Claude
-  `bypassPermissions` the engine stops sending permission requests at all, so
-  the permission bridge no longer sees that worker's native tool calls. Codex's
-  per-turn approval policy stays pinned by Cortex's adapter patch, so a Codex
-  worker still sends its requests, which Auto answers.
+Capability is not authorization to delete data, modify production/shared systems,
+change credentials, upload/push/deploy or run paid checks. Those effects still
+need explicit task authorization. Declared `rm` commands use gateway consent
+(`command_delete`), including recognized argv wrappers (`env`, `sudo`, `xargs`,
+`exec`) and explicit `sh`/`bash`/`dash`/`zsh` command scripts with leading whitespace.
+Recognized shell options with operands (for example `bash -o pipefail -c`) do
+not hide the script. Supported wrappers inside shell command positions are
+classified recursively, including `sh -c 'env dash -c "rm file"'`.
+Simple unquoted assignment prefixes and command-position control words in
+conditionals, loops, negation and groups are recognized before argv dispatch:
+`sh -c 'LABEL=fixture rm fixture'` and
+`sh -c 'if true; then env rm fixture; fi'` both require consent.
+Quoted/escaped prefix-like words and ordinary argument positions do not acquire
+shell-prefix meaning.
+Literal non-shell argv arguments containing separators and `rm` text do not
+request deletion consent. Refused, absent or malformed approval starts no process.
+This lexical classifier
+is not a semantic firewall: interpreters, scripts and daemon operations can hide
+effects. Existing `project_delete`, exceptional `outside_write` and
+`outside_command` consent remains. Development keeps the worker engine floor.
 
-Auto does **not** bypass anything that is not a user approval. In both modes:
-the engine jail and `command_run` sandbox (read-only host, scope-bound project
-writes, hidden `.cortex`, read-only `.codex`/`.claude`, read-only `.git`
-config/hooks/pointers with the `GitGuard` sweep); the channel-verified MCP
-gateway (task state, ownership epoch, channel revocation, assignment scopes,
-write denials, role rules such as no `command_run` for a coordinator or
-consultant, no-follow file operations, expected-content hashes, receipts); the
-native-subagent ban (removed at launch, and refused at the bridge whenever
-a request reaches it); a stale engine binding is refused; the coordinator's own
-engine mode floor; the external MCP allowlist; the paid probes' explicit
-`--i-authorize-paid-call`/`--approval-ref` flags; credential-free command
-environments (the owner's ssh-agent socket excepted, below) and display/log
-redaction. The ssh password dialog is a secret
-entry, not an approval, and is not answered by Auto. The ssh password dialog is a secret entry, not an approval, and is not answered by Auto.
+**Guarded** remains the explicit restrictive command profile (host/HOME mostly
+read-only, writable project and tool caches). **Auto** preserves its previous
+explicitly selected behavior: restricted ordinary command mounts, runtime
+auto-approval of consent cards and the most permissive offered worker engine mode.
+None of these modes lifts channel/role/epoch/revocation, owner denial, review,
+completion, native-subagent or paid-probe gates.
 
-Only the user changes the mode, through their ACP client: Paseo's composer mode
-control (ACP `modes`/`session/set_mode`) or the `access_mode` config option
-(Zed and others). No MCP tool reads or writes it, so a model cannot switch it.
-Every switch is an append-only revision in `access_mode_events` with its origin
-and ACP session; anything missing or unreadable reads as Guarded. The mode is
-never stored as a user default: every new ACP session starts Guarded, and a
-choice made before the first prompt becomes the new task's first revision.
-Switching back to Guarded applies at once to new prompts and new workers; a
-worker already confirmed in a permissive engine mode keeps it until it ends. The
-client's rendering of the shield and the Auto path against a paid engine have not
-been exercised in the applicable live environment; retain only the evidence for the exact observed surface. The no-paid test suite and startup smoke do not establish GUI behavior.
+Only ACP client controls select a mode; no model-facing setter exists.
+`acp_session_access_defaults` is additive format-12 metadata, written with fresh
+session creation; it never backfills old sessions or rewrites user settings.
+An explicit pre-task client choice is durable and wins over the initial default.
+Binding initializes one task event transactionally and idempotently. Load/reconnect
+uses durable state. Existing sessions/tasks without initialization, unknown or
+unreadable values and non-ACP task creation remain Guarded. Existing explicit
+Guarded/Auto selections remain unchanged.
+
+Development starts revalidate policy and authority; observed policy revision/denial
+changes or revocation terminate the owned command group with incomplete evidence.
+Switching modes does not remount a process or undo outside writes, detached
+children, Docker builds, containers or volumes. Receipts retain cwd, profile and
+policy provenance; another cwd/profile cannot close a failed check. Neither
+no-paid fake-launch tests nor startup smoke establishes real containment or GUI
+behavior. Paid CLI/desktop qualification still requires the owner's explicit
+mode-specific request.
 
 ### Owner's ssh-agent
 

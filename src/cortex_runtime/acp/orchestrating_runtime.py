@@ -1160,6 +1160,9 @@ class OrchestratingRuntime:
         self._task_permission_requesters: dict[str, Callable] = {}
         self._task_fs_requesters: dict[str, Callable] = {}
         self._task_requester_sessions: dict[str, str] = {}
+        self._task_resource_locks: dict[str, Any] = {}
+        self._task_resource_generations: dict[str, object] = {}
+        self._coordinator_open_attempts: dict[str, set[str]] = {}
         # T020: per-task de-duplication of identical consecutive runtime
         # status lines (never persisted -- see acp.messages.Dedup).
         self._status_dedup = acp_messages.Dedup()
@@ -1341,6 +1344,12 @@ class OrchestratingRuntime:
         # this process); a stale/unknown session_id is simply a no-op below.
         self._session_task: dict[str, str] = {}
 
+    def _task_resource_lock(self, task_id: str):
+        # Admission and cleanup are serialized per task, never across tasks.
+        # Engine shutdown does not hold the general runtime/SQLite locks.
+        with self._lock:
+            return self._task_resource_locks.setdefault(task_id, threading.RLock())
+
     # -- IncomingRuntime -----------------------------------------------
 
     def start_prompt(
@@ -1402,10 +1411,12 @@ class OrchestratingRuntime:
         narration. ``None`` (every pre-T035 caller/test) falls back to the
         plain-text-only behavior unchanged."""
         elicitor = host_elicitor if host_elicitor is not None else self._elicitor
-        with self._lock:
+        generation = object()
+        with self._task_resource_lock(task_id), self._lock:
             if task_id in self._active_tasks:
                 raise SecondCoordinatorRefused()
             self._active_tasks.add(task_id)
+            self._task_resource_generations[task_id] = generation
             self._active_cancel_events[task_id] = cancel_event
             # A new turn arrives over a live connection.
             self._host_disconnected.discard(task_id)
@@ -1436,7 +1447,19 @@ class OrchestratingRuntime:
                               emit_tool_call=emit_tool_call,
                               emit_display_update=emit_display_update,
                               prompt_blocks=prompt_blocks)
+        except Exception:
+            # A failed turn is recoverable, not a certified task failure.
+            try:
+                self._cleanup_task_resources(task_id, generation=generation)
+            except Exception:
+                pass  # Preserve the original diagnostic, never a success signal.
+            raise
         finally:
+            try:
+                self._cleanup_terminal_task(task_id, generation=generation)
+            except Exception:
+                # Cleanup must not replace the original prompt error.
+                pass
             with self._lock:
                 self._active_tasks.discard(task_id)
                 if self._active_cancel_events.get(task_id) is cancel_event:
@@ -1567,40 +1590,52 @@ class OrchestratingRuntime:
         Returns whether the ``host_disconnected`` record was written, so the
         ACP agent records a session that was only loaded itself."""
         recorded = False
-        task_id = self._session_task.get(session_id)
-        if task_id is not None:
-            # The host transport is now definitively closed.  Do not leave a
-            # requester closure pointing at it: a later worker permission
-            # request must fail closed rather than block on a dead pipe.
-            self._release_task_host_requesters(task_id, session_id=session_id)
+        with self._lock:
+            task_id = self._session_task.get(session_id)
+            generation = self._task_resource_generations.get(task_id)
+        with self._task_resource_lock(task_id):
             with self._lock:
-                # Marked before the event is set: the turn it wakes suspends
-                # without cancelling work (orchestration.controller).
-                self._host_disconnected.add(task_id)
-                active_event = self._active_cancel_events.get(task_id)
-                session_ref = self._coordinator_sessions.get(task_id)
-            turn_state = "cancel_event_set" if active_event is not None else "no_active_turn_in_process"
-            if active_event is not None:
-                active_event.set()
-            permission_invalidated = False
-            if session_ref is not None:
-                invalidate = getattr(self._engine, "invalidate_session", None)
-                if invalidate is not None:
-                    try:
-                        invalidate(session_ref, "host_disconnected")
-                        permission_invalidated = True
-                    except Exception:
-                        pass
-            try:
-                from ..recovery.worker_reconciliation import record_host_disconnect
+                owner = self._task_requester_sessions.get(task_id)
+                current_generation = self._task_resource_generations.get(task_id)
+            if ((owner is not None and owner != session_id)
+                    or current_generation is not generation):
+                # An old connection's EOF cannot stop the replacement's live work.
+                task_id = None
+            if task_id is not None:
+                # The host transport is now definitively closed.  Do not leave a
+                # requester closure pointing at it: a later worker permission
+                # request must fail closed rather than block on a dead pipe.
+                self._release_task_host_requesters(task_id, session_id=session_id)
+                with self._lock:
+                    # Marked before the event is set: the turn it wakes suspends
+                    # without cancelling work (orchestration.controller).
+                    self._host_disconnected.add(task_id)
+                    active_event = self._active_cancel_events.get(task_id)
+                    session_ref = self._coordinator_sessions.get(task_id)
+                turn_state = "cancel_event_set" if active_event is not None else "no_active_turn_in_process"
+                if active_event is not None:
+                    active_event.set()
+                permission_invalidated = False
+                if session_ref is not None:
+                    invalidate = getattr(self._engine, "invalidate_session", None)
+                    if invalidate is not None:
+                        try:
+                            invalidate(session_ref, "host_disconnected")
+                            permission_invalidated = True
+                        except Exception:
+                            pass
+                try:
+                    from ..recovery.worker_reconciliation import record_host_disconnect
 
-                record_host_disconnect(
-                    self._store, task_id, session_id, f"disconnect:{session_id}:{time.monotonic_ns()}",
-                    turn=turn_state, permission_invalidated=permission_invalidated, trigger=trigger,
-                )
-                recorded = True
-            except Exception:
-                pass
+                    record_host_disconnect(
+                        self._store, task_id, session_id, f"disconnect:{session_id}:{time.monotonic_ns()}",
+                        turn=turn_state, permission_invalidated=permission_invalidated, trigger=trigger,
+                    )
+                    recorded = True
+                except Exception:
+                    pass
+            if task_id is not None:
+                self._cleanup_task_resources(task_id)
         try:
             engine_reaper.sweep(self._store, self._engine)
         except Exception:
@@ -1720,9 +1755,11 @@ class OrchestratingRuntime:
                 else:
                     attempt_ref = existing["coordinator_attempt_ref"]
                     row = db.execute(
-                        "SELECT channel_id FROM trusted_channels WHERE task_id=? AND role='coordinator' AND attempt_id=? AND revoked_at IS NULL",
+                        "SELECT channel_id FROM trusted_channels WHERE task_id=? AND role='coordinator' AND attempt_id=?",
                         (task_id, attempt_ref),
                     ).fetchone()
+                    # A revoked channel is expected after resource cleanup;
+                    # recovery still verifies old-process absence before reopening.
                     if row is None:
                         raise PortableError(
                             category=PortableErrorCategory.INDETERMINATE_WRITE, code="coordinator_channel_missing",
@@ -1755,8 +1792,7 @@ class OrchestratingRuntime:
             )
             channel = outcome["channel"]
             session_ref = outcome["session_ref"]
-            self._coordinator_channels[task_id] = channel
-            self._coordinator_sessions[task_id] = session_ref
+            self._cache_coordinator_session(task_id, channel, session_ref)
             self._pending_recovery_notice[task_id] = outcome
             self._reconcile_configuration(task_id, session_ref)
             return channel, session_ref
@@ -1780,14 +1816,28 @@ class OrchestratingRuntime:
             except BaseException:
                 db.rollback()
                 raise
-        self._coordinator_channels[task_id] = channel
-        self._coordinator_sessions[task_id] = session_ref
+        self._cache_coordinator_session(task_id, channel, session_ref)
         self._reconcile_configuration(task_id, session_ref)
         return channel, session_ref
+
+    def _cache_coordinator_session(self, task_id, channel, session_ref) -> None:
+        from ..orchestration.gateway import channel_authority
+        with self._task_resource_lock(task_id):
+            with self._store.connection() as db:
+                channel_authority(db, channel)
+            with self._lock:
+                self._coordinator_channels[task_id] = channel
+                self._coordinator_sessions[task_id] = session_ref
 
     def _open_coordinator_session(
         self, task_id: str, attempt_ref: str, channel_id: str, secret: str, role_set, *, recovery: bool = False,
     ) -> str:
+        with self._task_resource_lock(task_id):
+            self._coordinator_open_attempts.setdefault(task_id, set()).add(attempt_ref)
+            if self.transport_lost(task_id):
+                from ..trusted_channel import revoke_channel
+                revoke_channel(self._store, channel_id)
+                raise StoreError("channel_revoked")
         preview = self._config.snapshot(task_id)
         launch = dict(
             task_id=task_id, attempt_id=attempt_ref, channel_id=channel_id,
@@ -1804,6 +1854,16 @@ class OrchestratingRuntime:
         instructions = composed_instructions(role_set)
         try:
             session_id = self._engine.open("shared_project_root", launch, instructions)
+            # Cleanup can win during open; never cache or prompt its late result.
+            from ..trusted_channel import resolve_channel
+            try:
+                resolve_channel(self._store, channel_id, secret)
+            except StoreError:
+                try:
+                    self._engine.terminate_owned(attempt_ref)
+                except Exception:
+                    pass
+                raise
         except Exception as error:
             # P1 diagnosable launch failure: this is the one place a
             # coordinator engine session actually starts (spawns the child
@@ -2532,46 +2592,71 @@ class OrchestratingRuntime:
             )
             self._notify()
             return StopReason.END_TURN
-        channel, session_ref = self._ensure_coordinator(task_id)
-        language = self._resolve_language(task_id, content_hint=text)
-        recovery_notice = self._pending_recovery_notice.pop(task_id, None)
-        if recovery_notice is not None:
-            if recovery_notice.get("route_changed"):
-                self._emit_localized(
-                    task_id, emit_update, language, "coordinator_recovery_new_engine",
-                    engine=recovery_notice.get("engine") or "?",
-                )
-            else:
-                # Same task, same chat: the coordinator was rebuilt from the
-                # recorded task state. Keep that on the record, not in the chat.
-                self._record_progress(task_id, "coordinator_recovery_new_session")
-        delegation_events.append_event(
-            self._store, task_id, "progress", f"question_answered:{question.id}",
-            dict(kind="question_answered", question_id=question.id, answer_text=answer_text, session_id=session_id),
-            origin="runtime",
-        )
-        # A user_message (meaningful) event, distinct from the informative
-        # progress row above, so the continuation loop's claim/coalesce
-        # gating (delegation_events.MEANINGFUL_EVENT_TYPES) actually wakes
-        # for it -- exactly like an ordinary prompt's own user_message.
-        delegation_events.append_event(
-            self._store, task_id, "user_message", f"cortex_answer:{question.id}",
-            dict(content=f"Answered question ({question.text!r}): {answer_text}", session_id=session_id),
-            origin=session_id,
-        )
-        with self._lock:
-            self._active_cancel_events[task_id] = cancel_event
-            self._host_disconnected.discard(task_id)
+        generation = object()
+        with self._task_resource_lock(task_id):
+            with self._lock:
+                if task_id in self._active_tasks:
+                    raise SecondCoordinatorRefused()
+                previous_session = self._task_requester_sessions.get(task_id)
+            if previous_session != session_id:
+                self._release_task_host_requesters(task_id)
+            with self._lock:
+                self._active_tasks.add(task_id)
+                self._task_resource_generations[task_id] = generation
+                self._session_task[session_id] = task_id
+                self._task_requester_sessions[task_id] = session_id
+                self._active_cancel_events[task_id] = cancel_event
+                self._host_disconnected.discard(task_id)
+                self._task_tool_call_emitters[task_id] = emit_tool_call
+                self._task_display_emitters[task_id] = emit_display_update
         try:
+            channel, session_ref = self._ensure_coordinator(task_id)
+            language = self._resolve_language(task_id, content_hint=text)
+            recovery_notice = self._pending_recovery_notice.pop(task_id, None)
+            if recovery_notice is not None:
+                if recovery_notice.get("route_changed"):
+                    self._emit_localized(
+                        task_id, emit_update, language, "coordinator_recovery_new_engine",
+                        engine=recovery_notice.get("engine") or "?",
+                    )
+                else:
+                    # Same task, same chat: the coordinator was rebuilt from the
+                    # recorded task state. Keep that on the record, not in the chat.
+                    self._record_progress(task_id, "coordinator_recovery_new_session")
+            delegation_events.append_event(
+                self._store, task_id, "progress", f"question_answered:{question.id}",
+                dict(kind="question_answered", question_id=question.id, answer_text=answer_text, session_id=session_id),
+                origin="runtime",
+            )
+            # A user_message (meaningful) event, distinct from the informative
+            # progress row above, so the continuation loop's claim/coalesce
+            # gating (delegation_events.MEANINGFUL_EVENT_TYPES) actually wakes
+            # for it -- exactly like an ordinary prompt's own user_message.
+            delegation_events.append_event(
+                self._store, task_id, "user_message", f"cortex_answer:{question.id}",
+                dict(content=f"Answered question ({question.text!r}): {answer_text}", session_id=session_id),
+                origin=session_id,
+            )
             return self._continuation_loop(
                 task_id, session_id, channel, session_ref, text, emit_update, cancel_event, language,
                 emit_tool_call=emit_tool_call,
                 emit_display_update=emit_display_update,
             )
+        except Exception:
+            try:
+                self._cleanup_task_resources(task_id, generation=generation)
+            except Exception:
+                pass
+            raise
         finally:
+            try:
+                self._cleanup_terminal_task(task_id, generation=generation)
+            except Exception:
+                pass
             with self._lock:
                 if self._active_cancel_events.get(task_id) is cancel_event:
                     del self._active_cancel_events[task_id]
+                    self._active_tasks.discard(task_id)
 
     def stop_task(
         self, task_id: str, session_id: str, emit_update: Callable[[str], bool],
@@ -2622,6 +2707,7 @@ class OrchestratingRuntime:
                     "ORDER BY id LIMIT 1", (task_id,),
                 ).fetchone()
             if state_row is None or state_row["state"] in {"COMPLETED", "FAILED", "CANCELLED"}:
+                self._cleanup_task_resources(task_id, include_durable=True)
                 return False
             if source_row is not None:
                 stop_source = json.loads(source_row["payload_json"])["source"]
@@ -2760,6 +2846,114 @@ class OrchestratingRuntime:
             else "stop_confirmed", language,
         ))
         return True
+
+    def _cleanup_terminal_task(self, task_id: str, *, generation=_UNSET) -> None:
+        with self._store.connection() as db:
+            row = db.execute("SELECT state FROM runtime_tasks WHERE task_id=?", (task_id,)).fetchone()
+        if row is not None and row["state"] in {"COMPLETED", "FAILED", "CANCELLED"}:
+            self._cleanup_task_resources(task_id, generation=generation)
+
+    def _cleanup_task_resources(self, task_id: str, *, include_durable: bool = False,
+                                generation=_UNSET) -> None:
+        with self._task_resource_lock(task_id):
+            with self._lock:
+                if (generation is not _UNSET
+                        and self._task_resource_generations.get(task_id) is not generation):
+                    return
+            self._cleanup_task_resources_locked(task_id, include_durable=include_durable)
+
+    def _cleanup_task_resources_locked(self, task_id: str, *, include_durable: bool) -> None:
+        """Stop this task's resources without changing its durable outcome.
+
+        No joins or shutdown run under a SQLite transaction or the runtime lock.
+        Unknown liveness retains the adapter's quarantine and reservations.
+        A later turn rebuilds the coordinator through ordinary fenced recovery.
+        """
+        with self._lock:
+            self._host_disconnected.add(task_id)
+            channel = self._coordinator_channels.get(task_id)
+            worker_sessions = {ref: session for (task, ref), session in self._worker_sessions.items()
+                               if task == task_id}
+            opening_workers = set(self._open_assignments.get(task_id, ()))
+            opening = set(self._coordinator_open_attempts.get(task_id, ()))
+        self._release_task_host_requesters(task_id)
+        attempts = opening | ({channel.attempt_id} if channel is not None else set())
+        try:
+            with self._store.connection() as db:
+                # Automatic teardown owns this runtime's sessions, not engines
+                # a replacement owner may have launched in another process.
+                principals = {row["principal_thread_id"] for row in db.execute(
+                    "SELECT principal_thread_id,attempt_id FROM trusted_channels "
+                    "WHERE task_id=? AND role='coordinator'", (task_id,))
+                    if row["attempt_id"] in attempts}
+                rows = db.execute(
+                    "SELECT p.attempt_id,p.idempotency_key,p.engine_session_ref,c.parent_principal_thread_id "
+                    "FROM delegation_provisioning p LEFT JOIN trusted_channels c ON c.channel_id=p.channel_id "
+                    "WHERE p.task_id=? AND p.attempt_id IS NOT NULL", (task_id,))
+                for row in rows:
+                    cached_session = worker_sessions.get(row["idempotency_key"])
+                    if (include_durable
+                            or (cached_session is not None and cached_session == row["engine_session_ref"])
+                            or (row["idempotency_key"] in opening_workers
+                                and row["parent_principal_thread_id"] in principals)):
+                        attempts.add(row["attempt_id"])
+                if include_durable:
+                    # Only an explicit owner stop authorizes task-wide cleanup.
+                    row = db.execute("SELECT coordinator_attempt_ref FROM task_orchestration WHERE task_id=?",
+                                     (task_id,)).fetchone()
+                    if row is not None and row[0]:
+                        attempts.add(row[0])
+        except Exception:
+            # Storage failure does not excuse leaving in-memory engines alive.
+            pass
+        unconfirmed = set()
+        owned = getattr(self._engine, "owned_attempts", None)
+        if owned is not None:
+            try:
+                attempts.update(owned(task_id))
+            except Exception:
+                pass
+        # Revoke authority before attempting any potentially unconfirmed exit.
+        # Exact attempts only: never a task-wide channel or epoch sweep.
+        try:
+            with self._store.connection() as db:
+                db.execute("BEGIN IMMEDIATE")
+                db.executemany(
+                    "UPDATE trusted_channels SET revoked_at=? WHERE task_id=? "
+                    "AND attempt_id=? AND revoked_at IS NULL",
+                    ((_now(), task_id, attempt_id) for attempt_id in attempts),
+                )
+                db.commit()
+        except Exception:
+            unconfirmed.update(attempts)
+        cancel_attempt = getattr(self._engine, "cancel_attempt", None)
+        for attempt_id in attempts:
+            if cancel_attempt is not None:
+                try:
+                    cancel_attempt(attempt_id)
+                except Exception:
+                    unconfirmed.add(attempt_id)
+        for attempt_id in attempts:
+            try:
+                self._engine.terminate_owned(attempt_id)
+                from ..orchestration.recovery import release_observed
+                if not release_observed(self, task_id, attempt_id):
+                    unconfirmed.add(attempt_id)
+            except Exception:
+                # No release is inferred from a failed shutdown.
+                unconfirmed.add(attempt_id)
+        if unconfirmed:
+            try:
+                delegation_events.append_event(
+                    self._store, task_id, "progress", f"resource_cleanup:{time.monotonic_ns()}",
+                    dict(kind="resource_cleanup", unconfirmed_attempt_count=len(unconfirmed)),
+                    origin="runtime",
+                )
+            except Exception:
+                pass
+        with self._lock:
+            self._coordinator_channels.pop(task_id, None)
+            self._coordinator_sessions.pop(task_id, None)
 
     def _terminate_coordinator_attempt(self, task_id: str) -> None:
         """Release the task's currently owned coordinator engine process.
@@ -5023,7 +5217,8 @@ class OrchestratingRuntime:
         # Close the exact attempt here too, so a stale future cannot leave a
         # newly opened process behind or send a first model turn.
         from ..orchestration.limits import assignment_current
-        if cancel_event.is_set() or not assignment_current(self._store,task_id,assignment_ref):
+        if (cancel_event.is_set() or self.transport_lost(task_id)
+                or not assignment_current(self._store,task_id,assignment_ref)):
             try:
                 self._engine.terminate_owned(result.attempt_id)
             except Exception:

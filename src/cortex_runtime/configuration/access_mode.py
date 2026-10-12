@@ -1,4 +1,4 @@
-"""The user's access mode for one task: Guarded (default) or Auto.
+"""The user's access mode for one task: Development, Guarded or Auto.
 
 Guarded is the behaviour Cortex always had: a deletion, a write outside the
 project and a command run outside the sandbox each wait for the user's
@@ -23,8 +23,9 @@ The mode is changed only by the user, through the ACP client (the session's
 access option or mode) -- no MCP tool writes it, so a model cannot. Every
 switch is an append-only revision in ``access_mode_events`` with its origin;
 a task with no revision is Guarded, and anything unreadable or unknown reads
-as Guarded. A new ACP session starts Guarded: the choice is never carried
-into another session through user defaults.
+as Guarded. Fresh ACP sessions durably start Development; legacy sessions
+remain Guarded. Development broadens only brokered writing-worker commands,
+not engine jails, engine modes or hazardous-action consent.
 """
 from __future__ import annotations
 
@@ -35,10 +36,13 @@ from typing import Mapping
 
 GUARDED = "guarded"
 AUTO = "auto"
-DEFAULT = GUARDED
-MODES = (GUARDED, AUTO)
-LABELS = {GUARDED: "Guarded mode", AUTO: "Auto mode"}
+DEVELOPMENT = "development"
+DEFAULT = GUARDED  # Missing, legacy or unreadable authority is restrictive.
+FRESH_SESSION_DEFAULT = DEVELOPMENT
+MODES = (DEVELOPMENT, GUARDED, AUTO)
+LABELS = {DEVELOPMENT: "Development mode", GUARDED: "Guarded mode", AUTO: "Auto mode"}
 DESCRIPTIONS = {
+    DEVELOPMENT: "Ordinary worker commands can use host resources. Hazardous actions still need consent. Docker and arbitrary code can bypass filesystem masks.",
     GUARDED: "Asks you before a deletion, a write outside the project or a command outside the sandbox.",
     AUTO: "Allows actions without asking, including outside-project writes and commands. Sandbox, .git/.cortex protection and MCP checks still apply.",
 }
@@ -62,7 +66,7 @@ WORKER_AUTO_MODES: Mapping[str, tuple[str, ...]] = {
 SCHEMA = '''CREATE TABLE IF NOT EXISTS access_mode_events (
  id INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT NOT NULL, kind TEXT NOT NULL,
  mode TEXT, origin TEXT, detail_json TEXT NOT NULL, created_at TEXT NOT NULL
-)'''
+);'''
 
 
 class InvalidAccessMode(ValueError):
@@ -93,7 +97,7 @@ def current(store, task_id: str | None) -> str:
             if not _exists(db):
                 return DEFAULT
             row = db.execute(
-                "SELECT mode FROM access_mode_events WHERE task_id=? AND kind='switched' ORDER BY id DESC LIMIT 1",
+                "SELECT mode FROM access_mode_events WHERE task_id=? AND kind IN ('switched','initialized') ORDER BY id DESC LIMIT 1",
                 (task_id,)).fetchone()
     except (sqlite3.Error, OSError):
         return DEFAULT
@@ -112,10 +116,10 @@ def switch(store, task_id: str, mode: str, *, origin: str, session_id: str | Non
         try:
             db.execute(SCHEMA)
             previous = db.execute(
-                "SELECT mode FROM access_mode_events WHERE task_id=? AND kind='switched' ORDER BY id DESC LIMIT 1",
+                "SELECT mode FROM access_mode_events WHERE task_id=? AND kind IN ('switched','initialized') ORDER BY id DESC LIMIT 1",
                 (task_id,)).fetchone()
             revision = db.execute(
-                "SELECT COUNT(*) FROM access_mode_events WHERE task_id=? AND kind='switched'", (task_id,)).fetchone()[0] + 1
+                "SELECT COUNT(*) FROM access_mode_events WHERE task_id=? AND kind IN ('switched','initialized')", (task_id,)).fetchone()[0] + 1
             detail = dict(revision=revision, previous=normalize(previous[0] if previous else None), session_id=session_id)
             db.execute(
                 "INSERT INTO access_mode_events(task_id,kind,mode,origin,detail_json,created_at) VALUES(?,?,?,?,?,?)",

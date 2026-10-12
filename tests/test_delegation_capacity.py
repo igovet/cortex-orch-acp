@@ -451,7 +451,8 @@ def _record(store, task_id, attempt_id, *, alive):
     from cortex_runtime.engine import process_identity
     from cortex_runtime.recovery import registry
 
-    own = process_identity.capture(os.getpid())
+    # This fixture observes the pytest process, not a private engine session.
+    own = process_identity.capture(os.getpid(), os.getpgrp())
     assert own is not None
     registry.record_process_launch(
         store, attempt_id=attempt_id, task_id=task_id, role="worker", pid=own.pid, pgid=own.pgid,

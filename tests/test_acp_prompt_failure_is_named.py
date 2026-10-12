@@ -61,6 +61,7 @@ def test_the_error_names_the_exception_class_and_where_it_came_from(tmp_path, mo
     reply = next(m for m in transport.responses if m.get("id") == 7)
     failure = reply["error"]["data"]["failure"]
     assert failure.startswith("RuntimeError at ")
+    assert failure in reply["error"]["message"]  # hosts may discard error.data
     assert ".py:" in failure  # a concrete file:line, not just a class name
     # The message is never carried: it can quote a path or a value.
     assert "private/path" not in str(reply)

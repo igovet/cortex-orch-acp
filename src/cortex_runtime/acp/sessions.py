@@ -39,9 +39,15 @@ CREATE TRIGGER IF NOT EXISTS acp_host_sessions_task_immutable
 BEFORE UPDATE OF task_id ON acp_host_sessions
 WHEN OLD.task_id IS NOT NULL
 BEGIN SELECT RAISE(ABORT, 'immutable'); END;
+CREATE TABLE IF NOT EXISTS acp_session_access_defaults (
+ session_id TEXT PRIMARY KEY REFERENCES acp_host_sessions(session_id) ON DELETE CASCADE,
+ mode TEXT NOT NULL CHECK(mode IN ('development','guarded','auto')),
+ selected_mode TEXT CHECK(selected_mode IN ('development','guarded','auto')),
+ selection_origin TEXT
+);
 ''' + TASK_WORKSPACE_SCHEMA
 
-ACP_SESSION_TABLES = frozenset({"acp_host_sessions"})
+ACP_SESSION_TABLES = frozenset({"acp_host_sessions", "acp_session_access_defaults"})
 
 
 def _now():
@@ -63,6 +69,9 @@ def create_session(store, session_id, project_root, client_info, client_capabili
                 "INSERT INTO acp_host_sessions VALUES (?,?,NULL,?,?,?,?,NULL)",
                 (session_id, project_root, _encode(client_info), _encode(client_capabilities),
                  _encode(mcp_servers), _now()))
+            from ..configuration.access_mode import FRESH_SESSION_DEFAULT
+            db.execute("INSERT INTO acp_session_access_defaults(session_id,mode) VALUES(?,?)",
+                       (session_id, FRESH_SESSION_DEFAULT))
             if workspace_root is not None:
                 record_session(db, session_id, workspace_root)
             db.commit()
@@ -90,9 +99,65 @@ def bind_task(store, session_id, task_id):
                     raise StoreError("acp_session_task_conflict")
             else:
                 db.execute("UPDATE acp_host_sessions SET task_id=? WHERE session_id=?", (task_id, session_id))
+            _initialize_task_access(db, session_id, task_id)
             db.commit()
         except BaseException:
             db.rollback(); raise
+
+
+def session_access_mode(store, session_id):
+    """Read-only, fail-closed lookup; never backfill legacy sessions."""
+    import sqlite3
+    from ..configuration.access_mode import normalize, USER_ORIGINS
+    try:
+        with store.connection() as db:
+            row = db.execute("SELECT mode,selected_mode,selection_origin FROM acp_session_access_defaults WHERE session_id=?",
+                             (session_id,)).fetchone()
+    except (sqlite3.Error, OSError):
+        row = None
+    if row and row["selected_mode"] is not None and row["selection_origin"] not in USER_ORIGINS:
+        return "guarded"
+    return normalize((row["selected_mode"] if row["selected_mode"] is not None else row["mode"]) if row else None)
+
+
+def select_session_access(store, session_id, mode, origin):
+    """Persist an explicit client selection before binding, including legacy sessions."""
+    from ..configuration.access_mode import MODES, USER_ORIGINS, InvalidAccessMode
+    if mode not in MODES or origin not in USER_ORIGINS:
+        raise InvalidAccessMode("invalid client access selection")
+    with store.connection() as db:
+        db.execute("BEGIN IMMEDIATE")
+        row = db.execute("SELECT task_id FROM acp_host_sessions WHERE session_id=?", (session_id,)).fetchone()
+        if row is None or row["task_id"] is not None:
+            raise StoreError("acp_session_access_conflict")
+        db.execute("INSERT INTO acp_session_access_defaults VALUES(?,'guarded',?,?) "
+                   "ON CONFLICT(session_id) DO UPDATE SET selected_mode=excluded.selected_mode,"
+                   "selection_origin=excluded.selection_origin", (session_id, mode, origin))
+        db.commit()
+
+
+def _initialize_task_access(db, session_id, task_id):
+    """Called only by runtime binding, in its transaction, at most once."""
+    import sqlite3
+    from ..configuration import access_mode
+    try:
+        row = db.execute("SELECT * FROM acp_session_access_defaults WHERE session_id=?", (session_id,)).fetchone()
+    except sqlite3.Error:
+        row = None
+    if row is None:
+        return  # Legacy sessions do not gain authority.
+    db.execute(access_mode.SCHEMA)
+    if db.execute("SELECT 1 FROM access_mode_events WHERE task_id=? AND kind IN ('initialized','switched')",
+                  (task_id,)).fetchone():
+        return
+    explicit = row["selected_mode"] is not None
+    mode = access_mode.normalize(row["selected_mode"] if explicit else row["mode"])
+    if explicit and row["selection_origin"] not in access_mode.USER_ORIGINS:
+        mode = "guarded"
+    origin = "acp_pre_task_selection" if explicit else "runtime_session_default"
+    db.execute("INSERT INTO access_mode_events(task_id,kind,mode,origin,detail_json,created_at) VALUES(?,?,?,?,?,?)",
+               (task_id, "switched" if explicit else "initialized", mode, origin,
+                _encode(dict(revision=1, previous="guarded", session_id=session_id)), _now()))
 
 
 def close_session(store, session_id):

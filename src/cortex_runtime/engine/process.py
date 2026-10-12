@@ -1020,6 +1020,9 @@ class EngineProcess:
                 self.mcp_broker.close()
             self._release_jail()
             raise
+        from . import process_identity
+        self._group_identity = process_identity.capture(self.process.pid, self.process.pid)
+        self._termination_lock = threading.Lock()
         self.state = "initialized"
 
         self._stderr_thread = threading.Thread(target=self._drain_stderr, name="engine-stderr", daemon=True)
@@ -1091,8 +1094,19 @@ class EngineProcess:
         self.logs.observe(ProcessObservation.TRANSPORT_EOF, alive=self.alive())
 
     def wait_exited(self, timeout=None) -> bool:
-        """True once the process is *observed* to have actually exited."""
-        return self._exited_event.wait(timeout)
+        """Confirm leader reaping and absence of active owned group members."""
+        import time
+        from . import process_identity
+
+        deadline = None if timeout is None else time.monotonic() + timeout
+        while True:
+            identity = self._group_identity
+            if (self._exited_event.is_set() and identity is not None
+                    and process_identity.probe_group(identity) == "absent"):
+                return True
+            if deadline is not None and time.monotonic() >= deadline:
+                return False
+            time.sleep(.02)
 
     def broker_external_mcp(self, credentials, config):
         from .mcp_bridge import MCP_RELAY_SCRIPT
@@ -1109,33 +1123,33 @@ class EngineProcess:
                     args=['-B',str(MCP_RELAY_SCRIPT),'--relay',broker.endpoint,broker.relay_token],env=[])
 
     def terminate(self, *, grace: float = TERMINATE_GRACE_SECONDS) -> None:
-        """SIGTERM the process group, grace, SIGKILL the process group, reap."""
-        for broker in self.external_mcp_brokers:
-            broker.close()
-        self.external_mcp_brokers.clear()
-        if self._exited_event.is_set():
-            return
-        try:
-            self.process.stdin.close()
-        except (OSError, ValueError):
-            pass
-        try:
-            os.killpg(os.getpgid(self.process.pid), signal.SIGTERM)
-        except (ProcessLookupError, PermissionError, OSError):
-            pass
-        if self._exited_event.wait(grace):
-            return
-        try:
-            os.killpg(os.getpgid(self.process.pid), signal.SIGKILL)
-        except (ProcessLookupError, PermissionError, OSError):
-            pass
-        self._exited_event.wait(grace)
+        """Bounded graceful shutdown/escalation of the exact launched group."""
+        from . import process_identity
+
+        with self._termination_lock:
+            for broker in self.external_mcp_brokers:
+                broker.close()
+            self.external_mcp_brokers.clear()
+            try:
+                self.process.stdin.close()
+            except (OSError, ValueError):
+                pass
+            for sig in (signal.SIGTERM, signal.SIGKILL):
+                identity = self._group_identity
+                if identity is not None and process_identity.probe_group(identity) == "alive":
+                    try:
+                        os.killpg(identity.pgid, sig)
+                    except (ProcessLookupError, PermissionError, OSError):
+                        pass
+                if self.wait_exited(grace):
+                    return
 
     def release(self, *, grace: float = TERMINATE_GRACE_SECONDS) -> None:
         """Terminate and reap; capacity is only freed once exit is observed."""
         self.terminate(grace=grace)
-        self._exited_event.wait(grace)
-        self.state = "released"
+        exited = self.wait_exited(0)
+        self.state = "released" if exited else "timeout_alive"
         if self.mcp_broker is not None:
             self.mcp_broker.close()
-        self._release_jail()
+        if exited:
+            self._release_jail()

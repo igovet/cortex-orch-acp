@@ -29,7 +29,7 @@ from orchestration_fakes import FakeConfigSnapshotSource, FakeSessionRuntime, Fa
 from test_acp_elicitation import _Harness, _initialize_and_new_session, _project
 
 
-def _delegate_and_wait_router(on_worker_prompt):
+def _delegate_and_wait_router(on_worker_prompt, *, publish_worker_result=True):
     phase = {"delegated": False}
 
     def coordinator_behavior(store, channel, session_ref, message, call_index):
@@ -51,7 +51,8 @@ def _delegate_and_wait_router(on_worker_prompt):
             role=db.execute('SELECT role_id FROM delegation_provisioning WHERE attempt_id=?',(channel.attempt_id,)).fetchone()[0]
         if role=='worker-code-reviewer': return publish_result(store,channel)
         outcome=on_worker_prompt(store, channel, session_ref, call_index)
-        publish_result(store,channel)
+        if publish_worker_result:
+            publish_result(store,channel)
         return outcome
 
     def router(store, channel, session_ref, launch, instructions):
@@ -176,10 +177,13 @@ def test_permission_requester_survives_coordinator_turn_for_background_worker(tm
     task_id_holder = {}
 
     def on_worker_prompt(store, channel, session_ref, call_index):
+        from cortex_runtime.delegation import mcp_tools
         task_id_holder["task_id"] = channel.task_id
-        return PromptOutcome(StopReason.END_TURN, "Worker A finished: done")
+        mcp_tools.dispatch(store, channel, "ask_question", dict(
+            question="Which target?", options=["Local", "Disposable"], request_key="background-wait"))
+        return PromptOutcome(StopReason.END_TURN, "")
 
-    router = _delegate_and_wait_router(on_worker_prompt)
+    router = _delegate_and_wait_router(on_worker_prompt, publish_worker_result=False)
     harness = _Harness2(tmp_path, router)
     harness.start()
     try:
@@ -190,6 +194,10 @@ def test_permission_requester_survives_coordinator_turn_for_background_worker(tm
 
         assert task_id_holder["task_id"]
         task_id = task_id_holder["task_id"]
+        from cortex_runtime.orchestration.state import TaskMachine
+        from cortex_runtime.orchestration import worker_waits
+        assert TaskMachine(harness.runtime._store).get_state(task_id) == "EXECUTING"
+        assert worker_waits.list_waits(harness.runtime._store, task_id)[0]["status"] == "open"
         requester = harness.runtime.permission_requester_for_task(task_id)
         assert requester is not None
 
@@ -212,9 +220,36 @@ def test_permission_requester_survives_coordinator_turn_for_background_worker(tm
         request_thread.join(2.0)
         assert result_holder["result"] == {"outcome": {"outcome": "selected", "optionId": "deny"}}
 
-        # The terminal/connection cleanup path still releases the closure.
-        harness.runtime._release_task_host_requesters(task_id)
+        # A real terminal transition, not a prompt yield, releases the closure.
+        harness.runtime.stop_task(task_id, session_id, lambda _: True)
+        assert TaskMachine(harness.runtime._store).get_state(task_id) == "CANCELLED"
         assert harness.runtime.permission_requester_for_task(task_id) is None
+    finally:
+        harness.stop()
+
+
+def test_completed_task_releases_requester_without_closing_the_host(tmp_path):
+    from cortex_runtime.orchestration.state import TaskMachine
+    task_id_holder = {}
+
+    def on_worker_prompt(store, channel, session_ref, call_index):
+        task_id_holder["task_id"] = channel.task_id
+        return PromptOutcome(StopReason.END_TURN, "Done.")
+
+    harness = _Harness2(tmp_path, _delegate_and_wait_router(on_worker_prompt))
+    harness.start()
+    try:
+        session_id = _initialize_and_new_session(harness, _project(tmp_path), elicitation_form=None)
+        prompt_id = harness.send("session/prompt", dict(
+            sessionId=session_id, prompt=[dict(type="text", text="Do it.")]))
+        assert harness.response_for(prompt_id)["result"]["stopReason"] == "end_turn"
+        task_id = task_id_holder["task_id"]
+        assert TaskMachine(harness.runtime._store).get_state(task_id) == "COMPLETED"
+        assert harness.runtime.permission_requester_for_task(task_id) is None
+        # The host connection still answers after terminal task-only cleanup.
+        status_id = harness.send("session/prompt", dict(
+            sessionId=session_id, prompt=[dict(type="text", text="/cortex-status")]))
+        assert harness.response_for(status_id)["result"]["stopReason"] == "end_turn"
     finally:
         harness.stop()
 

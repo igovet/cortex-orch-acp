@@ -60,8 +60,12 @@ Runtime shutdown interrupts a pending settlement wait (re-checked every
 50 ms) and performs ordinary teardown at once; no settlement diagnostic is
 recorded for it, and unrecorded counts stay unknown. `finish_owned` called after
 shutdown tears down directly. Shutdown waits at most **5 seconds** in total for
-settlement teardown already in progress, so it does not return while a
-process is still being stopped; a teardown stuck beyond that bound is left to
+settlement teardown already in progress. A settlement owns teardown of its exact
+manager, so shutdown does not invoke it a second time if exit remains unconfirmed.
+Thread registration/start is serialized with shutdown; a replacement manager is
+not covered by its predecessor's settlement. Unconfirmed managers, capacity and
+writer locks remain quarantined for a later explicit retry. A teardown stuck
+beyond the join bound is left to
 the existing retained-registry recovery rather than awaited indefinitely.
 
 The existing prompt consumer records one row against its original task, attempt

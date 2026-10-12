@@ -176,6 +176,7 @@ def finish_deletions(store,db,task):
         _delete_if_present("host_transcript","session_id IN (SELECT session_id FROM acp_host_sessions WHERE task_id=?)",(task,))
         _delete_if_present("host_updates","session_id IN (SELECT session_id FROM acp_host_sessions WHERE task_id=?)",(task,))
         _delete_if_present("acp_session_workspaces","session_id IN (SELECT session_id FROM acp_host_sessions WHERE task_id=?)",(task,))
+        _delete_if_present("acp_session_access_defaults","session_id IN (SELECT session_id FROM acp_host_sessions WHERE task_id=?)",(task,))
         db.execute("DELETE FROM acp_host_sessions WHERE task_id=?",(task,))
         _delete_if_present("task_workspaces","task_id=?",(task,))
         db.execute("DELETE FROM task_route_selections WHERE task_id=?",(task,))
@@ -247,7 +248,7 @@ def _orphan_sessions(db, project, cutoff, keep):
 
 def _delete_host_session(db, session_id):
     tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-    for table in ("host_transcript", "host_updates", "acp_session_workspaces", "acp_host_sessions"):
+    for table in ("host_transcript", "host_updates", "acp_session_workspaces", "acp_session_access_defaults", "acp_host_sessions"):
         if table in tables:
             db.execute(f"DELETE FROM {table} WHERE session_id=?", (session_id,))
 
