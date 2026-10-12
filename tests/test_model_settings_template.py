@@ -19,12 +19,12 @@ def entry(engine, model, efforts=("low", "medium", "high", "xhigh", "max", "ultr
 def test_public_asset_preserves_exact_baseline_tiers_efforts_and_coordinator():
     template = defaults.load_model_settings_template()
     routing = template["routing"]
-    assert template["coordinator"] == {"engine": "claude-agent-acp", "model": "opus[1m]",
-                                       "parameters": {"thought_level": "medium"}}
+    assert template["coordinator"] == {"engine": "codex-acp", "model": "gpt-6.1-sol",
+                                       "parameters": {"thought_level": "high"}}
     assert template["language"] == "ru"
-    # Complete portable production default snapshot, saved 2026-10-07 UTC.
+    # Complete portable production default snapshot, saved 2026-10-12 at 14:23 UTC.
     canonical = json.dumps(template, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
-    assert hashlib.sha256(canonical.encode()).hexdigest() == "c0487f1ad7a6376350167b067ce163b7d685374e6428609238d59a7a56afb339"
+    assert hashlib.sha256(canonical.encode()).hexdigest() == "bd49febbf8f05b0a40a868ba19cc54411ab779ef55d8eb90c880fcea4aa7b770"
     expected = {
         ("claude-agent-acp", "default"): ("deep",),
         ("claude-agent-acp", "opus[1m]"): ("flagship", "deep"),
@@ -55,11 +55,11 @@ def test_public_asset_preserves_exact_baseline_tiers_efforts_and_coordinator():
     assert routing["models"]["opencode"]["auto"] == ["byteplus-plan/glm-5.3-flash"]
     assert routing["models"]["opencode"]["tiers"]["byteplus-plan/glm-5.2"] == "deep"
     assert routing["providers"] == ["claude-agent-acp", "codex-acp"]
-    assert routing["auto_allow"] == ["opencode/byteplus-plan/glm-5.3-flash"]
+    assert routing["auto_allow"] == []
     assert routing["deny"] == ["gpt-5.5", "claude-agent-acp/claude-haiku-4-5-20251001", "claude-agent-acp/claude-sonnet-4-6",
         "claude-agent-acp/claude-opus-4-6", "claude-agent-acp/claude-opus-4-7", "claude-agent-acp/claude-opus-4-8",
         "claude-agent-acp/claude-opus-5[1m]", "claude-agent-acp/claude-fable-5", "codex-acp/gpt-5.6-luna",
-        "codex-acp/gpt-5.6-sol", "codex-acp/gpt-5.6-terra", "codex-acp/gpt-6-sol"]
+        "codex-acp/gpt-5.6-sol", "codex-acp/gpt-5.6-terra", "codex-acp/gpt-6-sol", "opencode/*"]
     assert routing["models"]["claude-agent-acp"]["auto"] == routing["enabled"]["claude-agent-acp"]
     assert routing["models"]["claude-agent-acp"]["policy"]["haiku"] == routing["models"]["codex-acp"]["policy"]["gpt-6-luna"]
     assert {"window": "seven_day_haiku", "models": ["haiku"]} in routing["quota_windows"]["claude-agent-acp"]
@@ -100,7 +100,7 @@ def test_template_rejects_invalid_or_private_data(tmp_path, change):
     if change == "version": data["schema_version"] = 99
     elif change == "private": data["routing"]["mcp"] = {}
     elif change == "route_id": data["coordinator"]["route_id"] = "local-fingerprint"
-    elif change == "coordinator-disabled": data["routing"]["enabled"]["claude-agent-acp"] = []
+    elif change == "coordinator-disabled": data["routing"]["enabled"][data["coordinator"]["engine"]] = []
     elif change == "coordinator-param": data["coordinator"]["parameters"]["credential"] = "not-secret"
     elif change == "language": data["language"] = "unsupported"
     else: data["owner_profile"] = "not-portable"
