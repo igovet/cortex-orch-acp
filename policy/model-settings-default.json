@@ -14,7 +14,8 @@
       "codex-acp/gpt-5.6-luna",
       "codex-acp/gpt-5.6-sol",
       "codex-acp/gpt-5.6-terra",
-      "codex-acp/gpt-6-sol"
+      "codex-acp/gpt-6-sol",
+      "opencode/*"
     ],
     "enabled": {
       "claude-agent-acp": [
@@ -31,9 +32,7 @@
       ],
       "opencode": []
     },
-    "auto_allow": [
-      "opencode/byteplus-plan/glm-5.3-flash"
-    ],
+    "auto_allow": [],
     "providers": [
       "claude-agent-acp",
       "codex-acp"
@@ -57,12 +56,12 @@
           "default": [
             "deep"
           ],
+          "haiku": [
+            "light"
+          ],
           "opus[1m]": [
             "deep",
             "flagship"
-          ],
-          "haiku": [
-            "light"
           ]
         },
         "policy": {
@@ -105,22 +104,6 @@
             "preferred_for": null,
             "request_names": null
           },
-          "opus[1m]": {
-            "also_standard_for": null,
-            "effort_floor": "medium",
-            "effort_ladder": null,
-            "max_effort": "xhigh",
-            "preferred_for": [
-              "design",
-              "planning",
-              "implementation",
-              "debugging",
-              "review",
-              "analysis"
-            ],
-            "preferred_when": "Any work of the listed kinds, except backend work; for backend, only very complex, narrowly scoped tasks.",
-            "request_names": null
-          },
           "haiku": {
             "also_standard_for": [
               "testing"
@@ -141,6 +124,22 @@
               "investigation",
               "operations"
             ],
+            "request_names": null
+          },
+          "opus[1m]": {
+            "also_standard_for": null,
+            "effort_floor": "medium",
+            "effort_ladder": null,
+            "max_effort": "xhigh",
+            "preferred_for": [
+              "design",
+              "planning",
+              "implementation",
+              "debugging",
+              "review",
+              "analysis"
+            ],
+            "preferred_when": "Use for any work of the listed kinds. Always use for UI/UX design tasks, including interface design, visual concepts, mockups, wireframes, and design systems, regardless of complexity or scope. Do not use for frontend implementation, HTML/CSS layout, or styling tasks unless they explicitly involve UI/UX design decisions. For backend work, use only for very complex, narrowly scoped tasks.",
             "request_names": null
           }
         }
@@ -278,10 +277,10 @@
     }
   },
   "coordinator": {
-    "engine": "claude-agent-acp",
-    "model": "opus[1m]",
+    "engine": "codex-acp",
+    "model": "gpt-6.1-sol",
     "parameters": {
-      "thought_level": "medium"
+      "thought_level": "high"
     }
   },
   "language": "ru"

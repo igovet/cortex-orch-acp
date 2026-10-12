@@ -430,11 +430,10 @@ The validated public asset policy/model-settings-default.json is installation/mi
 ### Fresh-install owner default snapshot
 
 The public install asset reflects the saved production `default` profile updated
-on 2026-10-05 at 10:45 UTC, with the owner-requested Haiku 5.5 addition
-adopted on 2026-10-07. Its routing is a non-secret snapshot, including
+on 2026-10-12 at 14:23 UTC. Its routing is a non-secret snapshot, including
 multi-tier memberships, effort floors/ceilings, preferences, request labels and
 quota-window associations. The portable coordinator is
-`claude-agent-acp/opus[1m]` with `thought_level: medium`; no mode override is
+`codex-acp/gpt-6.1-sol` with `thought_level: high`; no mode override is
 added. New `defaults.json` files also set `language: ru`. The install envelope
 remains schema version 1 with optional `language` (`en` or `ru`); coordinator
 `mode` is optional, and when present the install template accepts `agent`.
@@ -447,6 +446,12 @@ no saved `routing-profiles.json` snapshot is created or replaced. A fresh host m
 register its own connections/MCP servers and resolve the exact coordinator against
 one observed selectable route. Missing or unsupported model/effort observations
 still fail closed; this snapshot is not live qualification.
+
+The snapshot retains the Opus UI/UX design condition in `preferred_when`,
+including the frontend implementation exception and narrowly scoped complex
+backend condition. This is an advisory conditional preference, not a role pin
+or a tier override. OpenCode is explicitly denied by `opencode/*` and
+`auto_allow` is empty; dormant OpenCode model policy remains preserved.
 
 ### Haiku 5.5 and Luna parity
 

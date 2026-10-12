@@ -56,6 +56,12 @@ but grant no route: pins, deny, automatic membership, providers, tier,
 availability and quota rules remain controlling. Preferences cannot promote
 a model into a different tier. See [configuration](../../configuration.md#user-routing-profiles).
 
+The current install snapshot also preserves the saved 2026-10-12 default
+profile: the Opus UI/UX conditional preference, explicit OpenCode denial, and
+`codex-acp/gpt-6.1-sol` coordinator at high effort. The UI/UX wording does not
+create a strict role pin or override tier eligibility. See the
+[fresh-install snapshot](../../configuration.md#fresh-install-owner-default-snapshot).
+
 ## Current preset: Haiku 5.5 and Luna
 
 The installation preset now enables `claude-agent-acp/haiku` at full

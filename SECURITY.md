@@ -1,7 +1,7 @@
 # Security policy
 
-Fresh-install model settings use the saved 2026-10-05 owner default's portable
-routing policy plus the Haiku 5.5 addition, `claude-agent-acp/opus[1m]` coordinator at medium effort, and Russian
+Fresh-install model settings use the saved 2026-10-12 owner default's portable
+routing policy, `codex-acp/gpt-6.1-sol` coordinator at high effort, and Russian
 message language. Existing owner settings are never replaced. Account/connection
 identities and machine-specific MCP definitions/paths are not cloned; see
 [the install snapshot boundary](docs/configuration.md#fresh-install-owner-default-snapshot).
