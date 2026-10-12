@@ -67,6 +67,46 @@ def test_explicit_session_choice_survives_reopen_and_wins(tmp_path, mode):
         sessions.select_session_access(store, "fresh", "development", "model")
 
 
+@pytest.mark.parametrize("choice,expected", [
+    (None, "development"), ("guarded", "guarded"), ("auto", "auto"), ("legacy", "guarded"),
+])
+def test_install_snapshot_does_not_override_durable_session_access(tmp_path, choice, expected):
+    import json
+    from cortex_runtime.connections import registry
+    from cortex_runtime.routing import defaults
+    from cortex_runtime.store import Store
+
+    home = tmp_path / "home"
+    home.mkdir()
+    env = dict(HOME=str(home), XDG_CONFIG_HOME=str(tmp_path / "config"),
+               XDG_STATE_HOME=str(tmp_path / "state"))
+    result = defaults.apply(env)
+    assert result["defaults"]["status"] == "created"
+    installed = registry.config_root(env) / "defaults.json"
+    owner_bytes = installed.read_bytes()
+    assert json.loads(owner_bytes)["defaults"]["coordinator"] == {
+        "engine": "codex-acp", "model": "gpt-6.1-sol", "parameters": {"thought_level": "high"}}
+
+    store, task_id = _store_and_task(tmp_path)
+    sessions.create_session(store, "installed", store.project_root, {}, {}, [])
+    if choice == "legacy":
+        with store.connection() as db:
+            db.execute("DELETE FROM acp_session_access_defaults WHERE session_id='installed'")
+            db.commit()
+    elif choice is not None:
+        sessions.select_session_access(store, "installed", choice, "acp_set_mode")
+    sessions.bind_task(store, "installed", task_id)
+
+    # Reinstall and reopen must not turn a routing preference into access authority.
+    assert defaults.apply(env)["defaults"]["changed"] is False
+    assert installed.read_bytes() == owner_bytes
+    reopened = Store(Path(store.project_root) / ".cortex", project_root=store.project_root)
+    sessions.bind_task(reopened, "installed", task_id)
+    assert sessions.session_access_mode(reopened, "installed") == expected
+    assert access_mode.current(reopened, task_id) == expected
+    assert len(access_mode.history(reopened, task_id)) == (0 if choice == "legacy" else 1)
+
+
 def test_real_launch_preparation_has_host_home_and_masks(development, tmp_path):
     root, store, worker, home = development
     scratch = tmp_path / "scratch"
