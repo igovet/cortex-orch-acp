@@ -36,8 +36,9 @@ def _context_needs_nothing(value):
 
 
 def _task_get_context(store, channel):
+    from .user_text import bound_context
     machine = TaskMachine(store)
-    value = machine.context(channel.task_id)
+    value = bound_context(store, channel.task_id, machine.context(channel.task_id))
     needs_nothing = _context_needs_nothing(value)
     if needs_nothing:
         value = dict(value, hint=_NOTHING_NEEDED_HINT)

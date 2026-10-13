@@ -227,8 +227,21 @@ task-scoped by the caller's own `channel.task_id` -- a `source_ref` for a
 different task simply resolves to `unknown_source_ref`, never leaking
 whether it exists elsewhere. A coordinator continuation prompt
 (`acp.orchestrating_runtime._coalesce`) still only ever gives the
-coordinator the exact stored user text plus attachment descriptors
+coordinator the stored user text plus attachment descriptors
 (name/kind/availability/`source_ref`) -- never an inlined large body.
+
+User text itself is bounded the same way. A user text over 48 KiB of UTF-8
+(for example a pasted chat-history summary) is never inlined whole into a
+coordinator turn, `task_get_context` or `pipeline.md`
+(`orchestration.user_text`). It appears as its exact first 32 KiB and last
+8 KiB, separated by a runtime marker that gives the omitted byte count and
+the exact `read_source source_ref=<report_id>:-1 offset=<n>` that continues
+the text (`offset`/`next_offset` are byte offsets). The bounding covers the
+task goal, the current input and its forwarded prompt blocks, retained
+`user_message`/steering events, steering and user answers. Without it such a
+message was repeated in several places of every coordinator turn, and the
+context budget refused each turn before the engine was ever prompted.
+Workers already receive a bounded goal through their brief.
 
 ### Answered questions
 

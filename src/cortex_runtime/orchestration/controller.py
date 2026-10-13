@@ -15,6 +15,7 @@ import time
 
 from .state import TaskMachine, encoded, event, now, transition
 from .prompt_context import coordinator_prompt_context
+from . import user_text
 from .worker_brief import build_worker_brief
 from ..contracts import StoreError
 from ..delegation import events
@@ -544,12 +545,14 @@ def _run(runtime, task_id, session_id, channel, session_ref, content, emit_updat
                 message += ('\nEarlier review-cycle nodes are compact summaries; '
                            'historical_check_gaps retains older non-passing check records. '
                            'Full node history remains available through task_get_context. ')
-            message += '\n' + encoded(prompt_context)
+            message += '\n' + encoded(user_text.bound_context(runtime._store, task_id, prompt_context))
             if pending_events:
-                message += '\nRetained events:\n'+encoded([dict(type=e.event_type,payload=e.payload) for e in pending_events])
+                message += '\nRetained events:\n'+encoded([
+                    dict(type=e.event_type,payload=user_text.bound_event_payload(runtime._store,task_id,e.payload))
+                    for e in pending_events])
             if state == 'PLANNING':
                 if not prompt_blocks:
-                    message += '\nCurrent user input:\n' + content
+                    message += '\nCurrent user input:\n' + user_text.bound_text(runtime._store, task_id, content)
                 if initial_project_docs_context:
                     message += '\n' + initial_project_docs_context
             # Reassert the selected turn language after English report/context
@@ -622,7 +625,7 @@ def _run(runtime, task_id, session_id, channel, session_ref, content, emit_updat
                 outcome = runtime._engine.prompt(
                     session_ref, message, cancel_event, on_delta=on_delta,
                     on_tool_call=on_tool, on_display_update=on_display,
-                    **({'prompt_blocks': [dict(type='text',text=message),*prompt_blocks]} if prompt_blocks and runtime._engine_accepts_prompt_blocks else {}),
+                    **({'prompt_blocks': [dict(type='text',text=message),*user_text.bound_prompt_blocks(runtime._store,task_id,prompt_blocks)]} if prompt_blocks and runtime._engine_accepts_prompt_blocks else {}),
                 )
                 from .. import _fault_injection as fault_injection
                 fault_injection.checkpoint('t023_after_continuation_prompt')

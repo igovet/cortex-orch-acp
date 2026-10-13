@@ -158,6 +158,7 @@
     "src/cortex_runtime/orchestration/ssh_askpass.py",
     "src/cortex_runtime/orchestration/state.py",
     "src/cortex_runtime/orchestration/synthesis.py",
+    "src/cortex_runtime/orchestration/user_text.py",
     "src/cortex_runtime/orchestration/wait_notices.py",
     "src/cortex_runtime/orchestration/worker_brief.py",
     "src/cortex_runtime/orchestration/worker_waits.py",

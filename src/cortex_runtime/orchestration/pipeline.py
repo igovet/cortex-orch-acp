@@ -3,6 +3,7 @@ from pathlib import Path
 import json
 
 from ..routing.decision_display import route_decision_summary
+from .user_text import bound_text
 
 
 def _recorded_route_summary(store, task_id, assignment_ref):
@@ -36,7 +37,7 @@ def publish(store, channel, context):
         marker = path.read_text().split('\n\n', 1)[0]
         rows = [marker, '', '# Runtime pipeline', '', f"State: {state}",
                 f"Plan revision: {context['revision']}", '', '## Original objective', '',
-                '> ' + context['goal'].replace('\n','\n> '), '', '## Assignments', '']
+                '> ' + bound_text(store, context['task_id'], context['goal']).replace('\n','\n> '), '', '## Assignments', '']
         for node in context['nodes']:
             result = node['result'] or {}
             route = _recorded_route_summary(store, context["task_id"], node.get("assignment_ref"))
