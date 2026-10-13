@@ -98,10 +98,10 @@ SCHEMAS = {
                             request_key=text('Unique action identity.',128))),
     'command_run': obj(dict(argv=array(text('Literal command argument. Only scoped workers may run commands; coordinators and consultants cannot execute them. No implicit shell.',16384),
                                        'Command as argv, run without a shell. Only scoped workers may run commands. For the current reviewer, exact plan verification argv at the same project digest reuses a runtime-produced receipt; an in-flight run is awaited for at most five seconds (or the shorter requested timeout). Otherwise the command executes normally.', maximum=128, minimum=1),
-                            cwd=text('Absolute existing working directory. Omitted: task working tree. Outside-tree cwd requires a writing worker in Development; private and protected targets are refused, never retried outside the sandbox.',4096),
+                            cwd=text('Absolute existing working directory. Omitted: task working tree. Outside-tree cwd requires a writing worker in Development or Auto; private and protected targets are refused, never retried outside the sandbox.',4096),
                             timeout_seconds=timeout('Optional maximum runtime in seconds, including child processes. Omit to run until the command exits.'),
                             request_key=text('Unique action identity; ambiguous interrupted calls are never re-executed automatically.',128)), required=['argv','request_key']),
-    'outside_write': obj(dict(path=text('Absolute path OUTSIDE the project (inside it, write with your own tools). The user confirms first; the parent directory must exist.',4096),
+    'outside_write': obj(dict(path=text('Absolute path OUTSIDE the project (inside it, write with your own tools). In Guarded the user confirms first; in Development or Auto only protected control-plane paths ask. The parent directory must exist.',4096),
                               content=text('Complete new UTF-8 file content.',1000000),
                               request_key=text('Unique action identity.',128))),
     'outside_command': obj(dict(argv=array(text('Literal command argument, run as the user outside the sandbox after the user confirms (e.g. a global install, a change in HOME). No implicit shell.',16384),
@@ -439,7 +439,9 @@ def _command_cwd(root, args, development):
     path = Path(os.path.normpath(str(path)))
     root = Path(root).resolve(strict=True)
     if path != root and root not in path.parents and not development:
-        raise StoreError('gateway_command_cwd_denied')
+        raise StoreError('gateway_command_cwd_denied', 'cwd', str(path), 'a directory inside the task working tree',
+                         'Outside the project, a writing worker in Development or Auto may use this cwd; in Guarded '
+                         'use outside_command, which the user confirms.')
     from .sandbox import protected_host_paths
     if development:
         for protected in protected_host_paths(root, os.environ):
@@ -524,7 +526,10 @@ def _command(store,channel,root,scopes,args,ref,owner,effects):
     with store.connection() as db:
         _authority(db, channel)
         policy = _command_policy(db, channel.task_id)
-    development = bool(scopes and policy['mode'] == 'development')
+    # Development and Auto: a writing worker's commands work on the whole
+    # computer (one host-writable profile, named 'development' in receipts).
+    from ..configuration.access_mode import HOST_WIDE
+    development = bool(scopes and policy['mode'] in HOST_WIDE)
     from ..engine.permissions import declared_command_deletion
     if declared_command_deletion(args['argv']):
         if not scopes:
@@ -591,6 +596,24 @@ def _command(store,channel,root,scopes,args,ref,owner,effects):
                 output=data.decode('utf-8',errors='replace'),large_output_id=retained['id'])
 
 
+def _protected_outside(root, path):
+    """True when ``path`` (or the real path its parent leads to) is, or lies
+    under, a protected control-plane location; unresolvable is protected."""
+    from .sandbox import control_plane_paths, protected_host_paths
+    try:
+        candidates={path, path.parent.resolve(strict=True)/path.name}
+        if path.is_symlink() or path.exists():
+            candidates.add(path.resolve(strict=True))
+        # As named too: a control-plane file that does not exist yet
+        # (~/.gitconfig) is planted by creating it.
+        protected=[*protected_host_paths(root, os.environ),
+                   *(Path(os.path.normpath(p)) for p in control_plane_paths(root, os.environ))]
+    except (OSError, RuntimeError, StoreError):
+        return True
+    return any(candidate==guarded or guarded in candidate.parents
+               for candidate in candidates for guarded in protected)
+
+
 def _outside(store,channel,root,operation,args,ref,owner,effects):
     """Write a file or run a command outside the sandbox, as the user, once
     the user allows it (orchestration.consent)."""
@@ -605,7 +628,17 @@ def _outside(store,channel,root,operation,args,ref,owner,effects):
                          'Inside the project, write with your own tools or project_write.')
     def still_allowed():
         with store.connection() as db: _authority(db,channel)
-    if not consent.request(store,channel,operation,consent.subject_of(operation,args),still_allowed=still_allowed):
+    with store.connection() as db:
+        mode=_command_policy(db,channel.task_id)['mode']
+    from ..configuration.access_mode import HOST_WIDE
+    # Development and Auto: an outside file write is ordinary work, except a
+    # control-plane path (engine/Cortex/Paseo state, git credentials and
+    # configuration), which always asks. A command outside the sandbox
+    # bypasses those protections, so it keeps its card in every mode (Auto
+    # answers it itself).
+    routine=(operation=='outside_write' and mode in HOST_WIDE
+             and not _protected_outside(root,resolved))
+    if not routine and not consent.request(store,channel,operation,consent.subject_of(operation,args),still_allowed=still_allowed):
         raise StoreError('outside_action_not_confirmed','operation',operation,'the user allowing it',
                          'The user did not allow this action; do the work another way or explain what you need.')
     effects['possible']=True

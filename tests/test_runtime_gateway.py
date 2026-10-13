@@ -387,9 +387,11 @@ def test_read_only_specialists_hold_no_write_grant(tmp_path,role):
 
 @pytest.mark.parametrize('answer',['allow','deny','timeout',None])
 @pytest.mark.parametrize('operation',['outside_write','outside_command'])
-@pytest.mark.parametrize('mode',['guarded','auto'])
+@pytest.mark.parametrize('mode',['guarded','development','auto'])
 def test_outside_actions_follow_the_tasks_access_mode(tmp_path,tmp_path_factory,operation,answer,mode):
-    """Guarded requires a live allow; Auto approves without asking a host."""
+    """Guarded requires a live allow; Auto approves without asking a host.
+    Development and Auto write an ordinary outside file with no card at all;
+    a command outside the sandbox keeps its card in Development."""
     import threading,time
     from cortex_runtime.configuration import access_mode
     from cortex_runtime.orchestration import consent
@@ -417,6 +419,11 @@ def test_outside_actions_follow_the_tasks_access_mode(tmp_path,tmp_path_factory,
     assert not thread.is_alive()
     with store.connection() as db:
         rows=[tuple(row) for row in db.execute('SELECT kind,status FROM consent_requests WHERE task_id=?',(worker.task_id,))]
+    if operation=='outside_write' and mode!='guarded':
+        assert 'result' in outcome and target.read_text()=='x',outcome
+        assert rows==[] and cards==[]
+        assert [row['kind'] for row in access_mode.history(store,worker.task_id)]==['switched']
+        return
     if mode=='auto' or answer=='allow':
         assert 'result' in outcome and target.exists(),outcome
         assert rows==[(operation,'approved')]

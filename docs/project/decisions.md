@@ -1,3 +1,18 @@
+## 2026-10-13 access modes as trust levels
+
+The owner defined the three modes as trust levels over two axes, where a
+writing worker may work and whether a deletion waits for the user: Guarded is
+the project with consent for deletion and every outside action; Development is
+the whole computer with consent for deletion; Auto is the whole computer with
+no question. Auto therefore uses the Development host-writable command profile
+(it previously kept restricted mounts, so its automatic approval could not reach
+anything the restricted sandbox refused without a card). In Development an
+`outside_write` is routine except to a protected control-plane path, which keeps
+its card; `outside_command` runs outside every sandbox mask and keeps its card
+in Development. Read-only roles, review, verification, engine jails, `.cortex`
+and `.git` configuration/hooks protection are unchanged in every mode. The
+deletion classifier remains lexical, not a semantic guarantee.
+
 ## 2026-10-12 brokered Development command capability
 
 Use Development as the durable fresh-ACP-session default, not Auto. Ordinary
@@ -94,6 +109,7 @@ The owner selected the following behavior and limitations for Cortex 1.0.0:
   `outside_command` without a permission question/card, even if no client is
   connected. Guarded requires explicit accepted permission-card consent and
   fails closed if approval is denied, absent, cancelled, malformed or times out.
+  (Development, added 2026-10-12, is described in the 2026-10-13 entry.)
   This is a deliberate Auto-mode choice, not a residual policy mismatch.
 - **Engine jail exposure:** The engine sandbox may write to the host's real
   `/tmp` and engine state directories (except protected session-configuration

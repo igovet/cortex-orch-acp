@@ -1130,3 +1130,18 @@ def test_broken_worker_snapshot_reference_does_not_inherit_a_different_active_re
     assert section['task_configuration']==dict(status='unavailable',
                                                reason='worker_config_revision_reference_not_found')
     assert section['own_worker_route']['worker_configuration_confirmed']['status']=='unavailable'
+
+
+@pytest.mark.parametrize("mode", ["guarded", "development", "auto"])
+def test_writer_environment_states_the_users_access_mode(mode):
+    from cortex_runtime.recovery.capsule import _worker_environment
+    offered = sorted(mcp_tools._WRITE_TOOLS | {"project_read", "command_run", "outside_write", "outside_command"})
+    environment = _worker_environment("backend-dev", "build", offered, mode=mode)
+    host = "command_run works on the whole computer"
+    if mode == "guarded":
+        assert host not in environment
+        assert "Anything outside the project needs an explicit permission request the user accepts" in environment
+    else:
+        assert host in environment and "protected engine, Cortex, Paseo and git control-plane state" in environment
+        assert ("The runtime answers permission cards itself" in environment) == (mode == "auto")
+        assert ("Deletions and protected or exceptional actions still ask the user" in environment) == (mode == "development")

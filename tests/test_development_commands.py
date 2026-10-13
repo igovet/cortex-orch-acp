@@ -124,8 +124,10 @@ def test_real_launch_preparation_has_host_home_and_masks(development, tmp_path):
 
 
 @pytest.mark.usefixtures("unjailed_gateway_command")
-def test_receipt_outside_cwd_and_filtered_environment(development):
+@pytest.mark.parametrize("mode", ["development", "auto"])
+def test_receipt_outside_cwd_and_filtered_environment(development, mode):
     root, store, worker, home = development
+    access_mode.switch(store, worker.task_id, mode, origin="acp_set_mode")
     receipt = gateway.dispatch(store, worker, "command_run", dict(
         argv=[sys.executable, "-B", "-c", "import os;print(os.getcwd());assert not any(k.startswith('CORTEX_') for k in os.environ)"],
         cwd=str(home), request_key="outside"))
@@ -327,8 +329,10 @@ def test_real_host_write_restricted_home_and_private_masks(development):
     assert outside.read_text() == "built"
 
 
-def test_private_cwd_alias_and_read_only_profile_are_refused(development, monkeypatch):
+@pytest.mark.parametrize("mode", ["development", "auto"])
+def test_private_cwd_alias_and_read_only_profile_are_refused(development, monkeypatch, mode):
     root, store, worker, home = development
+    access_mode.switch(store, worker.task_id, mode, origin="acp_set_mode")
     alias = home / "alias"
     alias.symlink_to(root / ".cortex", target_is_directory=True)
     with pytest.raises((StoreError, OSError)):
@@ -390,3 +394,48 @@ def test_worktree_under_protected_parent_keeps_ordered_task_grant(tmp_path):
         assert parent < grant
         assert any(command[i:i+2] == ["--tmpfs", str(root / ".cortex")] for i in range(grant, len(command)-1))
 
+
+
+@pytest.mark.parametrize("mode", ["development", "auto"])
+def test_auto_and_development_share_the_host_command_profile(development, monkeypatch, mode):
+    root, store, worker, home = development
+    access_mode.switch(store, worker.task_id, mode, origin="acp_set_mode")
+    used = []
+    real = sandbox.development_command
+    monkeypatch.setattr(sandbox, "development_command", lambda *a, **kw: used.append(mode) or real(*a, **kw))
+    monkeypatch.setattr(gateway, "_run_command_process", lambda *a, **kw: (0, None))
+    receipt = gateway.dispatch(store, worker, "command_run", dict(argv=["true"], request_key=mode))
+    assert used == [mode] and receipt["profile"] == "development"
+    assert receipt["access_policy"]["mode"] == mode
+
+
+@pytest.mark.parametrize("mode", ["development", "auto"])
+@pytest.mark.parametrize("relative", [".claude/settings.json", ".codex/config.toml", ".gitconfig",
+                                      ".config/cortex/defaults.json", ".paseo/plugins.json", "link/settings.json"])
+def test_outside_write_to_control_plane_still_asks(development, monkeypatch, mode, relative):
+    root, store, worker, home = development
+    access_mode.switch(store, worker.task_id, mode, origin="acp_set_mode")
+    (home / ".claude").mkdir()
+    (home / "link").symlink_to(home / ".claude", target_is_directory=True)
+    target = home / relative
+    target.parent.mkdir(parents=True, exist_ok=True)
+    from cortex_runtime.orchestration import consent
+    asked = []
+    monkeypatch.setattr(consent, "request", lambda *a, **kw: asked.append(a[2]) or False)
+    with pytest.raises(StoreError, match="outside_action_not_confirmed"):
+        gateway.dispatch(store, worker, "outside_write", dict(path=str(target), content="{}", request_key="cp"))
+    assert asked == ["outside_write"]
+    assert not target.exists() and not (home / ".claude/settings.json").exists()
+
+
+@pytest.mark.parametrize("mode", ["development", "auto"])
+def test_outside_command_keeps_its_card_in_host_wide_modes(development, monkeypatch, mode):
+    root, store, worker, home = development
+    access_mode.switch(store, worker.task_id, mode, origin="acp_set_mode")
+    from cortex_runtime.orchestration import consent
+    asked = []
+    monkeypatch.setattr(consent, "request", lambda *a, **kw: asked.append(a[2]) or False)
+    monkeypatch.setattr(gateway.subprocess, "Popen", lambda *a, **kw: pytest.fail("ran without a card"))
+    with pytest.raises(StoreError, match="outside_action_not_confirmed"):
+        gateway.dispatch(store, worker, "outside_command", dict(argv=["true"], cwd=str(home), request_key="oc"))
+    assert asked == ["outside_command"]

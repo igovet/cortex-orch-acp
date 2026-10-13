@@ -204,8 +204,12 @@ still require consent, including `env rm`, `sh -c 'env rm file'` and
 conditional/loop command positions are recognized too, for example
 `sh -c 'LABEL=fixture rm fixture'` and `sh -c 'if true; then env rm fixture; fi'`.
 Literal `echo`/`printf` argv arguments are not shell commands. Select **Guarded**
-for restrictive future command mounts.
-Explicit **Auto** keeps its earlier approval semantics. Legacy sessions/tasks and
+to keep workers inside the project: a deletion, an outside write and a command
+outside the sandbox each ask first. **Auto** gives writing workers the same
+host-writable commands as Development and answers every permission card itself,
+deletions included. In Development an `outside_write` needs no card unless it
+targets protected engine, Cortex, Paseo or git control-plane state;
+`outside_command` (no sandbox) still asks. Legacy sessions/tasks and
 unknown/unreadable configuration remain Guarded; reconnect preserves durable
 choices without rewriting owner settings. Stopping a command does not roll back
 Docker or outside-project effects. See [permissions and containment](docs/features/permissions-and-containment/index.md#access-mode-development-guarded-and-auto).

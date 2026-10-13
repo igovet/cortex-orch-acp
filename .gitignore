@@ -20,3 +20,8 @@ docs/implementation
 # Paseo plugin development dependencies (typecheck only; Paseo provides every
 # runtime module itself). Reproduce with `npm ci` from package-lock.json.
 integrations/paseo/node_modules/
+
+# Checkout-local Python test environment (pytest); never a payload input.
+/.venv/
+/.verification-venv/
+/.cortex/

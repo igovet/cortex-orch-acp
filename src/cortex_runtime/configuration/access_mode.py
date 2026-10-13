@@ -1,31 +1,39 @@
 """The user's access mode for one task: Development, Guarded or Auto.
 
-Guarded is the behaviour Cortex always had: a deletion, a write outside the
-project and a command run outside the sandbox each wait for the user's
-answer on a permission card, and workers run with the engine mode that keeps
-every mutating tool call visible to ``engine.permissions.PermissionBridge``
-(``configuration.policy.WORKER_MODE_FLOOR``).
+Three trust levels over two axes -- where a writing worker may work, and
+whether a deletion waits for the user:
 
-Auto answers approval cards itself, including outside-project writes and commands:
-the runtime selects the engine's own one-shot allow option instead of asking (see :func:`auto_approve`, used by
-``acp.orchestrating_runtime.OrchestratingRuntime.permission_requester_for_task``,
-the one requester both approval paths reach), and a worker opened while the
-task is in Auto runs with the most permissive engine mode its session
-actually offers (:data:`WORKER_AUTO_MODES`), still confirm-or-fail.
+* Guarded: the project. A deletion, a write outside the project and a
+  command run outside the sandbox each wait for the user's answer on a
+  permission card, and workers run with the engine mode that keeps every
+  mutating tool call visible to ``engine.permissions.PermissionBridge``
+  (``configuration.policy.WORKER_MODE_FLOOR``).
+* Development: the whole computer (:data:`HOST_WIDE`). A writing worker's
+  brokered commands get host-writable mounts and an outside file write needs
+  no card; a recognized deletion, a write to a protected control-plane path
+  and a command run outside the sandbox still ask.
+* Auto: the whole computer, and nothing asks. The same host-writable command
+  profile as Development, and the runtime answers every approval card itself
+  by selecting the engine's own one-shot allow option (see
+  :func:`auto_approve`, used by
+  ``acp.orchestrating_runtime.OrchestratingRuntime.permission_requester_for_task``,
+  the one requester both approval paths reach). A worker opened while the
+  task is in Auto runs with the most permissive engine mode its session
+  actually offers (:data:`WORKER_AUTO_MODES`), still confirm-or-fail.
 
-Auto never lifts what is not a user approval: the engine jail, its
-``.cortex`` and ``.git`` config/hooks protection, the channel-verified MCP
-gateway (scopes, write denials, role rules, receipts), the native-subagent
-ban, the coordinator's own engine mode floor, the paid-call probe safeguards
-and secret handling all hold in both modes.
+No mode lifts what is not a user approval: the engine jail, its ``.cortex``
+and ``.git`` config/hooks protection, the protected control-plane mounts of
+the host command profile, the channel-verified MCP gateway (scopes, write
+denials, role rules -- read-only roles never write -- receipts), the
+native-subagent ban, the coordinator's own engine mode floor, the paid-call
+probe safeguards and secret handling all hold in every mode.
 
 The mode is changed only by the user, through the ACP client (the session's
 access option or mode) -- no MCP tool writes it, so a model cannot. Every
 switch is an append-only revision in ``access_mode_events`` with its origin;
 a task with no revision is Guarded, and anything unreadable or unknown reads
 as Guarded. Fresh ACP sessions durably start Development; legacy sessions
-remain Guarded. Development broadens only brokered writing-worker commands,
-not engine jails, engine modes or hazardous-action consent.
+remain Guarded.
 """
 from __future__ import annotations
 
@@ -40,11 +48,15 @@ DEVELOPMENT = "development"
 DEFAULT = GUARDED  # Missing, legacy or unreadable authority is restrictive.
 FRESH_SESSION_DEFAULT = DEVELOPMENT
 MODES = (DEVELOPMENT, GUARDED, AUTO)
+#: Modes whose writing workers work on the whole computer: host-writable
+#: brokered commands (``orchestration.sandbox.development_command``) and
+#: outside file writes without a routine card.
+HOST_WIDE = frozenset({DEVELOPMENT, AUTO})
 LABELS = {DEVELOPMENT: "Development mode", GUARDED: "Guarded mode", AUTO: "Auto mode"}
 DESCRIPTIONS = {
-    DEVELOPMENT: "Ordinary worker commands can use host resources. Hazardous actions still need consent. Docker and arbitrary code can bypass filesystem masks.",
-    GUARDED: "Asks you before a deletion, a write outside the project or a command outside the sandbox.",
-    AUTO: "Allows actions without asking, including outside-project writes and commands. Sandbox, .git/.cortex protection and MCP checks still apply.",
+    DEVELOPMENT: "Workers can work anywhere on this computer without asking. A deletion still asks you first. Docker and arbitrary code can bypass filesystem masks.",
+    GUARDED: "Workers work inside the project. Asks you before a deletion, a write outside the project or a command outside the sandbox.",
+    AUTO: "Workers can work anywhere on this computer and nothing asks you, deletions included. .git/.cortex protection, role limits and MCP checks still apply.",
 }
 
 #: Where a switch may come from: the user's own client controls. Nothing a

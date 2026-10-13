@@ -651,8 +651,8 @@ def gateway_command(root, scratch, argv, scopes, reveal=frozenset(), system_root
             git_guard.extend(guard.removed)
 
 
-def protected_host_paths(root, environ):
-    """Known control-plane locations; not a hostile-code isolation guarantee."""
+def control_plane_paths(root, environ):
+    """Known control-plane locations as named, existing or not."""
     root = Path(root).resolve(strict=True)
     home = Path(environ.get('HOME') or str(Path.home()))
     config = Path(environ.get('XDG_CONFIG_HOME') or home / '.config')
@@ -675,6 +675,13 @@ def protected_host_paths(root, environ):
     hooks = _configured_hooks_dir(root, include_external=True)
     if hooks is not None:
         paths.add(hooks)
+    return paths
+
+
+def protected_host_paths(root, environ):
+    """Known control-plane locations; not a hostile-code isolation guarantee."""
+    root = Path(root).resolve(strict=True)
+    paths = control_plane_paths(root, environ)
     resolved = set()
     for path in paths:
         if not path.exists() and not path.is_symlink():

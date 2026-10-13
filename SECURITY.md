@@ -650,13 +650,17 @@ Literal non-shell argv arguments containing separators and `rm` text do not
 request deletion consent. Refused, absent or malformed approval starts no process.
 This lexical classifier
 is not a semantic firewall: interpreters, scripts and daemon operations can hide
-effects. Existing `project_delete`, exceptional `outside_write` and
-`outside_command` consent remains. Development keeps the worker engine floor.
+effects. `project_delete` and `outside_command` consent remains. In Development
+an `outside_write` needs no card unless its target, as named or through a
+symlinked parent, is or lies beneath a protected control-plane location
+(`sandbox.control_plane_paths`, existing or not); those still ask.
+Development keeps the worker engine floor.
 
 **Guarded** remains the explicit restrictive command profile (host/HOME mostly
-read-only, writable project and tool caches). **Auto** preserves its previous
-explicitly selected behavior: restricted ordinary command mounts, runtime
-auto-approval of consent cards and the most permissive offered worker engine mode.
+read-only, writable project and tool caches) with consent for every outside
+write and outside command. **Auto** uses the Development host-writable command
+profile for writing workers, runtime auto-approval of every consent card and the
+most permissive offered worker engine mode.
 None of these modes lifts channel/role/epoch/revocation, owner denial, review,
 completion, native-subagent or paid-probe gates.
 

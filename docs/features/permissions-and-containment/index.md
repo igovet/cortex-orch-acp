@@ -126,7 +126,7 @@ checked by the gateway. A refused permission ends OpenCode's turn as
 [OpenCode adapter](../opencode-engine/index.md).
 
 ACP permission requests for native tools are allowed, since the jail bounds them,
-except a deletion, which the user confirms in Guarded mode (see
+except a deletion, which the user confirms in Guarded and Development modes (see
 [Access mode](#access-mode-guarded-and-auto)); a native subagent request is
 refused. Offered MCP allow options are used and the
 gateway then checks the actual channel and operation. Display titles and raw
@@ -151,13 +151,26 @@ Load/reconnect preserves durable choices. Legacy sessions/tasks without a record
 non-ACP task creation, unknown values or unreadable configuration stay Guarded.
 No model-facing mode or execution-profile setter exists.
 
-| Behavior | Development (fresh-session default) | Guarded | Auto (explicit legacy choice) |
+The three modes are trust levels over two axes: where a writing worker may
+work, and whether a deletion waits for the user.
+
+| Behavior | Guarded | Development (fresh-session default) | Auto |
 | --- | --- | --- | --- |
-| Writing-worker ordinary command | host-writable masks, no routine outside-resource card | restricted mounts | restricted mounts |
+| Where a writing worker works | the project | the whole computer | the whole computer |
+| Writing-worker `command_run` | restricted mounts; cwd inside the task tree | host-writable masks, any existing cwd, no card | same as Development |
+| `outside_write` | consent card | no card, except a protected control-plane path (consent card) | runtime answers the card itself |
+| `outside_command` (no sandbox) | consent card | consent card | runtime answers the card itself |
+| Declared deletion (`project_delete`, `command_delete`, native delete) | consent card | consent card | runtime answers the card itself |
 | Read-only/reviewer command and automatic verification | restricted | restricted | restricted |
 | Engine jail and worker mode floor | unchanged | unchanged | jail unchanged; most permissive offered worker mode |
-| Declared deletion and exceptional outside actions | consent; missing/refused answer blocks effects | same | existing automatic approval |
 | Channel, role, revocation, owner deny, review and completion gates | retained | retained | retained |
+
+A missing, refused, cancelled or timed-out answer to a consent card blocks the
+effect. Protected control-plane paths for `outside_write` are the
+`sandbox.control_plane_paths` locations (Cortex, Paseo, Codex, Claude and
+OpenCode state and configuration, `~/.gitconfig`, `~/.git-credentials`, the
+installed runtime, the project's `.cortex` and an external hooks directory),
+existing or not, and anything beneath them, including through a symlinked parent.
 
 Development is trusted local development, **not a hostile-code sandbox**.
 `sandbox.development_command` uses `--bind / /`, real HOME and /var/tmp,
@@ -194,8 +207,11 @@ and ordinary arguments are not shell prefixes. Rejected consent precedes
 working-directory preparation, command mounts and process launch.
 Shell text remains lexical matching, not complete shell interpretation. The
 classifier is not a semantic firewall for interpreters, scripts or Docker effects.
-Auto retains its existing approval behavior and engine-mode confirmation.
-Development does not select Claude bypassPermissions or re-enable Codex shells.
+Auto uses the same host-writable `sandbox.development_command` profile as
+Development (receipts name it `development`) and keeps its automatic approval
+and engine-mode confirmation. Development does not select Claude
+bypassPermissions; no mode re-enables the native Claude or Codex shells, so
+outside-project work always goes through the brokered gateway tools.
 
 Commands retain cwd/profile/policy provenance. Observed Development policy or
 denial changes terminate the owned command group with incomplete
@@ -372,7 +388,7 @@ Covered by `tests/test_project_skill_links.py`.
 `command_run` requires Linux bubblewrap and has no silent unsandboxed fallback.
 Its effective mounts depend on [access mode](#access-mode-development-guarded-and-auto).
 Restricted commands use read-only real HOME with writable tool caches; Development
-writers use real writable host resources. Both filter Cortex/credential environment
+and Auto writers use real writable host resources. Both filter Cortex/credential environment
 variables and retain validated owner SSH-agent access and shared network
 and mounts the project read-only except for writing workers, who receive the
 whole project writable regardless of their narrower declared coordination work

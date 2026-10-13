@@ -575,7 +575,7 @@ _ENVIRONMENT_BACKGROUND = (
 )
 
 
-def _worker_environment(role_id: str | None, stage: str | None, offered: list[str] | None, *, development=False) -> str:
+def _worker_environment(role_id: str | None, stage: str | None, offered: list[str] | None, *, mode='guarded') -> str:
     if role_id is None or offered is None:
         return (
             "The runtime could not resolve this assignment's role, stage or offered tools, so this capsule "
@@ -599,12 +599,18 @@ def _worker_environment(role_id: str | None, stage: str | None, offered: list[st
             + "Never reach a refused action another way: say exactly what you need through ask_question, or "
             "report it as a blocker."
         )
-    outside = (
-        "In Development, ordinary brokered commands can use authorized host resources without a routine card. "
-        "Direct file writes outside the project and exceptional commands retain their consent routes. "
-        "Host capability is not permission for deletion, production/shared mutations, publication, credentials or paid checks; "
+    host = (
+        "command_run works on the whole computer (host-writable, any existing cwd) and outside_write writes a file "
+        "outside the project; protected engine, Cortex, Paseo and git control-plane state stays read-only, and "
+        "outside_command (a command outside the sandbox, e.g. sudo) remains the exceptional route. "
+        "Host capability is not permission for production/shared mutations, publication, credentials or paid checks; "
         "Docker and arbitrary code can bypass filesystem masks. "
-        if development else
+    )
+    outside = {
+        "development": "The user chose Development: " + host + "Deletions and protected or exceptional actions "
+                       "still ask the user. ",
+        "auto": "The user chose Auto: " + host + "The runtime answers permission cards itself. ",
+    }.get(mode,
         "Anything outside the project needs an explicit permission request the user accepts: "
         "outside_write for a file, outside_command for a command that changes things outside. "
     )
@@ -634,7 +640,7 @@ def _section_pipeline_and_assignments(db, task_id: str, recipient: dict) -> dict
             from ..orchestration.gateway import _command_policy
             section['runtime']['environment'] = _worker_environment(
                 role_id, stage, _offered_tool_names('worker', role_id, stage),
-                development=_command_policy(db, task_id)['mode'] == 'development')
+                mode=_command_policy(db, task_id)['mode'])
         sql = 'SELECT task_id,node_id,role,stage,objective,dependencies_json,scope_json,status,assignment_ref FROM runtime_nodes WHERE task_id=? AND revision=?'
         values = [task_id,task['revision']]
         if recipient['role'] != 'coordinator':

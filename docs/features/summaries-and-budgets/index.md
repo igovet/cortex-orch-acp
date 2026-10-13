@@ -95,11 +95,27 @@ cached and used for subsequent retries.
 `context_generations` ledger with a narrower `compaction_recovery_events`
 table (new, additive schema group — see `recovery.budget_store`) recording
 whether each compaction attempt actually helped. It blocks (never loops)
-on any of: too many compactions within a recent window, a fresh
-generation's mandatory content already exceeding the usable budget right
-after compaction (immediate refill; skipped when the route's real window is
-unknown), or several consecutive attempts each
-recovering less than a minimum ratio of space. The pre-compaction size is
+on any of:
+
+- **Frequency** (`compaction_frequency_exceeded`) — the same engine session
+  already has 5 recorded attempts (`MAX_COMPACTIONS_PER_WINDOW`) within
+  15 minutes (`WINDOW_SECONDS`) of the current attempt, so the sixth
+  compaction inside one 15-minute span stops. The window is wall-clock time
+  from each row's persisted `created_at`, so it survives a Cortex restart,
+  and a row exactly 15 minutes old no longer counts. A session whose
+  compactions are at least 3 minutes apart never trips it, however many
+  compactions it accumulates. Other sessions' rows, rows with an
+  unreadable timestamp, and rows stamped 15 minutes or more after the
+  current attempt (written before a large clock correction) are not
+  counted. Blocked attempts are recorded and count toward the window.
+- **Immediate refill** (`immediate_refill`) — a fresh generation's
+  mandatory content already exceeds the usable budget right after
+  compaction (skipped when the route's real window is unknown).
+- **Low recovery** (`consecutive_low_recovery`) — the session's 3 newest
+  measured attempts (by `created_at`; this check has no time window) each
+  recovered less than 15% of the pre-compaction size.
+
+The pre-compaction size is
 the context fill (`usage_update.used`) the engine last reported before the
 compaction signal, kept in memory by the engine session adapter. When no
 such report exists (none arrived, or the Cortex process restarted), the
@@ -154,6 +170,7 @@ default.
 
 `tests/test_token_budget.py`, `tests/test_summary_validation.py`,
 `tests/test_summarizer_policy.py`, `tests/test_compaction_guard.py`,
+`tests/test_compaction_guard_runtime.py`,
 `tests/test_large_output_store.py`, `tests/test_presentation.py`, plus
 `context_window_tokens` coverage in `tests/test_catalog_model.py` and
 `tests/test_catalog_store.py`.
