@@ -216,11 +216,19 @@ def test_successful_gateway_writes_hint_before_result_and_clear_after_skill_read
     assert 'required_before_result_submit' not in after
 
 
-def test_gateway_hint_does_not_claim_success_when_start_revision_is_unobservable(tmp_path):
+def test_gateway_hint_uses_own_writes_and_result_gate_reports_unobservable_start(tmp_path):
     store,task,worker=setup_worker(tmp_path,start=False)
-    for path,content in [('src/new.py','X=2'),('docs/new.md','# New')]:
-        receipt=mcp_tools.dispatch(store,worker,'project_write',dict(path=path,content=content,expected_sha256='absent'))
-        assert 'required_before_result_submit' not in receipt
+    first=mcp_tools.dispatch(store,worker,'project_write',dict(path='src/new.py',content='X=2',expected_sha256='absent'))
+    assert 'required_before_result_submit' not in first
+    # The hint observes no tree: this attempt's own gateway writes are exact
+    # evidence even without a retained start revision.
+    second=mcp_tools.dispatch(store,worker,'project_write',dict(path='docs/new.md',content='# New',expected_sha256='absent'))
+    assert second['required_before_result_submit'][0]['skill']=='documentation-sync'
+    with store.connection() as db:
+        assert db.execute("SELECT COUNT(*) FROM observability_events WHERE category='skill_gate' AND outcome='unobservable'").fetchone()[0]==0
+    # The result gate still observes the tree and never treats the missing
+    # start revision as a pass.
+    assert skill_gate.required_before_result_submit(store,worker,stage=None,role_ids=('backend-dev',))==[]
     with store.connection() as db:
         assert db.execute("SELECT COUNT(*) FROM observability_events WHERE category='skill_gate' AND outcome='unobservable'").fetchone()[0]>0
 
@@ -422,7 +430,7 @@ def test_advisory_hint_is_attributed_like_the_hard_gate(tmp_path):
     assert 'required_before_result_submit' not in receipt
     assert mcp_tools.dispatch(store,worker,'result_submit',result_args())['recorded']
 
-def test_project_edit_attributed_outside_declared_scope_and_returns_skill_hint(tmp_path):
+def test_project_edit_attributed_outside_declared_scope_and_gated_at_result(tmp_path):
     store, task, worker = setup_worker(tmp_path)
     with store.connection() as db:
         db.execute("UPDATE runtime_nodes SET scope_json=? WHERE assignment_ref=(SELECT idempotency_key FROM delegation_provisioning WHERE attempt_id=?)",
@@ -432,6 +440,9 @@ def test_project_edit_attributed_outside_declared_scope_and_returns_skill_hint(t
     mcp_tools.dispatch(store, worker, 'project_read', dict(path='docs/guide.md'))
     receipt = mcp_tools.dispatch(store, worker, 'project_edit', dict(path='docs/guide.md',
         edits=[dict(old_string='Value is 1.', new_string='Value is 2.')]))
-    assert receipt['required_before_result_submit'][0]['skill'] == 'documentation-sync'
+    # The write receipt's hint sees only gateway writes, not the native edit.
+    assert 'required_before_result_submit' not in receipt
     changed = skill_gate.attributable_changed_paths(store, worker, {'src/app.py', 'docs/guide.md'})
     assert changed == {'src/app.py', 'docs/guide.md'}
+    with pytest.raises(StoreError, match='situational_skill_required'):
+        mcp_tools.dispatch(store, worker, 'result_submit', result_args())

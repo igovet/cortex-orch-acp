@@ -9,7 +9,8 @@ the skill is not a substitute; the model must load it when its case arises.
 So the runtime checks at a boundary it owns for both engines. Codex edits
 through its native ``apply_patch`` and Claude through native Edit/Write or
 Cortex ``project_write``; the project tree is the shared observation boundary.
-Successful gateway writes also return an early, non-error skill reminder.
+Successful gateway writes also return an early, non-error skill reminder,
+derived only from this attempt's own gateway writes (no tree observation).
 A shared-root worker's pre-attempt
 tree manifest is retained as ``attempt_revisions`` phase
 ``worker_start:<attempt_id>`` (see ``delegation.provisioning``). At
@@ -25,8 +26,8 @@ Limits, stated rather than hidden:
 * The tree delta is shared, but a refusal uses only this node's declared
   write reservation or its own successful gateway writes. Paths reserved by
   sibling nodes are excluded unless this attempt wrote them through the gateway.
-  The early non-error hint uses the same attribution and stays silent
-  when attribution is unavailable.
+  The early non-error hint sees only this attempt's gateway writes, so a
+  native edit counts first at ``result_submit``.
 * Without a complete pre-attempt manifest (isolated workspaces, a capture
   that was unavailable) nothing can be attributed; the gate does not fire
   and records a ``skill_gate``/``unobservable`` observability event instead
@@ -170,6 +171,20 @@ def _examples(paths: Iterable[str]) -> str:
     return shown + (f" (+{len(paths) - _EXAMPLE_LIMIT} more)" if len(paths) > _EXAMPLE_LIMIT else "")
 
 
+def _own_gateway_writes(db, channel) -> set[str]:
+    """Paths this attempt changed through completed gateway writes."""
+    writes = set()
+    for row in db.execute(
+        "SELECT e.payload_json FROM runtime_events e JOIN trusted_channels c ON c.channel_id=e.actor "
+        "WHERE e.task_id=? AND c.attempt_id=? AND e.type='TOOL_COMPLETED'",
+        (channel.task_id, channel.attempt_id),
+    ):
+        payload = json.loads(row["payload_json"])
+        if payload.get("operation") in {"project_write", "project_edit", "project_delete"} and isinstance(payload.get("path"), str):
+            writes.add(payload["path"])
+    return writes
+
+
 def attributable_changed_paths(store, channel, changed: set[str], *, successful_paths: Iterable[str] = ()) -> set[str] | None:
     """Conservatively attribute a shared-tree delta; never charge sibling work.
 
@@ -198,15 +213,7 @@ def attributable_changed_paths(store, channel, changed: set[str], *, successful_
             for scope in json.loads(row["scope_json"])]
         # The advisory caller may name a write that has committed but whose
         # TOOL_COMPLETED event is not published yet. These paths are runtime-owned.
-        writes = set(successful_paths)
-        for row in db.execute(
-            "SELECT e.payload_json FROM runtime_events e JOIN trusted_channels c ON c.channel_id=e.actor "
-            "WHERE e.task_id=? AND c.attempt_id=? AND e.type='TOOL_COMPLETED'",
-            (channel.task_id, channel.attempt_id),
-        ):
-            payload = json.loads(row["payload_json"])
-            if payload.get("operation") in {"project_write", "project_edit", "project_delete"} and isinstance(payload.get("path"), str):
-                writes.add(payload["path"])
+        writes = set(successful_paths) | _own_gateway_writes(db, channel)
         other_writes = set()
         for row in db.execute(
             "SELECT e.payload_json FROM runtime_events e JOIN trusted_channels c ON c.channel_id=e.actor "
@@ -245,6 +252,14 @@ def required_before_result_submit(store, channel, *, stage: str | None,
     pending = [gate for gate in pending if gate.skill_id not in read]
     if not pending:
         return []
+    if advisory:
+        # A write receipt's reminder observes no tree (a full scan per write
+        # cost up to 0.6 s on a large project): it names only this attempt's
+        # own gateway writes, which need no attribution. Native edits still
+        # count at result_submit, which observes the tree.
+        with store.connection() as db:
+            changed = _own_gateway_writes(db, channel) | set(successful_paths)
+        return _requirements(pending, changed)
     changed, reason = observed_changed_paths(store, channel.task_id, channel.attempt_id)
     if changed is None:
         try:
@@ -256,23 +271,22 @@ def required_before_result_submit(store, channel, *, stage: str | None,
         except Exception:
             pass
         return []
-    # F2 fix: attribution narrows ``changed`` to this attempt's own paths in
-    # *both* modes now, not only the hard result_submit gate -- an advisory
-    # write-receipt hint must never charge a code-only worker for a
-    # sibling's unrelated docs/** edit just because the shared-tree delta
-    # includes it (see this module's own docstring on attribution limits).
+    # Attribution narrows ``changed`` to this attempt's own paths: the gate
+    # must never charge a code-only worker for a sibling's unrelated docs/**
+    # edit just because the shared-tree delta includes it (see this module's
+    # own docstring on attribution limits).
     attributed = attributable_changed_paths(store, channel, changed, successful_paths=successful_paths)
     if attributed is None:
-        if not advisory:
-            from ..observability.events import append_event
+        from ..observability.events import append_event
 
-            append_event(store, channel.task_id, SKILL_GATE_CATEGORY, "unobservable", "observed",
-                         attempt_id=channel.attempt_id,
-                         detail=dict(reason="no_declared_scope", skills=[gate.skill_id for gate in pending]))
-        # Advisory mode emits no hint at all when attribution is unavailable
-        # (never a hint built from the whole shared-tree delta instead).
+        append_event(store, channel.task_id, SKILL_GATE_CATEGORY, "unobservable", "observed",
+                     attempt_id=channel.attempt_id,
+                     detail=dict(reason="no_declared_scope", skills=[gate.skill_id for gate in pending]))
         return []
-    changed = attributed
+    return _requirements(pending, attributed)
+
+
+def _requirements(pending, changed: set[str]) -> list[dict]:
     requirements = []
     for gate in pending:
         matched = gate.match(changed)

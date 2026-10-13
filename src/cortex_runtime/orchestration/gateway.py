@@ -954,7 +954,8 @@ def dispatch(store,channel,operation,args):
                                         (channel.task_id,channel.attempt_id)).fetchone()
                     hints=required_before_result_submit(store,channel,stage=node['stage'],
                                                        role_ids=(node['role'],role['role_id'] if role else None), advisory=True,
-                                                       successful_paths=(args['path'],))
+                                                       # A created directory is never a changed file.
+                                                       successful_paths=() if operation=='project_mkdir' else (args['path'],))
                 except Exception:
                     # The write already committed. An advisory observation failure
                     # must never pretend the mutation failed or invite a new write.

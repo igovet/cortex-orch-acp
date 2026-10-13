@@ -218,7 +218,10 @@ A background engine auto-update can install a new `claude-agent-acp` adapter ver
   `tests/test_situational_skill_gate.py
   ::test_parallel_workers_do_not_inherit_each_others_documentation_gate`
   (flipped to assert no hint) and the new
-  `::test_advisory_hint_is_attributed_like_the_hard_gate`.
+  `::test_advisory_hint_is_attributed_like_the_hard_gate`. Since 2026-10-13
+  the hint observes no tree at all: it uses only this attempt's own gateway
+  write paths, which need no attribution (a per-write tree scan cost up to
+  0.6 s on a large project); native edits count first at `result_submit`.
 
 ## G1-G8 fix-cycle low findings H1-H3, and two test-text drifts (2026-10-07)
 
@@ -397,7 +400,7 @@ A background engine auto-update can install a new `claude-agent-acp` adapter ver
   `node_status`; this is not task acceptance. No `supersedes` policy was introduced.
 - **Situational skills are still gated at submission.** Successful gateway writes
   and mkdir calls give early `required_before_result_submit` skill/reason hints
-  from the shared-tree trigger as non-error reminders; only attributable paths
+  from this attempt's own gateway writes as non-error reminders; only attributable paths
   in this node's declared scope or successful channel writes can refuse a result.
   Reading the skill clears later hints;
   native edits still rely on the result gate. Missing manifests remain explicitly
