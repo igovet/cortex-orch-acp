@@ -61,7 +61,8 @@
           ],
           "opus[1m]": [
             "deep",
-            "flagship"
+            "flagship",
+            "standard"
           ]
         },
         "policy": {
@@ -140,7 +141,10 @@
               "analysis"
             ],
             "preferred_when": "Use for any work of the listed kinds. Always use for UI/UX design tasks, including interface design, visual concepts, mockups, wireframes, and design systems, regardless of complexity or scope. Do not use for frontend implementation, HTML/CSS layout, or styling tasks unless they explicitly involve UI/UX design decisions. For backend work, use only for very complex, narrowly scoped tasks.",
-            "request_names": null
+            "request_names": [
+              "opus",
+              "опус"
+            ]
           }
         }
       },

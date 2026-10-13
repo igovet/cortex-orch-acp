@@ -1212,6 +1212,7 @@ REQUEST_WORDS = re.compile(
     r"|выбер(?:и|ите|ем)|выбрать|выбира(?:й|йте|ть)|назнач(?:ь|ьте|ить|им|ай|айте)"
     r"|отда(?:й|йте|ть|дим|вай|вайте)|переключ(?:и|ите|ись|итесь|ить|иться|им|имся|ай|айся)"
     r"|постав(?:ь|ьте|ить|им)|возьм(?:и|ите|ём|ем)|взять|бери|берите|берём|берем|пусть"
+    r"|переда(?:й|йте|ть|дим|вай|вайте)|поруч(?:и|ите|ить|им|ай|айте)"
     r"|треб(?:ование|ования|ованию|ованием|овании|ую|уем|ует|уется|уются|уй|уйте|овать)",
     re.IGNORECASE,
 )
@@ -1231,6 +1232,21 @@ WORK_VERBS = re.compile(
     r"|собер(?:и|ите|ём|ем)|собрать|провед(?:и|ите|ём|ем)|провести|отревью(?:й|йте|ить)",
     re.IGNORECASE,
 )
+# Past tenses of the verbs above. After "чтобы"/"чтоб"/"что бы" in the
+# same clause ("хочу, чтобы ты сделал аудит через <model>") a past tense is the
+# Russian subjunctive, which asks; anywhere else it reports ("сделал на <model>").
+_RU_PAST_SUFFIX = r"(?:л|ла|ло|ли|лся|лась|лось|лись)"
+_RU_SUBJUNCTIVE_REQUEST = re.compile(
+    r"(?:использова|задействова|запусти|запуска|прогна|прогоня|выбра|выбира|назначи|назнача"
+    r"|отда|отдава|переключи|переключа|постави|взя|бра|переда|передава|поручи|поруча)" + _RU_PAST_SUFFIX,
+    re.IGNORECASE,
+)
+_RU_SUBJUNCTIVE_WORK = re.compile(
+    r"(?:(?:с|пере|до)?дела|реализова|выполни|выполня|написа|провери|проверя|исправи|исправля"
+    r"|почини|(?:про)?тестирова|собра|провё|прове|отревьюи)" + _RU_PAST_SUFFIX,
+    re.IGNORECASE,
+)
+_RU_SUBJUNCTIVE_MARKERS = frozenset({"чтобы", "чтоб"})
 MEANS_WORDS = re.compile(r"on|via|through|using|на|через|посредством|силами|помощью", re.IGNORECASE)
 # At most one of these may stand between the preposition and the family
 # ("on the the named model route", "на модели модель").
@@ -1318,10 +1334,27 @@ def _clause_words(sentence: str) -> list[tuple[str, tuple[str, ...]]]:
     return result
 
 
-def _request_form(pattern: re.Pattern, word: str, lead: tuple[str, ...]) -> bool:
+def _subjunctive_lead(lead: tuple[str, ...]) -> bool:
+    """Whether ``lead`` opens a Russian subjunctive ("чтобы ты", "что бы вы")
+    with no negation after the marker."""
+    for index in range(len(lead) - 1, -1, -1):
+        word = lead[index]
+        if word in _RU_SUBJUNCTIVE_MARKERS or (word == "бы" and index and lead[index - 1] == "что"):
+            return not any(NEGATION_WORDS.fullmatch(after) for after in lead[index + 1:])
+    return False
+
+
+def _request_form(pattern: re.Pattern, word: str, lead: tuple[str, ...],
+                  subjunctive: bool = False) -> bool:
     """Whether ``word``, after ``lead`` in its clause, is a ``pattern`` word
     used as a request -- not a noun ("the last run"), a statement ("the tests
-    run", "I use") or a report ("tried to run", "пытались запустить")."""
+    run", "I use") or a report ("tried to run", "пытались запустить").
+    With ``subjunctive``, a Russian past tense of such a verb after
+    "чтобы"/"что бы" in its clause also asks ("чтобы ты сделал")."""
+    if subjunctive:
+        past = _RU_SUBJUNCTIVE_REQUEST if pattern is REQUEST_WORDS else _RU_SUBJUNCTIVE_WORK
+        if past.fullmatch(word) and _subjunctive_lead(lead):
+            return True
     if not pattern.fullmatch(word):
         return False
     previous = lead[-1] if lead else None
@@ -1340,7 +1373,7 @@ def _request_form(pattern: re.Pattern, word: str, lead: tuple[str, ...]) -> bool
     return False
 
 
-def _governed_means(window: list[tuple[str, tuple[str, ...]]]) -> bool:
+def _governed_means(window: list[tuple[str, tuple[str, ...]]], subjunctive: bool = False) -> bool:
     """A :data:`MEANS_WORDS` preposition directly before the family (at most
     one :data:`MEANS_FILLERS` word between) governed by a :data:`WORK_VERBS`
     verb in request form earlier in ``window``."""
@@ -1349,7 +1382,7 @@ def _governed_means(window: list[tuple[str, tuple[str, ...]]]) -> bool:
         position -= 1
     if position < 0 or not MEANS_WORDS.fullmatch(window[position][0]):
         return False
-    return any(_request_form(WORK_VERBS, word, lead) for word, lead in window[:position])
+    return any(_request_form(WORK_VERBS, word, lead, subjunctive) for word, lead in window[:position])
 
 
 def requests_family(text: str, family: str, names: Sequence[str] | None = None,
@@ -1381,8 +1414,11 @@ def requests_family(text: str, family: str, names: Sequence[str] | None = None,
         if any(NEGATION_WORDS.fullmatch(word) for word, _lead in words[-NEGATION_WINDOW:]):
             continue
         window = words[-REQUEST_WINDOW:]
-        if (any(_request_form(REQUEST_WORDS, word, lead) for word, lead in window)
-                or _governed_means(window)
+        # A refusal before the subjunctive's clause ("не хочу, чтобы ...")
+        # may stand outside the negation window; it refuses the whole sentence.
+        subjunctive = not any(NEGATION_WORDS.fullmatch(word) for word, _lead in words)
+        if (any(_request_form(REQUEST_WORDS, word, lead, subjunctive) for word, lead in window)
+                or _governed_means(window, subjunctive)
                 or (match.span() in exact_spans and
                     (message_request or (window and
                      re.fullmatch(r"на|on|via|with", window[-1][0]))))):

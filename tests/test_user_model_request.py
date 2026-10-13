@@ -53,6 +53,12 @@ OWNER_REQUEST = ("Ещё вопрос, можно ли сделать так ч�
     ("Реализуй на Астре, а ревью сделай через Фейбл", "fable", "Фейбл"),
     ("Проверь на Астре", "astra", "Астре"),
     ("Сделай на модели Астра", "astra", "Астра"),
+    # A Russian subjunctive after "чтобы"/"что бы" asks.
+    ("Я хочу что бы ты переработал дизайн и сделал аудит дизайна через Фейбл.", "fable", "Фейбл"),
+    ("Хочу, чтобы ты использовал Астру", "astra", "Астру"),
+    ("Нужно, чтобы ревью провели через Астру", "astra", "Астру"),
+    ("Все задачи связанные с UI/UX передавай только Фейблу", "fable", "Фейблу"),
+    ("Поручи аудит Астре", "astra", "Астре"),
     # A refusal.
     ("Не используй астру.", "astra", None),
     ("Please don't use Astra here", "astra", None),
@@ -60,6 +66,8 @@ OWNER_REQUEST = ("Ещё вопрос, можно ли сделать так ч�
     ("Do it without Fable", "fable", None),
     ("Use Astra, not Fable", "fable", None),
     ("Не хочу чтобы это делала Астра", "astra", None),
+    ("Я не хочу, чтобы ты переработал дизайн и сделал аудит дизайна через Фейбл.", "fable", None),
+    ("Хочу, чтобы ты не использовал Астру", "astra", None),
     # A bare mention: comparison, availability, quotation, preference for the default route.
     ("Compare Astra with Fable before choosing", "astra", None),
     ("Compare Astra with Fable before choosing", "fable", None),
@@ -101,6 +109,8 @@ OWNER_REQUEST = ("Ещё вопрос, можно ли сделать так ч�
     ("Мы запустили это на Астре и оно упало", "astra", None),
     ("Сделано на Астре", "astra", None),
     ("Пытались запустить на Астре", "astra", None),
+    ("Мы сделали аудит через Фейбл", "fable", None),
+    ("Чтобы ты знал, я сделал аудит через Фейбл", "fable", None),
     ("Использование Астры привело к ошибке", "astra", None),
     # Documented limits: these requests are missed (false negatives, by design) ...
     ("I want Astra", "astra", None),

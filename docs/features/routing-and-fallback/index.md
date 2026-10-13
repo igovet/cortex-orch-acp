@@ -59,7 +59,11 @@ a model into a different tier. See [configuration](../../configuration.md#user-r
 The current install snapshot also preserves the saved 2026-10-12 default
 profile: the Opus UI/UX conditional preference, explicit OpenCode denial, and
 `codex-acp/gpt-6.1-sol` coordinator at high effort. The UI/UX wording does not
-create a strict role pin or override tier eligibility. See the
+create a strict role pin or override tier eligibility. Since 2026-10-13 the
+snapshot also lists Opus in the `standard` tier, so standard-tier UI/UX design
+nodes (`ux-designer`) are eligible for it and the coordinator's exact Opus hint
+is honoured there instead of `ignored:tier_mismatch`, and gives it the request
+labels `opus`/`опус`. See the
 [fresh-install snapshot](../../configuration.md#fresh-install-owner-default-snapshot).
 
 ## Current preset: Haiku 5.5 and Luna
@@ -466,8 +470,8 @@ in [settings-only routing](#settings-only-routing). For labels, in the same sent
 
 - within the four words before it, either an explicit request word stands
   (`REQUEST_WORDS`: `use`, `run`, `switch`, `prefer`, `choose`, `request`,
-  `requirement`, `используй`, `запусти`, `переключи`, `пусть`,
-  `требование`, ... -- "use Astra", "run it on Astra", "switch the review to
+  `requirement`, `используй`, `запусти`, `переключи`, `передавай`,
+  `поручи`, `пусть`, `требование`, ... -- "use Astra", "run it on Astra", "switch the review to
   Fable", "используй астру", "требование использования астры"), or a work
   verb (`WORK_VERBS`: `implement`, `review`, `fix`, `сделай`, `реализуй`,
   `проверь`, ...) governs a preposition of means (`MEANS_WORDS`: `on`, `via`,
@@ -479,7 +483,11 @@ in [settings-only routing](#settings-only-routing). For labels, in the same sent
   follows a request-mood word (`please`, `to`, `could you`, `let's`, `then`,
   ...; a verb of choice may also follow `I`/`we`: "I prefer Astra"), and a
   Russian verb is one of its listed imperative, infinitive or first-person
-  plural forms and does not follow a past tense; and
+  plural forms and does not follow a past tense, or its past tense after
+  `чтобы`/`чтоб`/`что бы` in the same clause (the Russian subjunctive:
+  "хочу, чтобы ты сделал аудит через Опус", "чтобы ты использовал Астру")
+  when no negation stands anywhere earlier in the sentence ("не хочу, чтобы
+  ты сделал это через Опус" is refused); and
 - no negation, comparison or substitution word stands within the five words
   before it (`NEGATION_WORDS`: `not`, `never`, `without`, `don't`, `can't`,
   `instead`, `rather`, `than`, `over`, `compare`, `based`, `не`, `без`,

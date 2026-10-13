@@ -22,12 +22,13 @@ def test_public_asset_preserves_exact_baseline_tiers_efforts_and_coordinator():
     assert template["coordinator"] == {"engine": "codex-acp", "model": "gpt-6.1-sol",
                                        "parameters": {"thought_level": "high"}}
     assert template["language"] == "ru"
-    # Complete portable production default snapshot, saved 2026-10-12 at 14:23 UTC.
+    # Complete portable production default snapshot, saved 2026-10-12 at 14:23 UTC;
+    # 2026-10-13: Opus also standard-tier (UI/UX preferred_when) with request labels.
     canonical = json.dumps(template, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
-    assert hashlib.sha256(canonical.encode()).hexdigest() == "bd49febbf8f05b0a40a868ba19cc54411ab779ef55d8eb90c880fcea4aa7b770"
+    assert hashlib.sha256(canonical.encode()).hexdigest() == "7bbc45efeaa017f69c64d1e3dd5dcec76d49bcd40467e4e80ed7cbd6c60d64d0"
     expected = {
         ("claude-agent-acp", "default"): ("deep",),
-        ("claude-agent-acp", "opus[1m]"): ("flagship", "deep"),
+        ("claude-agent-acp", "opus[1m]"): ("flagship", "deep", "standard"),
         ("claude-agent-acp", "claude-fable-5-1[1m]"): ("flagship",),
         ("claude-agent-acp", "claude-sonnet-5"): ("standard",),
         ("claude-agent-acp", "haiku"): ("light",),
@@ -65,6 +66,7 @@ def test_public_asset_preserves_exact_baseline_tiers_efforts_and_coordinator():
     assert {"window": "seven_day_haiku", "models": ["haiku"]} in routing["quota_windows"]["claude-agent-acp"]
     assert routing["models"]["codex-acp"]["policy"]["gpt-6-astra"]["request_names"] == ["astra", "астр"]
     assert routing["models"]["claude-agent-acp"]["policy"]["claude-fable-5-1[1m]"]["request_names"] == ["fable", "фейбл", "фэйбл"]
+    assert routing["models"]["claude-agent-acp"]["policy"]["opus[1m]"]["request_names"] == ["opus", "опус"]
     assert all(v == "configured" for (e, m) in expected for v in model_policy.policy_for(e, m, routing).attribute_sources.values())
 
 
@@ -135,3 +137,23 @@ def test_install_language_rejects_non_supported_values(tmp_path, language):
     path.write_text(json.dumps(data))
     with pytest.raises(ValueError, match="invalid install language"):
         defaults.load_model_settings_template(path)
+
+
+@pytest.mark.parametrize("role,hint,chosen,hint_status", [
+    # UI/UX design runs on Opus at the standard tier, hinted or not.
+    ("worker-ux-designer", "claude-agent-acp/opus[1m]", "claude-agent-acp/opus[1m]", "honoured"),
+    ("worker-ux-designer", "auto", "claude-agent-acp/opus[1m]", "auto"),
+    # Unhinted standard implementation keeps the owner's Sonnet preference;
+    # the coordinator's exact Opus hint (judged against preferred_when) is honoured.
+    ("worker-frontend-dev", "auto", "claude-agent-acp/claude-sonnet-5", "auto"),
+    ("worker-frontend-dev", "claude-agent-acp/opus[1m]", "claude-agent-acp/opus[1m]", "honoured"),
+])
+def test_default_opus_serves_standard_design_work(role, hint, chosen, hint_status):
+    routing = defaults.default_routing()
+    entries = [entry(engine, model) for engine, models in routing["enabled"].items() for model in models]
+    _picked, decision = auto_route.rank(
+        auto_route.tier_for(role), entries, lambda e: 10.0, role=role, model_hint=hint,
+        affinity=routing.get("engine_affinity") or {}, models=routing["models"])
+    assert decision["tier"] == "standard"
+    assert decision["chosen"] == chosen
+    assert decision["model_hint_status"] == hint_status

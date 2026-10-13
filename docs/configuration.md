@@ -449,7 +449,10 @@ still fail closed; this snapshot is not live qualification.
 
 The snapshot retains the Opus UI/UX design condition in `preferred_when`,
 including the frontend implementation exception and narrowly scoped complex
-backend condition. This is an advisory conditional preference, not a role pin
+backend condition. Opus is configured for the `deep`, `flagship` and
+`standard` tiers so that condition can apply to standard-tier design work
+(`ux-designer`), and `request_names` `opus`/`опус` let the user request it by
+name. This is an advisory conditional preference, not a role pin
 or a tier override. OpenCode is explicitly denied by `opencode/*` and
 `auto_allow` is empty; dormant OpenCode model policy remains preserved.
 

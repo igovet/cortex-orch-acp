@@ -247,7 +247,11 @@ an English verb opening its clause or following a request-mood word
 run on Astra", "the tests run on Astra", "we tried to run it on Astra"), and
 a Russian verb only in its listed imperative, infinitive or first-person
 plural forms, never a past tense, participle or verbal noun ("запустили на
-Астре", "использование Астры"). A request phrased otherwise ("I want Astra",
+Астре", "использование Астры"). The one exception is the Russian subjunctive:
+a past tense after "чтобы"/"что бы" in its clause asks ("хочу, чтобы ты сделал
+аудит через Опус"); it was added on 2026-10-13 after such a request was missed,
+and any negation earlier in the sentence ("не хочу, чтобы ...") still refuses
+it. A request phrased otherwise ("I want Astra",
 "ревью через Фейбл", "let Astra do it") is deliberately not recognised and
 leaves the node on its ordinary tier with `not_requested_by_user` in the
 receipt: a false negative costs a rephrase, a false positive a flagship run
