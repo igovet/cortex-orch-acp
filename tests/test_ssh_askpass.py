@@ -171,3 +171,56 @@ def test_engine_jail_reaches_the_owner_agent(environ, agent, tmp_path):
         result = subprocess.run(command, pass_fds=fds, env={'PATH': '/usr/bin:/bin'},
                                 capture_output=True, text=True, timeout=30)
     assert result.stdout.strip() == 'agent-ok', result.stderr
+
+
+
+def test_trusted_config_copies_follow_includes_as_ssh_does(tmp_path, monkeypatch):
+    """Included files ssh trusts as root's are copied at their real paths; a
+    group-writable one, which ssh rejects on the host too, a per-connection
+    token and the unchecked system file itself are not."""
+    import os
+    monkeypatch.setattr(ssh_askpass, '_ROOT', os.getuid())
+    system = tmp_path / 'etc-ssh'
+    (system / 'conf.d').mkdir(parents=True)
+    monkeypatch.setattr(ssh_askpass, 'SYSTEM_CONFIG', str(system / 'ssh_config'))
+    (system / 'ssh_config').write_text('Include conf.d/*.conf\nHost *\n')
+    (system / 'target.conf').write_text('Include = "nested.conf"\n')
+    (system / 'nested.conf').write_text('# system-relative\n')
+    (system / 'conf.d' / '20-link.conf').symlink_to(system / 'target.conf')
+    (system / 'conf.d' / '30-loose.conf').write_text('# loose\n')
+    (system / 'conf.d' / '30-loose.conf').chmod(0o664)
+    home = tmp_path / 'home'
+    (home / '.ssh').mkdir(parents=True)
+    (home / '.ssh' / 'config').write_text('Include ~/.ssh/extra %d/skipped\nHost alias\n')
+    (home / '.ssh' / 'extra').write_text('# extra\n')
+    for path in (*system.rglob('*'), *home.rglob('*')):
+        if not path.is_symlink() and path.name != '30-loose.conf':
+            path.chmod(0o755 if path.is_dir() else 0o644)
+    assert ssh_askpass.trusted_config_copies(str(home)) == {
+        str(home / '.ssh' / 'config'): (home / '.ssh' / 'config').read_bytes(),
+        str(home / '.ssh' / 'extra'): b'# extra\n',
+        str(system / 'target.conf'): b'Include = "nested.conf"\n',
+        str(system / 'nested.conf'): b'# system-relative\n'}
+
+
+@pytest.mark.engine_jail
+@pytest.mark.requires_bwrap
+@pytest.mark.skipif(shutil.which('bwrap') is None or shutil.which('ssh') is None,
+                    reason='bubblewrap and ssh are required')
+def test_command_sandbox_ssh_accepts_root_owned_includes(environ, tmp_path):
+    """Unprivileged bwrap shows root's files as nobody's; ssh in the sandbox
+    still parses the host's configuration as the owner's terminal does."""
+    if not ssh_askpass.trusted_config_copies(environ['HOME']):
+        pytest.skip('the host ssh configuration includes no root-owned file')
+    env = {'PATH': '/usr/bin:/bin', 'HOME': environ['HOME']}
+    if subprocess.run(['ssh', '-G', 'localhost'], capture_output=True, env=env, timeout=30).returncode:
+        pytest.skip('the host ssh configuration fails on the host itself')
+    project, scratch = tmp_path / 'project', tmp_path / 'scratch'
+    project.mkdir(), scratch.mkdir()
+    script = 'ssh -G localhost >/dev/null && echo parsed; echo x > ssh-config/0.conf 2>/dev/null || echo sealed'
+    with gateway_command(project, scratch, ['sh', '-c', script], [], system_root=True) as (command, fds):
+        as_owner(command, environ)
+        command[command.index('--chdir') + 1] = str(scratch)
+        result = subprocess.run(command, pass_fds=fds, env={'PATH': '/usr/bin:/bin'},
+                                capture_output=True, text=True, timeout=30)
+    assert result.stdout.split() == ['parsed', 'sealed'], result.stderr

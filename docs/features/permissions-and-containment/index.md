@@ -49,7 +49,9 @@ terminate at once.
 
 The engine environment and each `command_run` receive the owner's own
 ssh-agent (`SSH_AUTH_SOCK`, only a socket the owner owns), so ssh uses the
-host's keys and `~/.ssh/config`; see
+host's keys and `~/.ssh/config`. Root-owned ssh config includes that ssh
+trusts on the host are mounted as read-only, owner-owned copies, because the
+sandbox's user namespace shows root's files as `nobody`'s; see
 [SECURITY.md](../../../SECURITY.md#owners-ssh-agent).
 
 With the owner's opt-in `ssh-askpass.json` (`orchestration.ssh_askpass`), the

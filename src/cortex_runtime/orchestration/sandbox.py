@@ -287,6 +287,9 @@ def as_owner(command, environ, *, writable_home=False):
     at = command.index('--chdir')
     command[at:at] = env
     allow_network(command)
+    # ssh's root-owned config includes, as the host's ssh trusts them.
+    from .ssh_askpass import mount_trusted_configs
+    mount_trusted_configs(command, home if has_home else '', Path(scratch) / 'ssh-config')
 
 
 # A one-shot sandboxed command (a worker's own shell, a verification check)

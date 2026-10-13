@@ -703,6 +703,18 @@ the agent (`ssh-add -D`, or a keyring lock) to withhold that. An agent
 configured to confirm each use (`ssh-add -c`) still asks the owner on the
 desktop.
 
+Unprivileged bubblewrap maps only the owner's uid into the sandbox, so a file
+root owns on the host appears owned by `nobody` there. ssh rejects an
+`Include`d config file (for example `/etc/ssh/ssh_config.d/*.conf`) owned by
+anyone but root or the user. Each sandbox that shows the whole host
+therefore mounts, at the real path of every `~/.ssh/config` or `Include`d
+file that root owns and no group or other user can write, a read-only copy of
+the same bytes owned by the owner
+(`orchestration.ssh_askpass.mount_trusted_configs`). These are exactly the
+files ssh accepts on the host. A file ssh rejects on the host stays as it is
+and is rejected the same way. The copies live in the command's own scratch
+directory, mounted read-only.
+
 ### Optional ssh password dialog
 
 This is off by default. With {\"enabled\": true} in

@@ -19,8 +19,19 @@ The dialog script is Cortex-generated and mounted read-only, so the sandbox
 cannot replace it. Without a display session or a dialog program nothing is
 added and ssh fails as before. sudo is out of reach either way: the sandbox
 sets no_new_privs, which forbids setuid programs.
+
+Unprivileged bubblewrap maps only the owner's uid into the sandbox, so files
+root owns on the host appear owned by ``nobody`` there. ssh refuses an
+``Include``d config file (Ubuntu's ``/etc/ssh/ssh_config.d/*.conf``) owned by
+anyone but root or the user, so every ssh failed with "Bad owner or
+permissions" although the owner's terminal accepts the same file.
+``trusted_config_copies`` finds the included files ssh trusts on the host
+(root-owned, not group- or world-writable) and ``mount_trusted_configs``
+shows the same bytes there, owned by the owner and read-only. A file ssh
+rejects on the host is left alone and is rejected the same way.
 """
 from pathlib import Path
+import glob
 import json
 import re
 import os
@@ -146,3 +157,104 @@ def apply(command, environ, directory) -> bool:
     at = command.index('--chdir')
     command[at:at] = args
     return True
+
+
+SYSTEM_CONFIG = '/etc/ssh/ssh_config'
+_INCLUDE = re.compile(r'^\s*include(?:\s*=\s*|\s+)(.*)$', re.IGNORECASE)
+_ROOT = 0
+_MAX_DEPTH = 16  # ssh's own READCONF_MAX_DEPTH
+_MAX_BYTES = 1 << 20
+
+
+def _includes(path, base, home):
+    """The files an ssh config ``Include``s, in ssh's order; relative paths
+    are under ``base`` (``~/.ssh`` or ``/etc/ssh``)."""
+    try:
+        lines = Path(path).read_text(encoding='utf-8', errors='replace').splitlines()
+    except OSError:
+        return []
+    found = []
+    for line in lines:
+        match = _INCLUDE.match(line)
+        if match is None:
+            continue
+        try:
+            words = shlex.split(match.group(1), comments=True)
+        except ValueError:
+            continue
+        for word in words:
+            if '%' in word or '$' in word:
+                continue  # A token ssh expands per connection: not reproducible here.
+            if word.startswith('~/') and home:
+                word = str(Path(home, word[2:]))
+            elif not word.startswith('/'):
+                word = str(Path(base, word))
+            found += sorted(glob.glob(word))
+    return found
+
+
+def _trusted_bytes(path):
+    """The file's bytes when ssh on the host trusts it as root's; else None."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError:
+        return None
+    with os.fdopen(fd, 'rb') as stream:
+        info = os.fstat(fd)
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != _ROOT or info.st_mode & 0o022
+                or info.st_size > _MAX_BYTES):
+            return None
+        return stream.read(_MAX_BYTES)
+
+
+def trusted_config_copies(home) -> dict[str, bytes]:
+    """Real path -> bytes of each ssh config file ssh checks for ownership
+    (``~/.ssh/config`` and every ``Include``d file) that the host's root owns
+    and nobody else can write: exactly the ones the sandbox would show as
+    ``nobody``'s although ssh on the host accepts them."""
+    home = home if isinstance(home, str) and home.startswith('/') else ''
+    user_config = str(Path(home, '.ssh', 'config')) if home else None
+    pending = [(user_config, str(Path(home, '.ssh')), True, 0)] if user_config else []
+    pending.append((SYSTEM_CONFIG, str(Path(SYSTEM_CONFIG).parent), False, 0))
+    copies, seen = {}, set()
+    while pending:
+        path, base, checked, depth = pending.pop(0)
+        try:
+            real = str(Path(path).resolve(strict=True))
+        except (OSError, RuntimeError):
+            continue
+        if real in seen:
+            continue
+        seen.add(real)
+        if checked:
+            data = _trusted_bytes(real)
+            if data is not None:
+                copies[real] = data
+        if depth < _MAX_DEPTH:
+            pending += [(found, base, True, depth + 1) for found in _includes(real, base, home)]
+    return copies
+
+
+def mount_trusted_configs(command, home, directory) -> int:
+    """``trusted_config_copies`` over the host-wide mount of a sandbox
+    command, in place: each copy is written under ``directory`` (the
+    command's scratch), sealed read-only and mounted at its real path.
+    Returns the number of files mounted."""
+    whole_host = any(command[at] in ('--bind', '--ro-bind') and command[at + 1:at + 3] == ['/', '/']
+                     for at in range(len(command) - 2))
+    copies = trusted_config_copies(home) if whole_host else {}
+    if not copies:
+        return 0
+    directory = Path(directory)
+    directory.mkdir(mode=0o700, exist_ok=True)
+    args = []
+    for number, (target, data) in enumerate(copies.items()):
+        copy = directory / f'{number}.conf'
+        copy.unlink(missing_ok=True)  # A relaunched engine reuses its scratch.
+        copy.write_bytes(data)
+        copy.chmod(0o444)
+        args += ['--ro-bind', str(copy), target]
+    args += ['--ro-bind', str(directory), str(directory)]
+    at = command.index('--chdir')
+    command[at:at] = args
+    return len(copies)
