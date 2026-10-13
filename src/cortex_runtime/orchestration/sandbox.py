@@ -43,9 +43,11 @@ def _private_target(path: Path, root: Path) -> Path | None:
     return target
 
 
-def verification_command(root, scratch, argv, system_root=False):
+def verification_command(root, scratch, argv, system_root=False, *, mask_private=True):
     """``system_root`` mounts the whole host read-only (an engine may be
-    installed anywhere), with the host's real /dev and /run/user."""
+    installed anywhere), with the host's real /dev and /run/user.
+    ``mask_private=False`` is only for a caller that replaces the project
+    mount and masks private names itself (``gateway_command``)."""
     binary = shutil.which('bwrap')
     if binary is None:
         raise StoreError('verification_sandbox_unavailable')
@@ -88,20 +90,19 @@ def verification_command(root, scratch, argv, system_root=False):
                 '--bind', str(var_tmp), '/var/tmp',
                 '--ro-bind', str(root), str(root)]
     from .gateway import PRIVATE
-    for current, dirs, files in os.walk(root,followlinks=False):
+    for current, dirs, files in os.walk(str(root),followlinks=False) if mask_private else ():
         for name in list(dirs)+files:
-            path = Path(current)/name
             if name in PRIVATE:
                 if name in dirs:
                     dirs.remove(name)
-                target = _private_target(path, root)
+                target = _private_target(Path(current, name), root)
                 if target is None:
                     continue
                 if target.is_dir():
                     command += ['--tmpfs',str(target),'--remount-ro',str(target)]
                 else:
                     command += ['--ro-bind','/dev/null',str(target)]
-            elif name in dirs and path.is_symlink():
+            elif name in dirs and os.path.islink(os.path.join(current, name)):
                 dirs.remove(name)
     if system_root:
         # A linked worktree's runtime store lives in its main repository,
@@ -446,7 +447,7 @@ def gateway_command(root, scratch, argv, scopes, reveal=frozenset(), system_root
     git = None
     if git_writable and any(scope in {'.', '**', '**/*'} for scope in scopes):
         git = git_metadata_mounts(root)
-    command = verification_command(root, scratch, argv, system_root)
+    command = verification_command(root, scratch, argv, system_root, mask_private=False)
     # Replace project bind and build scoped grants before masking private data.
     start = command.index('--ro-bind', _dev_index(command) + 1)
     command = command[:start]
@@ -490,21 +491,24 @@ def gateway_command(root, scratch, argv, scopes, reveal=frozenset(), system_root
         # (a link is a directory entry: parent inode plus name, so a tree
         # seen twice through a bind mount is not counted twice).
         link_counts={};link_entries={}
-        for current,dirs,files in os.walk(root,followlinks=False):
+        # Plain strings, not Path objects: a large tree (node_modules, a
+        # virtualenv) made Path construction and relative_to dominate every
+        # sandboxed command at several seconds each.
+        root_text=str(root)
+        for current,dirs,files in os.walk(root_text,followlinks=False):
             visited+=len(dirs)+len(files)
             over_limit = visited>_TREE_LIMIT  # grants stop; private masking does not
             parent_id=None
+            rel_dir=current[len(root_text)+1:]
             for name in list(dirs):
-                path=Path(current)/name
                 if name in PRIVATE:
-                    private_paths.add(path); dirs.remove(name)
-                elif path.is_symlink():
+                    private_paths.add(Path(current,name)); dirs.remove(name)
+                elif os.path.islink(os.path.join(current,name)):
                     dirs.remove(name)
             for name in files:
-                path=Path(current)/name
-                relative=path.relative_to(root).as_posix()
+                relative=f'{rel_dir}/{name}' if rel_dir else name
                 if name in PRIVATE:
-                    private_paths.add(path)
+                    private_paths.add(Path(current,name))
                 elif over_limit:
                     continue
                 if denied_globs and _matches(relative,denied_globs):
@@ -512,7 +516,7 @@ def gateway_command(root, scratch, argv, scopes, reveal=frozenset(), system_root
                 if name in PRIVATE:
                     continue
                 elif (owner:=granting_dir(relative)) is not None or _matches(relative,scopes):
-                    info=path.lstat()
+                    info=os.lstat(os.path.join(current,name))
                     if stat.S_ISREG(info.st_mode) and info.st_nlink!=1:
                         # Its other link may be outside the project: writing
                         # through it would escape the scope. Read-only, not a
@@ -526,7 +530,7 @@ def gateway_command(root, scratch, argv, scopes, reveal=frozenset(), system_root
                         if not (readonly and _matches(relative,readonly)):
                             link_entries.setdefault(key,{})[(parent_id,name)]=owner
                         linked.append((relative,owner,key))
-                    elif owner is None and not path.is_symlink(): candidates.add(relative)
+                    elif owner is None and not stat.S_ISLNK(info.st_mode): candidates.add(relative)
         def internal(key,excluded=frozenset()):
             # Every link of this file is a writable path of this project
             # (esbuild links its two binaries together): writing through one
@@ -730,12 +734,12 @@ def development_command(root, scratch, argv, scopes, *, environ, readonly=(), gi
                              if path.name == '.cortex' and path.is_dir()
                              else ['--ro-bind', str(path), str(path)])
         from .gateway import PRIVATE
-        for current, dirs, files in os.walk(root, followlinks=False):
+        for current, dirs, files in os.walk(str(root), followlinks=False):
             for name in list(dirs) + files:
-                path = Path(current) / name
                 if name in PRIVATE:
                     if name in dirs:
                         dirs.remove(name)
+                    path = Path(current, name)
                     if path.is_symlink():
                         try:
                             target = path.resolve(strict=True)

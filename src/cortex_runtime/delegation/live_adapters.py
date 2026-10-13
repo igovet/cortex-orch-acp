@@ -38,6 +38,7 @@ shortcut. No test in this repository launches a real engine.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import threading
@@ -653,6 +654,65 @@ class QueuedOpenCancelled(RuntimeError):
     def __init__(self, kind: str) -> None:
         self.kind = kind
         super().__init__(kind)
+
+
+# Catalog observations already saved: connection id -> (observation
+# fingerprint, saved at). Every Paseo chat is its own Cortex process, so the
+# fingerprint is also kept beside that connection's catalog snapshots.
+_CATALOG_OBSERVED: dict[str, tuple[str, float]] = {}
+_CATALOG_OBSERVED_LOCK = threading.Lock()
+_CATALOG_OBSERVATION_TTL_SECONDS = 6 * 3600
+_CATALOG_FINGERPRINT_FILE = "observed-fingerprint.json"
+
+
+def _catalog_observation_fingerprint(record, install, raw) -> str:
+    """Identity of one session's configOptions for one install, without the
+    session's own current selections."""
+    def strip(value):
+        if isinstance(value, dict):
+            return {k: strip(v) for k, v in value.items() if k != "currentValue"}
+        if isinstance(value, list):
+            return [strip(v) for v in value]
+        return value
+    body = json.dumps(dict(record=record.id, engine=record.engine, install=repr(install), options=strip(raw)),
+                      sort_keys=True, default=str, separators=(",", ":"))
+    return hashlib.sha256(body.encode("utf-8")).hexdigest()
+
+
+def _catalog_fingerprint_path(connection_id: str, environ) -> Path:
+    from ..connections import registry as connection_registry
+    return connection_registry.state_root(environ) / "catalog" / connection_id / _CATALOG_FINGERPRINT_FILE
+
+
+def _catalog_observation_fresh(connection_id: str, fingerprint: str, environ) -> bool:
+    from ..catalog import store as catalog_store
+    from ..connections import registry as connection_registry
+    with _CATALOG_OBSERVED_LOCK:
+        seen = _CATALOG_OBSERVED.get(connection_id)
+    fresh = (seen is not None and seen[0] == fingerprint
+             and time.monotonic() - seen[1] <= _CATALOG_OBSERVATION_TTL_SECONDS)
+    try:
+        if not fresh:
+            data = connection_registry.read_owner_file(_catalog_fingerprint_path(connection_id, environ))
+            saved = json.loads(data.decode("utf-8")) if data else {}
+            fresh = (isinstance(saved, dict) and saved.get("fingerprint") == fingerprint
+                     and isinstance(saved.get("saved_at"), (int, float))
+                     and 0 <= time.time() - saved["saved_at"] <= _CATALOG_OBSERVATION_TTL_SECONDS)
+        return fresh and catalog_store.latest_connection_snapshot(connection_id, environ) is not None
+    except Exception:  # noqa: BLE001 - an unreadable cache is observed again
+        return False
+
+
+def _remember_catalog_observation(connection_id: str, fingerprint: str, environ) -> None:
+    from ..connections import registry as connection_registry
+    with _CATALOG_OBSERVED_LOCK:
+        _CATALOG_OBSERVED[connection_id] = (fingerprint, time.monotonic())
+    try:
+        path = _catalog_fingerprint_path(connection_id, environ)
+        body = json.dumps(dict(fingerprint=fingerprint, saved_at=time.time())).encode("utf-8")
+        connection_registry.atomic_write_private(path, body, directory=path.parent)
+    except Exception:  # noqa: BLE001 - only the next process observes again
+        pass
 
 
 class EngineSessionManagerAdapter:
@@ -1282,6 +1342,14 @@ class EngineSessionManagerAdapter:
             from ..catalog import discovery as catalog_discovery
             from ..catalog import store as catalog_store
 
+            # The per-model probe (one set_config_option per Claude model, a
+            # ``codex debug models`` run for Codex) ran before every first
+            # prompt and cost seconds per session. An identical observation
+            # of the same install is already saved: skip it.
+            fingerprint = _catalog_observation_fingerprint(record, getattr(manager, "_install", None), raw)
+            if _catalog_observation_fresh(record.id, fingerprint, self._environ):
+                return
+
             observation = catalog_discovery.parse_observation(raw)
             if record.engine == "opencode":
                 from ..catalog.refresh import _opencode_cortex_mode_advertised
@@ -1318,6 +1386,7 @@ class EngineSessionManagerAdapter:
                 observation = observation.with_model_thought_levels(levels)
             snapshot = catalog_discovery.build_catalog({record.id: record}, {record.id: observation})
             catalog_store.save_snapshot(snapshot, self._environ)
+            _remember_catalog_observation(record.id, fingerprint, self._environ)
         except Exception:
             pass
 

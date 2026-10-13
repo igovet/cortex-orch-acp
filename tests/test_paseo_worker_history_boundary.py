@@ -66,8 +66,9 @@ def test_worker_history_does_not_accept_foreign_identity_or_root_overrides():
 
 
 def test_worker_activity_payload_fields_are_persisted_and_projected():
-    assert 'payload["input"] = input_value' in RUNTIME_SOURCE
-    assert 'payload["output"] = output_value' in RUNTIME_SOURCE
+    # Stored once (raw_*); the projection still reads an older row's copies.
+    assert 'payload["input"]' not in RUNTIME_SOURCE
+    assert 'payload["output"]' not in RUNTIME_SOURCE
     assert 'payload["error"] = error_value' in RUNTIME_SOURCE
     assert "input_value=_client_safe_raw(raw_input)" in RUNTIME_SOURCE
     assert "output_value=_client_safe_raw(raw_output)" in RUNTIME_SOURCE
@@ -76,8 +77,8 @@ def test_worker_activity_payload_fields_are_persisted_and_projected():
     assert 'payload["tool_kind"] = kind' in RUNTIME_SOURCE
     assert 'payload["locations"] = _client_safe_raw(locations_value)' in RUNTIME_SOURCE
     assert 'payload["content"] = _client_safe_raw(content_value)' in RUNTIME_SOURCE
-    assert 'payload["raw_input"] = input_value' in RUNTIME_SOURCE
-    assert 'payload["raw_output"] = output_value' in RUNTIME_SOURCE
+    assert 'payload["raw_input"] = _client_safe_raw(input_value)' in RUNTIME_SOURCE
+    assert 'payload["raw_output"] = _client_safe_raw(output_value)' in RUNTIME_SOURCE
 
 
 def test_embedded_history_query_binds_lifecycle_and_worker_events_to_one_attempt(tmp_path):

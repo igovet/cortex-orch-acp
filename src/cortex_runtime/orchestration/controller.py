@@ -49,6 +49,77 @@ _VERIFICATION_OUTPUT_TAIL_BYTES = 2500
 _VERIFICATION_RAW_OUTPUT_MAX_BYTES = SESSION_UPDATE_MAX_BYTES // 2
 
 
+def _execution_lock(task_id):
+    """Serializes starting a plan revision and dispatching its ready nodes
+    between the controller loop and the early start below."""
+    with _EXECUTION_LOCKS_GUARD:
+        return _EXECUTION_LOCKS.setdefault(task_id, threading.Lock())
+
+
+_EXECUTION_LOCKS = {}
+_EXECUTION_LOCKS_GUARD = threading.Lock()
+
+
+def _dispatch_ready(runtime, machine, task_id, channel, context, emit_tool_call):
+    for node in machine.claim_ready(task_id, channel.channel_id):
+        dependencies = set(json.loads(node['dependencies_json']))
+        inputs = [dict(node=n['node_id'], report_ref=n['result']['report_ref'])
+                  for n in context['nodes'] if n['node_id'] in dependencies and n['result']]
+        review_evidence = []
+        if node['stage'] == 'review':
+            from .artifacts import project_git_evidence
+            from .reviewer_handoff import review_runtime_facts
+            observation = {}
+            try:
+                machine.start_review(task_id, node['assignment_ref'], observation=observation)
+            except StoreError as error:
+                # Never a crashed turn: ask the user with the reason.
+                machine.move(task_id, 'BLOCKED', blocker=str(error))
+                return
+            review_evidence.append(review_runtime_facts(
+                runtime._store, task_id, node['assignment_ref'], runtime._task_workspace_root(task_id),
+                observed=observation or None))
+            for kind in ('status', 'diff'):
+                ref = f"review:{node['assignment_ref']}:{kind}"
+                if emit_tool_call:
+                    emit_tool_call(dict(tool_call_id=ref,new=True,title='Read project '+kind,kind='read',status='in_progress',raw_input=dict(kind=kind)))
+                observed = project_git_evidence(runtime._store,task_id,node['assignment_ref'],runtime._task_workspace_root(task_id),kind)
+                review_evidence.append(observed)
+                if emit_tool_call:
+                    emit_tool_call(dict(tool_call_id=ref,new=False,status='completed' if observed['available'] else 'failed',raw_output=observed))
+        brief = build_worker_brief(
+            objective=node['objective'],
+            scope=json.loads(node['scope_json']),
+            dependency_reports=inputs,
+            original_goal=context['goal'],
+            review_evidence=review_evidence,
+            assignment_ref=node['assignment_ref'],
+        )
+        from .scheduler import dispatch_assignment
+        dispatch_assignment(runtime._store, channel, dict(
+            title=node['objective'][:200], brief=brief, role=node['role'],
+            acceptance='Publish a truthful immutable report and structured result. '
+                       + ('Publish the complete review report inline with result_submit and include a review verdict.'
+                          if node['stage'] == 'review' else 'Complete the assigned objective.'),
+            request_key=node['request_key']))
+
+
+def _start_execution_early(runtime, machine, task_id, channel, cancel_event, emit_tool_call):
+    """A plan accepted while the coordinator's turn is still streaming starts
+    its workers now instead of after that turn's closing text."""
+    try:
+        with _execution_lock(task_id):
+            if cancel_event.is_set() or _transport_lost(runtime, task_id):
+                return
+            if machine.get_state(task_id) != 'PLAN_READY':
+                return
+            machine.move(task_id, 'EXECUTING')
+            _dispatch_ready(runtime, machine, task_id, channel, machine.context(task_id), emit_tool_call)
+        runtime._process_new_events_safely(task_id, channel, cancel_event, emit_tool_call, phase='early_scheduler')
+    except Exception as error:  # noqa: BLE001 - the controller loop retries the same start
+        runtime._record_coordinator_dispatch_failure(task_id, error, phase='early_scheduler')
+
+
 def _verification_output_tail(output):
     """Read a bounded tail from the temporary output without loading it whole."""
     output.seek(0, os.SEEK_END)
@@ -582,6 +653,15 @@ def _run(runtime, task_id, session_id, channel, session_ref, content, emit_updat
                 tail = redactor.flush()
                 if tail:
                     emit_update(tail)
+            early_start = []
+            def start_early(current):
+                # The accepted plan's workers start while the coordinator is
+                # still writing its closing text, not seconds after it.
+                if current == 'PLAN_READY' and not early_start:
+                    early_start.append(threading.Thread(
+                        target=_start_execution_early, name='cortex-early-start', daemon=True,
+                        args=(runtime, machine, task_id, channel, cancel_event, emit_tool_call)))
+                    early_start[0].start()
             def on_delta(text):
                 nonlocal answer_pending, question_asked
                 # Some adapters deliver text before the tool lifecycle callback.
@@ -589,6 +669,7 @@ def _run(runtime, task_id, session_id, channel, session_ref, content, emit_updat
                 if answer_pending: return True
                 if not question_asked:
                     current = machine.get_state(task_id)
+                    start_early(current)
                     answer_pending = current == 'ANSWER_READY'
                     if answer_pending: return True
                     question_asked = current == 'WAITING_USER'
@@ -602,6 +683,7 @@ def _run(runtime, task_id, session_id, channel, session_ref, content, emit_updat
                 nonlocal answer_pending, question_asked
                 tool_seen.append(True)
                 current = machine.get_state(task_id)
+                start_early(current)
                 answer_pending = current == 'ANSWER_READY'
                 question_asked = question_asked or current == 'WAITING_USER'
                 flush()
@@ -687,7 +769,9 @@ def _run(runtime, task_id, session_id, channel, session_ref, content, emit_updat
                 emit_update(outcome.text)
             if outcome.stop_reason == StopReason.CANCELLED:
                 return _stop_turn(runtime, task_id, machine, emit_tool_call, emit_update, language)
-            if outcome.stop_reason != StopReason.END_TURN:
+            if early_start:
+                early_start[0].join()
+            if outcome.stop_reason != StopReason.END_TURN and machine.get_state(task_id) != 'EXECUTING':
                 failure_stop_reason = outcome.stop_reason
                 machine.move(task_id,'BLOCKED',blocker='coordinator_turn_failed:'+outcome.stop_reason.value)
             elif state == 'RECONCILING' and machine.context(task_id)['synthesis']:
@@ -709,7 +793,9 @@ def _run(runtime, task_id, session_id, channel, session_ref, content, emit_updat
                         machine.move(task_id, 'BLOCKED', blocker=str(error))
             continue
         if state == 'PLAN_READY':
-            machine.move(task_id, 'EXECUTING')
+            with _execution_lock(task_id):
+                if machine.get_state(task_id) == 'PLAN_READY':
+                    machine.move(task_id, 'EXECUTING')
             continue
         if state in {'EXECUTING', 'REVIEWING'}:
             # The context already carries active waits. Keep the ordinary
@@ -727,45 +813,8 @@ def _run(runtime, task_id, session_id, channel, session_ref, content, emit_updat
                     reclaim(task_id)
             # Start only dependency-ready nodes reserved by the runtime
             # scheduler, at most MAX_WORKERS_PER_SESSION at once.
-            for node in machine.claim_ready(task_id, channel.channel_id):
-                dependencies = set(json.loads(node['dependencies_json']))
-                inputs = [dict(node=n['node_id'], report_ref=n['result']['report_ref'])
-                          for n in context['nodes'] if n['node_id'] in dependencies and n['result']]
-                review_evidence = []
-                if node['stage'] == 'review':
-                    from .artifacts import project_git_evidence
-                    from .reviewer_handoff import review_runtime_facts
-                    try:
-                        machine.start_review(task_id, node['assignment_ref'])
-                    except StoreError as error:
-                        # Never a crashed turn: ask the user with the reason.
-                        machine.move(task_id, 'BLOCKED', blocker=str(error))
-                        break
-                    review_evidence.append(review_runtime_facts(
-                        runtime._store, task_id, node['assignment_ref'], runtime._task_workspace_root(task_id)))
-                    for kind in ('status', 'diff'):
-                        ref = f"review:{node['assignment_ref']}:{kind}"
-                        if emit_tool_call:
-                            emit_tool_call(dict(tool_call_id=ref,new=True,title='Read project '+kind,kind='read',status='in_progress',raw_input=dict(kind=kind)))
-                        observed = project_git_evidence(runtime._store,task_id,node['assignment_ref'],runtime._task_workspace_root(task_id),kind)
-                        review_evidence.append(observed)
-                        if emit_tool_call:
-                            emit_tool_call(dict(tool_call_id=ref,new=False,status='completed' if observed['available'] else 'failed',raw_output=observed))
-                brief = build_worker_brief(
-                    objective=node['objective'],
-                    scope=json.loads(node['scope_json']),
-                    dependency_reports=inputs,
-                    original_goal=context['goal'],
-                    review_evidence=review_evidence,
-                    assignment_ref=node['assignment_ref'],
-                )
-                from .scheduler import dispatch_assignment
-                dispatch_assignment(runtime._store, channel, dict(
-                    title=node['objective'][:200], brief=brief, role=node['role'],
-                    acceptance='Publish a truthful immutable report and structured result. '
-                               + ('Publish the complete review report inline with result_submit and include a review verdict.'
-                                  if node['stage'] == 'review' else 'Complete the assigned objective.'),
-                    request_key=node['request_key']))
+            with _execution_lock(task_id):
+                _dispatch_ready(runtime, machine, task_id, channel, context, emit_tool_call)
             # A step that cannot start is shown, with what holds it, instead
             # of a silent chat; the card closes when the wait ends.
             if wait_cards or any(n['status'] == 'pending' for n in context['nodes']):

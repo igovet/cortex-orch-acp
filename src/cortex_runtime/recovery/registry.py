@@ -150,6 +150,18 @@ def mark_terminated_tx(db, attempt_id: str, reason: str) -> None:
             "UPDATE attempt_process_registry SET terminated_at=?, termination_reason=? WHERE attempt_id=?",
             (_now(), reason, attempt_id),
         )
+        if reason != "timeout_alive":
+            release_start_listing_tx(db, attempt_id)
+
+
+def release_start_listing_tx(db, attempt_id: str) -> None:
+    """Drop an exited attempt's start listing (a full tree manifest,
+    megabytes per row); its kind, head and digest stay. Only a live attempt's
+    own publication checks read the listing."""
+    db.execute(
+        "UPDATE attempt_revisions SET manifest_json=NULL WHERE attempt_id=? AND phase=? AND manifest_json IS NOT NULL",
+        (attempt_id, f"worker_start:{attempt_id}"),
+    )
 
 
 def mark_terminated(store, attempt_id: str, reason: str) -> None:

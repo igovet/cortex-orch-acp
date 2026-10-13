@@ -10,8 +10,10 @@ cross-route).
 """
 from __future__ import annotations
 
+import json
 import queue
 import threading
+import time
 
 from ..configuration.service import ConfigurationRejected
 from ..portable.engine_contract import EngineCapability, EngineEvent, EngineEventKind, StopReason, UsageBasis
@@ -959,6 +961,29 @@ class EngineSessionManager:
         receipt["engine_session_id"] = engine_session_id
         return receipt
 
+    _TRANSIENT_RETRY_DELAYS = (1.0, 2.0)
+
+    def _set_config_option_retrying(self, wire_session_id: str, option_id: str, value):
+        """One ``session/set_config_option``, repeated only after an explicit
+        rejection whose engine detail asks to try again (Claude Code: "Couldn't
+        confirm model ... with the API. Try again"). A rejected call applied
+        nothing, so the repeat is the same request; anything else is raised."""
+        for delay in (*self._TRANSIENT_RETRY_DELAYS, None):
+            try:
+                return self._client.call(
+                    "session/set_config_option",
+                    dict(sessionId=wire_session_id, configId=option_id, value=value),
+                    timeout=self._call_timeout,
+                )
+            except EngineProtocolError as protocol_error:
+                detail = json.dumps(protocol_error.data, default=str) if protocol_error.data is not None else ""
+                if delay is None or "try again" not in detail.lower():
+                    raise
+                self._process.logs.observe(
+                    "set_config_option_retry", option_id=option_id, code=protocol_error.code, delay_seconds=delay,
+                )
+                time.sleep(delay)
+
     def configure(self, engine_session_id: str, revision) -> str:
         wire_session_id = self.correlation.wire_session_id(engine_session_id)
         if wire_session_id is None:
@@ -993,11 +1018,7 @@ class EngineSessionManager:
                     "configure() call; never sent."
                 )
             try:
-                result = self._client.call(
-                    "session/set_config_option",
-                    dict(sessionId=wire_session_id, configId=option_id, value=value),
-                    timeout=self._call_timeout,
-                )
+                result = self._set_config_option_retrying(wire_session_id, option_id, value)
             except EngineProtocolError as protocol_error:
                 # The client only ever sees the bare message ("Internal
                 # error"); the engine's own detail lives in ``data`` and is

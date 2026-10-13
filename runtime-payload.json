@@ -100,6 +100,7 @@
     "src/cortex_runtime/engine/external_proxy.py",
     "src/cortex_runtime/engine/failure_classification.py",
     "src/cortex_runtime/engine/fs_bridge.py",
+    "src/cortex_runtime/engine/install_digest.py",
     "src/cortex_runtime/engine/install_resolution.py",
     "src/cortex_runtime/engine/instruction_delivery_registry.py",
     "src/cortex_runtime/engine/logs.py",

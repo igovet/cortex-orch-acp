@@ -855,7 +855,7 @@ class TaskMachine:
             event(db, channel.task_id, 'PLAN_ACCEPTED', dict(revision=revision, plan=plan), channel.channel_id)
             transition(db, channel.task_id, 'PLAN_READY')
             result = dict(revision=revision, state='PLAN_READY', model_hints=previews,
-                          hint='Plan accepted; the runtime dispatches workers once this turn ends. '
+                          hint='Plan accepted; the runtime is starting its workers now. '
                                'End this turn now -- do not call task_get_context to wait for dispatch, '
                                'the runtime resumes you when results arrive.')
             db.execute('INSERT INTO runtime_requests VALUES(?,?,?,?,?,?)',
@@ -1200,16 +1200,24 @@ class TaskMachine:
                        attempt_id=provision['attempt_id'], result=result))
             db.commit()
 
-    def start_review(self, task_id, assignment_ref):
+    def start_review(self, task_id, assignment_ref, *, observation=None):
+        """Bind the review to the project observed now. ``observation``
+        (a dict) receives the capture so the reviewer's facts reuse it."""
         from ..delegation.revision import capture_revision
+        # The tree walk runs before the write lock: holding it here stalled
+        # every other writer, and the lock never froze the files anyway.
+        with self.store.connection() as db:
+            root = task_workspace.task_root(db, task_id)
+        observed = capture_revision(root)
+        if observed['kind'] != 'observed':
+            raise StoreError('review_revision_unavailable')
         with self.store.connection() as db:
             db.execute('BEGIN IMMEDIATE')
-            observed = capture_revision(task_workspace.task_root(db, task_id))
-            if observed['kind'] != 'observed':
-                raise StoreError('review_revision_unavailable')
             event(db, task_id, 'REVIEW_STARTED', dict(assignment_ref=assignment_ref,
                   revision_digest=observed['dirty_digest']))
             db.commit()
+        if observation is not None:
+            observation.update(observed)
         return observed['dirty_digest']
 
     def add_review(self, task_id):

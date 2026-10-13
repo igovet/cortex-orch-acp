@@ -107,7 +107,7 @@ def _scale_router(*, workers: int, tools: int, write_every: int, write_bytes: in
             mcp_tools.dispatch(store, channel, "plan_submit",
                                dict(plan=plan, request_key=str(uuid.uuid4())))
             # The live coordinator kept polling while its own turn was still
-            # open (workers start only after it ends); every poll is a card.
+            # open (its workers already run meanwhile); every poll is a card.
             envelope = {"server": "cortex", "tool": "task_get_context", "arguments": {}}
             for index in range(POLLS):
                 context = mcp_tools.dispatch(store, channel, "task_get_context", {})
@@ -310,9 +310,28 @@ def test_repeated_identical_coordinator_polls_are_not_resent(scale_runs, case):
     polls = [entry for key, entry in per_id.items()
              if str(key).startswith("call:coordinator:") and ":poll-" in str(key)]
     assert len(polls) == POLLS
-    first, repeats = polls[0], polls[1:]
-    for entry in repeats:
-        assert entry["bytes"] <= REPEATED_POLL_MAX_BYTES, entry
+    first = polls[0]
+    # Workers start while the coordinator still polls, so a repeat carries
+    # the context again only when it really changed; an unchanged repeat is
+    # a small receipt.
+    results = {}
+    for update in scale_runs[(workers, label)]["updates"]:
+        ref = str(update.get("toolCallId", ""))
+        if ":poll-" in ref and isinstance(update.get("rawOutput"), dict) and "result" in update["rawOutput"]:
+            results[ref.rsplit(":poll-", 1)[1]] = update["rawOutput"]["result"]["structuredContent"]
+    previous = results["0"]
+    unchanged = 0
+    for index in range(1, POLLS):
+        entry = next(e for k, e in per_id.items() if str(k).endswith(f":poll-{index}"))
+        result = results.get(str(index))
+        # No result at all: the emitter already elided a repeated output.
+        if result is None or result.get("unchanged_since_last_read"):
+            unchanged += 1
+            assert entry["bytes"] <= REPEATED_POLL_MAX_BYTES, entry
+        else:
+            assert result != previous
+            previous = result
+    assert unchanged
     # The first poll carries the context once: structuredContent, no text copy.
     first_update = [u for u in scale_runs[(workers, label)]["updates"]
                     if str(u.get("toolCallId", "")).endswith(":poll-0") and u.get("rawOutput")][0]

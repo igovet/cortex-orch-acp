@@ -275,8 +275,9 @@ def _worker_publish_result(store, channel: ChannelContext, args: Mapping[str, An
                 (assignment_ref, phase),
             ).fetchone()
         if captured is None:
+            # Publication checks read only this capture's kind and digest.
             delegation_revision.record_attempt_revision(
-                store, assignment_ref, phase, direct_root,
+                store, assignment_ref, phase, direct_root, keep_manifest=False,
             )
     # T017: each check carries an audit label; 'observed'/'contradicted' is
     # resolved strictly against this exact attempt's own command receipts

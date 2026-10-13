@@ -5,6 +5,15 @@
 
 ## Installed Paseo version boundary
 
+> On 2026-10-13 the installed CLI reported 0.11.2. Its CLI help still lists
+> `--home`, and its bundle reads `PASEO_HOME` for the daemon home and
+> `PASEO_ELECTRON_USER_DATA_DIR` for the Electron profile; the desktop daemon
+> manager resolves its daemon from `PASEO_HOME`. A requested `desktop` check
+> that day ran the guarded wrapper's dev daemon on `127.0.0.1:16767` with the
+> app on the dev server id, while production's daemon on `127.0.0.1:6767`
+> kept running untouched. `paseo workspace create --isolation local --path`
+> registers a disposable project without starting an agent.
+
 > On 2026-09-30, read-only package/bundle inspection reported Paseo 0.10.2. The 0.10.0 CLI/isolation observations below are historical, not qualification of 0.10.2. Recheck the installed CLI, bridge and guarded wrapper before a requested live launch; do not infer unchanged capabilities from the version number.
 
 The installed Linux CLI is `/opt/Paseo/resources/bin/paseo`; a read-only `--version` check on 2026-09-29 returned 0.10.0. Do not assume older 0.9.2 command or isolation observations still apply without checking the installed CLI and bridge. The guarded wrapper's current `--check` was run on 2026-09-29: it selected `/home/igovet/.paseo-dev` and reported `/home/igovet/.paseo` as the protected production home (exit 0). This validates wrapper selection only, not daemon endpoint or GUI isolation.

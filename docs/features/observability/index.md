@@ -477,7 +477,9 @@ complete tool-call reply twice, once in `runtime_requests.result_json` and once
 in the `EXTERNAL_TOOL_RESULT` event payload
 (`src/cortex_runtime/engine/external_proxy.py:236-242`), and
 `orchestrating_runtime`'s worker-activity panel event persists the scrubbed but
-still content-bearing `raw_input`/`raw_output`/`content` fields rather than a
+still content-bearing `raw_input`/`raw_output`/`content` fields (rows written
+before 2026-10-13 also carry `input`/`output` copies of the first two; readers
+use `raw_*` first) rather than a
 ref + digest + size
 (`src/cortex_runtime/acp/orchestrating_runtime.py:3516-3537`). Treat
 ref + digest + size as this page's policy for the new measurements it adds,

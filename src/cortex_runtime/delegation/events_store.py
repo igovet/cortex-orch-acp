@@ -61,6 +61,8 @@ CREATE TABLE IF NOT EXISTS task_events (
 );
 CREATE INDEX IF NOT EXISTS task_events_by_task ON task_events(task_id, id);
 CREATE INDEX IF NOT EXISTS task_events_by_assignment ON task_events(task_id, assignment_ref);
+CREATE INDEX IF NOT EXISTS task_events_by_type ON task_events(task_id, event_type, id);
+CREATE INDEX IF NOT EXISTS task_events_unconsumed ON task_events(task_id, id) WHERE consumed_by IS NULL AND superseded=0;
 CREATE TABLE IF NOT EXISTS task_orchestration (
  task_id TEXT PRIMARY KEY REFERENCES tasks(id),
  state TEXT NOT NULL,

@@ -206,6 +206,15 @@ launch (passing `None`, the default, is always correct).
 
 ## Configuration-option mapping
 
+Claude Code confirms a selected model with its API and can reject the choice
+with "Couldn't confirm model ... with the API. Try again" (observed in the dev
+profile on 2026-10-10 and 2026-10-13, each time ending the coordinator's turn
+as `orchestration_unavailable`). A rejected option applied nothing, so
+`EngineSessionManager.configure` sends the same option again after 1 s and
+then 2 s when the engine's error detail asks to try again
+(`set_config_option_retry` in the engine log); any other rejection, or a third
+one, is raised as before.
+
 `engine.claude_adapter_acp.claude_option_mapping(revision,
 observed_config_options)` maps a `ConfigurationRevision` to
 `session/set_config_option` pairs, pre-checked against this session's own

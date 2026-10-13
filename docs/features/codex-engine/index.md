@@ -312,8 +312,11 @@ A real engine session opened by `delegation.live_adapters
 .EngineSessionManagerAdapter.open()` now automatically captures its own
 observed `configOptions` into a real `DISCOVERY`-provenance snapshot
 (`EngineSessionManagerAdapter._capture_catalog_observation`, using
-`EngineSessionManager.observed_config_options`) — best-effort and
-non-blocking, never itself sending a prompt or failing the engine session.
+`EngineSessionManager.observed_config_options`) — best-effort, never itself
+sending a prompt or failing the engine session. It runs before the session's
+first prompt, so a process that already saved an identical observation (same
+connection, install and `configOptions` apart from current selections, within
+six hours) skips it: the per-model probe cost seconds per worker session.
 `scripts/cortex_acp_setup.py record-observation` remains the manual
 fallback for capturing an observation from outside a real task run.
 

@@ -96,8 +96,15 @@ without dropping requirements or silently truncating it. Rejection retains no
 accepted plan or worker reservation. Codex and Claude receive the same channel
 MCP schema; this does not guarantee model compliance.
 
-After accepting a plan, `plan_submit` tells the coordinator that workers are
-dispatched after the current turn ends and to end the turn rather than poll.
+After accepting a plan, `plan_submit` tells the coordinator that its workers
+are starting and to end the turn rather than poll. The runtime does not wait
+for that turn to end: once the coordinator's next tool or text update shows the
+task in `PLAN_READY`, a runtime thread records the execution baseline, moves
+the task to `EXECUTING` and dispatches the dependency-ready nodes
+(`orchestration.controller._start_execution_early`). That thread and the
+controller loop share one per-task lock, so the start and the first
+reservations happen once. A planning turn that ends with an error after its
+plan has already started does not block the running plan.
 When `task_get_context` shows no coordinator action is needed, it gives the same
 turn-ending hint. An identical repeat read on that channel returns a compact
 unchanged-state receipt instead of resending the plan and nodes. The hint is

@@ -758,10 +758,12 @@ def capture_revision(workspace_root) -> dict:
     return dict(kind="observed", head=head, dirty_digest=digest, detail=None, manifest=manifest)
 
 
-def record_attempt_revision(store, attempt_id: str, phase: str, workspace_root) -> dict:
+def record_attempt_revision(store, attempt_id: str, phase: str, workspace_root, *, keep_manifest: bool = True) -> dict:
     """Capture and durably append one ``attempt_revisions`` row. Returns the
-    captured ``dict`` (see :func:`capture_revision`)."""
+    captured ``dict`` (see :func:`capture_revision`). ``keep_manifest=False``
+    stores only kind, head and digest (the listing is megabytes per row)."""
     captured = capture_revision(workspace_root)
+    stored_manifest = captured.get("manifest") if keep_manifest else None
     with store.connection() as db:
         db.execute("BEGIN IMMEDIATE")
         try:
@@ -770,7 +772,7 @@ def record_attempt_revision(store, attempt_id: str, phase: str, workspace_root) 
                 "(attempt_id,captured_at,phase,kind,head,dirty_digest,detail,manifest_json) "
                 "VALUES (?,?,?,?,?,?,?,?)",
                 (attempt_id, _now(), phase, captured["kind"], captured["head"], captured["dirty_digest"],
-                 captured["detail"], json.dumps(captured.get("manifest"), ensure_ascii=False, separators=(",", ":"))),
+                 captured["detail"], json.dumps(stored_manifest, ensure_ascii=False, separators=(",", ":"))),
             )
             db.commit()
         except BaseException:

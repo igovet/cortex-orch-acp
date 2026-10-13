@@ -67,9 +67,10 @@ def _encoded(value):
     return json.dumps(value, sort_keys=True, separators=(',', ':'), ensure_ascii=True)
 
 
-def review_runtime_facts(store, task_id, assignment_ref, root):
-    """Build and retain a bounded allowlisted block for this review binding."""
-    observed = capture_revision(root)
+def review_runtime_facts(store, task_id, assignment_ref, root, *, observed=None):
+    """Build and retain a bounded allowlisted block for this review binding.
+    ``observed`` is the capture the review was just bound to, when known."""
+    observed = observed or capture_revision(root)
     current = path_metadata(observed)
     with store.connection() as db:
         task = db.execute('SELECT revision,plan_json FROM runtime_tasks WHERE task_id=?',

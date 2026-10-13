@@ -22,6 +22,18 @@ conflicts, failed reads and missing copies are retained.
 Task state is durable before recovery decisions. In-memory state may accelerate
 reads but cannot be the only record of a mutation or background-task failure.
 
+## Attempt tree listings
+
+Each worker attempt records a project observation when it starts and when it
+publishes (`attempt_revisions`). Only the start capture keeps its full tree
+listing, which the attempt's own publication checks compare against while its
+process lives. When the process registry records a confirmed exit, that listing
+is dropped (`recovery.registry.release_start_listing_tx`); kind, head and
+digest stay. Publication captures store kind, head and digest only. A writable
+store open clears listings that already qualify. The space is reused by later
+writes; the file shrinks only after a `VACUUM`, such as the one task retention
+runs below.
+
 ## Explicit task retention
 
 The owner uses `/cortex-clear before YYYY-MM-DD` in an idle project ACP chat

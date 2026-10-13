@@ -409,6 +409,16 @@ class Store:
                 if "manifest_json" not in revision_columns:
                     db.execute("ALTER TABLE attempt_revisions ADD COLUMN manifest_json TEXT")
                 db.execute("CREATE INDEX IF NOT EXISTS attempt_revisions_by_attempt ON attempt_revisions(attempt_id,captured_at)")
+                # Listings nothing reads any more: publication captures and
+                # the start captures of attempts whose process exited. An
+                # inspection open stays non-mutating.
+                if initialize:
+                    db.execute(
+                        "UPDATE attempt_revisions SET manifest_json=NULL WHERE manifest_json IS NOT NULL AND "
+                        "(phase LIKE 'worker_publish:%' OR (phase LIKE 'worker_start:%' AND attempt_id IN "
+                        "(SELECT attempt_id FROM attempt_process_registry WHERE terminated_at IS NOT NULL "
+                        "AND termination_reason IS NOT 'timeout_alive')))"
+                    )
                 # T020: additive pending_questions/pending_question_late_answers
                 # tables for a pre-T020 store (same precedent as
                 # attempt_revisions above -- plain db.execute per statement,

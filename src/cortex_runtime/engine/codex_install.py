@@ -19,7 +19,6 @@ never construct a launch command from an unverified install.
 """
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 from dataclasses import dataclass
@@ -168,19 +167,13 @@ def _reject_untrusted_or_impure_path(path_text: str, field: str, environ: dict[s
 
 
 def _hash_file(path: Path) -> str:
-    hasher = hashlib.sha256()
+    from .install_digest import sha256_file
     try:
-        with open(path, "rb") as handle:
-            while True:
-                chunk = handle.read(_HASH_CHUNK_SIZE)
-                if not chunk:
-                    break
-                hasher.update(chunk)
+        return sha256_file(path, _HASH_CHUNK_SIZE)
     except OSError as error:
         raise _validation_error(
             "engine_install_drifted", f"Could not read {path} to verify its pinned hash: {error}.",
         ) from error
-    return hasher.hexdigest()
 
 
 def verify_install(install: CodexAcpInstall, environ: dict[str, str] | None = None) -> CodexAcpInstall:

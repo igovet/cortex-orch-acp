@@ -547,7 +547,8 @@ MCP-text mirrors of structured results, suppresses no-op updates, and uses
 cache. An identical `task_get_context` poll returns a compact receipt, and the
 accepted-plan/context results advise the coordinator to end its turn when no
 action is needed. The hint reduces needless polling but is not enforced, and
-worker dispatch still begins after the coordinator turn ends. Scale tests show
+worker dispatch began after the coordinator turn ended (since 2026-10-13 it
+begins as soon as the plan is accepted, during that turn). Scale tests show
 bounded event bytes for the tested 10- and 200-tool workload; they do not prove
 constant daemon memory or bound durable history. A live dev-Paseo heap run was
 not performed.

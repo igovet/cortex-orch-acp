@@ -3569,14 +3569,19 @@ class OrchestratingRuntime:
                     known.update(json.loads(self._context_sizes_path().read_text()))
                 except (OSError, ValueError):
                     pass
+                # The file already carries every size learned so far; the
+                # full progress-row scan (seconds on a large store, under
+                # this lock) is only a backfill for a store without it.
                 try:
                     with self._store.connection() as db:
-                        for row in db.execute(
-                                "SELECT a.engine||'/'||a.model AS m, MAX(CAST(json_extract(e.payload_json,'$.content.size') AS INTEGER)) AS s "
-                                "FROM task_events e JOIN attempt_route_audit a ON a.attempt_id=json_extract(e.payload_json,'$.attempt_id') "
-                                "WHERE e.event_type='progress' AND json_extract(e.payload_json,'$.activity_ref')='context' GROUP BY m"):
-                            if isinstance(row["s"], int):
-                                known[row["m"]] = max(row["s"], known.get(row["m"], 0))
+                        rows = [] if known else db.execute(
+                            "SELECT a.engine||'/'||a.model AS m, MAX(CAST(json_extract(e.payload_json,'$.content.size') AS INTEGER)) AS s "
+                            "FROM task_events e JOIN attempt_route_audit a ON a.attempt_id=json_extract(e.payload_json,'$.attempt_id') "
+                            "WHERE e.event_type='progress' AND json_extract(e.payload_json,'$.activity_ref')='context' GROUP BY m"
+                        ).fetchall()
+                    for row in rows:
+                        if isinstance(row["s"], int):
+                            known[row["m"]] = max(row["s"], known.get(row["m"], 0))
                 except Exception:  # noqa: BLE001 - display nicety only
                     pass
                 for name, value in known.items():
@@ -3725,14 +3730,12 @@ class OrchestratingRuntime:
             payload["title"] = scrub_text(title, max_chars=max(4000, len(title) * 2 + 1000))
         if locations_value is not None:
             payload["locations"] = _client_safe_raw(locations_value)
+        # Stored once: readers take raw_input/raw_output (an older row's
+        # input/output copies stay readable as a fallback).
         if input_value is not None:
-            input_value = _client_safe_raw(input_value)
-            payload["raw_input"] = input_value
-            payload["input"] = input_value
+            payload["raw_input"] = _client_safe_raw(input_value)
         if output_value is not None:
-            output_value = _client_safe_raw(output_value)
-            payload["raw_output"] = output_value
-            payload["output"] = output_value
+            payload["raw_output"] = _client_safe_raw(output_value)
         if error_value is not None:
             error_value = _client_safe_raw(error_value)
             payload["error"] = error_value
