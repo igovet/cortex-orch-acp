@@ -132,7 +132,8 @@ def test_metadata_only_attribution_language_and_replay(ready):
                               threading.Event(), 'ru') == StopReason.END_TURN
     finally:
         runtime.shutdown()
-    assert visible.count(ru) == 1
+    # Own paragraph after any streamed coordinator prose.
+    assert visible.count('\n\n' + ru) == 1
     assert kinds(machine, task).count('SYNTHESIS_RUNTIME_COMPOSED') == 1
 
 
@@ -463,7 +464,7 @@ def test_controller_skips_reconciliation_only_when_eligible(tmp_path, eligible, 
     assert any(('Runtime-composed synthesis' if eligible else 'Runtime: COMPLETED') in m for m in messages)
     if not eligible:
         # The coordinator's own synthesis reaches the chat, before the label.
-        final = [i for i, m in enumerate(messages) if m.startswith('Coordinator fallback')]
+        final = [i for i, m in enumerate(messages) if m.startswith('\n\nCoordinator fallback')]
         assert len(final) == 1 and 'Not verified' in messages[final[0]], messages
         assert final[0] < max(i for i, m in enumerate(messages) if 'Runtime: COMPLETED' in m)
 

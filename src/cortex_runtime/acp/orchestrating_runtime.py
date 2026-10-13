@@ -4539,7 +4539,8 @@ class OrchestratingRuntime:
             )
             label = acp_messages.render("question_options_label", language)
             body = f"{body}\n\n{label}\n{choices}" if choices else body
-        emit_update(body + "\n\n")
+        # Own paragraph: chunks of one message are concatenated.
+        emit_update(f"\n\n{body}\n\n")
         # A host callback can deliver the user's text synchronously while the
         # fallback update is being emitted. Re-read the row before returning;
         # otherwise the caller would overwrite the answered state with

@@ -360,7 +360,7 @@ def test_elicitation_not_advertised_uses_text_fallback(tmp_path):
         assert final["result"]["stopReason"] == "end_turn"
         # Never an outbound elicitation/create request.
         assert not any(m.get("method") == "elicitation/create" for m in harness.stdout.lines)
-        chunk = harness.wait_for(lambda m: m.get("params", {}).get("update", {}).get("content", {}).get("text", "").startswith("1. Which environment?"))
+        chunk = harness.wait_for(lambda m: m.get("params", {}).get("update", {}).get("content", {}).get("text", "").startswith("\n\n1. Which environment?"))
         assert chunk is not None
 
         with harness.store.connection() as db:

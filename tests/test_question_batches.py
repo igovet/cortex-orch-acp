@@ -365,8 +365,8 @@ def test_displayed_batch_numbers_bind_command_answers_in_creation_order(planning
     shown = []
     assert not runtime._handle_question_batch(coordinator.task_id, 'incoming', shown.append, 'en',
                                              pending(store, coordinator.task_id), None)
-    assert shown[0].startswith('2. Which target?')
-    assert shown[1].startswith('3. Which format?')
+    assert shown[0].startswith('\n\n2. Which target?')
+    assert shown[1].startswith('\n\n3. Which format?')
     assert all(block.endswith('\n\n') for block in shown)
     assert '\n\n3. Which format?' in ''.join(shown)
 
@@ -388,7 +388,7 @@ def test_displayed_batch_numbers_bind_command_answers_in_creation_order(planning
     shown.clear()
     runtime._handle_question_batch(coordinator.task_id, 'incoming', shown.append, 'en',
                                    pending(store, coordinator.task_id), None)
-    assert len(shown) == 1 and shown[0].startswith('2. Which format?')
+    assert len(shown) == 1 and shown[0].startswith('\n\n2. Which format?')
     agent._run_cortex_answer('second', 'incoming', session, '2 second answer', threading.Event(), lambda _: None)
     assert questions_store.get(store, receipt['question_ids'][1]).answer_text == 'second answer'
     assert questions_store.get(store, older.id).status == 'open'

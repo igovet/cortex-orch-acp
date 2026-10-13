@@ -93,7 +93,11 @@ Each coordinator prompt turn gets one assistant `messageId`. Every streamed
 the chunks into one visible message. When a new tool call starts, Cortex rotates
 the id before sending later prose; a later continuation turn also receives a
 fresh id. This prevents Paseo from merging text across tool boundaries or
-separate turns. The id is stored with the host transcript and is sent again by
+separate turns. Because chunks of one id are concatenated verbatim, a
+runtime-authored block that can follow the coordinator's streamed prose in the
+same message (the final answer or synthesis, a text-fallback question) starts
+with a blank line, so its leading Markdown heading or list is parsed as a new
+block instead of being glued to the previous sentence. The id is stored with the host transcript and is sent again by
 `session/load`; older rows without an id receive a deterministic replay id for
 that replay entry, without claiming that the old stream had a historical id.
 

@@ -308,7 +308,7 @@ def test_follow_up_question_on_a_completed_task_is_answered_without_a_plan(tmp_p
     assert "This task was completed" in follow_ups[0] and "answer_submit is not available" not in follow_ups[0]
     assert (context["state"], context["blocker"], context["synthesis"], context["revision"]) == (
         "COMPLETED", None, answer, 1)
-    assert answer in output
+    assert "\n\n" + answer in output
     with store.connection() as db:
         types = [row[0] for row in db.execute(
             "SELECT type FROM runtime_events WHERE task_id=? AND id>(SELECT MAX(id) FROM runtime_events "

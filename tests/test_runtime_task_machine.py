@@ -1044,7 +1044,7 @@ def test_project_overview_reads_and_answers_once_without_workers(tmp_path,langua
         result=runtime.start_prompt(task.task_id,'incoming','Расскажи о чем проект',output.append,threading.Event())
     finally: runtime.shutdown()
     assert result==StopReason.END_TURN
-    assert output==[answer]
+    assert output==['\n\n'+answer]
     assert len(calls)==1
     context=TaskMachine(store).context(task.task_id)
     assert context['state']=='COMPLETED' and context['nodes']==[] and context['verification'] is None

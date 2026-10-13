@@ -49,6 +49,13 @@ _VERIFICATION_OUTPUT_TAIL_BYTES = 2500
 _VERIFICATION_RAW_OUTPUT_MAX_BYTES = SESSION_UPDATE_MAX_BYTES // 2
 
 
+def _own_paragraph(text):
+    """Chunks of one ACP message are concatenated, so a runtime block after
+    the coordinator's streamed prose must start its own paragraph; otherwise
+    a leading Markdown heading or list lands mid-line and is not parsed."""
+    return text if text.startswith('\n') else '\n\n' + text
+
+
 def _execution_lock(task_id):
     """Serializes starting a plan revision and dispatching its ready nodes
     between the controller loop and the early start below."""
@@ -536,7 +543,7 @@ def _run(runtime, task_id, session_id, channel, session_ref, content, emit_updat
             from .pipeline import publish
             publish(runtime._store,channel,machine.context(task_id))
             runtime._set_state(task_id,'accepted',wait_reason=None)
-            emit_update(context['synthesis'])
+            emit_update(_own_paragraph(context['synthesis']))
             return StopReason.END_TURN
         if state == 'RECOVERING':
             # Explicit cancellation/replanning revokes first, then terminates
@@ -578,7 +585,7 @@ def _run(runtime, task_id, session_id, channel, session_ref, content, emit_updat
                 return _synthesis_workers_absent(runtime, task_id, cancel_event, db)
             synthesis = compose_synthesis(machine, task_id, language, workers_absent)
             if synthesis is not None:
-                emit_update(synthesis)
+                emit_update(_own_paragraph(synthesis))
                 runtime_synthesis_emitted = True
                 continue
         if state in {'PLANNING', 'RECONCILING'}:
@@ -991,7 +998,7 @@ def _run(runtime, task_id, session_id, channel, session_ref, content, emit_updat
                 # Runtime-composed or the coordinator's synthesis_submit text
                 # alike: the final answer belongs in the chat, not only in
                 # pipeline.md behind a bare completion label.
-                emit_update(context['synthesis'])
+                emit_update(_own_paragraph(context['synthesis']))
                 runtime_synthesis_emitted = True
             runtime._set_state(task_id, 'accepted' if state == 'COMPLETED' else state.lower(),
                                wait_reason=context['blocker'])
