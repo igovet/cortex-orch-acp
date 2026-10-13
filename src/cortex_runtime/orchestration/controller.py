@@ -61,13 +61,22 @@ def _verification_output_tail(output):
 
 
 @contextlib.contextmanager
-def _verification_command(root, scratch, argv):
-    """Prepare the production sandbox; tests may replace only this launch seam."""
-    from .sandbox import as_owner, gateway_command, with_umask, readonly_test_cache
+def _verification_command(root, scratch, argv, profile='restricted'):
+    """Prepare the production sandbox; tests may replace only this launch seam.
+
+    ``profile`` follows the task's access mode, as a worker's command_run
+    does: ``development`` makes the host writable (a ``docker build`` writes
+    ~/.docker/buildx) while the project stays read-only outside its
+    git-ignored directories either way."""
+    from .sandbox import as_owner, gateway_command, development_command, with_umask, readonly_test_cache
     scopes = [path + '/**' for path in revision.ignored_directories(str(root))]
-    with gateway_command(root, scratch, with_umask(argv), scopes, system_root=True,
-                         reveal=frozenset({'.git'})) as (command, fds):
-        as_owner(command, os.environ)
+    mount = (development_command(root, scratch, with_umask(argv), scopes, environ=os.environ)
+             if profile == 'development' else
+             gateway_command(root, scratch, with_umask(argv), scopes, system_root=True,
+                             reveal=frozenset({'.git'})))
+    with mount as (command, fds):
+        if profile != 'development':
+            as_owner(command, os.environ)
         readonly_test_cache(command, scratch, os.environ)
         yield command, fds
 
@@ -75,9 +84,11 @@ def _verification_command(root, scratch, argv):
 def _verification_observation(runtime, task_id, context, expected, emit_tool_call, cancel, run_id):
     """Run retained literal argv commands to completion with complete output.
 
-    The root filesystem is read-only; checks can write only in
-    their private temporary directory and git-ignored project directories.
-    The real runtime store is inaccessible.
+    The project is read-only outside its git-ignored directories; the rest
+    of the host follows the task's access mode, as a worker's command_run
+    does (read-only in Guarded, writable outside the protected control plane
+    in Development and Auto). A mode switch during a check stops it,
+    incomplete. The real runtime store is inaccessible.
     Missing OS isolation is a failure, never an unsandboxed fallback.
     """
     root = Path(runtime._task_workspace_root(task_id))
@@ -107,8 +118,11 @@ def _verification_observation(runtime, task_id, context, expected, emit_tool_cal
             # node_modules) are writable, so sources stay untouched and the
             # revision (which skips ignored paths) cannot drift. No access to
             # the real private store, even from an interpreter.
+            from ..configuration import access_mode
+            profile = access_mode.command_profile(access_mode.current(runtime._store, task_id))
             try:
-                command, fds = stack.enter_context(_verification_command(root, scratch, argv))
+                command, fds = stack.enter_context(
+                    _verification_command(root, scratch, argv, profile=profile))
             except StoreError as error:
                 if trace is not None:
                     trace.record("verification", "in", dict(blocker=str(error)),
@@ -123,7 +137,7 @@ def _verification_observation(runtime, task_id, context, expected, emit_tool_cal
                     # never emit a verification lifecycle event from this runner.
                     event(db, task_id, 'CHECK_EXECUTION_STARTED', dict(
                         command_ref=ref, argv=argv, revision=context['revision'],
-                        revision_digest=digest, index=index))
+                        revision_digest=digest, index=index, profile=profile))
                     started_event_id = db.execute('SELECT last_insert_rowid()').fetchone()[0]
                     db.commit()
                 try:
@@ -143,10 +157,14 @@ def _verification_observation(runtime, task_id, context, expected, emit_tool_cal
                         os.close(extra)
                 # No time limit, as for a worker's command_run: a project's
                 # full suite runs to completion; only a task stop ends it.
-                interrupted = False
+                interrupted = policy_changed = False
                 while proc.poll() is None:
                     if cancel.wait(.1):
                         interrupted = True
+                        _kill_verification(proc)
+                        break
+                    if access_mode.command_profile(access_mode.current(runtime._store, task_id)) != profile:
+                        interrupted = policy_changed = True
                         _kill_verification(proc)
                         break
                 code = proc.wait()
@@ -173,12 +191,13 @@ def _verification_observation(runtime, task_id, context, expected, emit_tool_cal
                 saved = persist_output_stream(
                     runtime._store, task_id=task_id, owner_scope='coordinator',
                     source_kind='terminal', source_ref=ref, stream=output,
-                    exit_code=code, failure='interrupted' if interrupted else None,
+                    exit_code=code, failure=('execution_policy_changed' if policy_changed
+                                             else 'interrupted' if interrupted else None),
                 )
                 output_tail = _verification_output_tail(output)
         failed = interrupted or code != 0 or not unchanged
         observed = dict(argv=argv,exit_code=code,complete=not interrupted and unchanged,
-                        revision_digest=digest,large_output_id=saved['id'],
+                        revision_digest=digest,large_output_id=saved['id'],profile=profile,
                         command_ref=ref,started_event_id=started_event_id,
                         # The full output is retained separately; this excerpt is only for repair context.
                         output_tail=output_tail if failed else None)
@@ -916,16 +935,12 @@ def _run(runtime, task_id, session_id, channel, session_ref, content, emit_updat
             runtime._set_state(task_id, 'waiting_for_user', wait_reason=question.get('blocker') or 'user_question')
             return failure_stop_reason
         if state in {'COMPLETED', 'FAILED', 'BLOCKED', 'CANCELLED'}:
-            if state == 'COMPLETED' and not runtime_synthesis_emitted:
-                with runtime._store.connection() as db:
-                    composed = db.execute("SELECT payload_json FROM runtime_events WHERE task_id=? "
-                                          "AND type='SYNTHESIS_RUNTIME_COMPOSED' ORDER BY id DESC LIMIT 1",
-                                          (task_id,)).fetchone()
-                recorded = json.loads(composed[0]) if composed else {}
-                if (recorded.get('revision') == context['revision']
-                        and recorded.get('text') == context['synthesis']):
-                    emit_update(context['synthesis'])
-                    runtime_synthesis_emitted = True
+            if state == 'COMPLETED' and not runtime_synthesis_emitted and context['synthesis']:
+                # Runtime-composed or the coordinator's synthesis_submit text
+                # alike: the final answer belongs in the chat, not only in
+                # pipeline.md behind a bare completion label.
+                emit_update(context['synthesis'])
+                runtime_synthesis_emitted = True
             runtime._set_state(task_id, 'accepted' if state == 'COMPLETED' else state.lower(),
                                wait_reason=context['blocker'])
             labels = {'COMPLETED':'Завершено','FAILED':'Ошибка выполнения','BLOCKED':'Выполнение заблокировано','CANCELLED':'Отменено'}

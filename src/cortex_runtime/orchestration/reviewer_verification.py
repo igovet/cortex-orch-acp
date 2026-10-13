@@ -60,7 +60,7 @@ def _usable(db, task_id, check):
     if not check or check.get('complete') is not True or type(check.get('exit_code')) is not int:
         return False
     from .. import task_workspace
-    if check.get('profile', 'restricted') != 'restricted':
+    if check.get('profile', 'restricted') not in ('restricted', 'development'):
         return False
     if check.get('cwd') not in (None, task_workspace.task_root(db, task_id)):
         return False
@@ -95,8 +95,6 @@ def _usable(db, task_id, check):
 
 def validate_reuse(db, task_id, attempt_id, receipt):
     """Verify runtime provenance without accepting an executor's assertion."""
-    if receipt.get('profile', 'restricted') != 'restricted':
-        return False
     from .. import task_workspace
     if receipt.get('cwd') not in (None, task_workspace.task_root(db, task_id)):
         return False
@@ -120,6 +118,7 @@ def validate_reuse(db, task_id, attempt_id, receipt):
                              ('filename', 'byte_count', 'source_kind', 'signal', 'failure', 'exit_code', 'truncated')) and
                 origin == dict(source='runtime', command_ref=check['command_ref'],
                                large_output_id=check['large_output_id'], run_id=check['run_id']) and
+                receipt.get('profile', 'restricted') == check.get('profile', 'restricted') and
                 all(receipt.get(k) == check.get(k) for k in ('argv', 'exit_code', 'complete', 'revision_digest')))
 
 
@@ -171,7 +170,11 @@ def reuse(store, channel, root, args, ref, owner):
             if aborted:
                 return None
             if check:
-                if not _usable(db, channel.task_id, check):
+                # Only a check run in the profile the reviewer's own command
+                # would get now stands in for it.
+                from ..configuration import access_mode
+                if (not _usable(db, channel.task_id, check) or check.get('profile', 'restricted') !=
+                        access_mode.command_profile(access_mode.current(store, channel.task_id))):
                     return None
                 break
         remaining = deadline - time.monotonic()
@@ -207,7 +210,8 @@ def reuse(store, channel, root, args, ref, owner):
             "FROM large_outputs WHERE id=? AND task_id=?",
             (output_id, owner, ref, store._now(), check['large_output_id'], channel.task_id))
         db.commit()
-    return dict(tool_call_ref=ref, argv=check['argv'], cwd=str(Path(root).resolve()), profile='restricted',
+    return dict(tool_call_ref=ref, argv=check['argv'], cwd=str(Path(root).resolve()),
+                profile=check.get('profile', 'restricted'),
                 exit_code=check['exit_code'], complete=True,
                 failure=None, revision_digest=check['revision_digest'], large_output_id=output_id,
                 output='', output_truncated=False, output_inline_omitted=True,

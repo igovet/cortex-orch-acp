@@ -189,11 +189,14 @@ A text `project_read` pages by 1-based line: `offset` is a line number, `limit` 
 
 ## Development command access
 
-Fresh ACP sessions durably start **Development**: writing workers can use ordinary
-host resources, Docker/Compose, SDK/cache state and authorized outside-project
-working directories through the receipt-producing command gateway without routine
-approval cards. Engine jails, read-only roles, channel/revocation gates, owner
-denials, independent review and runtime completion remain in place.
+Fresh ACP sessions durably start **Development**: every sandboxed command --
+any worker's or reviewer's `command_run` and the runtime's automatic verification
+checks -- can use ordinary host resources, Docker/Compose (including `docker
+build`), SDK/cache state and outside-project working directories through the
+receipt-producing command gateway without routine approval cards. Roles still
+decide the project: read-only roles never write it, and verification writes only
+git-ignored directories. Engine jails, channel/revocation gates, owner denials,
+independent review and runtime completion remain in place.
 
 This is trusted local development, **not hostile-code OS isolation**. Direct
 filesystem masks cannot stop arbitrary owner code or a Docker daemon from
@@ -205,8 +208,8 @@ conditional/loop command positions are recognized too, for example
 `sh -c 'LABEL=fixture rm fixture'` and `sh -c 'if true; then env rm fixture; fi'`.
 Literal `echo`/`printf` argv arguments are not shell commands. Select **Guarded**
 to keep workers inside the project: a deletion, an outside write and a command
-outside the sandbox each ask first. **Auto** gives writing workers the same
-host-writable commands as Development and answers every permission card itself,
+outside the sandbox each ask first. **Auto** gives commands the same
+host-writable profile as Development and answers every permission card itself,
 deletions included. In Development an `outside_write` needs no card unless it
 targets protected engine, Cortex, Paseo or git control-plane state;
 `outside_command` (no sandbox) still asks. Legacy sessions/tasks and

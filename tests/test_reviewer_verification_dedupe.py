@@ -111,6 +111,25 @@ def test_reuse_rejects_outside_cwd_and_host_profile(tmp_path):
         dict(argv=ARGV, cwd=str(tmp_path.parent)), "fixture", "owner") is None
 
 
+def test_reuse_follows_the_access_mode_profile(tmp_path, monkeypatch):
+    from cortex_runtime.configuration import access_mode
+    runtime, task, machine, _, reviewer, _, digest = fixture(tmp_path)
+    access_mode.switch(runtime._store, task.task_id, 'development', origin='acp_set_mode')
+    observed = observe(runtime, task, machine, digest)
+    assert observed['checks'][0]['profile'] == 'development'
+    monkeypatch.setattr(gateway, '_command', no_execution)
+    receipt = command(runtime._store, reviewer)
+    assert receipt['profile'] == 'development' and receipt['runtime_verification']
+    with runtime._store.connection() as db:
+        assert reviewer_verification.validate_reuse(db, task.task_id, reviewer.attempt_id, receipt)
+        assert not reviewer_verification.validate_reuse(db, task.task_id, reviewer.attempt_id,
+                                                        dict(receipt, profile='restricted'))
+    # A check run host-wide never stands in for a Guarded reviewer's own command.
+    access_mode.switch(runtime._store, task.task_id, 'guarded', origin='acp_set_mode')
+    assert reviewer_verification.reuse(runtime._store, reviewer, str(tmp_path),
+                                       dict(argv=ARGV), 'fixture-guarded', 'owner') is None
+
+
 def test_in_flight_waits_without_reexecuting(tmp_path, monkeypatch):
     runtime, task, machine, _, reviewer, assignment, digest = fixture(tmp_path)
     started, release = threading.Event(), threading.Event()

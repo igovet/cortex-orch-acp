@@ -8,10 +8,11 @@ whether a deletion waits for the user:
   permission card, and workers run with the engine mode that keeps every
   mutating tool call visible to ``engine.permissions.PermissionBridge``
   (``configuration.policy.WORKER_MODE_FLOOR``).
-* Development: the whole computer (:data:`HOST_WIDE`). A writing worker's
-  brokered commands get host-writable mounts and an outside file write needs
-  no card; a recognized deletion, a write to a protected control-plane path
-  and a command run outside the sandbox still ask.
+* Development: the whole computer (:data:`HOST_WIDE`). Every brokered
+  command -- any role's ``command_run`` and automatic verification -- gets
+  host-writable mounts (the role and scopes still decide the project), and
+  an outside file write needs no card; a recognized deletion, a write to a
+  protected control-plane path and a command run outside the sandbox still ask.
 * Auto: the whole computer, and nothing asks. The same host-writable command
   profile as Development, and the runtime answers every approval card itself
   by selecting the engine's own one-shot allow option (see
@@ -52,6 +53,14 @@ MODES = (DEVELOPMENT, GUARDED, AUTO)
 #: brokered commands (``orchestration.sandbox.development_command``) and
 #: outside file writes without a routine card.
 HOST_WIDE = frozenset({DEVELOPMENT, AUTO})
+
+
+def command_profile(mode) -> str:
+    """The sandbox profile every runtime-launched command of a task in
+    ``mode`` gets -- a worker's ``command_run`` of any role and an automatic
+    verification check alike: ``development`` (host-writable) or
+    ``restricted``. Receipts and check observations record it."""
+    return "development" if normalize(mode) in HOST_WIDE else "restricted"
 LABELS = {DEVELOPMENT: "Development mode", GUARDED: "Guarded mode", AUTO: "Auto mode"}
 DESCRIPTIONS = {
     DEVELOPMENT: "Workers can work anywhere on this computer without asking. A deletion still asks you first. Docker and arbitrary code can bypass filesystem masks.",

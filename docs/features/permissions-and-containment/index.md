@@ -161,7 +161,7 @@ work, and whether a deletion waits for the user.
 | `outside_write` | consent card | no card, except a protected control-plane path (consent card) | runtime answers the card itself |
 | `outside_command` (no sandbox) | consent card | consent card | runtime answers the card itself |
 | Declared deletion (`project_delete`, `command_delete`, native delete) | consent card | consent card | runtime answers the card itself |
-| Read-only/reviewer command and automatic verification | restricted | restricted | restricted |
+| Read-only/reviewer `command_run` and automatic verification | restricted; project read-only | host-writable masks, any existing cwd; project read-only (verification: git-ignored directories writable) | same as Development |
 | Engine jail and worker mode floor | unchanged | unchanged | jail unchanged; most permissive offered worker mode |
 | Channel, role, revocation, owner deny, review and completion gates | retained | retained | retained |
 
@@ -387,8 +387,8 @@ Covered by `tests/test_project_skill_links.py`.
 
 `command_run` requires Linux bubblewrap and has no silent unsandboxed fallback.
 Its effective mounts depend on [access mode](#access-mode-development-guarded-and-auto).
-Restricted commands use read-only real HOME with writable tool caches; Development
-and Auto writers use real writable host resources. Both filter Cortex/credential environment
+Restricted commands (Guarded) use read-only real HOME with writable tool caches;
+in Development and Auto every role's commands use real writable host resources. Both filter Cortex/credential environment
 variables and retain validated owner SSH-agent access and shared network
 and mounts the project read-only except for writing workers, who receive the
 whole project writable regardless of their narrower declared coordination work
@@ -409,7 +409,12 @@ retained output could not be written), or an unexpected runtime exception, is
 exception class (plus an `OSError`'s reason); the traceback goes to the
 engine's stderr log, and the request key is fenced so it is never re-run.
 Automatic verification may write only the directories the project's git ignores
-(caches, builds, installed dependencies); the project's `.git` is masked there.
+(caches, builds, installed dependencies) inside the project; the project's `.git`
+is read-only there. Outside the project it follows the task's access mode like
+`command_run`: restricted in Guarded, the host-writable profile in Development and
+Auto. Each check records its profile; a mode switch stops a running check as
+incomplete (`execution_policy_changed`), and a reviewer reuses a runtime check
+only when it ran in the profile the reviewer's own command would get.
 
 ### Git and tool state
 

@@ -131,6 +131,7 @@ def test_automatic_verification_can_inspect_git_but_cannot_write(tmp_path, repo,
     runtime_root.mkdir()
     store = Store(runtime_root / '.cortex', project_root=runtime_root)
     task = bootstrap_task(store, SourceEvent(origin='verify-test', event_id='one'), 'Verify', 'owner')
+    TaskMachine(store).create(task.task_id, 'Verify')
     before = revision.capture_revision(str(root))
     digest = before.get('dirty_digest') or before.get('digest')
     common = repo / '.git'
@@ -154,6 +155,89 @@ def test_automatic_verification_can_inspect_git_but_cannot_write(tmp_path, repo,
     assert len(recorded[0][1]) == 3
     assert all(check['exit_code'] == 0 and check['complete'] for check in recorded[0][1])
     assert (root / 'a.txt').read_text() == 'one\n'
+
+
+@pytest.mark.parametrize('mode,profile', [('development', 'development'), ('auto', 'development'),
+                                          ('guarded', 'restricted')])
+@pytest.mark.requires_bwrap
+@pytest.mark.real_verification_sandbox
+def test_automatic_verification_follows_access_mode(tmp_path, repo, monkeypatch, mode, profile):
+    from cortex_runtime.configuration import access_mode
+    home = tmp_path / 'home'
+    (home / '.docker/buildx/activity').mkdir(parents=True)
+    monkeypatch.setenv('HOME', str(home))
+    runtime_root = tmp_path / 'runtime'
+    runtime_root.mkdir()
+    store = Store(runtime_root / '.cortex', project_root=runtime_root)
+    task = bootstrap_task(store, SourceEvent(origin='verify-test', event_id='one'), 'Verify', 'owner')
+    TaskMachine(store).create(task.task_id, 'Verify')
+    access_mode.switch(store, task.task_id, mode, origin='acp_set_mode')
+    before = revision.capture_revision(str(repo))
+    digest = before.get('dirty_digest') or before.get('digest')
+    # What `docker build` does on every run: record the builder's activity in HOME.
+    activity = home / '.docker/buildx/activity/default'
+    script = (
+        'from pathlib import Path\n'
+        f'try: Path({str(activity)!r}).write_text("now")\n'
+        'except OSError: print("host read-only")\n'
+        'try: Path("a.txt").write_text("forbidden")\n'
+        'except OSError: pass\n'
+        'else: raise AssertionError("project writable")\n')
+    context = dict(revision=1, nodes=[dict(stage='review', result=dict(project_digest=digest))],
+                   plan=dict(verification=[['python3', '-B', '-c', script]]))
+    recorded = []
+    machine = SimpleNamespace(context=lambda _: context,
+                              move=lambda *args, **kwargs: pytest.fail(str(kwargs)),
+                              record_verification=lambda *args: recorded.append(args))
+    runtime = SimpleNamespace(_store=store, _task_project_root=lambda _: str(repo),
+                              _task_workspace_root=lambda _: str(repo))
+    _verification(runtime, task.task_id, machine, None, threading.Event())
+    [check] = recorded[0][1]
+    assert check['exit_code'] == 0 and check['complete'] and check['profile'] == profile, check
+    assert activity.exists() == (profile == 'development')
+    assert (repo / 'a.txt').read_text() == 'one\n'
+    with store.connection() as db:
+        started = json.loads(db.execute("SELECT payload_json FROM runtime_events WHERE type='CHECK_EXECUTION_STARTED'").fetchone()[0])
+    assert started['profile'] == profile
+
+
+@pytest.mark.requires_bwrap
+@pytest.mark.real_verification_sandbox
+def test_mode_switch_stops_a_running_verification_check(tmp_path, repo):
+    from cortex_runtime.configuration import access_mode
+    runtime_root = tmp_path / 'runtime'
+    runtime_root.mkdir()
+    store = Store(runtime_root / '.cortex', project_root=runtime_root)
+    task = bootstrap_task(store, SourceEvent(origin='verify-test', event_id='one'), 'Verify', 'owner')
+    TaskMachine(store).create(task.task_id, 'Verify')
+    access_mode.switch(store, task.task_id, 'development', origin='acp_set_mode')
+    before = revision.capture_revision(str(repo))
+    digest = before.get('dirty_digest') or before.get('digest')
+    started = tmp_path / 'started'
+    script = f'from pathlib import Path;import time;Path({str(started)!r}).write_text("yes");time.sleep(30)'
+    context = dict(revision=1, nodes=[dict(stage='review', result=dict(project_digest=digest))],
+                   plan=dict(verification=[['python3', '-B', '-c', script]]))
+    recorded = []
+    machine = SimpleNamespace(context=lambda _: context,
+                              move=lambda *args, **kwargs: pytest.fail(str(kwargs)),
+                              record_verification=lambda *args: recorded.append(args))
+    runtime = SimpleNamespace(_store=store, _task_project_root=lambda _: str(repo),
+                              _task_workspace_root=lambda _: str(repo))
+    def switch():
+        import time
+        deadline = time.monotonic() + 10
+        while not started.exists() and time.monotonic() < deadline:
+            time.sleep(.01)
+        access_mode.switch(store, task.task_id, 'guarded', origin='acp_set_mode')
+    thread = threading.Thread(target=switch)
+    thread.start()
+    _verification(runtime, task.task_id, machine, None, threading.Event())
+    thread.join()
+    [check] = recorded[0][1]
+    assert not check['complete'] and check['profile'] == 'development', check
+    with store.connection() as db:
+        failure = db.execute('SELECT failure FROM large_outputs WHERE id=?', (check['large_output_id'],)).fetchone()[0]
+    assert failure == 'execution_policy_changed'
 
 
 @pytest.mark.parametrize('relative', sorted(PROJECT_NOTES))

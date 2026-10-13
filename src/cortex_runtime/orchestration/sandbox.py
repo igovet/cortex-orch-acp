@@ -698,12 +698,13 @@ def protected_host_paths(root, environ):
 
 @contextmanager
 def development_command(root, scratch, argv, scopes, *, environ, readonly=(), git_guard=None):
-    """Host-writable brokered commands; engine/verification jails are unchanged.
+    """Host-writable commands of a Development or Auto task; the engine jail is unchanged.
 
+    The mode decides the host (writable outside the protected control
+    plane); ``scopes`` still decide the project: a writing worker's whole
+    project, a check's git-ignored directories, nothing for a read-only role.
     Docker, outside aliases and same-user programs can bypass direct masks.
     """
-    if '.' not in scopes:
-        raise StoreError('gateway_scope_denied')
     with gateway_command(root, scratch, argv, scopes, system_root=True, readonly=readonly,
                          reveal=frozenset({'.git'}), git_writable=True, git_guard=git_guard) as (command, fds):
         at = command.index('--ro-bind')

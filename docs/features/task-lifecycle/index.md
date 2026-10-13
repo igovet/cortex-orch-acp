@@ -67,7 +67,10 @@ left in RECONCILING after VERIFICATION_PASSED retries these same gates: eligible
 work completes through runtime synthesis, otherwise it is handed to the
 coordinator. Committed synthesis is reused without another completion or synthesis
 event. Display uses
-the existing ACP assistant-message path and retained pipeline, not a new host API.
+the existing ACP assistant-message path and retained pipeline, not a new host API:
+on completion the stored synthesis -- runtime-composed or the coordinator's
+`synthesis_submit` text with its "Not verified" list -- is sent as an assistant
+message before the completion label, so the chat never ends with the bare label.
 Automated tests cover emission and recovery, not rendered Desktop qualification.
 
 For declines covered by its fixed vocabulary, `orchestration/synthesis.py`

@@ -440,7 +440,7 @@ def _command_cwd(root, args, development):
     root = Path(root).resolve(strict=True)
     if path != root and root not in path.parents and not development:
         raise StoreError('gateway_command_cwd_denied', 'cwd', str(path), 'a directory inside the task working tree',
-                         'Outside the project, a writing worker in Development or Auto may use this cwd; in Guarded '
+                         'Outside the project, a command in Development or Auto may use this cwd; in Guarded '
                          'use outside_command, which the user confirms.')
     from .sandbox import protected_host_paths
     if development:
@@ -469,8 +469,9 @@ def _run_command_process(store, channel, launch, fds, output, effects, limit, *,
         with store.connection() as db:
             db.execute('BEGIN IMMEDIATE')
             granted, _ = _authority(db, channel)
-            if policy and not granted:
-                raise StoreError('gateway_scope_denied')
+            # A host-wide command of a writing worker stops with its grant; a
+            # read-only role's never had one.
+            writer = bool(granted)
             if policy and _command_policy(db, channel.task_id) != policy:
                 raise StoreError('execution_policy_changed')
             if directory:
@@ -500,7 +501,7 @@ def _run_command_process(store, channel, launch, fds, output, effects, limit, *,
                     granted, _ = _authority(db, channel)
                 except StoreError:
                     failure = 'authority_revoked'; break
-                if policy and not granted:
+                if policy and writer and not granted:
                     failure = 'authority_revoked'; break
                 if policy and _command_policy(db, channel.task_id) != policy:
                     failure = 'execution_policy_changed'; break
@@ -526,10 +527,11 @@ def _command(store,channel,root,scopes,args,ref,owner,effects):
     with store.connection() as db:
         _authority(db, channel)
         policy = _command_policy(db, channel.task_id)
-    # Development and Auto: a writing worker's commands work on the whole
-    # computer (one host-writable profile, named 'development' in receipts).
-    from ..configuration.access_mode import HOST_WIDE
-    development = bool(scopes and policy['mode'] in HOST_WIDE)
+    # Development and Auto: every worker's commands work on the whole computer
+    # (one host-writable profile, named 'development' in receipts); the role
+    # still decides the project, which stays read-only without a write grant.
+    from ..configuration.access_mode import command_profile
+    development = command_profile(policy['mode']) == 'development'
     from ..engine.permissions import declared_command_deletion
     if declared_command_deletion(args['argv']):
         if not scopes:

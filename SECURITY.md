@@ -558,8 +558,9 @@ auth, cookie, session; a commit author's `GIT_AUTHOR_NAME`/`_EMAIL`/`_DATE` are
 identity and pass), and the host network, devices, supplementary groups and
 session sockets remain visible. Read-only mounts
 alone do not prevent mutating Docker socket requests; there is no implicit privilege escalation. External MCP
-servers and automatic verification get no HOME, network or inherited environment
-unless explicitly granted. External hardlinks in the task tree are mounted
+servers get no HOME, network or inherited environment unless explicitly granted;
+automatic verification runs with the same owner environment and the command
+profile of the task's access mode. External hardlinks in the task tree are mounted
 read-only where identified; this is not a host-wide alias guarantee. Draft writes require the exact owned unpublished draft ID.
 File actions and command starts recheck authority at the transaction boundary; running
 commands and external servers are terminated on observed revocation.
@@ -618,8 +619,13 @@ Fresh ACP sessions durably start **Development**. A writing worker's ordinary
 `command_run` uses host-writable mounts, real HOME, real /var/tmp, owner devices,
 groups and shared network through the channel-bound host broker. Docker/Compose,
 SDK/cache state and authorized outside-project cwd need no routine permission
-card merely for crossing the project boundary. Engines themselves stay jailed;
-read-only roles, reviewers and automatic verification stay restricted.
+card merely for crossing the project boundary. The mode, not the role, decides
+the host: read-only roles, reviewers and automatic verification get the same
+host-writable profile (a `docker build` check can record its builder state in
+`~/.docker/buildx`), while their project stays read-only -- verification may
+write only git-ignored directories, and a check that changes the reviewed
+revision or outlives a mode switch is incomplete. Guarded keeps every command
+restricted. Engines themselves stay jailed.
 
 This is **trusted local development, not hostile-code isolation**. Direct masks
 hide the bound task's private runtime storage and protect Git configuration,
@@ -750,8 +756,7 @@ outlives it is no longer swept, and could still plant one of those absent entrie
 -- the same class as the racing same-user process this document already excludes.
 A writing worker can also leave an interactive rebase or cherry-pick in progress;
 git shows that state and runs its todo list only when the owner continues it.
-Reviewers and read-only roles see `.git` read-only; automatic verification does
-not see it. `project_read`/`project_write`/`project_edit`/`project_delete` still refuse every
+Reviewers, read-only roles and automatic verification see `.git` read-only. `project_read`/`project_write`/`project_edit`/`project_delete` still refuse every
 path through `.git`, `.cortex`, `.codex` or `.claude`, and plan scopes cannot name
 them. The single exception is `project_skill_link`: a writing worker may create or
 remove exactly the relative symlink `.claude/skills/<name>` ->

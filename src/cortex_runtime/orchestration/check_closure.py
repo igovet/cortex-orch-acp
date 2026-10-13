@@ -105,6 +105,8 @@ def verified_runtime_runs(db, task_id, plan_revision):
             "AND type='CHECK_EXECUTION_STARTED' AND json_extract(payload_json,'$.command_ref')=?",
             (task_id, ref)).fetchall()
         binding = dict(command_ref=ref, argv=argv, revision=plan_revision, revision_digest=digest, index=index)
+        if 'profile' in check:
+            binding['profile'] = check['profile']
         if (len(starts) != 1 or starts[0]['id'] != start_id or starts[0]['actor'] != 'runtime'
                 or json.loads(starts[0]['payload_json']) != binding):
             return None

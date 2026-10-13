@@ -279,7 +279,7 @@ def test_literal_arguments_need_no_deletion_consent(development, monkeypatch, re
     receipt = gateway.dispatch(store, worker, "command_run", dict(argv=argv, request_key="literal"))
     assert receipt["exit_code"] == 0 and receipt["complete"], receipt
     assert receipt["output"] == literal + ("\n" if program == "echo" else "")
-    assert receipt["profile"] == ("restricted" if read_only else "development")
+    assert receipt["profile"] == "development"
 
 
 def test_command_identity_does_not_collide():
@@ -330,7 +330,7 @@ def test_real_host_write_restricted_home_and_private_masks(development):
 
 
 @pytest.mark.parametrize("mode", ["development", "auto"])
-def test_private_cwd_alias_and_read_only_profile_are_refused(development, monkeypatch, mode):
+def test_private_cwd_alias_and_read_only_deletion_are_refused(development, monkeypatch, mode):
     root, store, worker, home = development
     access_mode.switch(store, worker.task_id, mode, origin="acp_set_mode")
     alias = home / "alias"
@@ -338,10 +338,38 @@ def test_private_cwd_alias_and_read_only_profile_are_refused(development, monkey
     with pytest.raises((StoreError, OSError)):
         gateway.dispatch(store, worker, "command_run", dict(argv=["true"], cwd=str(alias), request_key="alias"))
     monkeypatch.setattr(gateway, "_authority", lambda db, ch: ([], "read-only"))
-    with pytest.raises(StoreError, match="gateway_command_cwd_denied"):
-        gateway.dispatch(store, worker, "command_run", dict(argv=["true"], cwd=str(home), request_key="read-only"))
     with pytest.raises(StoreError, match="gateway_scope_denied"):
         gateway.dispatch(store, worker, "command_run", dict(argv=["rm", "fixture"], request_key="readonly-delete"))
+
+
+@pytest.mark.usefixtures("unjailed_gateway_command")
+@pytest.mark.parametrize("mode,profile", [("development", "development"), ("auto", "development"),
+                                          ("guarded", "restricted")])
+def test_read_only_role_command_follows_access_mode(development, monkeypatch, mode, profile):
+    root, store, worker, home = development
+    access_mode.switch(store, worker.task_id, mode, origin="acp_set_mode")
+    monkeypatch.setattr(gateway, "_authority", lambda db, ch: ([], "read-only"))
+    if profile == "restricted":
+        with pytest.raises(StoreError, match="gateway_command_cwd_denied"):
+            gateway.dispatch(store, worker, "command_run", dict(argv=["true"], cwd=str(home), request_key="outside"))
+    else:
+        receipt = gateway.dispatch(store, worker, "command_run", dict(argv=["true"], cwd=str(home), request_key="outside"))
+        assert receipt["complete"] and receipt["cwd"] == str(home), receipt
+    receipt = gateway.dispatch(store, worker, "command_run", dict(argv=["true"], request_key="inside"))
+    assert receipt["profile"] == profile and receipt["complete"], receipt
+
+
+@pytest.mark.requires_bwrap
+def test_real_read_only_role_writes_host_not_project(development, monkeypatch):
+    root, store, worker, home = development
+    monkeypatch.setattr(gateway, "_authority", lambda db, ch: ([], "read-only"))
+    outside, inside = home / "buildx-activity", root / "reviewer-wrote"
+    script = (f"from pathlib import Path\nPath({str(outside)!r}).write_text('ok')\n"
+              f"try: Path({str(inside)!r}).write_text('bad')\nexcept OSError: print('project read-only')\n"
+              "else: raise AssertionError('project writable')")
+    result = gateway.dispatch(store, worker, "command_run", dict(argv=[sys.executable, "-B", "-c", script], request_key="ro"))
+    assert result["exit_code"] == 0 and result["complete"] and result["profile"] == "development", result
+    assert outside.read_text() == "ok" and not inside.exists()
 
 
 @pytest.mark.parametrize("mode,origin", [("auto", "model"), ("unknown", "acp_set_mode"), ("", "acp_set_mode")])

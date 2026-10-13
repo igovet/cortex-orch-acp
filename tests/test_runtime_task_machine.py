@@ -284,11 +284,12 @@ def test_exact_verified_command_closes_only_its_declared_gap(tmp_path, mode, cwd
     with pytest.raises(StoreError, match='synthesis_gaps_undisclosed') as error:
         state.submit_synthesis(channel, 'Verified')
     assert 'frontend tests' in error.value.correction
-    closes_backend = mode == 'guarded' and cwd_matches
+    # A pass in the profile the task's mode gives commands, in the task root.
+    closes_backend = cwd_matches
     assert ('backend tests' not in error.value.correction) == closes_backend
     gaps = [dict(item='frontend tests', blocker='The frontend command did not run.')]
     if not closes_backend:
-        gaps.append(dict(item='backend tests', blocker='Only a different command profile or cwd ran.'))
+        gaps.append(dict(item='backend tests', blocker='Only a different cwd ran.'))
     assert state.submit_synthesis(channel, 'Verified', gaps)['recorded']
 
 

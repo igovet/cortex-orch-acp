@@ -461,6 +461,11 @@ def test_controller_skips_reconciliation_only_when_eligible(tmp_path, eligible, 
     if delayed_exit:
         assert kinds(machine, task).index('VERIFICATION_PASSED') < kinds(machine, task).index('TEST_REVIEWER_EXIT')
     assert any(('Runtime-composed synthesis' if eligible else 'Runtime: COMPLETED') in m for m in messages)
+    if not eligible:
+        # The coordinator's own synthesis reaches the chat, before the label.
+        final = [i for i, m in enumerate(messages) if m.startswith('Coordinator fallback')]
+        assert len(final) == 1 and 'Not verified' in messages[final[0]], messages
+        assert final[0] < max(i for i, m in enumerate(messages) if 'Runtime: COMPLETED' in m)
 
 
 def registry_engine(machine, task, *, terminated=False, alive=False):
