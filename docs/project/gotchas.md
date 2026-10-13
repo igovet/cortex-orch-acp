@@ -40,8 +40,11 @@
     is true. An append replaces a unique tail anchor with itself plus the added
     text. If any edit fails, nothing is written. The receipt carries a bounded
     diff.
-  - Every successful write or edit clears that path's coverage on the channel,
-    so the next mutation needs a fresh read.
+  - Every successful write or edit replaces that path's coverage on the channel
+    with the bytes it just wrote, so the channel can edit its own result again
+    without re-reading. That coverage is complete only after a full write or an
+    edit of a completely read file; anyone else's later change is still a stale
+    read.
   - The write path fsyncs the temporary file before the rename and the parent
     directory after it. `src/cortex_runtime/engine/fs_bridge.py` does the same
     for engine-side file writes.

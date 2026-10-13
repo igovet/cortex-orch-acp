@@ -125,6 +125,18 @@ def record_read(db, channel, root, args, result):
     result['full_content_sha256'] = result['sha256'] if complete else None
 
 
+def record_own_write(db, channel, root, path, digest, *, complete, total_lines):
+    """After this channel's own successful write or edit it knows the bytes it
+    produced: record them as read, so its next edit of the same file needs no
+    re-read. Complete only when everything it wrote was known to it; a later
+    change by anyone else still fails as a stale read."""
+    ranges = [[1, total_lines]] if complete and total_lines else []
+    state = dict(path=path, sha256=digest, complete=complete, ranges=ranges)
+    db.execute('INSERT OR REPLACE INTO runtime_requests VALUES(?,?,?,?,?,?)',
+               (channel.task_id, _key(root, path), channel.channel_id, 'project_read_state',
+                digest, json.dumps(dict(complete=True, read_state=state))))
+
+
 def require_read(state, digest, *, complete):
     if state is None or (complete and not state['complete']):
         raise StoreError('gateway_complete_read_required' if complete else 'gateway_read_required',

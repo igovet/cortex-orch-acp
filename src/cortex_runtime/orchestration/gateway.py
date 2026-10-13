@@ -935,10 +935,18 @@ def dispatch(store,channel,operation,args):
                         result=_write(root,args,effects,read_state=state,require_complete_read=True)
                     else:
                         result=_edit(root,args,state,effects)
-                    # Invalidate read coverage after every mutation; the result is not a Read.
-                    db.execute('DELETE FROM runtime_requests WHERE task_id=? AND actor=? AND operation=? '
-                               "AND json_extract(result_json,'$.read_state.path')=?",
-                               (channel.task_id,channel.channel_id,'project_read_state',args['path']))
+                    # The channel knows the bytes it just produced: its next
+                    # edit needs no re-read (engines' own edit tools behave so).
+                    # Whole-file knowledge only after a full write, or an edit
+                    # of a completely read file; .gitignore gains protected
+                    # lines the model did not send.
+                    from .project_files import record_own_write
+                    complete = ((operation == 'project_write' or bool(state and state['complete']))
+                                and _parts(args['path']) != ('.gitignore',))
+                    record_own_write(db,channel,root,args['path'],result['sha256'],
+                                     complete=complete,total_lines=result['new_lines'])
+                    result['read_coverage_complete'] = complete
+                    result['full_content_sha256'] = result['sha256'] if complete else None
                 elif operation=='project_skill_link':
                     result=skill_links.apply(root,args,effects)
                 else:

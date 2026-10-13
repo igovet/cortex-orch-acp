@@ -269,8 +269,16 @@ file bodies. Coverage is capped at 2048 merged ranges, so a fragmented read
 cannot become complete. `full_content_sha256` is returned only when this
 channel's coverage of the current bytes is complete. A partial page's `sha256`
 is identity only and never authorizes an overwrite. A successful `project_write`
-or `project_edit` clears the path's coverage on that channel, so the next
-mutation needs a fresh read. Copying a digest from another channel, or computing
+or `project_edit` replaces the path's coverage on that channel with the digest
+of the bytes it just wrote, so the channel's next edit of its own result needs
+no re-read (the engines' native edit tools behave the same way, and workers
+edited twice in a row and were refused `gateway_read_required` before
+2026-10-13). The new coverage is complete after a full write or after an edit
+of a completely read file, never for `.gitignore` (the runtime adds protected
+lines the model did not send); otherwise it is partial and does not authorize
+`project_write`. The mutation receipt reports `read_coverage_complete` and
+`full_content_sha256` for that coverage. A change by anyone else afterwards is
+still `gateway_stale_read`. Copying a digest from another channel, or computing
 one outside the runtime, does not bypass this rule.
 
 `project_read` of a permitted missing path succeeds with `exists: false`,

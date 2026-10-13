@@ -381,3 +381,35 @@ def test_gitignore_edit_size_cap_includes_restored_protection(worker):
              edits=[dict(old_string='x\n', new_string='y\n')])
     assert target.read_bytes() == before
     assert not list(worker[3].glob('.cortex-write-*'))
+
+
+def test_own_edit_counts_as_read_for_the_next_edit_but_not_for_others_changes(worker):
+    # Live: workers read, edited, edited the same file again and were refused
+    # with gateway_read_required -- the runtime forgot the bytes they produced.
+    target = worker[3]/'file.txt'
+    target.write_text('alpha\nbeta\ngamma\n')
+    read(worker, offset=2, limit=1)
+    first = edit(worker, [dict(old_string='beta', new_string='BETA')])
+    assert first['read_coverage_complete'] is False and first['full_content_sha256'] is None
+    edit(worker, [dict(old_string='BETA', new_string='Beta')])
+    assert target.read_text() == 'alpha\nBeta\ngamma\n'
+    # Partial knowledge never becomes overwrite authority.
+    digest = hashlib.sha256(target.read_bytes()).hexdigest()
+    with pytest.raises(StoreError, match='gateway_complete_read_required'):
+        call(worker, 'project_write', path='file.txt', content='x\n', expected_sha256=digest)
+    # A change by anyone else is still a stale read.
+    target.write_text('alpha\nBeta\ngamma\nexternal\n')
+    with pytest.raises(StoreError, match='gateway_stale_read'):
+        edit(worker, [dict(old_string='Beta', new_string='b')])
+
+
+def test_edit_of_a_completely_read_file_keeps_whole_file_knowledge(worker):
+    target = worker[3]/'file.txt'
+    target.write_text('one\ntwo\n')
+    read(worker)
+    receipt = edit(worker, [dict(old_string='two', new_string='three')])
+    assert receipt['read_coverage_complete'] is True
+    assert receipt['full_content_sha256'] == hashlib.sha256(target.read_bytes()).hexdigest()
+    call(worker, 'project_write', path='file.txt', content='replaced\n', expected_sha256=receipt['full_content_sha256'])
+    edit(worker, [dict(old_string='replaced', new_string='again')])
+    assert target.read_text() == 'again\n'
