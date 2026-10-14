@@ -407,8 +407,8 @@ instructions, not runtime translation or semantic enforcement of arbitrary prose
 jail also leaves the host's real `/tmp` writable and the engine state directory
 writable apart from protected session-configuration files, so these locations
 are residual write surfaces, not denied by the project gateway. `.cortex` is hidden (for a task bound to a linked worktree, the jail root is that worktree
-and the main repository's shared `.cortex` is masked too) and `.codex`,
-`.claude` are read-only; `.git` is read-only except the
+and the main repository's shared `.cortex` is masked too); the project's
+`.codex` and `.claude` are ordinary project paths; `.git` is read-only except the
 repository data git needs for a writing worker (see
 [Git and tool state in the project](#git-and-tool-state-in-the-project)). The coordinator, reviewers and
 read-only roles get no project write grant. Database-architect and
@@ -549,8 +549,8 @@ Cortex gateway file writes check assignment and role authority (writing workers 
 whole project writable for a writing worker; that jail grant is broader than
 the worker's runtime-declared assignment scope. Additional access requests
 update only the declared-scope writer reservations after runtime validation,
-not the OS jail. Private `.cortex`, `.codex` and `.claude` paths are masked,
-and the project's `.git` is visible as described below. The restrictive command profile runs as the owner: their user and
+not the OS jail. Private `.cortex` paths are masked, the project's `.codex` and
+`.claude` are ordinary project paths, and the project's `.git` is visible as described below. The restrictive command profile runs as the owner: their user and
 group names resolve, their real HOME is mounted read-only (so its dotfiles and
 credentials are readable by the command), the runtime's environment is passed on
 except `CORTEX_*` and credential-like variables (token, secret, password, API key,
@@ -769,8 +769,20 @@ outlives it is no longer swept, and could still plant one of those absent entrie
 A writing worker can also leave an interactive rebase or cherry-pick in progress;
 git shows that state and runs its todo list only when the owner continues it.
 Reviewers, read-only roles and automatic verification see `.git` read-only. `project_read`/`project_write`/`project_edit`/`project_delete` still refuse every
-path through `.git`, `.cortex`, `.codex` or `.claude`, and plan scopes cannot name
-them. The single exception is `project_skill_link`: a writing worker may create or
+path through `.git` or `.cortex`, and plan scopes cannot name them.
+
+The project's own `.claude` and `.codex` are ordinary project paths: a writing
+worker may read, write and delete them with the file tools and commands like any
+other project file, and `project_git` status/diff and revision digests include
+them. Residual risk: their settings, hooks, MCP server entries, agents, commands
+and skills configure later Claude Code and Codex sessions opened in this project,
+the owner's own interactive ones included, and a hook or MCP command written
+there runs outside any Cortex jail when such a session starts. Review changes to
+these directories before opening the project natively; a user deny-write path
+(for example `.claude/settings*.json`) keeps chosen entries read-only. The owner's
+engine state directories in HOME stay protected as described above.
+
+`project_skill_link` is the guarded way to expose a shared skill: a writing worker may create or
 remove exactly the relative symlink `.claude/skills/<name>` ->
 `../../.agents/skills/<name>` for a real in-project skill directory. It never
 writes a file, never follows a symlinked `.claude`, `.claude/skills` or

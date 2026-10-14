@@ -445,7 +445,6 @@ def gateway_command(root, scratch, argv, scopes, reveal=frozenset(), system_root
     git configuration paths removed when the command ends.
     """
     from .gateway import PRIVATE, _parts, _parent, _matches
-    from .project_paths import PROJECT_NOTES
     root = Path(root).resolve(strict=True)
     git = None
     if git_writable and any(scope in {'.', '**', '**/*'} for scope in scopes):
@@ -557,10 +556,6 @@ def gateway_command(root, scratch, argv, scopes, reveal=frozenset(), system_root
         # Read-only on top of the writable binds: demoted directories and the
         # user's deny-write paths.
         overlays=sorted(demoted|{path for path in denied_exact if path and (root/path).exists()}|set(denied_found))
-        # Engine directories are already protected; note denials are applied
-        # when notes are mounted after their private parent below.
-        overlays = [p for p in overlays if p not in {'.claude', '.codex'} and p not in PROJECT_NOTES]
-        candidates -= PROJECT_NOTES
         for relative in sorted(candidates,key=lambda p:(len(PurePath(p).parts),p)):
             path=root/relative
             if not path.exists(): continue
@@ -627,27 +622,6 @@ def gateway_command(root, scratch, argv, scopes, reveal=frozenset(), system_root
                 command+=['--ro-bind','/dev/null',str(path)]
             elif path.exists():
                 command+=['--tmpfs',str(path)]
-            # These exact project notes are data. Never follow an engine
-            # directory symlink or expose another private directory's content.
-            if original == root / original.name and original.name in {'.claude', '.codex'} and not original.is_symlink():
-                for relative in sorted(PROJECT_NOTES):
-                    if relative.split('/')[0] != original.name:
-                        continue
-                    try:
-                        parent = os.open(original.name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fds[0])
-                        try:
-                            pinned = os.open(relative.split('/')[1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
-                        finally:
-                            os.close(parent)
-                    except OSError:
-                        continue
-                    info = os.fstat(pinned)
-                    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
-                        os.close(pinned)
-                        continue
-                    fds.append(pinned)
-                    writable = _matches(relative, scopes) and not _matches(relative, readonly)
-                    command += ['--bind' if writable else '--ro-bind', f'/proc/self/fd/{pinned}', str(root / relative)]
             if path.is_dir() and original.name not in reveal:
                 command += ['--remount-ro', str(path)]
         yield command+['--chdir',str(root),'--',*argv],tuple(fds)
