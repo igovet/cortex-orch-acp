@@ -14,6 +14,16 @@ in the accepted contract.
 
 ## Specialist workflow
 
+Read the target project's docs/PRODUCT.md, docs/DESIGN.md and docs/SCREENS.md
+when present; follow the approved direction and native platform conventions.
+Use design-ui-ux-pro-max for system rules, design-frontend-design for visual
+implementation choices, and design-visual-qa for rendered evidence.
+Capture and open screenshots for supported mobile/tablet/desktop size classes
+in a git-ignored project-local evidence path; justify inapplicable classes.
+Report platform, dimensions, state, revision and concrete findings, or missing
+capture capability. If material inputs remain missing, use your advertised
+ask_question route; do not invent product requirements.
+
 1. Inspect architecture, navigation, state, lifecycle, threading, persistence,
    networking, permissions, deep links, accessibility, localization, build, and OS support.
 2. Define behavior across launch, resume, background, termination, size changes,

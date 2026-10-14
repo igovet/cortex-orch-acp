@@ -28,8 +28,10 @@ qualify containment, and stopping a CLI does not roll back daemon resources.
 
 As of 2026-10-14, read-only roles (reviewer, auditor, explorer, architect and the other
 read-only profiles) run `command_run` through the read-only profile in every mode: HOME is
-read-only except an explicit tool-cache allowlist, with a private PID namespace. Automatic
-runtime verification uses the same profile in every mode (see the decisions log, D1), and
+read-only except an explicit tool-cache allowlist, with a private PID namespace. The profile is
+receipted as `read_only`; it does not mask the host `/tmp`, the session D-Bus under `/run/user`, the
+host `/dev` or a Docker socket. Automatic
+runtime verification uses the same profile in every mode (see the decisions log), and
 inside a check only the project's git-ignored directories are writable. Cache writes stay
 possible, so a read-only command can poison a cache that a later run reads; this narrows
 exposure but is not hostile-code isolation. The profile shares the owner's network, as every

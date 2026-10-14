@@ -295,6 +295,10 @@ _CATALOG: dict[str, dict[str, str]] = {
         "en": "Paused. Send a message to continue this task, or /cortex-stop to close it.",
         "ru": "Задача на паузе. Отправьте сообщение, чтобы продолжить её, или /cortex-stop, чтобы закрыть.",
     },
+    "turn_paused_earlier": {
+        "en": "Your earlier stop paused this task after its turn ended; it continues with this message.",
+        "ru": "Ваша остановка поставила задачу на паузу уже после окончания хода; задача продолжается с этим сообщением.",
+    },
     "turn_paused_unknown_actions": {
         "en": " The stop cut off {count} worker action(s) mid-way; their outcome is unknown. They are not re-run automatically: the coordinator checks the project for their effect when you continue.",
         "ru": " Остановка прервала действий исполнителей на середине: {count}; их результат неизвестен. Они не повторяются автоматически: при продолжении координатор проверит их последствия в проекте.",

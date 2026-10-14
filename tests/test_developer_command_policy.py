@@ -160,7 +160,7 @@ def test_automatic_verification_can_inspect_git_but_cannot_write(tmp_path, repo,
 @pytest.mark.requires_bwrap
 @pytest.mark.real_verification_sandbox
 def test_automatic_verification_is_read_only_in_every_mode(tmp_path, repo, monkeypatch, mode):
-    # Owner decision D1: verification uses the read-only host profile in
+    # Verification uses the read-only host profile in
     # every mode; the tool-cache allowlist (buildx activity included) stays
     # writable, the rest of HOME does not.
     from cortex_runtime.configuration import access_mode
@@ -252,7 +252,7 @@ def test_mode_switch_does_not_stop_a_running_verification_check(tmp_path, repo):
     _verification(runtime, task.task_id, machine, None, threading.Event())
     thread.join()
     [check] = recorded[0][1]
-    assert check['complete'] and check['exit_code'] == 0 and check['profile'] == 'restricted', check
+    assert check['complete'] and check['exit_code'] == 0 and check['profile'] == 'read_only', check
     with store.connection() as db:
         failure = db.execute('SELECT failure FROM large_outputs WHERE id=?', (check['large_output_id'],)).fetchone()[0]
     assert failure is None

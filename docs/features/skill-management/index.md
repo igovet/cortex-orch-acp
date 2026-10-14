@@ -65,6 +65,10 @@ The user sees the runtime's own evidence list with the report ids and titles, fo
 
 Existing files never start a proposal. The runtime cannot inspect a model's intent, so it does not block a plan that ignores the decision; the instruction, the recorded decision, the plan, and the mandatory independent review are the controls for that.
 
+## Bundled core skills and project extras
+
+The Cortex package ships its own shared skills; a target project does not create them. These include the coordinator-only `requirements-intake` and `design-workflow` guidance and the worker-only `design-*` skills, which are readable only by their stage owners. Their provenance and the design workflow are described in [requirements intake](../requirements-intake/index.md) and [UI/UX design workflow](../design-workflow/index.md#bundled-design-skills). Project-specific procedures are added with `/skill-management` as described above. A session-listed project skill is read by its exact path through `read_skill`, and it can take precedence over a bundled design skill when applicable, as the design workflow instructs.
+
 ## Checks and evidence
 
 Check the name, frontmatter, internal links, every adopted file, collision handling, and the final link state. Use the focused no-paid checks available in the current checkout. Propose a few representative prompts and use available review feedback to improve the skill; do not assume the upstream `skill-creator` scripts, subagents, browser viewer, paid benchmark, or package-presenting tools are installed. State every behavior you could not observe. Runtime review and verification remain mandatory under Cortex policy.

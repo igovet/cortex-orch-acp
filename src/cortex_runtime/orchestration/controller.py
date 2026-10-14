@@ -70,7 +70,7 @@ _EXECUTION_LOCKS_GUARD = threading.Lock()
 def _title_from_objective(objective, max_chars=200):
     """A short display title for an assignment card/capsule entry.
 
-    A hard ``[:max_chars]`` slice can land mid-word (C-30). Cut at the last
+    A hard ``[:max_chars]`` slice can land mid-word. Cut at the last
     whitespace within the limit instead; an objective with no whitespace
     before the limit falls back to the hard slice rather than growing
     unbounded."""
@@ -88,7 +88,7 @@ def _dispatch_ready(runtime, machine, task_id, channel, context, emit_tool_call)
                   for n in context['nodes'] if n['node_id'] in dependencies and n['result']]
         if node['node_id'] == CONSULTATION_NODE:
             # An escalation-created consultant reads no project source: its
-            # packet is the runtime-built report selection (owner decision D8).
+            # packet is the runtime-built report selection.
             inputs = machine.consultation_reports(task_id, node.get('revision', context['revision'])) + inputs
         review_evidence = []
         if node['stage'] == 'review':
@@ -162,7 +162,7 @@ def _verification_command(root, scratch, argv):
     """Prepare the production sandbox; tests may replace only this launch seam.
 
     Every access mode runs a check in the read-only host profile of a role
-    without a write grant (``sandbox.readonly_command``, owner decision D1):
+    without a write grant (``sandbox.readonly_command``):
     the host and HOME read-only except the explicit tool-cache allowlist, a
     private TMPDIR and /var/tmp, its own PID namespace, the protected control
     plane read-only. Only the project's git-ignored directories (caches,
@@ -1116,7 +1116,7 @@ def _stop_question(question, context, language):
             unpassed = ', '.join(
                 f"{c['name']}: {c['outcome']}" + (f" ({c['blocker']})" if c.get('blocker') else '')
                 # A failure an exact later rerun closed is history, not a current failure.
-                for c in result.get('checks', []) if c.get('outcome') != 'passed' and not c.get('closed_by')
+                for c in result.get('checks', []) if c.get('outcome') != 'passed' and not c.get('closed_by') and c.get('current_outcome') != 'retracted'
             )
             details += messages.render('worker_failed_details', language, node=node['node_id'], report_ref=result['report_ref'],
                                        summary=result['summary'],

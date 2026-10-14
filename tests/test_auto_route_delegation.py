@@ -183,7 +183,7 @@ def test_deep_work_moves_off_the_account_above_the_threshold(tmp_path):
 
 
 def test_worker_configuration_confirmed_is_findable_by_its_own_recovery_capsule(tmp_path):
-    """C-22: the event used to be stored with assignment_ref=None (``launch``
+    """The event used to be stored with assignment_ref=None (``launch``
     never had an "assignment_ref" key -- only the unrelated work-graph
     "assignment_id" -- so ``launch.get("assignment_ref")`` was always
     ``None``), and recovery.capsule's own lookup is an exact match on the
@@ -204,7 +204,7 @@ def test_worker_configuration_confirmed_is_findable_by_its_own_recovery_capsule(
 
 
 def test_a_known_hot_account_now_loses_to_an_unknown_alternative_despite_affinity(tmp_path):
-    """C-19 (owner D5), rank version 11: a known >=95%-used candidate
+    """Rank version 11: a known >=95%-used candidate
     always loses to a non-hot one now, even an *unknown*-usage
     alternative and even when engine affinity would otherwise keep the
     work on the hot account -- rank version 6's 'no known cheaper
@@ -225,7 +225,7 @@ def test_a_known_hot_account_now_loses_to_an_unknown_alternative_despite_affinit
 def test_light_work_still_moves_off_the_account_above_the_threshold_on_a_meaningful_gap(tmp_path):
     """A meaningfully cheaper known alternative still moves light work off
     the hot account; the hot/non-hot quota flag decides it directly now
-    (C-19, rank version 11), ahead of the usage-gap signal it used to
+    (rank version 11), ahead of the usage-gap signal it used to
     reach through."""
     store, channel, provisioning, adapter, connection_a, connection_b, log_a, log_b, project, environ = _setup(tmp_path)
     _routing(project, {"engine_affinity": {"*": "codex-acp"}})
@@ -741,11 +741,11 @@ def test_a_user_requested_flagship_is_dispatched_and_audited(tmp_path, monkeypat
 
 
 def test_a_user_revocation_reaches_the_live_route_audit(tmp_path, monkeypatch):
-    """C-11: ``orchestration.state.attempt_routing`` and
+    """``orchestration.state.attempt_routing`` and
     ``delegation.live_adapters._resolve_runtime_route`` carry the user's
     revocation (``routing.auto_route.user_model_revocation``) through to
     the real dispatch, not merely at the ``auto_route.choose()`` level --
-    the gap ``r_b98b7ed46749`` left open."""
+    the gap an earlier fix left open."""
     from cortex_runtime.orchestration import state
 
     store, channel, provisioning, adapter, connection_a, connection_b, log_a, log_b, project, environ = _setup(

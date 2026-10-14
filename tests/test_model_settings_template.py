@@ -23,9 +23,10 @@ def test_public_asset_preserves_exact_baseline_tiers_efforts_and_coordinator():
                                        "parameters": {"thought_level": "high"}}
     assert template["language"] == "ru"
     # Complete portable production default snapshot, saved 2026-10-12 at 14:23 UTC;
-    # 2026-10-13: Opus also standard-tier (UI/UX preferred_when) with request labels.
+    # 2026-10-13: Opus also standard-tier (UI/UX preferred_when) with request labels;
+    # 2026-10-14: the Opus condition covers frontend layout/styling, Sol's excludes it.
     canonical = json.dumps(template, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
-    assert hashlib.sha256(canonical.encode()).hexdigest() == "7bbc45efeaa017f69c64d1e3dd5dcec76d49bcd40467e4e80ed7cbd6c60d64d0"
+    assert hashlib.sha256(canonical.encode()).hexdigest() == "771bcccad9a96cfc818f58655be943a2263c779206fbffad8ef8744034fdc84e"
     expected = {
         ("claude-agent-acp", "default"): ("deep",),
         ("claude-agent-acp", "opus[1m]"): ("flagship", "deep", "standard"),

@@ -80,7 +80,7 @@ def coordinator_prompt_context(context):
                 continue
             outcome = check.get("outcome")
             if (outcome in {"not_run", "unverified"}
-                    or (outcome == "failed" and not check.get("closed_by"))):
+                    or (outcome == "failed" and not check.get("closed_by") and check.get("current_outcome") != "retracted")):
                 historical_check_gaps.append({
                     "node_id": node_id,
                     "check": check,

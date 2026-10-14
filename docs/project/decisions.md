@@ -1,41 +1,47 @@
-## 2026-10-14 orchestration audit decisions D1-D8
+## 2026-10-14 orchestration audit decisions
 
 An owner-approved audit of the orchestration prompts and logic produced these
 decisions. Each one states the owner's choice and what the code does now. Where
 the implementation is partial, the entry says so.
 
-### D1 read-only roles and the command host profile
+### Read-only roles and the command host profile
 
 Read-only roles (reviewer, auditor, explorer, architect) never receive a host-writable
 `command_run`. Their commands run through `sandbox.readonly_command`, in every access
 mode, with an explicit allowlist of writable home caches (`READ_ONLY_HOME_CACHES`),
-the scratch directory, `/tmp`, and a private PID namespace. The receipt profile is
-`restricted`. Outside-project working directories stay allowed in Development and Auto,
+the scratch directory, the host `/tmp`, and a private PID namespace. The receipt profile is
+`read_only`, which is distinct from the Guarded writer profile `restricted` and the host-writable
+`development` profile. Outside-project working directories stay allowed in Development and Auto,
 and refused in Guarded, as before. The earlier entry below ("read-only roles, review,
 verification ... unchanged in every mode") described the intended restriction; this entry
 records what `command_run` now enforces.
 
 Automatic runtime verification (`controller._verification_command`) uses the same
 `sandbox.readonly_command` profile in every access mode, and its receipts record
-`restricted`. Inside a check only the project's git-ignored directories are writable; the
+`read_only`. Inside a check only the project's git-ignored directories are writable; the
 source and the protected control plane stay read-only. The reviewer reuse rule
 (`reviewer_verification.reuse`) reuses only a check that ran in that read-only profile. The
 synthesis gap check (`state.synthesis_checks`) accepts a declared-command gap closed by a
-pass in the task mode's own command profile or in the read-only profile, so in Development
-and Auto a writing worker's host-writable pass with the same argv and cwd can close it. A
-Guarded task accepts only restricted passes. The read-only profile limits writes, not
-network egress: as with every owner command, the host network is shared.
+pass in the read-only profile, in the task mode's own command profile, or in the Guarded writer
+profile (`restricted`, which also names read-only runs recorded before the read-only profile had
+its own name). So in Development and Auto a writing worker's host-writable pass with the same argv
+and cwd can close it. Once a task is Guarded, a host-writable pass never closes a gap. The
+read-only profile limits writes, not network egress: as with every owner command, the host network
+is shared. Writes also remain reachable through the host `/tmp`, the session D-Bus and systemd user
+manager, the host `/dev` and a Docker socket (see the permissions page).
 
 The owner chose restoring the read-only intent over rewriting it, on the condition that
 nothing breaks. Cache writes stay possible through the allowlist, so ordinary package
 manager and test runs keep working. Residual risk: a read-only command can still poison
 a cache that a later run reads. This narrows exposure; it is not hostile-code isolation.
 
-### D2 runtime stop question: Finish and Continue
+### Runtime stop question: Finish and Continue
 
 On the runtime's own stop question, **Finish** ends the task `CANCELLED` with a
-`USER_FORCE_FINISHED` event. It is recognised by number, by stored text, by the rendered
-English or Russian text, and by its label. **Continue** resumes the runtime flow and never
+`USER_FORCE_FINISHED` event. The question is recognised by a structured runtime marker, not by
+its wording, so a coordinator question worded the same way never force-finishes the task. Its
+Finish option is recognised by number, by stored text, by the rendered English or Russian text,
+and by its label. **Continue** resumes the runtime flow and never
 releases a direct answer. Only an answer in the user's own words releases the question.
 
 An answer that closes planned work is certified before it becomes `COMPLETED`. If a work
@@ -43,7 +49,7 @@ gate (review or verification) did not pass, the task ends `FAILED` with blocker
 `answer_not_certified:<gap>` and an `ANSWER_NOT_CERTIFIED` event. Informational answers,
 and follow-up answers after a reopened completed task, are unchanged.
 
-### D3 user revocation of a model grant
+### User revocation of a model grant
 
 A newer user message that refuses the model, or a refusal that is newer than the grant,
 revokes the grant within the task. The routing audit then records
@@ -51,14 +57,15 @@ revokes the grant within the task. The routing audit then records
 Comparisons and remarks ("compare X with Y") decline a grant but do not revoke one.
 The live dispatch path carries the revocation to the recorded route decision.
 
-### D4 no escalation after infrastructure failures
+### No escalation after infrastructure failures
 
 A retry whose failure class is `engine_failure` or `transport_failure` (crash, EOF,
-poisoned session) does not raise the model tier. Only quality causes, or retries with no
+poisoned session), or `worker_lost` (a worker that vanished in a runtime restart or a host
+disconnect), does not raise the model tier. Only quality causes, or retries recorded with no
 failure class, escalate as before. No owner setting that would allow flagship escalation
 after such a failure exists; it is not implemented.
 
-### D5 quota ranking with a hot account
+### Quota ranking with a hot account
 
 A known candidate at or above 95% of its plan usage ranks behind any non-hot candidate,
 whether that candidate's usage is known or unknown. This happens before engine affinity.
@@ -66,24 +73,29 @@ The rank key moved the hot flag to position four, and `RANK_VERSION` is 11. Reje
 quota windows without a reset time expire after a bounded TTL, and a CLI window that stops
 being reported is pruned on the next successful refresh.
 
-### D6 Paseo cancel followed by a prompt
+### Paseo cancel followed by a prompt
 
 In a Paseo session, `session/cancel` followed by `session/prompt` on the same session is
 steering, not Stop. The cancelled coordinator turn ends at once. Running workers continue,
 and the new prompt is applied as steering. A lone cancel still pauses the task, but only
 after a grace window of 5 seconds (`DEFAULT_HOST_CANCEL_GRACE_SECONDS`) with no follow-up
 prompt. Non-Paseo clients keep the immediate pause. A user who wants Stop sends a lone
-cancel and waits out the window.
+cancel and waits out the window. The pause notice is shown on the next turn, because the cancelled
+turn can no longer emit updates. A failed deferred pause leaves a `host_cancel_pause_failed`
+progress event. A prompt that answers a question on the held session also resolves the hold, so
+it is steering, not a later pause.
 
-### D7 natural-language deny-write
+### Natural-language deny-write
 
 Only the explicit form `deny-write: <path>` (bare, single-quoted, double-quoted or
-backtick-quoted) creates a write denial. Wildcard or mask characters are rejected. Natural
+backtick-quoted) creates a write denial. Wildcard or mask characters are not stored in new
+entries. A denial that an earlier runtime stored with a wildcard still guards writes, matched as
+a glob. Natural
 language such as "do not modify ..." creates no denial. A denial is stored in its
 normalized path form, and a write is matched after the same normalization, so a `./`
 spelling cannot bypass it.
 
-### D8 senior consultation is escalation-only
+### Senior consultation is escalation-only
 
 A senior consultant is reached only through `escalation_request`. A plan that names the
 consultant is refused with `consultant_requires_escalation`. The runtime builds the
@@ -91,6 +103,40 @@ consultant's packet, from the reports the escalation names and then the reports 
 escalated revision, with each report's SHA-256 and recorded artifact versions. The
 consultant has no `access_request` and no `ask_question` route. It records a missing
 fact as a limitation in its report and asks the user nothing.
+
+## 2026-10-14 fix-node roles and own-probe retraction
+
+The owner asked for the runtime defects found after the audit to be fixed directly. Two
+runtime behaviours changed. Each entry states the rule now enforced and its limits.
+
+### Fix nodes choose a writing role
+
+A fix node used to keep the role of the node it repaired, even when that role cannot
+write files. Now a read-only source role is replaced by a writing specialist chosen from
+the original node's effective scope: `worker-technical-writer` for documentation-only
+scopes, `worker-qa-engineer` for tests-only scopes, and `worker-backend-dev` for any other
+scope. A writing role is kept. The fix keeps the effective scope exactly, so a finding
+cannot widen it. The rule is `fix_role` in `orchestration/state.py`, applied when the fix
+node is recorded after a REQUEST_CHANGES review, for targeted and fallback fixes alike.
+
+### Own-probe errors are retractable; outside commands have a full identity
+
+A failed check that came from the worker's own standalone Python probe (a syntax error,
+or a regex or assertion error from a literal pattern) can be retracted only by a later
+verified passing correction with the same name, operation, cwd and profile. The failure
+remains as history with a runtime-derived `retracted_by`; the current outcome is
+`retracted`, never `passed`. Every other failure keeps the rule that only an exact rerun
+with the same argv (and cwd, for outside commands) closes it. Test, lint, build and
+runtime-verification failures cannot be retracted.
+
+An `outside_command` identity now also includes its profile (`outside_confirmed`), so an
+outside failure closes only on an exact outside rerun, and a later unrelated run with a
+recorded identity no longer makes that rerun ambiguous. A later unrecorded run still does.
+
+Limits: the retraction is a narrow runtime check of receipts. The reason is the worker's
+claim, which independent review evaluates; the runtime does not judge the product. Historical
+receipts without an argv (or without a cwd for an outside command) still have no identity
+and fail closed. No identity is invented for them.
 
 ## 2026-10-13 access modes as trust levels
 
@@ -669,13 +715,13 @@ unchanged. Requested via a delivered user steer.
 
 ## 2026-09-23 audit remediation (user-approved)
 
-- D1 build-verification profile: keep it (all 23 profiles are required);
+- Build-verification profile: keep it (all 23 profiles are required);
   document it as runtime-reserved — not plannable, not dispatched — since the
   runtime itself executes command verification. Approved by the user.
-- D2 retention: ship a user-run maintenance CLI, `python3 src/cortex_clear.py
+- Retention: ship a user-run maintenance CLI, `python3 src/cortex_clear.py
   --project-root <path> --days N [--keep-thread <id>]`; the coordinator only
   explains it. Codex-era `CODEX_*` env protection is removed. Approved by the user.
-- D3 `docs/project/verification.md` is produced by a knowledge-harvest
+- `docs/project/verification.md` is produced by a knowledge-harvest
   refresh rather than hand-written, per the user.
 - Worker routing: a route-caused failure (quota/rate limit, model
   unavailable, engine start failure, unconfirmed worker mode) is recorded

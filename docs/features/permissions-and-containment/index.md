@@ -164,20 +164,32 @@ work, and whether a deletion waits for the user.
 | `outside_write` | consent card | no card, except a protected control-plane path (consent card) | runtime answers the card itself |
 | `outside_command` (no sandbox) | consent card | consent card | runtime answers the card itself |
 | Declared deletion (`project_delete`, `command_delete`, native delete) | consent card | consent card | runtime answers the card itself |
-| Read-only/reviewer `command_run` (every read-only role, every mode) | restricted read-only profile; cwd inside the task tree | restricted read-only profile; any existing cwd | same as Development |
-| Automatic runtime verification | read-only profile (`restricted`); project read-only, git-ignored directories writable | same read-only profile | same read-only profile |
+| Read-only/reviewer `command_run` (every read-only role, every mode) | read-only profile (`read_only`); cwd inside the task tree | read-only profile (`read_only`); any existing cwd | same as Development |
+| Automatic runtime verification | read-only profile (`read_only`); project read-only, git-ignored directories writable | same read-only profile | same read-only profile |
 | Engine jail and worker mode floor | unchanged | unchanged | jail unchanged; most permissive offered worker mode |
 | Channel, role, revocation, owner deny, review and completion gates | retained | retained | retained |
 
-The read-only profile binds HOME read-only except an explicit allowlist of tool caches
-(for example `.cache`, `.npm`, and the Docker buildx activity records), plus scratch and
-`/tmp`. It runs in a private PID namespace. Read-only roles therefore cannot write
-HOME startup files, sibling projects or the project tree, in any mode. Cache writes
-remain possible, so a read-only command can still poison a cache that a later run reads.
-Automatic runtime verification uses this same profile in every mode (owner decision D1, see
-[the decisions log](../../project/decisions.md)), so a check cannot write host state outside
-the tool-cache allowlist, scratch and `/tmp`. The profile limits writes, not network access: as with every owner command,
-the owner's network is shared.
+The read-only profile (receipts name it `read_only`; the Guarded writer profile is `restricted`
+and the host-writable Development/Auto profile is `development`) mounts the whole host read-only.
+HOME is read-only except an explicit allowlist of tool caches (for example `.cache`, `.npm`,
+and the Docker buildx activity records). Scratch is private, and the command runs in its own
+PID namespace. Through these mounts a read-only role's command cannot write the project tree,
+HOME startup files outside the cache allowlist, or other host files, in any access mode. The
+following paths are exceptions: they stay writable or reachable from a read-only command:
+
+- the host `/tmp`, bound writable, so files and sibling projects under `/tmp` can be written;
+- the session D-Bus and the systemd user manager under `/run/user` (audio, display and keyring
+  sockets too), so `systemd-run --user` and similar calls start processes outside the sandbox;
+- the host `/dev`, bound with its real devices;
+- a Docker socket, if the host has one: a read-only mount does not stop mutating Docker requests;
+- the owner's network, which the profile shares by owner decision.
+
+Cache writes remain possible, so a read-only command can still poison a cache that a later run
+reads. This narrows exposure; it is not hostile-code isolation. Automatic runtime verification
+uses this same profile in every access mode (see [the decisions log](../../project/decisions.md#read-only-roles-and-the-command-host-profile)),
+so its writes are limited to the git-ignored project directories, the tool-cache allowlist,
+scratch and the host `/tmp`, subject to the reachable paths above. The profile limits writes, not
+network access: as with every owner command, the owner's network is shared.
 
 A missing, refused, cancelled or timed-out answer to a consent card blocks the
 effect. Protected control-plane paths for `outside_write` are the
@@ -230,9 +242,13 @@ and engine-mode confirmation. Development does not select Claude
 bypassPermissions; no mode re-enables the native Claude or Codex shells, so
 outside-project work always goes through the brokered gateway tools.
 
-Commands retain cwd/profile/policy provenance. Observed Development policy or
-denial changes terminate the owned command group with incomplete
-`execution_policy_changed` evidence. Revocation/cancellation and timeouts still
+Commands retain cwd/profile/policy provenance. An observed change of the task's access
+policy (a mode switch) or of its write denials terminates a host-writable (Development or
+Auto) writing-worker command's owned command group with incomplete
+`execution_policy_changed` evidence. Read-only commands (every read-only role's command and
+automatic verification, which has the `read_only` profile in every mode) and Guarded writer
+commands are not stopped by such a change: a read-only command's profile does not depend on
+the mode, so its mode switch leaves it running. Revocation/cancellation and timeouts still
 stop the group. Neither termination nor switching to Guarded rolls back files,
 detached processes, containers, volumes or daemon builds. No incomplete command
 is automatically rerun. Earlier explicit Auto workers keep their confirmed
@@ -254,6 +270,14 @@ Writing workers receive project-wide gateway write authority, except private and
 user-protected paths; a declared assignment scope is a coordination work area,
 not an enforced project-path boundary. Writers reserve additional paths with
 `access_request` before changing them so parallel assignments remain coordinated.
+Owner deny-write entries come only from an explicit `deny-write: <path>` instruction (bare,
+single-quoted, double-quoted or backtick-quoted). Natural-language requests such as "do not
+modify X" create no entry, and a value containing wildcard or mask characters is skipped
+when parsed. Entries are stored in normalized form and checked after the same normalization
+for `project_write`, `project_edit`, `project_mkdir` and `project_delete`, both at dispatch and
+at the filesystem effect. An entry stored by an earlier runtime that contains `*`, `?` or `[`
+still guards writes: it is matched conservatively as a glob against both the normalized and
+the raw path, and the command sandbox keeps every stored entry that exists when a command starts read-only, wildcard or not. An exact entry naming a path that does not yet exist is not bound for commands, so a command can create that path; the gateway file tools still refuse it (see the `.claude` and `.codex` paragraph in `SECURITY.md`).
 Writer conflicts retry automatically on a bounded 1/2/4-second backoff, then
 receive a runtime grant or denial without a user question. Unsafe paths, owner
 deny-write policy and read-only roles receive immediate runtime denials. Retained
@@ -435,10 +459,16 @@ engine's stderr log, and the request key is fenced so it is never re-run.
 Automatic verification runs in the read-only profile in every mode, so it may write only
 the directories the project's git ignores (caches, builds, installed dependencies) inside
 the project; the project's `.git` is read-only there, and the rest of the host is read-only
-except the tool-cache allowlist and private scratch. Each check records its profile (`restricted`);
-a mode switch stops a running check as incomplete (`execution_policy_changed`). A reviewer
-reuses a runtime check only when it ran in the read-only profile, which is the profile a
-reviewer's own command gets; a check from a host-writable run is never reused.
+except the tool-cache allowlist, private scratch and the host `/tmp` (see the reachable paths
+above). Each check records its profile (`read_only`). A mode switch does not stop a running
+check: the check's profile does not depend on the mode, and a check cannot establish a pass if
+it fails, its output is incomplete or the project digest changes. A reviewer reuses a runtime
+check only when it ran in the `read_only` profile, which is the profile a reviewer's own command
+gets. A check recorded under the Guarded writer name (`restricted`) or the host-writable name
+(`development`) is never reused for a reviewer; it is run again instead. Gap closure accepts a
+pass in `read_only`, in the task mode's own writer profile, or in `restricted` (a Guarded writer's
+pass, which also covers read-only runs recorded before the read-only profile had its own name).
+A host-writable pass never closes a gap once the task is Guarded.
 
 ### Git and tool state
 

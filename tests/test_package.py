@@ -225,7 +225,7 @@ def test_orchestrator_routes_conditional_procedures_with_valid_links():
     from cortex_runtime.portable.roles import WORKER_ALIASES
     routing = (root/'references/worker-routing.md').read_text()
     plannable = set(NODE['properties']['role']['enum'])
-    # The senior consultant is escalation-only (owner decision D8).
+    # The senior consultant is escalation-only.
     reserved = {'code-reviewer', 'build-verification', 'senior-consultant'}
     catalogue = set(re.findall(r'^- `([^`]+)`:', routing, re.M))
     assert catalogue == plannable

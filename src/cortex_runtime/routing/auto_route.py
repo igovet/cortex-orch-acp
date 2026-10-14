@@ -458,14 +458,14 @@ def choose(role: str, project_root=None, environ: Mapping[str, str] | None = Non
             raise _policy_error("model_effort_policy_unsupported", "Pinned effort_ladder step is not permitted.")
         pinned_effort = nearest(effort or default_effort, permitted)
         if effort is not None and pinned_effort != effort:
-            # C-35 L1: a configured pin effort routing.json's own policy
+            # A configured pin effort routing.json's own policy
             # does not permit is silently lowered/raised to the nearest
             # permitted step (never refused); record that it happened.
             decision["pin_effort_clamped"] = dict(configured=effort, applied=pinned_effort)
         return Choice(best.connection_id, model, pinned_effort,
                       "auto:pin", decision, best.route.id)
     default_denied = {entry.route.id for entry in allowed if _default_auto_denied(overrides, entry)}
-    # C-21: a model configured with several native tiers (e.g. both
+    # A model configured with several native tiers (e.g. both
     # "light" and "standard") keeps its own non-stretch tiers even when its
     # *stretch* promotion to standard is excluded for this work; only a
     # model with no other native tier (light-only) is denied outright, so
@@ -595,7 +595,7 @@ RANK_VERSION = 11
 # ``quota`` moved from right after ``hint`` to right before ``used_percent``
 # in rank version 6 (a late tie breaker, behind the usage-gap signal,
 # retry diversification and affinity), then back to right after ``hint``
-# in rank version 11 (C-19): a candidate whose *known* usage reaches
+# in rank version 11: a candidate whose *known* usage reaches
 # :data:`HOT_PERCENT` must rank behind every non-hot candidate -- known or
 # unknown usage alike -- never merely a late, easily-ties-with-unknown tie
 # breaker affinity and diversification could still outrank.
@@ -641,7 +641,7 @@ def rank(role_tier: str, entries: Sequence, usage, tier_overrides: Mapping[str, 
        route loses to ``purpose`` and records ``ignored:owner_preferred``;
     4. the quota band (unknown is not hot): a candidate whose *known*
        usage is at or above :data:`HOT_PERCENT` ranks behind every
-       candidate below that band, known or unknown usage alike (C-19) --
+       candidate below that band, known or unknown usage alike --
        this outranks the usage-gap signal, diversification and affinity
        below, so a hot known candidate never wins merely by being the
        preferred engine or more suitable for the work;
@@ -759,7 +759,7 @@ def rank(role_tier: str, entries: Sequence, usage, tier_overrides: Mapping[str, 
             purpose_status = "honoured"
 
         def key(e):
-            # C-19: a candidate's own hot/known-quota flag ranks right after
+            # A candidate's own hot/known-quota flag ranks right after
             # preference/purpose/hint -- before the usage-gap band,
             # diversification and affinity -- so a known >=95% candidate
             # always loses to any non-hot one (known or unknown usage).

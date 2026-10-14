@@ -1,17 +1,18 @@
-"""C-30 (consolidated audit r_9731f0fc6d64, WP9): a worker's first prompt no
-longer repeats its objective as often, and the generated SKILL.md
+"""A worker's first prompt states its objective exactly once, in its
+runtime-authored assignment instructions, and the generated SKILL.md
 frontmatter/footer markers never leak into delivered instructions.
 
-Recovery capsules still carry the full objective verbatim in their own
-protected fields (``own_assignment.title``/``brief``, ``runtime.nodes[].
-objective`` -- see ``recovery/capsule.py`` and the pre-existing
+A capsule fetched through ``read_capsule`` still carries the full objective
+verbatim in its own protected fields (``own_assignment.title``/``brief``,
+``runtime.nodes[].objective`` -- see ``recovery/capsule.py`` and
 ``test_worker_own_huge_brief_stays_verbatim_never_a_null_tool_reference``);
-this file only asserts that the *literal* catalog+brief tail
+this file asserts that the literal catalog+brief tail
 (``acp/orchestrating_runtime.py``'s ``_provision_and_prompt_inner``) stops
 restating the title line when it adds nothing the brief does not already
-carry, that a long objective's display title is cut on a word boundary
-(``orchestration/controller.py``'s ``_title_from_objective``), and that
-inlined shared skills (``portable/roles.py``'s ``composed_instructions``)
+carry, that a capsule rendered in front of that brief references it instead
+of repeating it, that a long objective's display title is cut on a word
+boundary (``orchestration/controller.py``'s ``_title_from_objective``), and
+that inlined shared skills (``portable/roles.py``'s ``composed_instructions``)
 carry no YAML frontmatter or generated footer comment.
 """
 from __future__ import annotations
@@ -79,7 +80,7 @@ def test_composed_instructions_strip_generated_skill_frontmatter_and_footer():
 
 def test_worker_first_prompt_repeats_the_objective_exactly_once(tmp_path):
     store = Store(tmp_path / '.cortex', project_root=tmp_path)
-    task = bootstrap_task(store, SourceEvent(origin='test', event_id='c30'), 'Audit remediation', 'owner')
+    task = bootstrap_task(store, SourceEvent(origin='test', event_id='objective-once'), 'Audit remediation', 'owner')
     objective = 'Deliver the objective once per worker first prompt in this regression test.'
     captured: dict = {}
 
@@ -136,10 +137,7 @@ def test_worker_first_prompt_repeats_the_objective_exactly_once(tmp_path):
 
 
 def test_worker_first_prompt_with_inline_capsule_delivers_the_objective_exactly_once(tmp_path):
-    """C-30 (full fix, see r_99646044798e's own qualification contradiction:
-    the narrower test above never exercised a capsule-attached delivery at
-    all, so it stayed green at a ``<=4`` ceiling that no longer matched the
-    stated "objective once" goal).
+    """The narrower test above never exercises a capsule-attached delivery.
 
     Every real ``session_open``/post-compaction-continuation whose engine
     adapter supports delivery tracking (``delegation.live_adapters.
@@ -154,14 +152,13 @@ def test_worker_first_prompt_with_inline_capsule_delivers_the_objective_exactly_
     ``orchestration.controller._title_from_objective`` -- equals the
     objective exactly, the hardest case to collapse to one copy): the
     delivered message still carries the full objective exactly once --
-    kept verbatim only at
-    ``pipeline_and_assignments.own_assignment.brief`` (see
-    ``recovery.capsule._apply_inline_delivery_dedup``, and the literal-
-    brief strip in ``_begin_generation_delivery`` itself)."""
+    in the literal brief of the worker's own assignment instructions, never
+    only inside a data-labelled capsule block (see
+    ``recovery.capsule.reference_brief_delivered_inline``)."""
     from test_context_generations import GenerationAwareSessionRuntime
 
     store = Store(tmp_path / '.cortex', project_root=tmp_path)
-    task = bootstrap_task(store, SourceEvent(origin='test', event_id='c30-inline'), 'Audit remediation', 'owner')
+    task = bootstrap_task(store, SourceEvent(origin='test', event_id='objective-once-inline'), 'Audit remediation', 'owner')
     objective = 'Deliver the objective once per worker first prompt, even with a capsule attached.'
     captured: dict = {}
 
@@ -202,7 +199,39 @@ def test_worker_first_prompt_with_inline_capsule_delivers_the_objective_exactly_
         # the no-capsule scenario above and prove nothing new).
         assert 'Cortex recovery capsule' in message
         assert message.count(objective) == 1, message.count(objective)
+        # The one copy is the assignment's own instruction text after the
+        # capsule, never inside a data-labelled capsule block.
+        at = message.index(objective)
+        assert at > message.rindex('CORTEX_CAPSULE_DATA_END'), 'objective only inside the capsule'
+        assert 'Delivered once, verbatim, as this assignment' in message[:at]
         assert '---\nname:' not in message
         assert 'END OF COMPLETE CORTEX' not in message
     finally:
         runtime.shutdown()
+
+
+def _worker_capsule(brief):
+    return dict(
+        recipient=dict(role='worker', assignment_ref='a', attempt_id='xa'),
+        sections=dict(pipeline_and_assignments=dict(
+            own_assignment=dict(title='Do it', brief=brief, acceptance='Done'),
+            runtime=dict(nodes=[dict(node_id='N0', objective='Do it')]),
+        )),
+    )
+
+
+def test_a_capsule_without_the_brief_in_its_message_keeps_the_full_brief():
+    """A continuation prompt that does not carry the literal brief keeps the
+    capsule's own verbatim brief: the objective is never lost."""
+    from cortex_runtime.recovery.capsule import reference_brief_delivered_inline
+    capsule = _worker_capsule('{"objective": "Do it"}')
+    assert reference_brief_delivered_inline(capsule, 'Continue the work.') is capsule
+    referenced = reference_brief_delivered_inline(capsule, 'header\n\n{"objective": "Do it"}\n\nAcceptance: Done')
+    own = referenced['sections']['pipeline_and_assignments']['own_assignment']
+    assert own['brief']['status'] == 'referenced' and own['title']['status'] == 'referenced'
+    assert own['acceptance'] == 'Done'
+    assert referenced['sections']['pipeline_and_assignments']['runtime']['nodes'][0]['objective']['status'] == 'referenced'
+    # Rendering only: the built capsule itself is unchanged.
+    assert capsule['sections']['pipeline_and_assignments']['own_assignment']['brief'] == '{"objective": "Do it"}'
+    coordinator = dict(_worker_capsule('x'), recipient=dict(role='coordinator'))
+    assert reference_brief_delivered_inline(coordinator, 'x') is coordinator

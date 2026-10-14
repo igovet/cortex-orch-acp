@@ -3,7 +3,7 @@ from contextlib import contextmanager
 
 
 @contextmanager
-def verification_command(root, scratch, argv, profile="restricted"):
+def verification_command(root, scratch, argv, profile="read_only"):
     # Literal argv stays literal, even with spaces or shell metacharacters.
     # The shell only sets cwd/umask; it never evaluates the check's arguments.
     command = [

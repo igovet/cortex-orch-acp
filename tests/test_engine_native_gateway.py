@@ -103,7 +103,7 @@ def _declared_exec_tool_names(body):
 
 @pytest.mark.requires_bwrap
 def test_installed_wrapper_advertises_apply_patch_without_shell_or_view_image_tools(tmp_path):
-    """Closes the gap left unverified by r_98c4d5ec4233/r_edaa460fcf2e: proves,
+    """Closes a gap earlier reviews left unverified: proves,
     against the real installed App Server with the exact Cortex-forced config,
     that no shell/view_image tool is actually offered to the model -- not just
     that the feature flags read back false -- while apply_patch is still

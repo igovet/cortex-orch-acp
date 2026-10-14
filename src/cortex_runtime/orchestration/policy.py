@@ -21,9 +21,9 @@ _WILDCARD=re.compile(r'[*?\[\]]')
 
 
 def parse_denials(text):
-    """Recognize only an explicit 'deny-write: <path>' directive (owner
-    decision D7): no natural-language phrasing, and no wildcard or masked
-    path is ever accepted as a denial. The path may be quoted."""
+    """Recognize only an explicit 'deny-write: <path>' directive: no
+    natural-language phrasing, and no wildcard or masked path is ever
+    accepted as a new denial. The path may be quoted."""
     from .gateway import _parts
     values=[]
     for match in _DENY_WRITE.finditer(text):
@@ -32,7 +32,7 @@ def parse_denials(text):
             continue
         # Store the same normalized path parts the gateway's write-effect
         # check uses, so './secrets/key.txt' and 'secrets/key.txt' denote
-        # one denial (C-10).
+        # one denial.
         parts=_parts(value)
         if parts:
             values.append('/'.join(parts))

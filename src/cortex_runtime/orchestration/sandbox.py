@@ -680,8 +680,7 @@ def control_plane_paths(root, environ):
         paths.add(hooks)
     # The project's own git metadata (config, hooks, commondir, gitdir) --
     # for a linked worktree this can live outside the project entirely, so
-    # it needs its own protection here, not just the inside-project refusal
-    # (C-12).
+    # it needs its own protection here, not just the inside-project refusal.
     from ..delegation.revision import git_metadata_dirs
     for directory in git_metadata_dirs(str(root)) or ():
         paths.add(Path(directory))

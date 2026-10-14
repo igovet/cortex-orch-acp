@@ -114,6 +114,8 @@ def review_runtime_facts(store, task_id, assignment_ref, root, *, observed=None)
                                    current_outcome=outcome['outcome'], closed_by=outcome['closed_by'],
                                    receipt_ref=check['tool_call_ref'],
                                    digest_binding='not established for reviewed digest'))
+                if outcome['outcome'] == 'retracted':
+                    checks[-1].update(retracted_by=outcome['retracted_by'], invocation_error=check['invocation_error'])
         verification = json.loads(task['plan_json'] or '{}').get('verification', [])
 
     facts = dict(kind='runtime_verified_facts', revision=task['revision'],

@@ -45,8 +45,8 @@ _NATIVE_BLOCK = re.compile(
 # ``scripts/generate_agent_profiles.py``'s ``expected_skills``). Neither is
 # role content: an ACP engine has no native skill loader to read them, and
 # pasting them into every delivered prompt (the role body itself, plus once
-# per inlined shared skill -- see ``composed_instructions``) was pure noise
-# (C-30). Strip both from the *portable* body only; the canonical file and
+# per inlined shared skill -- see ``composed_instructions``) was pure noise.
+# Strip both from the *portable* body only; the canonical file and
 # its ``sha256``/``title`` are computed from the untouched raw bytes.
 _FRONTMATTER_BLOCK = re.compile(r"\A---\n.*?\n---\n+", re.S)
 _GENERATED_SKILL_FOOTER = re.compile(r"\n*<!--\s*END OF COMPLETE CORTEX[^>]*-->\s*\Z")
@@ -68,6 +68,9 @@ SHARED_ROLE_IDS = frozenset({
     "skill-authoring",
     "knowledge-harvest-scope",
     "tool-discipline-worker",
+    "requirements-intake", "design-workflow",
+    "design-frontend-design", "design-ui-ux-pro-max", "design-impeccable",
+    "design-reference-analysis", "design-visual-qa",
 })
 #: Shared skills restricted to the coordinator: a worker or the consultant
 #: (also a "worker"-kind channel) may never see or read these by
@@ -84,12 +87,29 @@ COORDINATOR_ONLY_SHARED_ROLE_IDS = frozenset({
     "coordinator-communication",
     "skill-management",
     "knowledge-harvest-scope",
+    "requirements-intake", "design-workflow",
 })
 
 # Procedures delivered only to project workers, never coordinator sessions.
 WORKER_ONLY_SHARED_ROLE_IDS = frozenset({
     "tool-discipline-worker", "skill-authoring", "knowledge-harvest",
+    "design-frontend-design", "design-ui-ux-pro-max", "design-impeccable",
+    "design-reference-analysis", "design-visual-qa",
 })
+
+# Design procedures are situational and restricted to their stage owners.
+DESIGN_SKILL_ROLES: dict[str, frozenset[str]] = {
+    "design-frontend-design": frozenset({"worker-frontend-dev", "worker-mobile-dev"}),
+    "design-ui-ux-pro-max": frozenset({"worker-ux-designer", "worker-mobile-dev"}),
+    "design-impeccable": frozenset({
+        "worker-ux-designer", "worker-accessibility-auditor", "worker-frontend-dev",
+    }),
+    "design-reference-analysis": frozenset({"worker-ux-designer"}),
+    "design-visual-qa": frozenset({
+        "worker-ux-designer", "worker-accessibility-auditor",
+        "worker-frontend-dev", "worker-mobile-dev", "worker-qa-engineer",
+    }),
+}
 
 
 def shared_skill_ids(role_kind: str, role_id: str | None = None) -> frozenset[str]:
@@ -97,6 +117,7 @@ def shared_skill_ids(role_kind: str, role_id: str | None = None) -> frozenset[st
     if role_kind == "coordinator":
         return SHARED_ROLE_IDS - WORKER_ONLY_SHARED_ROLE_IDS
     ids = SHARED_ROLE_IDS - COORDINATOR_ONLY_SHARED_ROLE_IDS
+    ids -= frozenset(skill for skill, roles in DESIGN_SKILL_ROLES.items() if role_id not in roles)
     if role_id == CONSULTANT_ROLE_ID:
         ids -= WORKER_ONLY_SHARED_ROLE_IDS
     return ids
@@ -181,7 +202,7 @@ def _role_kind(role_id: str) -> str:
 
 
 def known_role_ids() -> tuple[str, ...]:
-    """Every loadable role id: 22 specialists + consultant + orchestrator + 7 shared skills."""
+    """Every loadable role id: 22 specialists + consultant + orchestrator + registered shared skills."""
     worker_ids = tuple(sorted(
         path.name for path in SKILLS_ROOT.glob("worker-*") if (path / "SKILL.md").is_file()
     ))
@@ -295,7 +316,19 @@ COORDINATOR_REFERENCE_IDS = frozenset({
     "cortex-release", "governance", "host-compatibility", "incident",
     "live-qualification", "pipeline-publication", "recovery",
     "senior-consultation", "verification-coverage", "worker-routing",
+    "question-banks", "agreed-spec", "design-intake",
+    "PRODUCT", "DESIGN", "SCREENS", "visual-review",
 })
+# Fixed package resources linked by the coordinator-only intake/design skills.
+COORDINATOR_REFERENCE_PATHS = {
+    "question-banks": "requirements-intake/references/question-banks.md",
+    "agreed-spec": "requirements-intake/references/agreed-spec.md",
+    "design-intake": "design-workflow/references/design-intake.md",
+    "PRODUCT": "design-workflow/references/PRODUCT.md",
+    "DESIGN": "design-workflow/references/DESIGN.md",
+    "SCREENS": "design-workflow/references/SCREENS.md",
+    "visual-review": "design-workflow/references/visual-review.md",
+}
 EXAMPLE_REFERENCE_IDS = frozenset({
     "index", "documentation-example", "implementation-example",
     "investigation-example", "plan-example", "report-example",
@@ -303,18 +336,40 @@ EXAMPLE_REFERENCE_IDS = frozenset({
 })
 
 
-def read_reference(reference_id: str, *, role_kind: str = "worker") -> str:
+# Supporting data uses the same stage-role allowlist as its parent skill.
+DESIGN_REFERENCE_PATHS = {
+    "design-colors": ("design-ui-ux-pro-max", "references/colors.csv"),
+    "design-typography": ("design-ui-ux-pro-max", "references/typography.csv"),
+    "design-ux-guidelines": ("design-ui-ux-pro-max", "references/ux-guidelines.csv"),
+    "design-pro-rules": ("design-ui-ux-pro-max", "references/pro-rules.md"),
+    "design-critique": ("design-impeccable", "references/critique.md"),
+    "design-refinement": ("design-impeccable", "references/refinement.md"),
+    "design-defect-checklist": ("design-visual-qa", "references/defect-checklist.md"),
+}
+
+
+def reference_ids(role_kind: str, role_id: str | None = None) -> frozenset[str]:
+    """One reference inventory for advertisement and read authorization."""
+    if role_kind == "coordinator":
+        return COORDINATOR_REFERENCE_IDS | EXAMPLE_REFERENCE_IDS
+    if role_kind == "worker":
+        design = frozenset(
+            reference for reference, (skill, _) in DESIGN_REFERENCE_PATHS.items()
+            if role_id in DESIGN_SKILL_ROLES[skill]
+        )
+        return WORKER_REFERENCE_IDS | EXAMPLE_REFERENCE_IDS | design
+    return frozenset()
+
+
+def read_reference(
+    reference_id: str, *, role_kind: str = "worker", role_id: str | None = None,
+) -> str:
     """Read one known package reference with caller-role authorization.
 
     ``read_skill`` is the public dispatch surface; it must pass the verified
     channel role. The default preserves older worker callers only.
     """
-    if role_kind == "coordinator":
-        allowed = COORDINATOR_REFERENCE_IDS | EXAMPLE_REFERENCE_IDS
-    elif role_kind == "worker":
-        allowed = WORKER_REFERENCE_IDS | EXAMPLE_REFERENCE_IDS
-    else:
-        allowed = frozenset()
+    allowed = reference_ids(role_kind, role_id)
     if not isinstance(reference_id, str) or reference_id not in allowed:
         raise PortableError(
             category=PortableErrorCategory.VALIDATION,
@@ -323,7 +378,12 @@ def read_reference(reference_id: str, *, role_kind: str = "worker") -> str:
             retry_eligible=False,
             field="skill",
         )
-    if reference_id in COORDINATOR_REFERENCE_IDS:
+    if reference_id in DESIGN_REFERENCE_PATHS:
+        skill, relative_path = DESIGN_REFERENCE_PATHS[reference_id]
+        source = SKILLS_ROOT / skill / relative_path
+    elif reference_id in COORDINATOR_REFERENCE_PATHS:
+        source = SKILLS_ROOT / COORDINATOR_REFERENCE_PATHS[reference_id]
+    elif reference_id in COORDINATOR_REFERENCE_IDS:
         source = SKILLS_ROOT / "orchestrator" / "references" / f"{reference_id}.md"
     elif reference_id in WORKER_REFERENCE_IDS:
         source = SKILLS_ROOT / "worker-general" / "references" / f"{reference_id}.md"
@@ -390,8 +450,8 @@ def load_role(role_hint: object) -> RoleInstructionSet:
 NAMED_SKILLS: dict[str, tuple[str, ...]] = {
     "coordinator": ("tool-discipline", "coordinator-communication", "content-safety",
                     "context-compaction", "documentation-sync", "knowledge-harvest-scope",
-                    "cortex-control", "skill-management",
-                    # C-26: these are COORDINATOR_REFERENCE_IDS -- without a matching
+                    "cortex-control", "skill-management", "requirements-intake", "design-workflow",
+                    # These are COORDINATOR_REFERENCE_IDS -- without a matching
                     # entry here, situational_skill_triggers (and therefore the
                     # prompt's "Skills, and when to read one" section and the
                     # read_skill tool's own "Situational ids" description) named
@@ -403,7 +463,9 @@ NAMED_SKILLS: dict[str, tuple[str, ...]] = {
                     "senior-consultation", "verification-coverage", "worker-routing"),
     "worker": ("tool-discipline", "tool-discipline-worker", "content-safety", "report-publication", "code-and-evidence",
                "interactive-resources", "index", "context-compaction", "documentation-sync",
-               "knowledge-harvest", "skill-authoring"),
+               "knowledge-harvest", "skill-authoring",
+               "design-frontend-design", "design-ui-ux-pro-max", "design-impeccable",
+               "design-reference-analysis", "design-visual-qa"),
     "shared": (),
 }
 
@@ -437,13 +499,20 @@ _SKILL_TRIGGERS = {
     "knowledge-harvest": "before collecting what a codebase already knows into project knowledge",
     "knowledge-harvest-scope": "before scoping an explicit harvest or harvest-refresh request",
     "skill-authoring": "before creating, revising or importing an authorized project skill",
+    "requirements-intake": "before planning a new request whose goal lacks information that would materially change the result",
+    "design-workflow": "the user requests new UI/UX design, a visual redesign, a design system or significant visual improvement",
+    "design-frontend-design": "you build or reshape a screen and must make visual design choices",
+    "design-ui-ux-pro-max": "you choose a visual system or check UX rules for a product UI",
+    "design-impeccable": "you critique or polish an already-rendered interface",
+    "design-reference-analysis": "you derive design principles from a reference site or screenshot",
+    "design-visual-qa": "you capture or judge a rendered UI across target viewports",
     "skill-management": "the user invoked /skill-management or approved a skill proposal, or retained reports repeat a procedure",
     "cortex-control": "the user asks about /cortex-clear chat retention or the manual retention CLI",
     "report-publication": "you draft and publish your report and result",
     "code-and-evidence": "you locate code (code index first) or need saved report detail",
     "interactive-resources": "before starting or using a browser, device, port or server session",
     "index": "you want a full-report example",
-    # C-26: triggers for the coordinator's own reference skills
+    # Triggers for the coordinator's own reference skills
     # (COORDINATOR_REFERENCE_IDS), named here so NAMED_SKILLS["coordinator"]
     # can surface them in the prompt and in the read_skill tool schema.
     "cortex-release": "before release-sensitive package, profile-generation or live-qualification work",

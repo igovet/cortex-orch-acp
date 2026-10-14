@@ -42,7 +42,7 @@ def _add(store, task_id, text, event_id):
     return append_source_event(store, SourceEvent(origin="test", event_id=event_id), text, task_id)
 
 
-# --- C-03: refusals, unavailability and substitution are never consent --------
+# --- refusals, unavailability and substitution are never consent --------
 
 # The six probe messages of the routing audit, plus EN/RU variants.
 @pytest.mark.parametrize("text,granted", [
@@ -152,7 +152,7 @@ def test_strict_refusal_detection(text, refused):
     assert (auto_route.refuses_family(text, ASTRA) is not None) == refused
 
 
-# --- C-11: a newer refusing user message revokes an earlier grant ------------
+# --- a newer refusing user message revokes an earlier grant ------------
 
 @pytest.mark.parametrize("refusal", [
     "Stop using codex-acp/gpt-astra, it is too expensive.",

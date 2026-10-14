@@ -213,8 +213,11 @@ def _write_recovery_failure_if_still_lost(
             _mark_graph_attempt_failed_tx(db, task_id, assignment_ref, "recovery_worker_lost")
             delegation_events.append_event_tx(
                 db, task_id, "assignment_failed", f"recovery_worker_lost:{assignment_ref}",
+                # A worker lost to a restart or a host disconnect is an
+                # infrastructure loss: its retry must not raise the model
+                # tier (orchestration.state.attempt_routing).
                 dict(error="recovery_worker_lost", assignment_ref=assignment_ref, attempt_id=attempt_id,
-                     prior_state=prior_state),
+                     prior_state=prior_state, failure_class="worker_lost"),
                 origin="runtime", assignment_ref=assignment_ref,
             )
             db.commit()

@@ -64,7 +64,7 @@ def _result_args(key):
     return dict(report='# Result\n\nDone.\n', report_title='Result', summary='Done.', checks=[], request_key=key)
 
 
-# C-04 -----------------------------------------------------------------------
+# A refused result never blocks later reconciliation ---------------------------
 
 def test_a_result_refused_for_good_after_publication_never_blocks_later_reconciliation(tmp_path, monkeypatch):
     store, task, coordinator = _fixture(tmp_path)
@@ -133,7 +133,7 @@ def test_a_dispatch_refused_after_publication_closes_its_request_with_the_refusa
     reconcile_results(store, task.task_id)
 
 
-# C-14 -----------------------------------------------------------------------
+# verification_submit uses the plan's argv contract -----------------------------
 
 @pytest.mark.parametrize('argv, code', [
     (['python3', '-c', 'print(1)\x00'], 'invalid_verification_command'),
@@ -194,7 +194,7 @@ def test_any_verification_runner_exception_stops_the_task_with_its_reason(tmp_pa
     assert context['blocker'] == 'verification_execution_error:OSError'
 
 
-# C-17 -----------------------------------------------------------------------
+# Events claimed by a failed coordinator prompt are released --------------------
 
 def test_events_claimed_for_a_coordinator_prompt_that_raised_are_released(tmp_path):
     store = Store(tmp_path / '.cortex', project_root=tmp_path)
@@ -221,7 +221,7 @@ def test_events_claimed_for_a_coordinator_prompt_that_raised_are_released(tmp_pa
     assert message['consumed_by'] is None
 
 
-# C-07 -----------------------------------------------------------------------
+# Cancelling a worker also cancels its open question -----------------------------
 
 @pytest.fixture
 def waiting_worker(tmp_path):
@@ -282,7 +282,7 @@ def test_every_path_that_cancels_a_worker_also_cancels_its_open_question(waiting
     assert [w['status'] for w in worker_waits.list_waits(store, task_id)][-1] == 'cancelled'
 
 
-# C-15 -----------------------------------------------------------------------
+# A queued message never becomes a false answer ----------------------------------
 
 def test_a_queued_message_replay_reports_that_it_never_answered_the_question(tmp_path):
     store, task, _coordinator = _fixture(tmp_path)
@@ -344,7 +344,7 @@ def test_a_queued_message_continuation_is_steering_not_a_false_answer(tmp_path):
     assert not any(already in update for update in updates)
 
 
-# C-16 -----------------------------------------------------------------------
+# A silently published result becomes the node's result -------------------------
 
 def test_a_silent_published_result_is_recorded_as_the_nodes_result(tmp_path):
     store, task, coordinator = _fixture(tmp_path)

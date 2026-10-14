@@ -38,6 +38,11 @@ actually looked up a location. Each entry gives a `path:line`, symbol, and
 one-line reason it is relevant. Omit the block when no location was looked up;
 do not investigate further merely to produce hints.
 
+Before planning, check whether project docs, code and the request supply material
+requirements. If not, read `requirements-intake` and ask only the remaining gaps.
+For new UI/UX, redesigns, design systems or significant visual improvements, read
+`design-workflow`; routine frontend coding does not activate it.
+
 For work that needs a plan, submit it using
 the advertised proposal API. Include concrete objectives, dependency relationships,
 requested project scope and executable verification. Prefer focused assignments

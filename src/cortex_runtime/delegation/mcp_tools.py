@@ -223,7 +223,7 @@ def _worker_publish_result(store, channel: ChannelContext, args: Mapping[str, An
             entry['runtime_command_ref'] = assessed['runtime_command_ref']
         # A pass the runtime did not accept keeps the claim and its gap; a
         # failure an exact later rerun closed keeps the closing ref.
-        for key in ("blocker", "claimed_outcome", "evidence_gap", "closed_by", "command"):
+        for key in ("blocker", "claimed_outcome", "evidence_gap", "closed_by", "command", "invocation_error", "retracted_by"):
             if item.get(key):
                 entry[key] = item[key]
         checks.append(entry)
@@ -363,8 +363,7 @@ def _shared_read_skill(store, channel: ChannelContext, args: Mapping[str, Any]) 
 
 def _read_skill_body(store, channel: ChannelContext, args: Mapping[str, Any]) -> dict:
     from ..portable.roles import (
-        COORDINATOR_REFERENCE_IDS, EXAMPLE_REFERENCE_IDS,
-        WORKER_REFERENCE_IDS, load_role, read_reference, shared_skill_ids,
+        load_role, read_reference, reference_ids, shared_skill_ids,
     )
 
     requested = args.get("skill")
@@ -377,12 +376,12 @@ def _read_skill_body(store, channel: ChannelContext, args: Mapping[str, Any]) ->
     # Skills link their references as `references/<id>.md`; accept that link form.
     skill_id = skill_id.strip().removeprefix("references/").removesuffix(".md")
     role_kind = "coordinator" if channel is not None and channel.role == "coordinator" else "worker"
-    references = (COORDINATOR_REFERENCE_IDS | EXAMPLE_REFERENCE_IDS if role_kind == "coordinator"
-                  else WORKER_REFERENCE_IDS | EXAMPLE_REFERENCE_IDS)
-    allowed_shared = shared_skill_ids(role_kind, _own_role_id(store, channel))
+    role_id = _own_role_id(store, channel)
+    references = reference_ids(role_kind, role_id)
+    allowed_shared = shared_skill_ids(role_kind, role_id)
     if skill_id in references:
         return dict(skill=skill_id, title=skill_id.replace("-", " ").capitalize(),
-                    body=read_reference(skill_id, role_kind=role_kind))
+                    body=read_reference(skill_id, role_kind=role_kind, role_id=role_id))
     if skill_id and skill_id == _own_role_id(store, channel):
         # A channel may always re-read its own role. A coordinator asking
         # for `orchestrator` -- the role it is -- used to fail as
@@ -530,7 +529,7 @@ _OPERATION_DESCRIPTIONS = dict(
     verification_submit="After the runtime verification failed and the work itself is fine: replace only the verification commands and verify again, without redoing the reviewed work.",
     synthesis_submit="Submit a final synthesis grounded in the retained reports and verification. Accepted only after every task, the review and the verification finished. Every retained not_run or unverified worker check must be verified first or listed in not_verified with its concrete blocker. The runtime then completes the task and shows text (with not_verified) to the user as the final chat message, so do not repeat it in chat; use it only when nothing is left for the user to decide; otherwise ask with user_question_request.",
     user_question_request="Always use this structured tool for user questions while planning or reconciling, never prose-only or native engine questions. Supply meaningful selectable options; group related questions with questions, instead of question/options. All batch answers are required; custom free text remains available. Write the details once in your message before this call; the question itself is one short line with short answer options. After the call end the turn without writing anything more. The runtime persists the question before elicitation and resumes only after a real answer. A question asked while reconciling (approve a proposed plan, choose how to continue) keeps the task open, and the answer returns it to planning: submit a plan for the chosen work, or answer_submit a short close when the user chose to finish. With skill_proposal it proposes one reusable project skill backed by retained report evidence. Use exactly one accepted action-matched pair, approval first: create: [Create the skill, Not now], [Создать навык, Не сейчас], [Approve creating the skill, Decline creating the skill], [Одобрить создание навыка, Отклонить создание навыка]; update: [Update the skill, Not now], [Обновить навык, Не сейчас], [Approve updating the skill, Decline updating the skill], [Одобрить обновление навыка, Отклонить обновление навыка]. Only an exact pair is accepted; 1 selects its approval label, 2 its decline label, and any other answer is unclear. An arbitrary first option never approves.",
-    result_submit="Submit this worker attempt's report, summary and observed checks. report is required in every call, a review included, and is one plain string, never an object: the complete report Markdown (optionally titled with report_title), which the runtime publishes; or, after create_draft, draft_write and write_report, only that write_report's report_id. summary, verdict and findings never replace it. Decision-brief items (conclusion, evidence, checks, contradictions, limits, next action) are Markdown sections inside the report, never separate fields. If the engine reports that the call could not be parsed, nothing reached Cortex: resend the same arguments with valid serialization and the same request_key. This does not relax publication or receipt checks. Use checks=[] only if no automated command ran. Each checks item has name (a stable check name) and outcome (passed|failed|not_run|unverified; there is no status field); passed or failed needs tool_call_ref, not_run or unverified needs blocker, and command is optional as an argv array of strings. For a verified passed check, run command_run first, inspect its complete exit-0 result, and copy its tool_call_ref into one check. Engine-native shell calls and report ids are not command evidence. project_git is context only, not a check receipt; put its observations in the report body, never derive tool_call_ref from large_output_id. A checks[].command supplied with passed or failed is descriptive only and cannot verify the check; do not send closed_by, which the runtime derives. Every not_run or unverified check needs a concrete blocker. Use a fresh request_key for a new result; retry an uncertain call only with the identical key and payload. Reviewers must include verdict=APPROVE, REQUEST_CHANGES or BLOCK (lowercase forms normalize); other workers omit verdict. Open failed checks are refused with open_failed_check before recording or publishing and leave the channel active. Retain failures and cite an exact-argv later passed rerun, or explicitly send assignment_outcome=failed to submit a failed assignment; changing argv never closes a failure. A mistyped command line whose own output shows the check never started (usage, unrecognized-flag or file-not-found error for the command itself) is not a failed check: cite the corrected command's receipt and describe the mistyped run in the report. The receipt carries node_status (completed or failed), not task acceptance. This cannot accept the task. Top-level write_report-only fields such as artifacts are ignored. "
+    result_submit="Submit this worker attempt's report, summary and observed checks. report is required in every call, a review included, and is one plain string, never an object: the complete report Markdown (optionally titled with report_title), which the runtime publishes; or, after create_draft, draft_write and write_report, only that write_report's report_id. summary, verdict and findings never replace it. Decision-brief items (conclusion, evidence, checks, contradictions, limits, next action) are Markdown sections inside the report, never separate fields. If the engine reports that the call could not be parsed, nothing reached Cortex: resend the same arguments with valid serialization and the same request_key. This does not relax publication or receipt checks. Use checks=[] only if no automated command ran. Each checks item has name (a stable check name) and outcome (passed|failed|not_run|unverified; there is no status field); passed or failed needs tool_call_ref, not_run or unverified needs blocker, and command is optional as an argv array of strings. For a verified passed check, run command_run first, inspect its complete exit-0 result, and copy its tool_call_ref into one check. Engine-native shell calls and report ids are not command evidence. project_git is context only, not a check receipt; put its observations in the report body, never derive tool_call_ref from large_output_id. A checks[].command supplied with passed or failed is descriptive only and cannot verify the check; do not send closed_by, which the runtime derives. Every not_run or unverified check needs a concrete blocker. Use a fresh request_key for a new result; retry an uncertain call only with the identical key and payload. Reviewers must include verdict=APPROVE, REQUEST_CHANGES or BLOCK (lowercase forms normalize); other workers omit verdict. Open failed checks are refused with open_failed_check before recording or publishing and leave the channel active. Retain failures and cite an exact-argv later passed rerun, or explicitly send assignment_outcome=failed to submit a failed assignment; changing argv never closes a failure. For a source-backed syntax/regex error in your own standalone Python probe only, checks[].invocation_error may explicitly bind a later verified passing correction and a reason: both receipts remain visible, the failure is retracted, not passed. Runtime verification and actual test/lint/build failures cannot be retracted. A mistyped command line whose own output shows the check never started (usage, unrecognized-flag or file-not-found error for the command itself) is not a failed check: cite the corrected command's receipt and describe the mistyped run in the report. The receipt carries node_status (completed or failed), not task acceptance. This cannot accept the task. Top-level write_report-only fields such as artifacts are ignored. "
                   "The runtime compares the project with how it was when this attempt started, attributing only this node's "
                   "declared scope or successful channel writes and excluding sibling writers' scopes. When those changes match a "
                   "situational skill's trigger ({gates}) and this attempt has not read that skill with read_skill, the "
@@ -597,8 +596,8 @@ _WRITE_TOOLS = frozenset({"project_write", "project_edit", "project_mkdir", "pro
 
 
 # What the senior consultant is never offered. Besides project source and
-# commands (owner decision 2026-10-04), it requests no paths and asks the user
-# nothing (owner decision D8): missing evidence is a limitation in its report.
+# commands, it requests no paths and asks the user nothing: missing evidence
+# is a limitation in its report.
 _CONSULTANT_WITHHELD = frozenset({"command_run", "project_read", "project_git", "access_request", "ask_question"})
 # Withheld operations this module's dispatch refuses itself; the gateway
 # refuses the others.
@@ -674,12 +673,10 @@ def _enumerate_skills(schema: dict, role_kind: str, role_id: str | None) -> dict
     """Describe role-scoped ids; path grants are checked per session at read."""
     from ..acp.orchestrating_runtime import COORDINATOR_ROLE_ID
     from ..portable.roles import (
-        COORDINATOR_REFERENCE_IDS, EXAMPLE_REFERENCE_IDS,
-        WORKER_REFERENCE_IDS, shared_skill_ids, situational_skill_triggers,
+        reference_ids, shared_skill_ids, situational_skill_triggers,
     )
 
-    ids = set(shared_skill_ids(role_kind, role_id)) | EXAMPLE_REFERENCE_IDS
-    ids |= COORDINATOR_REFERENCE_IDS if role_kind == "coordinator" else WORKER_REFERENCE_IDS
+    ids = set(shared_skill_ids(role_kind, role_id) | reference_ids(role_kind, role_id))
     own = COORDINATOR_ROLE_ID if role_kind == "coordinator" else role_id
     if own:
         ids.add(own)

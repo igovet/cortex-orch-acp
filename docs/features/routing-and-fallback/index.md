@@ -63,7 +63,11 @@ create a strict role pin or override tier eligibility. Since 2026-10-13 the
 snapshot also lists Opus in the `standard` tier, so standard-tier UI/UX design
 nodes (`ux-designer`) are eligible for it and the coordinator's exact Opus hint
 is honoured there instead of `ignored:tier_mismatch`, and gives it the request
-labels `opus`/`опус`. See the
+labels `opus`/`опус`. Since 2026-10-14 the Opus condition covers all UI/UX
+work, including frontend layout and styling (`frontend-dev` implementation
+nodes), and the `gpt-6.1-sol` condition excludes it. The preference still
+applies only on nodes where the coordinator names the exact Opus route, and
+never in the light tier (`low` complexity). See the
 [fresh-install snapshot](../../configuration.md#fresh-install-owner-default-snapshot).
 
 ## Current preset: Haiku 5.5 and Luna
@@ -347,7 +351,9 @@ A user `routing.json` pin is also an explicit route choice and remains strict.
 
 The role tier starts from `ROLE_TIERS` and is shifted by complexity (low moves
 cheaper; high moves stronger). On escalation, the runtime normally advances the tier;
-`flagship` is reserved for escalation. Ordinary standard-tier testing
+`flagship` is reserved for escalation. A retry caused by an infrastructure failure
+(`engine_failure`, `transport_failure`) or by a worker lost to a runtime restart or host disconnect
+(`worker_lost`) does not escalate; other retries, including a retry with no recorded failure class, do. Ordinary standard-tier testing
 retries and review fixes retain the standard candidate pool described below;
 other standard-tier retries escalate normally. If no usable candidate exists in the
 requested tier, the configured fallback order searches other tiers. Explorer

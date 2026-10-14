@@ -92,24 +92,59 @@ def _events(store, task_id, kind):
 
 @pytest.mark.parametrize('answer', FINISH_FORMS)
 def test_every_form_of_the_stop_question_finish_is_force_finish(answer):
-    assert stop_choice(answer, STOP_TEXT) == 'finish'
-    assert is_force_finish_answer(answer, STOP_TEXT)
+    assert stop_choice(answer, STOP_TEXT, runtime_stop=True) == 'finish'
+    assert is_force_finish_answer(answer, STOP_TEXT, runtime_stop=True)
 
 
 @pytest.mark.parametrize('answer', CONTINUE_FORMS)
 def test_every_form_of_the_stop_question_continue_is_not_force_finish(answer):
-    assert stop_choice(answer, STOP_TEXT) == 'continue'
-    assert not is_force_finish_answer(answer, STOP_TEXT)
+    assert stop_choice(answer, STOP_TEXT, runtime_stop=True) == 'continue'
+    assert not is_force_finish_answer(answer, STOP_TEXT, runtime_stop=True)
 
 
 def test_stop_options_match_the_rendered_english_options_and_other_text_is_not_a_choice():
     assert STOP_OPTIONS == (messages.render('stop_option_continue', 'en'), messages.render('stop_option_finish', 'en'))
-    assert stop_choice('Fix the failing test and finish', STOP_TEXT) is None
-    assert stop_choice('3', STOP_TEXT) is None
+    assert stop_choice('Fix the failing test and finish', STOP_TEXT, runtime_stop=True) is None
+    assert stop_choice('3', STOP_TEXT, runtime_stop=True) is None
     # Another question's options are not the runtime's: no number or label match.
-    assert stop_choice('Finish', 'Anything else?') is None
+    assert stop_choice('Finish', 'Anything else?', runtime_stop=True) is None
     assert not is_force_finish_answer('2', 'Anything else?')
     assert not is_force_finish_answer('Finish', 'Anything else?')
+
+
+@pytest.mark.parametrize('answer', ['2', 'Finish', 'Завершить', STOP_OPTIONS[1]])
+def test_the_stop_question_text_without_the_runtime_marker_is_not_a_stop_choice(answer):
+    """Only the runtime's structured marker makes a question its stop
+    question; the same wording from anyone else is an ordinary question."""
+    assert stop_choice(answer, STOP_TEXT) is None
+    assert not is_force_finish_answer(answer, STOP_TEXT)
+
+
+def test_the_runtime_stop_question_carries_its_structured_markers(machine):
+    from cortex_runtime.orchestration.questions import runtime_stop_dedup_key, runtime_stop_request
+    state, channel = machine
+    question = _runtime_stop_question(state, channel)
+    assert question['runtime_stop'] is True and runtime_stop_request(question)
+    with state.store.connection() as db:
+        dedup_key = db.execute('SELECT dedup_key FROM pending_questions WHERE id=?',
+                               (question['question_id'],)).fetchone()[0]
+    assert runtime_stop_dedup_key(dedup_key)
+
+
+@pytest.mark.parametrize('answer', ['2', 'Finish: close the task as is, without certifying unfinished work'])
+def test_a_coordinator_question_worded_like_the_stop_question_never_force_finishes(machine, answer):
+    from cortex_runtime.orchestration.questions import request, runtime_stop_dedup_key
+    state, channel = machine
+    receipt = request(state.store, channel, dict(question=STOP_TEXT, options=list(STOP_OPTIONS), request_key='mimic'))
+    row = questions_store.get(state.store, receipt['question_id'])
+    with state.store.connection() as db:
+        dedup_key = db.execute('SELECT dedup_key FROM pending_questions WHERE id=?', (row.id,)).fetchone()[0]
+    assert not runtime_stop_dedup_key(dedup_key)
+    assert questions_store.answer(state.store, receipt['question_id'], _question_answer_value(row, answer), 'text')
+    # An ordinary answer: the task resumes, it is not force-finished.
+    assert resume_answered(state.store, channel.task_id) is True
+    assert state.context(channel.task_id)['state'] != 'CANCELLED'
+    assert not _events(state.store, channel.task_id, 'USER_FORCE_FINISHED')
 
 
 @pytest.mark.parametrize('answer, source', [

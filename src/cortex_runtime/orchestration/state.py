@@ -254,12 +254,17 @@ def _ask_about_stop(db, task_id, source, blocker):
     # Two open questions (a stopped worker's and this one) would make the
     # user disambiguate with /cortex-answer; only the stop question remains.
     cancel_tx(db, task_id, 'task_stopped_for_question')
+    from .questions import STOP_QUESTION_DEDUP_PREFIX, STOP_QUESTION_PREFIX, STOP_QUESTION_SUFFIX
     question_id = new_id('pq_')
-    text = f'The task stopped: {blocker}. What should happen next?'
+    text = f'{STOP_QUESTION_PREFIX}{blocker}{STOP_QUESTION_SUFFIX}'
+    # Structured markers, never the text alone, identify this as the
+    # runtime's own stop question (questions.runtime_stop_request and
+    # questions.runtime_stop_dedup_key).
     db.execute("INSERT INTO pending_questions(id,task_id,dedup_key,text,options_json,status,created_at) VALUES(?,?,?,?,?,'open',?)",
-               (question_id, task_id, f'runtime:stop:{question_id}', text, encoded(list(STOP_OPTIONS)), now()))
+               (question_id, task_id, f'{STOP_QUESTION_DEDUP_PREFIX}{question_id}', text, encoded(list(STOP_OPTIONS)), now()))
     event(db, task_id, 'USER_QUESTION_REQUESTED', dict(question_id=question_id, question=text, options=list(STOP_OPTIONS),
-                                                       resume_state='RECOVERING', blocker=blocker, revision=revision))
+                                                       resume_state='RECOVERING', blocker=blocker, revision=revision,
+                                                       runtime_stop=True))
     db.execute('UPDATE runtime_tasks SET state=?,blocker=?,updated_at=? WHERE task_id=?',
                ('WAITING_USER', blocker, now(), task_id))
     event(db, task_id, 'TASK_STATE_CHANGED', dict(previous=source, state='WAITING_USER', blocker=blocker))
@@ -274,7 +279,7 @@ def released_by_user(db, task):
     the user's own words releases a stop question: its Continue resumes the
     runtime flow and its Finish force-finishes the task. A released answer
     still completes only certified work (answer_needs_certified_work)."""
-    from .questions import stop_choice
+    from .questions import runtime_stop_request, stop_choice
     if db.execute("SELECT 1 FROM runtime_nodes WHERE task_id=? AND status IN ('pending','running')",
                   (task['task_id'],)).fetchone():
         return False
@@ -289,7 +294,8 @@ def released_by_user(db, task):
         asked_question = stops.get(received.get('question_id'))
         if asked_question is None:
             continue
-        if asked_question.get('blocker') and stop_choice(received.get('answer'), asked_question.get('question')):
+        if runtime_stop_request(asked_question) and stop_choice(
+                received.get('answer'), asked_question.get('question'), runtime_stop=True):
             # The runtime's own options: Continue resumes the flow, Finish
             # force-finishes; neither hands the stopped work to an answer.
             continue
@@ -371,16 +377,19 @@ class AttemptRouting(NamedTuple):
     # task (routing.auto_route.user_model_request), for every configured tier.
     user_request: dict | None = None
     # The newer user refusal that revoked an earlier request for the exact
-    # hint (routing.auto_route.user_model_revocation); never consent (C-11).
+    # hint (routing.auto_route.user_model_revocation); never consent.
     user_revocation: dict | None = None
 
 
-# C-18 (owner D4): a retry caused only by an infrastructure failure --
-# the engine/transport itself became unreachable, not a quality signal
-# about the work -- must not raise the model tier. Mirrors
-# engine.failure_classification's own closed class names so a future
-# class added there is excluded here only by deliberate choice.
-_INFRASTRUCTURE_RETRY_CLASSES = frozenset({'engine_failure', 'transport_failure'})
+# A retry caused only by an infrastructure failure -- the engine/transport
+# itself became unreachable, or the worker's process was lost to a host
+# disconnect or a runtime restart, not a quality signal about the work --
+# must not raise the model tier. Mirrors engine.failure_classification's own
+# closed class names (plus ``worker_lost``, recorded by
+# orchestration.recovery.retry_lost) so a future class added there is
+# excluded here only by deliberate choice.
+WORKER_LOST_FAILURE_CLASS = 'worker_lost'
+_INFRASTRUCTURE_RETRY_CLASSES = frozenset({'engine_failure', 'transport_failure', WORKER_LOST_FAILURE_CLASS})
 
 
 def attempt_routing(store, task_id, attempt_id):
@@ -414,7 +423,7 @@ def attempt_routing(store, task_id, attempt_id):
     planned = fix.group(1) if fix else node['node_id']
     tasks = json.loads(plan['plan_json'])['tasks'] if plan and plan['plan_json'] else []
     task = next((t for t in tasks if t['id'] == planned), {})
-    # C-18: a retry whose own recorded cause is purely an infrastructure
+    # A retry whose own recorded cause is purely an infrastructure
     # failure never counts toward escalation; a retry recorded before this
     # fix (no failure_class) or for any other/quality cause still does.
     retried = any(p.get('node') == node['node_id'] and p.get('revision') == node['revision'] and not p.get('route_failure')
@@ -460,6 +469,27 @@ def review_provider_preference(store, task_id, attempt_id):
     if len(engines) > 1:
         return None, "no_single_opposite_provider:mixed_execution"
     return None, "no_audited_execution_provider"
+
+
+def fix_role(role, scope):
+    """Keep writing specialists; replace non-writers by the reviewed scope.
+
+    Documentation-only scopes use technical-writer, tests-only scopes use
+    qa-engineer, and all other (including mixed or whole-project) scopes use
+    backend-dev. Use the runtime's access classes, not a second role list.
+    Scope is retained exactly: findings never authorize a wider grant.
+    """
+    from .contracts import READ_ONLY
+    role = resolve_role(role)
+    if role not in READ_ONLY:
+        return role
+    paths = [PurePosixPath(path) for path in scope]
+    if paths and all(path.parts and (path.parts[0] == 'docs' or path.suffix == '.md')
+                     for path in paths):
+        return 'worker-technical-writer'
+    if paths and all(path.parts and path.parts[0] == 'tests' for path in paths):
+        return 'worker-qa-engineer'
+    return 'worker-backend-dev'
 
 
 def targeted_fixes(tasks, scopes, findings, report_ref=None):
@@ -549,15 +579,18 @@ def synthesis_checks(db, task_id, revision):
         return gap_origin == pass_origin and pass_cycle >= 0 and pass_cycle >= gap_cycle
 
     from .. import task_workspace
-    from ..configuration.access_mode import command_profile, READ_ONLY_COMMAND_PROFILE
+    from ..configuration.access_mode import command_profile, READ_ONLY_COMMAND_PROFILE, GUARDED_COMMAND_PROFILE
     from .gateway import _command_policy
     command_cwd = task_workspace.task_root(db, task_id)
     # A pass closes a gap only in a profile a command of this task gets now:
     # the one the task's mode gives a writing worker, or the read-only host
     # profile that reviewers, other read-only roles and runtime verification
-    # get in every mode (owner decision D1). A host-writable pass never
-    # closes a gap once the task is Guarded.
-    profiles = {command_profile(_command_policy(db, task_id)['mode']), READ_ONLY_COMMAND_PROFILE}
+    # get in every mode. The Guarded writer profile is never wider than
+    # either, and also names read-only passes recorded before the read-only
+    # profile had its own name, so it still closes a gap. A host-writable
+    # pass never closes a gap once the task is Guarded.
+    profiles = {command_profile(_command_policy(db, task_id)['mode']), READ_ONLY_COMMAND_PROFILE,
+                GUARDED_COMMAND_PROFILE}
     passes = [(node, check, current, assessment) for node, check, current, assessment, _ in checks
               if check.get('outcome') == 'passed' and current is not None
               and current['outcome'] == 'passed' and assessment['strength'] == 'verified']
@@ -607,7 +640,7 @@ def consultation_objective(proposal):
 
 
 def consultation_packet(db, task_id, source_revision, proposal, objective):
-    """Dependency reports of an escalation-created consultant (owner D8).
+    """Dependency reports of an escalation-created consultant.
 
     The consultant reads no project source, so the runtime -- never the
     escalating model's free text alone -- selects its evidence: the reports
@@ -680,7 +713,7 @@ def validate_plan(plan):
         if not role.startswith('worker-') or role in {'worker-code-reviewer', 'worker-build-verification'}:
             raise StoreError('runtime_reserved_role')
         if role == CONSULTANT_ROLE:
-            # Owner decision D8: consultation is escalation-only. A planned
+            # Consultation is escalation-only. A planned
             # consultant node had no runtime-built packet to work from.
             raise StoreError('consultant_requires_escalation', f"tasks[{key}].role", node['role'],
                              'a non-consultant specialist role',
@@ -974,7 +1007,7 @@ class TaskMachine:
             if escalation.get('operation')=='escalation_request' and escalation.get('revision')==task['revision']:
                 # The runtime routes a readonly consultant automatically
                 # (routing.auto_route). The model never chooses a model.
-                # It also builds the consultation packet (owner decision D8);
+                # It also builds the consultation packet;
                 # the controller hands it over as the dependency reports.
                 proposal=escalation['proposal']
                 objective=consultation_objective(proposal)
@@ -1460,9 +1493,11 @@ class TaskMachine:
                         objective,dependencies=targets[node_id]['objective'],[review['node_id'],*(keys[n] for n in targets[node_id]['after'])]
                     else:
                         continue
+                    scope = effective_scope(db, implementation)
+                    role = fix_role(implementation['role'], scope)
                     db.execute('INSERT INTO runtime_nodes VALUES(?,?,?,?,?,?,?,?,?,?,?)',
-                               (task_id,task['revision'],keys[node_id],implementation['role'],objective,
-                                encoded(dependencies),encoded(effective_scope(db, implementation)),'execution','pending',None,None))
+                               (task_id,task['revision'],keys[node_id],role,objective,
+                                encoded(dependencies),encoded(scope),'execution','pending',None,None))
                     fixes.append(keys[node_id])
                 event(db,task_id,'REVIEW_CHANGES_REQUESTED',dict(review=review['node_id'],fixes=fixes,
                                                                   targeted=targets is not None,fallback=fallback))

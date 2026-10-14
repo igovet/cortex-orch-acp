@@ -369,7 +369,81 @@ def _gateway_assessment(db, task_id: str, attempt_id: str, ref: str, outcome: st
         return _gap("command_unrecorded", **detail)
     if outcome == "passed" and trivial_command(argv):
         return _gap("trivial_command", **detail)
+    detail["output_id"] = output_id
+    if outcome == "failed" and "runtime_verification" not in receipt:
+        detail["invocation_error"] = _probe_invocation_error(argv, receipt.get("output"), retained["byte_count"])
     return dict(strength="verified", gap=None, **detail)
+
+
+def _probe_invocation_error(argv, output, byte_count):
+    """Narrow, source-backed errors in an ad-hoc Python probe, not check failures.
+
+    Never execute the submitted source. Require a recorded Python syntax or
+    regex/assertion error in complete observed output; regex corrections must
+    subsequently preserve the entire probe except exactly one pattern literal.
+    Other errors keep the existing exact-rerun/failed-assignment path.
+    """
+    import ast
+    import re
+    from pathlib import Path
+
+    if (not isinstance(output, str) or len(output.encode("utf-8")) != byte_count
+            or Path(argv[0]).name not in {"python", "python3"}
+            or "-c" not in argv or argv.index("-c") != len(argv) - 2
+            or any(word not in {"-B", "-I", "-S"} for word in argv[1:argv.index("-c")])):
+        return None
+    source = argv[-1]
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return "python_syntax" if re.search(r"(?m)^SyntaxError: [^\n]+\Z", output.rstrip()) else None
+    imports = [node for node in ast.walk(tree) if isinstance(node, (ast.Import, ast.ImportFrom))]
+    if any((isinstance(node, ast.ImportFrom) and (node.module or "").split(".")[0] in {"pytest", "unittest"})
+           or (isinstance(node, ast.Import) and any(alias.name.split(".")[0] in {"pytest", "unittest"}
+                                                   for alias in node.names)) for node in imports):
+        return None
+    if not any(isinstance(node, ast.Import) and any(alias.name == "re" and not alias.asname
+                                                   for alias in node.names) for node in imports):
+        return None
+    if not ('File "<string>"' in output
+            and re.search(r"(?m)^(?:re\.(?:error|PatternError)|AssertionError):[^\n]*\Z", output.rstrip())):
+        return None
+    return "python_regex" if _regex_literals(tree) else None
+
+
+def _regex_literals(tree):
+    import ast
+
+    return [node.args[0] for node in ast.walk(tree)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+            and isinstance(node.func.value, ast.Name) and node.func.value.id == "re"
+            and node.func.attr in {"compile", "search", "match", "fullmatch", "findall", "finditer", "split", "sub", "subn"}
+            and node.args and isinstance(node.args[0], ast.Constant) and isinstance(node.args[0].value, str)]
+
+
+def _probe_correction(failed_argv, passed_argv, kind):
+    """Keep every assertion and product call unchanged; only one regex may change."""
+    import ast
+
+    if failed_argv[:-1] != passed_argv[:-1]:
+        return False
+    try:
+        corrected = ast.parse(passed_argv[-1])
+    except (SyntaxError, ValueError):
+        return False
+    if kind == "python_syntax":
+        return True  # The original script could not execute at all.
+    original = ast.parse(failed_argv[-1])
+    before, after = _regex_literals(original), _regex_literals(corrected)
+    if len(before) != len(after):
+        return False
+    changed = [(left, right) for left, right in zip(before, after) if left.value != right.value]
+    if len(changed) != 1:
+        return False
+    left, right = changed[0]
+    # AST equality ignores formatting/comments, never assertions or test targets.
+    left.value = right.value
+    return ast.dump(original) == ast.dump(corrected)
 
 
 def command_identity(operation, receipt) -> tuple | None:
@@ -386,7 +460,7 @@ def command_identity(operation, receipt) -> tuple | None:
         return (operation, tuple(argv), receipt.get("cwd"), receipt.get("profile", "restricted"))
     cwd = receipt.get("cwd")
     if operation == "outside_command" and isinstance(cwd, str) and cwd:
-        return (operation, tuple(argv), cwd)
+        return (operation, tuple(argv), cwd, receipt.get("profile", "outside_confirmed"))
     return None
 
 
@@ -497,6 +571,9 @@ def current_outcomes(db, task_id: str, attempt_id: str, checks) -> list[dict]:
       identity is unrecorded. Only then is it ``passed`` with ``closed_by``
       naming that closing ref. The claim itself is never rewritten: the
       failed check stays in the result as history.
+    - An explicit, validated own-probe invocation error is ``retracted``,
+      never passed, with ``retracted_by`` naming the later observed correction.
+      Both checks and the nonzero receipt remain history.
     - ``not_run`` and ``unverified`` are kept as claimed.
 
     Ambiguity never closes a failure; nothing here turns a current failure
@@ -546,7 +623,61 @@ def current_outcomes(db, task_id: str, attempt_id: str, checks) -> list[dict]:
                 closing = latest["ref"]
         outcomes.append(dict(outcome="passed", gap=None, closed_by=closing) if closing
                         else dict(outcome="failed", gap=None, closed_by=None))
+    # Explicit retraction is not a pass and never changes the failed receipt.
+    # Derive it only after the corrected check's ordinary current outcome.
+    for index, check in enumerate(checks):
+        if not check.get("invocation_error"):
+            continue
+        if history is None:
+            history = command_history(db, task_id, attempt_id)
+        ref = _invocation_retraction(db, task_id, index, checks, assessments, outcomes, history)
+        if ref:
+            outcomes[index] = dict(outcome="retracted", gap=None, closed_by=None, retracted_by=ref)
     return outcomes
+
+
+def _invocation_retraction(db, task_id, index, checks, assessments, outcomes, history):
+    check, failed = checks[index], assessments[index]
+    request = check.get("invocation_error")
+    if (check.get("outcome") != "failed" or not isinstance(request, dict)
+            or not isinstance(request.get("reason"), str) or not request["reason"].strip()
+            or failed["strength"] != "verified" or not failed.get("invocation_error")
+            or failed.get("evidence_source") == "runtime_verification" or failed.get("identity") is None):
+        return None
+    ref = request.get("corrected_by")
+    if "retracted_by" in check and check["retracted_by"] != ref:
+        return None
+    matches = [i for i, other in enumerate(checks)
+               if other.get("outcome") == "passed" and other.get("tool_call_ref") == ref
+               and other.get("name") == check.get("name")]
+    if len(matches) != 1 or sum(
+            other.get("invocation_error", {}).get("corrected_by") == ref
+            for other in checks if isinstance(other.get("invocation_error"), dict)) != 1:
+        return None
+    target = matches[0]
+    passed = assessments[target]
+    if (passed["strength"] != "verified" or outcomes[target]["outcome"] != "passed"
+            or passed.get("evidence_source") == "runtime_verification"
+            or passed.get("order", 0) <= failed["order"] or passed.get("identity") is None
+            or passed["identity"][0] != failed["identity"][0]
+            or passed["identity"][2:] != failed["identity"][2:]
+            or not _probe_correction(failed["identity"][1], passed["identity"][1], failed["invocation_error"])):
+        return None
+    from ..orchestration.check_closure import _retained_output_complete
+
+    for assessed in (failed, passed):
+        output = db.execute("SELECT * FROM large_outputs WHERE task_id=? AND id=?",
+                            (task_id, assessed.get("output_id"))).fetchone()
+        if output is None or not _retained_output_complete(db, task_id, output):
+            return None
+    # Neither an unresolved run nor another later failure can be explained
+    # away by correcting this particular invocation.
+    if any(run["order"] > failed["order"] and (
+            run["identity"] is None or
+            (run["identity"] == failed["identity"] and run["status"] != "passed"))
+           for run in history):
+        return None
+    return ref
 
 
 def accept_checks(db, task_id: str, attempt_id: str, checks) -> list[dict]:
@@ -560,12 +691,26 @@ def accept_checks(db, task_id: str, attempt_id: str, checks) -> list[dict]:
     ``claimed_outcome='passed'`` and the structured ``evidence_gap`` code.
     A ``failed`` check stays ``failed`` in the record, as history; when an
     exact later rerun closes it, it carries ``closed_by`` with the closing
-    ``tool_call_ref``. ``not_run`` and ``unverified`` are kept as claimed.
+    ``tool_call_ref``. A validated invocation error instead carries
+    ``retracted_by`` and its stated reason, while retaining ``outcome=failed``.
+    ``not_run`` and ``unverified`` are kept as claimed.
     """
+    from ..contracts import StoreError
+
     accepted = []
-    for check, current in zip(checks, current_outcomes(db, task_id, attempt_id, checks)):
+    for index, (check, current) in enumerate(zip(checks, current_outcomes(db, task_id, attempt_id, checks))):
+        if "invocation_error" in check and current["outcome"] != "retracted":
+            raise StoreError("invalid_check_retraction", f"arguments.checks[{index}].invocation_error",
+                             "not bound to an eligible own invocation error and later observed correction",
+                             "a verified failed standalone Python syntax/regex probe and a later verified passing correction in this attempt (regex: only one pattern literal changes)",
+                             "Retain real failures and use an exact rerun. Retract only your own supported probe invocation error, "
+                             "with a nonempty reason and corrected_by naming a passed check of this result with the same name, "
+                             "operation, cwd and profile. Claimed, incomplete, foreign and runtime verification checks cannot be retracted.")
         if check["outcome"] == "failed":
-            accepted.append(dict(check, closed_by=current["closed_by"]) if current["closed_by"] else dict(check))
+            if current["outcome"] == "retracted":
+                accepted.append(dict(check, retracted_by=current["retracted_by"]))
+            else:
+                accepted.append(dict(check, closed_by=current["closed_by"]) if current["closed_by"] else dict(check))
             continue
         if check["outcome"] != "passed" or current["outcome"] == "passed":
             accepted.append(dict(check))
@@ -585,12 +730,14 @@ def open_failure(db, task_id: str, attempt_id: str, checks) -> bool:
     """Whether a recorded result still carries a current failure: a
     ``failed`` check that no exact later rerun closes (a stored
     ``closed_by`` counts only when it equals the closing ref derived now),
-    or a ``passed`` check that is not currently verified. ``not_run`` and
+    a retraction that cannot be rederived from its original and correction
+    receipts, or a ``passed`` check that is not currently verified. ``not_run`` and
     ``unverified`` are disclosures, never failures."""
     checks = [check if isinstance(check, dict) else {} for check in checks or ()]
     for check, current in zip(checks, current_outcomes(db, task_id, attempt_id, checks)):
         if check.get("outcome") == "failed" and not (
-                current["closed_by"] and check.get("closed_by") == current["closed_by"]):
+                (current["closed_by"] and check.get("closed_by") == current["closed_by"])
+                or (current["outcome"] == "retracted" and check.get("retracted_by") == current["retracted_by"])):
             return True
         if check.get("outcome") == "passed" and current["outcome"] != "passed":
             return True
@@ -609,9 +756,14 @@ def annotate_checks(db, task_id: str, attempt_id: str | None, checks) -> list[di
                        for c in checks]
     else:
         assessments = assess_checks(db, task_id, attempt_id, checks)
+    currents = (current_outcomes(db, task_id, attempt_id, checks)
+                if attempt_id and any(check.get("invocation_error") for check in checks)
+                else [None] * len(checks))
     annotated = []
-    for check, assessment in zip(checks, assessments):
+    for check, assessment, current in zip(checks, assessments, currents):
         entry = dict(check, evidence_strength=assessment["strength"])
+        if check.get("invocation_error"):
+            entry["current_outcome"] = current["outcome"] if current else "unverified"
         for key in ('evidence_source', 'runtime_command_ref'):
             entry.pop(key, None)
             if assessment.get(key):

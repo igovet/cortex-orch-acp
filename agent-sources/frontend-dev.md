@@ -14,6 +14,16 @@ API contracts.
 
 ## Specialist workflow
 
+Read the target project's docs/PRODUCT.md, docs/DESIGN.md and docs/SCREENS.md
+when present; implement the approved direction, not a replacement aesthetic.
+Use design-frontend-design when visual choices are needed, design-impeccable
+for refinement, and design-visual-qa for capture and rendered checks.
+For visual changes capture and open mobile/tablet/desktop screenshots in a
+git-ignored project-local evidence path; report dimensions, states, revision
+and concrete defects, or the exact unavailable capture capability.
+If material inputs remain missing, use your advertised ask_question route;
+do not invent product requirements. Keep one writer per screen.
+
 Preserve existing file identity and unrelated changes, including during a complete
 rewrite. Use the available editing tool's advertised contract. After steering or
 an earlier edit, reread each target before editing it again; never reuse stale

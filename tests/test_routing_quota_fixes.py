@@ -1,19 +1,18 @@
-"""Routing and quota fixes from the consolidated audit (r_9731f0fc6d64,
-source r_adaf203d8679):
+"""Routing and quota behaviour:
 
-- C-18 (owner D4): a retry caused only by an infrastructure failure
-  (transport EOF, crash, poisoned session) never raises the model tier;
-  only a quality-caused retry (or a fix) does.
-- C-19 (owner D5): a candidate whose *known* usage reaches 95% ranks
-  behind every non-hot candidate, known or unknown usage alike.
-- C-20: a rejected rate-limit window with no ``resetsAt`` still expires
-  after a bounded TTL, and a CLI-sourced window the CLI stops reporting
-  is pruned on the next successful refresh.
-- C-21: the stretch exclusion applies only to stretch candidacy -- a
-  model configured with several native tiers (e.g. both light and
-  standard) keeps its own non-stretch tiers.
-- C-35 L1: a pinned effort routing.json's own policy clamps to a
-  different step is recorded in the route decision.
+- A retry caused only by an infrastructure failure (transport EOF, crash,
+  poisoned session, a worker lost to a restart or host disconnect) never
+  raises the model tier; only a quality-caused retry (or a fix) does.
+- A candidate whose *known* usage reaches 95% ranks behind every non-hot
+  candidate, known or unknown usage alike.
+- A rejected rate-limit window with no ``resetsAt`` still expires after a
+  bounded TTL, and a CLI-sourced window the CLI stops reporting is pruned
+  on the next successful refresh.
+- The stretch exclusion applies only to stretch candidacy -- a model
+  configured with several native tiers (e.g. both light and standard)
+  keeps its own non-stretch tiers.
+- A pinned effort routing.json's own policy clamps to a different step is
+  recorded in the route decision.
 """
 from __future__ import annotations
 
@@ -34,7 +33,7 @@ from test_auto_route import _entry, _live_all, _live_choose
 from test_usage_accounting import _USAGE_TEXT, _claude_connection, _environ, _fake_claude_binary, _now, _usage_result
 
 
-# --- C-18: an infrastructure-only retry never escalates the model tier -----
+# --- an infrastructure-only retry never escalates the model tier -----
 
 def _task_machine(tmp_path):
     store = Store(tmp_path / '.cortex', project_root=tmp_path)
@@ -66,7 +65,7 @@ def _provisioned_node(tmp_path):
     return state, channel, node
 
 
-@pytest.mark.parametrize("failure_class", ["engine_failure", "transport_failure"])
+@pytest.mark.parametrize("failure_class", ["engine_failure", "transport_failure", "worker_lost"])
 def test_an_infrastructure_only_retry_does_not_escalate(tmp_path, failure_class):
     state, channel, node = _provisioned_node(tmp_path)
     with state.store.connection() as db:
@@ -105,7 +104,7 @@ def test_one_quality_retry_among_several_infrastructure_ones_still_escalates(tmp
     assert attempt_routing(state.store, channel.task_id, 'xa_first').escalate is True
 
 
-# --- C-19: a known-hot candidate always loses to any non-hot candidate -----
+# --- a known-hot candidate always loses to any non-hot candidate -----
 
 def test_a_known_hot_candidate_loses_to_an_unknown_usage_candidate_despite_affinity():
     """Before the fix, engine affinity (checked ahead of the hot flag) let
@@ -118,7 +117,7 @@ def test_a_known_hot_candidate_loses_to_an_unknown_usage_candidate_despite_affin
         return 97.0 if entry.connection_id == "codex" else None
 
     # worker-backend-dev's work_kind ("implementation") prefers codex-acp
-    # (auto_route.WORK_KIND_ENGINES); without the C-19 fix that preference
+    # (auto_route.WORK_KIND_ENGINES); without the quota band first, that preference
     # alone would pick the hot codex standard model over Claude's unknown one.
     picked = auto_route.pick("standard", CODEX + CLAUDE, usage, role="worker-backend-dev", models=MODELS)
     assert picked.route.engine == "claude-agent-acp"
@@ -136,7 +135,7 @@ def test_a_known_hot_candidate_loses_to_any_known_non_hot_candidate_too():
 
 
 def test_both_hot_known_still_ranks_by_the_usual_signals():
-    """The C-19 fix only changes hot-vs-non-hot; two hot knowns still rank
+    """The quota band only changes hot-vs-non-hot; two hot knowns still rank
     the same way (lower usage, then affinity) as before."""
     from model_policy_fixtures import MODELS
     from test_auto_route import CLAUDE, CODEX
@@ -148,7 +147,7 @@ def test_both_hot_known_still_ranks_by_the_usual_signals():
     assert picked.route.engine == "codex-acp"
 
 
-# --- C-20: quota windows always eventually expire or get pruned ------------
+# --- quota windows always eventually expire or get pruned ------------
 
 def test_a_rejected_window_without_resetsat_expires_after_a_bounded_ttl(tmp_path):
     environ = {"HOME": str(tmp_path), "XDG_STATE_HOME": str(tmp_path / "state")}
@@ -200,7 +199,7 @@ def test_an_event_sourced_window_is_never_pruned_by_a_cli_refresh(tmp_path, monk
     assert "custom_scope" in quota._load(record.id, environ)
 
 
-# --- C-21: a stretch exclusion never removes a model's other native tier --
+# --- a stretch exclusion never removes a model's other native tier --
 
 def test_a_dual_tier_stretch_excluded_model_still_serves_its_own_native_tier(tmp_path, monkeypatch):
     """A model configured with both light and standard tiers, whose
@@ -221,7 +220,7 @@ def test_a_dual_tier_stretch_excluded_model_still_serves_its_own_native_tier(tmp
 
 
 def test_a_light_only_stretch_excluded_model_is_still_fully_excluded(tmp_path, monkeypatch):
-    """Regression guard: the C-21 fix narrows the exclusion, it does not
+    """Regression guard: the fix narrows the exclusion, it does not
     remove it for a model with no other native tier to fall back on."""
     entries = [_entry("codex", "gpt-light-only")]
     routing = {"enabled": {"codex-acp": ["gpt-light-only"]}, "models": {"codex-acp": {
@@ -236,7 +235,7 @@ def test_a_light_only_stretch_excluded_model_is_still_fully_excluded(tmp_path, m
     assert "codex-acp/gpt-light-only" in refused.value.remediation
 
 
-# --- C-35 L1: a clamped pin effort is recorded in the route decision ------
+# --- a clamped pin effort is recorded in the route decision ------
 
 def test_a_clamped_pin_effort_is_recorded(tmp_path, monkeypatch):
     project, environ = _live_all(monkeypatch, tmp_path, {"pin": {"*": "codex-acp/gpt-6-luna:low"}})

@@ -1407,6 +1407,10 @@ class OrchestratingRuntime:
         # The current (or most recently cancelled) coordinator turn's host
         # cancel hold per task -- see _CancelSteeringHold.
         self._cancel_holds: dict[str, _CancelSteeringHold] = {}
+        # A pause a held cancel applied after its turn ended, keyed by task:
+        # the count of worker actions it cut off. That turn's host emitters
+        # are closed by its cancel, so the next turn of the task says it.
+        self._pending_pause_notices: dict[str, int] = {}
 
     def _task_resource_lock(self, task_id: str):
         # Admission and cleanup are serialized per task, never across tasks.
@@ -1823,8 +1827,19 @@ class OrchestratingRuntime:
                     hold.state = "expired"
                     self._cancel_holds.pop(task_id, None)
                 self._apply_cancel_pause(task_id, hold, "grace_expired")
-        except Exception:  # noqa: BLE001 - a timer thread has no caller to report to
-            pass
+        except Exception as error:  # noqa: BLE001 - a timer thread has no caller to report to
+            # Leave a durable trace of the failed deferred pause instead of
+            # losing it with the timer thread.
+            try:
+                delegation_events.append_event(
+                    self._store, task_id, "progress", f"host_cancel_pause_failed:{new_id('p_')}",
+                    dict(kind="host_cancel_pause_failed", reason="grace_expired", session_id=hold.session_id,
+                         error=type(error).__name__,
+                         note="A host cancel's deferred pause failed; the task may still be running."),
+                    origin="runtime",
+                )
+            except Exception:  # noqa: BLE001 - the store itself may be what failed
+                pass
 
     def _resolve_cancel_hold(self, task_id: str, session_id: str | None) -> None:
         """Settle a waiting hold before this task's next turn, stop or
@@ -1874,10 +1889,20 @@ class OrchestratingRuntime:
             return
         from ..orchestration.controller import _pause_turn
         from ..orchestration.state import TaskMachine
+        from ..recovery.worker_reconciliation import unknown_outcome_actions
 
+        machine = TaskMachine(self._store)
+        if machine.get_state(task_id) in {'COMPLETED', 'FAILED', 'CANCELLED'}:
+            return
+        with self._store.connection() as db:
+            fenced = len(unknown_outcome_actions(db, task_id, revoked_only=True))
         with self._lock:
             emit_tool_call = self._task_tool_call_emitters.get(task_id)
-        _pause_turn(self, task_id, TaskMachine(self._store), emit_tool_call)
+        _pause_turn(self, task_id, machine, emit_tool_call)
+        with self._store.connection() as db:
+            cut = len(unknown_outcome_actions(db, task_id, revoked_only=True)) - fenced
+        with self._lock:
+            self._pending_pause_notices[task_id] = max(cut, 0)
         delegation_events.append_event(
             self._store, task_id, "progress", f"host_cancel_paused:{new_id('p_')}",
             dict(kind="host_cancel_paused", reason=reason, session_id=hold.session_id,
@@ -2402,14 +2427,13 @@ class OrchestratingRuntime:
             recipient_map["assignment_ref"] = generation["assignment_ref"]
             recipient_map["attempt_id"] = pending["attempt_id"]
         try:
-            # C-30: this is the one call site whose rendered capsule is
-            # prefixed onto the worker's own literal prompt text below in
-            # the same message -- ``inline_delivery=True`` removes the
-            # capsule's own redundant copies of the objective (its own
-            # node ``objective`` and assignment ``title``) that would
-            # otherwise duplicate ``own_assignment['brief']`` a second and
-            # third time before the literal brief further down even
-            # starts (see ``recovery.capsule._apply_inline_delivery_dedup``).
+            # This is the one call site whose rendered capsule is prefixed
+            # onto the worker's own literal prompt text below in the same
+            # message -- ``inline_delivery=True`` removes the capsule's own
+            # redundant copies of the objective (its own node ``objective``
+            # and assignment ``title``) that would otherwise duplicate
+            # ``own_assignment['brief']`` (see
+            # ``recovery.capsule._apply_inline_delivery_dedup``).
             # ``read_capsule`` and every other caller never pass this.
             capsule = build_capsule(self._store, task_id, recipient_map, inline_delivery=True)
         except StoreError as error:
@@ -2455,7 +2479,13 @@ class OrchestratingRuntime:
             delivery_role, delivery_for(actual_engine, actual_version), [],
             allow_unqualified_delivery=self._allow_unqualified_delivery,
         )
-        capsule_text = render_capsule(capsule)
+        # The worker's objective appears once: in the literal brief of its
+        # own prompt below (runtime-authored assignment instructions), while
+        # the capsule rendered in front of it references that brief instead
+        # of repeating it inside a data-labelled block. A prompt without the
+        # literal brief (a continuation) keeps the capsule's full brief.
+        from ..recovery.capsule import reference_brief_delivered_inline
+        capsule_text = render_capsule(reference_brief_delivered_inline(capsule, prompt_text))
         if plan.qualification == DeliveryQualification.UNSUPPORTED:
             role_blocks_text = ""
         else:
@@ -2549,32 +2579,6 @@ class OrchestratingRuntime:
                 return prompt_text, None, True
 
         prefix = f"{role_blocks_text}\n\n{capsule_text}" if role_blocks_text else capsule_text
-        # C-30: ``capsule``'s own ``own_assignment['brief']`` (always kept
-        # verbatim -- see ``recovery.capsule._compact_pipeline``) is the
-        # same literal text ``_provision_and_prompt_inner`` also embeds
-        # further down in this very ``prompt_text`` (the worker's own
-        # task brief). Once that capsule text is actually about to be
-        # prefixed onto this message, repeating it there a second time
-        # duplicated the objective. Replace that one exact, byte-for-byte
-        # occurrence with a short pointer back to the capsule above it;
-        # every other content of ``prompt_text`` (acceptance, project
-        # catalog, language rules) is untouched. A capsule whose own
-        # brief could not be found verbatim in ``prompt_text`` (never
-        # expected -- both ultimately come from the same
-        # ``delegation_requested`` event payload) leaves ``prompt_text``
-        # exactly as built rather than guessing.
-        if recipient == "worker":
-            own_brief_text = (
-                capsule.get("sections", {}).get("pipeline_and_assignments", {}).get("own_assignment", {}).get("brief")
-            )
-            if isinstance(own_brief_text, str) and own_brief_text and own_brief_text in prompt_text:
-                prompt_text = prompt_text.replace(
-                    own_brief_text,
-                    "(see this same message's recovery capsule above, "
-                    "pipeline_and_assignments.own_assignment.brief, for this assignment's objective, "
-                    "scope, dependency reports and original goal)",
-                    1,
-                )
         new_prompt_text = f"{prefix}\n\n---\n\n{prompt_text}"
         self._engine.mark_delivery_transmitted(session_ref, delivery["id"])
         from .. import _fault_injection
@@ -2694,6 +2698,7 @@ class OrchestratingRuntime:
         # an answer or as steering.
         open_questions = questions_store.list_open(self._store, task_id)
         language = self._resolve_language(task_id, content_hint=content)
+        self._emit_pending_pause_notice(task_id, emit_update, language)
         if len(open_questions) >= 2:
             listing = "\n".join(f"{index + 1}. {q.text}" for index, q in enumerate(open_questions))
             emit_update(acp_messages.render("question_ambiguous", language, questions=listing))
@@ -2812,6 +2817,10 @@ class OrchestratingRuntime:
 
         A stopped task's late answer is recorded and inert, exactly like an
         ordinary prompt after ``/cortex-stop`` (see ``_run``)."""
+        # Settled before any early return: this answer is a prompt on the
+        # session, so a host cancel held for steering is steering, never a
+        # pause applied later when its grace window expires.
+        self._resolve_cancel_hold(task_id, session_id)
         if acp_steering.is_stopped(self._store, task_id):
             acp_steering.record_post_stop_message(self._store, task_id, session_id, new_id("post_"), text)
             language = self._resolve_language(task_id, content_hint=text)
@@ -2841,7 +2850,6 @@ class OrchestratingRuntime:
             self._notify()
             return StopReason.END_TURN
         generation = object()
-        self._resolve_cancel_hold(task_id, session_id)
         with self._lock:
             hold = _CancelSteeringHold(session_id, cancel_event, bool(self._worker_panel_mode.get(task_id)))
         outcome = None
@@ -2865,6 +2873,7 @@ class OrchestratingRuntime:
         try:
             channel, session_ref = self._ensure_coordinator(task_id)
             language = self._resolve_language(task_id, content_hint=text)
+            self._emit_pending_pause_notice(task_id, emit_update, language)
             recovery_notice = self._pending_recovery_notice.pop(task_id, None)
             if recovery_notice is not None:
                 if recovery_notice.get("route_changed"):
@@ -3286,6 +3295,20 @@ class OrchestratingRuntime:
                 dict(content=entry["text"], session_id=entry["origin"], recovered=True),
                 ledger_origin=entry["origin"], ledger_event_id=entry["event_id"],
             )
+
+    def _emit_pending_pause_notice(self, task_id: str, emit_update: Callable[[str], bool], language: str) -> None:
+        """Say, at the start of the task's next turn, that a held host cancel
+        paused it after its own turn had ended (that turn could no longer
+        show it), with the worker actions the pause cut off."""
+        with self._lock:
+            cut = self._pending_pause_notices.pop(task_id, None)
+        if cut is None:
+            return
+        text = acp_messages.render("turn_paused_earlier", language)
+        if cut > 0:
+            text += acp_messages.render("turn_paused_unknown_actions", language, count=cut)
+        emit_update(text + "\n\n")
+        self._record_progress(task_id, "turn_paused_earlier")
 
     def _emit_resume_context(self, task_id: str) -> None:
         with self._store.connection() as db:
@@ -5501,8 +5524,8 @@ class OrchestratingRuntime:
         # engine session launch); this main process never needs to hold the
         # worker's ChannelContext, only its engine session ref.
         self._worker_sessions[(task_id, assignment_ref)] = result.engine_session_ref
-        # C-30: ``title`` is always derived from (a word-boundary-cut prefix
-        # of) the same objective already encoded inside ``brief`` -- see
+        # ``title`` is always derived from (a word-boundary-cut prefix of)
+        # the same objective already encoded inside ``brief`` -- see
         # ``orchestration.controller._dispatch_ready``/``_title_from_objective``
         # -- so repeating it verbatim here duplicated the objective on every
         # worker's first prompt. Show it only when it adds information the
@@ -6627,7 +6650,7 @@ class OrchestratingRuntime:
                     # Before declaring that nothing came of this: did the
                     # worker publish a report and simply never say so? Live
                     # (2026-09-19, a user's own thread) one did exactly
-                    # that -- report r_1777da4c6513 published through its
+                    # that -- its report was published through its
                     # own channel at 14:43:10, the assignment declared
                     # empty at 14:43:15, and the same work delegated again
                     # from scratch. The work existed; only the sentence

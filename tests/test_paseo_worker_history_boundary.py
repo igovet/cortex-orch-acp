@@ -16,7 +16,7 @@ def test_worker_history_uses_authoritative_workspace_handle_directory():
     # resolveProjectRoot now runs the python3 subprocess through the async,
     # concurrency-bounded runPython helper (python-runner.ts) instead of a
     # blocking spawnSync, so every caller awaits it. See runPython's own
-    # comment (report r_6df0ca1ceeb1) for the measured event-loop blocking
+    # comment for the measured event-loop blocking
     # this replaced.
     assert "const projectRoot = await resolveProjectRoot(directory)" in SOURCE
     assert "input.projectRoot" not in SOURCE

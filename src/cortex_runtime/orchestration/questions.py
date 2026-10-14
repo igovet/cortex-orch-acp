@@ -17,7 +17,7 @@ FORCE_FINISH_ANSWERS = frozenset({
 
 
 # The model sees this with the receipt. A bare receipt was followed by a full
-# rewrite of the message written before the call (r_5c2679466a0e); the
+# rewrite of the message written before the call (observed live); the
 # coordinator's later text in that turn is also withheld by the controller.
 QUESTION_RECEIPT_NEXT = (
     'The question is shown to the user together with the message you wrote before this call. '
@@ -28,8 +28,12 @@ QUESTION_RECEIPT_NEXT = (
 
 # The runtime's own stop question (state._ask_about_stop) as stored: the
 # chat shows it rendered in the task language with the same two options.
+# It is recognized by its structured runtime marker (its request names the
+# blocker; its pending row's dedup key starts with STOP_QUESTION_DEDUP_PREFIX),
+# never by its text alone: a coordinator may word a question the same way.
 STOP_QUESTION_PREFIX = 'The task stopped: '
 STOP_QUESTION_SUFFIX = '. What should happen next?'
+STOP_QUESTION_DEDUP_PREFIX = 'runtime:stop:'
 # Finish wording earlier builds stored or rendered (en, ru) for stop
 # questions that may still be open.
 _LEGACY_STOP_OPTIONS = ((), ('Finish: accept the current results and close the task',
@@ -40,10 +44,23 @@ def _normalized(value):
     return value.strip().casefold().rstrip('.!')
 
 
-def is_stop_question(question):
-    """Whether ``question`` is the text of the runtime's own stop question."""
-    return (isinstance(question, str) and question.startswith(STOP_QUESTION_PREFIX)
+def is_stop_question(question, runtime_stop=False):
+    """Whether ``question`` is the runtime's own stop question: it carries
+    the runtime's structured marker (``runtime_stop``) and its text."""
+    return (runtime_stop is True and isinstance(question, str) and question.startswith(STOP_QUESTION_PREFIX)
             and question.endswith(STOP_QUESTION_SUFFIX))
+
+
+def runtime_stop_request(payload):
+    """Whether a ``USER_QUESTION_REQUESTED`` payload is the runtime's own
+    stop question: only the runtime records its stop blocker there."""
+    return isinstance(payload, dict) and bool(payload.get('runtime_stop') or payload.get('blocker'))
+
+
+def runtime_stop_dedup_key(dedup_key):
+    """Whether a pending question's dedup key is the runtime stop question's.
+    A coordinator or worker question's key names its channel instead."""
+    return isinstance(dedup_key, str) and dedup_key.startswith(STOP_QUESTION_DEDUP_PREFIX)
 
 
 def _stop_option_answers(index):
@@ -57,12 +74,14 @@ def _stop_option_answers(index):
         str(index + 1)}
 
 
-def stop_choice(value, question):
+def stop_choice(value, question, *, runtime_stop=False):
     """``'finish'`` or ``'continue'`` when ``value`` picks one of the runtime
     stop question's own options -- by its stored or rendered (en/ru) text,
     its label, or its number -- else ``None`` (an answer in the user's own
-    words, or any other question)."""
-    if not isinstance(value, str) or not is_stop_question(question):
+    words, or any other question). ``runtime_stop`` is the question's
+    structured runtime marker (:func:`runtime_stop_request`,
+    :func:`runtime_stop_dedup_key`)."""
+    if not isinstance(value, str) or not is_stop_question(question, runtime_stop):
         return None
     answer = _normalized(value)
     for index, choice in enumerate(('continue', 'finish')):
@@ -71,13 +90,13 @@ def stop_choice(value, question):
     return None
 
 
-def is_force_finish_answer(value, question=None):
+def is_force_finish_answer(value, question=None, *, runtime_stop=False):
     if not isinstance(value, str):
         return False
     answer = _normalized(value)
     if answer in FORCE_FINISH_ANSWERS:
         return True
-    if stop_choice(value, question) == 'finish':
+    if stop_choice(value, question, runtime_stop=runtime_stop) == 'finish':
         # The stop question's own Finish closes the task CANCELLED with
         # USER_FORCE_FINISHED; it never certifies the stopped work.
         return True
@@ -167,7 +186,8 @@ def resume_answered(store, task_id):
                 return False
         if not answer or answer['status'] != 'answered':
             return False
-        if not saved.get('batch_id') and answer['answer_source'] in {'text', 'elicitation'} and is_force_finish_answer(answer['answer_text'], saved['question']):
+        if not saved.get('batch_id') and answer['answer_source'] in {'text', 'elicitation'} and is_force_finish_answer(
+                answer['answer_text'], saved['question'], runtime_stop=runtime_stop_request(saved)):
             # Leave WAITING_USER in place until stop_task atomically records
             # the stop marker and fences workers. A crash here is retryable.
             received = db.execute(

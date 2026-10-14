@@ -114,7 +114,7 @@ def test_reuse_rejects_outside_cwd_and_host_profile(tmp_path):
 @pytest.mark.parametrize('mode', ['development', 'auto', 'guarded'])
 def test_reuse_uses_the_read_only_profile_in_every_mode(tmp_path, monkeypatch, mode):
     # Verification and a reviewer's own command share the read-only host
-    # profile in every mode (owner decision D1), so reuse holds in each.
+    # profile in every mode, so reuse holds in each.
     from cortex_runtime.configuration import access_mode
     runtime, task, machine, _, reviewer, _, digest = fixture(tmp_path)
     access_mode.switch(runtime._store, task.task_id, mode, origin='acp_set_mode')
@@ -122,29 +122,32 @@ def test_reuse_uses_the_read_only_profile_in_every_mode(tmp_path, monkeypatch, m
     assert observed['checks'][0]['profile'] == access_mode.READ_ONLY_COMMAND_PROFILE
     monkeypatch.setattr(gateway, '_command', no_execution)
     receipt = command(runtime._store, reviewer)
-    assert receipt['profile'] == 'restricted' and receipt['runtime_verification']
+    assert receipt['profile'] == 'read_only' and receipt['runtime_verification']
     with runtime._store.connection() as db:
         assert reviewer_verification.validate_reuse(db, task.task_id, reviewer.attempt_id, receipt)
         assert not reviewer_verification.validate_reuse(db, task.task_id, reviewer.attempt_id,
                                                         dict(receipt, profile='development'))
 
 
-def test_reuse_never_stands_in_with_a_host_writable_check(tmp_path):
-    # A check retained from a host-writable run (before D1) is never reused.
+@pytest.mark.parametrize('profile', ['development', 'restricted'])
+def test_reuse_never_stands_in_with_a_check_of_another_profile(tmp_path, profile):
+    # A check retained from a host-writable run, or recorded under the Guarded
+    # writer profile name (older verification runs that could write broader
+    # HOME tool directories), is never reused.
     from cortex_runtime.configuration import access_mode
     runtime, task, machine, _, reviewer, _, digest = fixture(tmp_path)
     access_mode.switch(runtime._store, task.task_id, 'development', origin='acp_set_mode')
     observe(runtime, task, machine, digest)
     with runtime._store.connection() as db:
-        db.execute("UPDATE runtime_events SET payload_json=json_set(payload_json,'$.profile','development') "
+        db.execute("UPDATE runtime_events SET payload_json=json_set(payload_json,'$.profile',?) "
                    "WHERE task_id=? AND type IN ('CHECK_EXECUTION_STARTED','CHECK_EXECUTION_FINISHED')",
-                   (task.task_id,))
+                   (profile, task.task_id))
         db.commit()
         check = reviewer_verification.observation(
             db, task.task_id, f"verification:{machine.context(task.task_id)['revision']}:123:0")
-        assert check['profile'] == 'development' and reviewer_verification._usable(db, task.task_id, check)
+        assert check['profile'] == profile and reviewer_verification._usable(db, task.task_id, check)
     assert reviewer_verification.reuse(runtime._store, reviewer, str(tmp_path),
-                                       dict(argv=ARGV), 'fixture-development', 'owner') is None
+                                       dict(argv=ARGV), 'fixture-' + profile, 'owner') is None
 
 
 def test_in_flight_waits_without_reexecuting(tmp_path, monkeypatch):

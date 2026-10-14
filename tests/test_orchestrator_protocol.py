@@ -36,7 +36,7 @@ def test_all_specialists_remain_discoverable_and_reports_remain_selective():
     import re
     plannable = set(NODE['properties']['role']['enum'])
     reserved = {'code-reviewer', 'build-verification'}
-    # Owner decision D8: the consultant is escalation-only, added by the
+    # The consultant is escalation-only, added by the
     # runtime after an escalation_request, never named in a plan.
     escalation_only = {'senior-consultant'}
     catalogue = set(re.findall(r'^- `([^`]+)`:', routing, re.M))

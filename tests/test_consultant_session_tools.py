@@ -1,4 +1,4 @@
-"""Owner decision D3: the senior consultant works only from its consultation
+"""The senior consultant works only from its consultation
 packet and retained reports.
 
 Its Cortex tool offer already excludes project reads and commands. These

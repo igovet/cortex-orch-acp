@@ -2,7 +2,7 @@
 English-only `ask_question` text/options, and must carry the
 selected-language exception for them.
 
-Report r_34ed2bf822c9 (REQUEST_CHANGES) found that the restored canonical
+A review found that the restored canonical
 ``agent-sources/worker-protocol.md`` Communication paragraph listed
 "questions" among the items a worker must keep in English, with no
 exception -- contradicting the per-turn ``user_question_language`` directive

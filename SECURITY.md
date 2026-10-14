@@ -18,14 +18,31 @@ for exact paths, artifact-test limits and the next upstream-fix decision.
 
 ## Current ACP boundary (1.0.0)
 
+Requirements intake and design workflow are coordinator-only situational guidance,
+not additional lifecycle or permission APIs. Bundled design skills are readable
+only by their relevant worker roles; read-only designers/auditors return reports
+while assigned writers persist design documents and capture images. Skill text,
+reference tables and example sites never authorize tools, installs, network
+actions or copied assets. Missing browser/evidence stays unverified; screenshot
+artifacts use git-ignored project paths outside private storage. Bundled design
+skills adapt Apache-2.0 and MIT material; their license and NOTICE files ship in their
+directories, they contain no executable scripts, and the Taste Skill text is not bundled
+because its license could not be established. See
+[requirements intake](docs/features/requirements-intake/index.md) and
+[UI/UX design workflow](docs/features/design-workflow/index.md).
+
+
 Read-only roles (reviewer, auditor, explorer, architect and the other read-only
-profiles) run `command_run` in a restricted read-only profile in every access mode:
-HOME is read-only except an explicit tool-cache allowlist, and the command runs in a
-private PID namespace. Automatic runtime verification uses the same profile in every mode, and
+profiles) run `command_run` in the read-only profile (receipts name it `read_only`) in every
+access mode: HOME is read-only except an explicit tool-cache allowlist, and the command runs in
+a private PID namespace. Automatic runtime verification uses the same profile in every mode, and
 inside a check only the project's git-ignored directories are writable. Writing workers keep
 the access-mode profile. Cache writes are allowed, so a read-only command can poison a cache
-that a later run reads. The read-only profile shares the owner's network, as every owner
-command does, so it limits writes, not egress. This is not hostile-code isolation. The deletion classifier
+that a later run reads. The read-only profile does not mask the host `/tmp`, the session D-Bus and
+systemd user manager under `/run/user`, the host `/dev`, or a Docker socket if one exists, so a
+read-only command can still write `/tmp` and reach those services. The profile shares the owner's
+network, as every owner command does, so it limits writes, not egress. Read-only commands keep
+running across a mode switch. This is not hostile-code isolation. The deletion classifier
 is lexical: it recognises `rm` and the other common deletion commands, but not deletions
 hidden inside scripts, interpreters or build tools.
 
@@ -37,7 +54,8 @@ engine). An unbound broker's token is single-use. The file is removed with the b
 PID isolation applies only to the read-only profile, not to writing workers.
 
 A natural-language request such as "do not modify X" creates no write denial. Only an
-explicit `deny-write: <path>` does, and it is matched after path normalization.
+explicit `deny-write: <path>` does, and it is matched after path normalization. A denial stored by
+an earlier runtime with wildcard characters still guards writes (matched as a glob).
 
 Owner-triggered retention removes session access-default rows before deleted host
 sessions, without changing surviving defaults or explicit access choices. The
@@ -99,8 +117,9 @@ confirmed process exit, or postpone explicit cancellation. Cleanup is bound to
 the original manager, not a replacement. Shutdown hands off to that exact owned
 settlement once, with a bounded join; uncertain exit retains quarantine rather
 than causing a second teardown in the same shutdown. Declared-command evidence
-gaps require the task-root restricted profile as well as identical argv; a
-Development or different-cwd receipt cannot close them. Unknown consumption remains unknown;
+gaps require identical argv at the task-root cwd, in the read-only profile, the task mode's own writer
+profile, or the Guarded writer profile (`restricted`); a different-cwd receipt cannot close them, and
+a host-writable receipt cannot close one once the task is Guarded. Unknown consumption remains unknown;
 see [usage settlement](docs/features/token-and-plan-usage/index.md#coverage-and-interrupted-turns).
 The read-only synthesis aggregate keeps unfinished reconciliation explicit and
 withholds its share; it never turns a pending outcome into a completed fallback
@@ -284,7 +303,7 @@ Plan verification commands execute as literal argv without a shell. Submission r
 
 Worker briefs preserve the assignment objective, scope and dependency report references. The original task goal and review git evidence are shortened only when needed to fit the provisioning limit, and every shortened field identifies the worker-readable capsule or git-output source. These references use tools already available to the worker and do not change its assignment authority. A recovery capsule whose critical sections exceed their byte budget is compacted deterministically, never refused: each truncated field carries its sha256, size, a fenced preview with its original trust label and the tool that returns the full text (`read_source` for user messages and answers). Each trimmed list names its omitted entries, so recovery never silently loses required context.
 
-A worker `passed` check is accepted only with an exact same-attempt `command_run` or user-confirmed `outside_command` receipt for one completed, nontrivial operation, complete untruncated output and exit code 0. Engine-native shell calls and file reads do not verify checks. Insufficient evidence stays `unverified`; observed nonzero exits stay `failed`. Earlier reports are not rewritten, and older evidence is marked weak when projected under the current rule. Check run history is retained; a failure closes only on a later exact verified rerun that remains the latest result for that command.\n\nTransport state is distinct from task outcome. A plugin disconnect records available session/task/attempt identities and history completeness; restart recovery reads persisted state and leaves actions with unknown outcomes unresolved. Until reload recovery is qualified for the deployed version, update the plugin between active tasks. A host SIGKILL without SIGTERM cannot be recorded, and native engine actions cannot be represented by the retained command receipt mechanism.
+A worker `passed` check is accepted only with an exact same-attempt `command_run` or user-confirmed `outside_command` receipt for one completed, nontrivial operation, complete untruncated output and exit code 0. Engine-native shell calls and file reads do not verify checks. Insufficient evidence stays `unverified`; observed nonzero exits stay `failed`. Earlier reports are not rewritten, and older evidence is marked weak when projected under the current rule. Check run history is retained; a failure closes only on a later exact verified rerun that remains the latest result for that command. A supported invocation error in the worker's own standalone Python probe can instead be retracted by a later verified passing correction; the failed receipt stays as `retracted` history, never as a pass. Runtime verification failures are never retracted.\n\nTransport state is distinct from task outcome. A plugin disconnect records available session/task/attempt identities and history completeness; restart recovery reads persisted state and leaves actions with unknown outcomes unresolved. Until reload recovery is qualified for the deployed version, update the plugin between active tasks. A host SIGKILL without SIGTERM cannot be recorded, and native engine actions cannot be represented by the retained command receipt mechanism.
 
 On stdin EOF, the ACP process joins its reader after EOF is observed and before
 runtime teardown, so disconnect recording and cancellation are not abandoned
@@ -295,7 +314,7 @@ before joining prompt workers or tearing down the runtime, without joining a
 reader blocked on still-open stdin. SIGTERM records the disconnect synchronously.
 
 For `result_submit`, a model-supplied `checks[].command` on a completed check
-is descriptive, never evidence. Only the runtime derives `closed_by` from real
+is descriptive, never evidence. Only the runtime derives `closed_by` and `retracted_by` from real
 same-attempt command receipts for failed-check history; malformed fields get
 path-specific corrections. A declared-command not_run/unverified gap can also
 close by the runtime's own final-verification receipt with identical argv,
@@ -449,7 +468,7 @@ invalidate the digest-bound review, verification or completion gate as above.
 Explicit cancellation, stop and replanning terminate at once. Inside the jail Codex runs with
 full access, since its own sandbox cannot start there; its approval policy is
 pinned to `untrusted` so each command still reaches the permission bridge, which
-allows it unless it deletes (see [Access mode](#access-mode-guarded-and-auto)).
+allows it unless it deletes (see [Access mode](#access-mode-development-guarded-and-auto)).
 
 Excluded regardless of the jail: native subagents (Claude `Agent`, `Task`,
 `Workflow` and team tools are disallowed and refused at the permission bridge;
@@ -644,10 +663,10 @@ card merely for crossing the project boundary. The mode decides
 the host for writing workers: Development and Auto give them the host-writable profile (a
 `docker build` check can record its builder state in `~/.docker/buildx`), and Guarded keeps
 them restricted. Read-only roles, reviewers and automatic verification always get the
-read-only profile, while their project stays read-only -- verification may write only
-git-ignored directories, and a check that changes the reviewed
-revision or outlives a mode switch is incomplete. Guarded keeps every command
-restricted. Engines themselves stay jailed.
+read-only profile (`read_only`), while their project stays read-only -- verification may write only
+git-ignored directories, and a check whose project digest changes is incomplete. A mode switch
+does not stop a read-only command or a verification check. Only a host-writable (Development or
+Auto) writing-worker command is stopped by a mode switch or a denial change. Engines themselves stay jailed.
 
 This is **trusted local development, not hostile-code isolation**. Direct masks
 hide the bound task's private runtime storage and protect Git configuration,
@@ -800,8 +819,14 @@ them. Residual risk: their settings, hooks, MCP server entries, agents, commands
 and skills configure later Claude Code and Codex sessions opened in this project,
 the owner's own interactive ones included, and a hook or MCP command written
 there runs outside any Cortex jail when such a session starts. Review changes to
-these directories before opening the project natively; a user deny-write path
-(for example `.claude/settings*.json`) keeps chosen entries read-only. The owner's
+these directories before opening the project natively. To keep chosen entries
+read-only, write one exact directive per path, for example
+`deny-write: .claude/settings.json` and `deny-write: .claude/settings.local.json`,
+or `deny-write: .claude` for the whole directory; a directory denial also refuses
+`project_skill_link`. Wildcard values are not accepted and create no denial. The
+file tools refuse a denied path whether or not it exists, but a command keeps it
+read-only only if it exists when the command starts: to stop a command from
+creating a missing settings file, deny its existing parent directory. The owner's
 engine state directories in HOME stay protected as described above.
 
 `project_skill_link` is the guarded way to expose a shared skill: a writing worker may create or

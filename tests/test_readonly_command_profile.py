@@ -140,12 +140,17 @@ def test_gateway_never_gives_a_read_only_role_the_host_writable_profile(tmp_path
     monkeypatch.setattr(sandbox.shutil, 'which', lambda name: '/usr/bin/bwrap' if name == 'bwrap' else None)
     monkeypatch.setattr(sandbox, 'development_command', lambda *a, **kw: pytest.fail('host-writable profile'))
 
+    watched = []
+
     def fake_run(store_, channel_, launch, fds, output, effects, limit, **kw):
         launched.append(launch)
+        watched.append(kw.get('policy'))
         return 0, None
     monkeypatch.setattr(gateway, '_run_command_process', fake_run)
     receipt = gateway.dispatch(store, worker, 'command_run', dict(argv=['true'], request_key='ro'))
-    assert receipt['profile'] == 'restricted' and receipt['complete'], receipt
+    assert receipt['profile'] == 'read_only' and receipt['complete'], receipt
+    # Its profile does not depend on the mode: a mode switch never stops it.
+    assert watched == [None]
     [launch] = launched
     assert '--unshare-pid' in launch and ['--bind', '/', '/'] not in _windows(launch)
     assert ['--ro-bind', str(home), str(home)] in _windows(launch)

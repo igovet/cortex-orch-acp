@@ -28,6 +28,8 @@ not close it.
 A speculative run is eligible only after authoritative credit on the approved
 digest; its `CHECK_EXECUTION_STARTED` marker alone is diagnostic and never closes
 a gap. Discarded candidates remain ineligible.
+
+A worker's failed check is closed only by an exact later passing rerun of the same command identity. The one exception is a supported error in the worker's own standalone Python probe, which a later verified correction may retract; the failure stays as `retracted` history and is never a pass. Runtime verification failures are never retracted (see [check history](../features/orchestration/index.md#check-history-and-current-outcome)). Tests for these rules: `tests/test_check_closure_fixes.py`.
 See [check closure](../features/orchestration/index.md#check-history-and-current-outcome)
 and `tests/test_deferred_check_closure.py`.
 

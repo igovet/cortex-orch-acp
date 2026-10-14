@@ -5,7 +5,7 @@ The owner's explicit decision was: no new MCP tool; the existing read tools
 Claude's native ``Read`` does -- a real MCP ``image`` content block -- instead
 of either a useless ``binary: true`` marker (``project_read`` on a PNG) or a
 giant base64 text block that overflows an engine's tool-result token limit
-(``read_source`` on a stored image attachment; see report r_5eb34035eceb).
+(``read_source`` on a stored image attachment).
 """
 import base64
 import hashlib

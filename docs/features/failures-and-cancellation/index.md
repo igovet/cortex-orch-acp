@@ -114,7 +114,12 @@ Paseo steer, which uses a concurrent configuration request and does not call
 `session/prompt` on the same session is steering rather than Stop: the cancelled
 coordinator turn ends at once, running workers continue, and the prompt is applied
 as steering. A lone cancel pauses the task only after a 5-second grace window with no
-following prompt (`DEFAULT_HOST_CANCEL_GRACE_SECONDS`); other clients pause at once.
+following prompt (`DEFAULT_HOST_CANCEL_GRACE_SECONDS`); other clients pause at once. A deferred
+pause cannot write its `turn_paused` line into the cancelled turn, so the runtime shows a
+`turn_paused_earlier` notice, with the cut-off action count, at the start of the next turn. If the
+deferred pause itself fails, a `host_cancel_pause_failed` progress event records it, because the
+task may still be running. A prompt that answers a question on the held session also resolves the
+hold as steering.
 The cancellation path records `TURN_INTERRUPTED`, not
 `USER_STEERING`; `turn_interrupted` classifies as `cancellation` even when
 an adapter prefixes it with `engine_error`, and a cancelled worker never

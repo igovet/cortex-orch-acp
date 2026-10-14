@@ -2,7 +2,7 @@
 
 Paseo 0.9.2 retains every provider event of a session, so the bytes Cortex
 sends are the bytes its daemon keeps.  The live qualification in report
-``r_236acb13fabb`` measured 287,938 update bytes for a three-worker task
+A live qualification measured 287,938 update bytes for a three-worker task
 against 107,579 for the baseline build; the host journal showed the growth was
 not the worker cards but the coordinator polling ``task_get_context`` 57 times
 (each output mirrored twice, as MCP text and ``structuredContent``, and resent
@@ -16,7 +16,7 @@ long transcripts with large writes, plus that polling coordinator, and pins:
 * each worker card's number of updates is a constant (lifecycle transitions
   plus a fixed progress budget) for 10, 60 or 300 tools and for a worker
   running for hours on a simulated clock -- the live qualification in report
-  ``r_a3d87956eb0f`` found 296 worker-card updates for three workers against
+  a live review found 296 worker-card updates for three workers against
   9 on the baseline, from one long title spelled two ways;
 * repeated identical coordinator polls cost a small constant each;
 * the small three-worker workload stays below the live baseline figure.
@@ -38,7 +38,7 @@ from cortex_runtime.acp.wire_budget import SESSION_UPDATE_MAX_BYTES
 from cortex_runtime.portable.engine_contract import StopReason
 
 #: Cortex ``session/update`` bytes the baseline build (45c1951d) sent for the
-#: live three-worker workload in report r_236acb13fabb.
+#: live three-worker workload.
 LIVE_BASELINE_THREE_WORKER_BYTES = 107_579
 #: Owner target for everything one worker's card costs the host.
 PASEO_WORKER_CARD_MAX_BYTES = 20 * 1024
@@ -350,7 +350,7 @@ def test_small_workload_stays_below_the_live_baseline(scale_runs):
 
 
 #: Worker-card updates per worker in the live baseline (45c1951d) first wave
-#: of report r_a3d87956eb0f: create, start, result (9 for three workers).
+#: of that live review: create, start, result (9 for three workers).
 LIVE_BASELINE_UPDATES_PER_WORKER = 3
 
 
@@ -766,7 +766,7 @@ def test_legacy_journal_replay_is_folded_to_the_bound(tmp_path):
     assert len(replayed) <= 2 * limit + 50
 
 
-# Byte-first restart: report r_f9afa07c6a12 (REQUEST_CHANGES) found that
+# Byte-first restart: a review found that
 # `_seed_coordinator_card_budget` restored `shown` but not `shown_bytes`, so a
 # task that crossed the 4 MiB byte budget before its 150th distinct call could
 # emit another ~4 MiB tranche after every Cortex restart. These rounds issue

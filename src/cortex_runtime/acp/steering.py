@@ -302,15 +302,16 @@ def mark_stopped(store, task_id: str, *, source: str = "cortex_stop_command", se
                 db.commit()
                 return False
             if source == "user_answer_force_finish":
-                from ..orchestration.questions import is_force_finish_answer
+                from ..orchestration.questions import is_force_finish_answer, runtime_stop_dedup_key
                 answer = db.execute(
-                    "SELECT status,answer_text,answer_source,text FROM pending_questions WHERE task_id=? AND id=?",
+                    "SELECT status,answer_text,answer_source,text,dedup_key FROM pending_questions WHERE task_id=? AND id=?",
                     (task_id, question_id),
                 ).fetchone()
                 if (
                     not answer or answer["status"] != "answered"
                     or answer["answer_source"] not in {"text", "elicitation"}
-                    or not is_force_finish_answer(answer["answer_text"], answer["text"])
+                    or not is_force_finish_answer(answer["answer_text"], answer["text"],
+                                                  runtime_stop=runtime_stop_dedup_key(answer["dedup_key"]))
                 ):
                     raise ValueError("force finish requires an exact captured owner answer")
             elif source == "cortex_finish_command":

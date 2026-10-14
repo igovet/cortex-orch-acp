@@ -234,7 +234,7 @@ def test_oversized_labeled_digest_with_later_prose_is_partition_invariant():
     assert split_pending <= StreamingRedactor._MAX_PENDING
 
 
-# -- T7 (H2 fix spec r_84e20c5ca0a6): streaming partition invariance for the
+# -- Streaming partition invariance for the
 # authorization-scheme, assignment, claim and known-token rules. The
 # streaming result for one chunk, char-by-char, and every two-way cut must
 # equal the whole-text scrub_text/scrub_display_text result, with

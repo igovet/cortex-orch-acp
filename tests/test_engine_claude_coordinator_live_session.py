@@ -131,6 +131,6 @@ def test_claude_agent_acp_coordinator_session_runs_through_the_real_session_mana
     prompt = dumped["_meta"]["systemPrompt"]
     assert prompt.startswith("# Cortex session\n\nYou are the Cortex coordinator")
     # The coordinator role body follows the preamble; its SKILL.md YAML
-    # frontmatter is not role content and is stripped from delivery (C-30).
+    # frontmatter is not role content and is stripped from delivery.
     assert "\n\n# Cortex coordinator\n\nYou analyze the user's goal" in prompt
     assert "name: orchestrator" not in prompt

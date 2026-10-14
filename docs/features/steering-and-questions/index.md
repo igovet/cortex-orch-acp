@@ -107,6 +107,13 @@ build) continue through ordinary planning. The match is deliberately narrow;
 use `/cortex-finish` if wording is uncertain. Model text alone cannot trigger
 this transition.
 
+The runtime's own stop question (asked when the runtime stops a task on a blocker) is different. The runtime recognises it by a structured marker on the question, not by its wording, so a
+coordinator question with the same text never force-finishes the task. Its Finish option (by number,
+stored or rendered English or Russian text, or label) ends the task `CANCELLED` with
+`USER_FORCE_FINISHED`. Continue resumes the runtime flow and never releases the stop. Only an answer
+in the user's own words releases the question. See
+[the decisions log](../../project/decisions.md#runtime-stop-question-finish-and-continue).
+
 User steering is durably queued by message identity and requirement revision. It
 does not cancel the coordinator turn, change an executing plan, revoke worker
 channels, or classify a worker interruption as an engine failure. The controller

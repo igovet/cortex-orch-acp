@@ -93,7 +93,7 @@ _COMMON_BODY = """\
 """
 
 
-#: C-26: the base prompt's one worked example of the `read_skill` convention
+#: The base prompt's one worked example of the `read_skill` convention
 #: used to name `documentation-sync` and `interactive-resources` for every
 #: role alike, but neither is ever named for the senior consultant
 #: (`portable.roles.CONSULTANT_EXCLUDED_NAMED_SKILLS`), and `interactive-
@@ -399,7 +399,7 @@ def attached_servers_section(servers, workspace_root: str | None = None, *, role
 
     ``role_id`` (the worker profile, when known) narrows the listed tools to
     ``read_only_tools`` for a read-only role exactly as
-    ``engine.external_proxy`` narrows the actual calls it forwards (C-23):
+    ``engine.external_proxy`` narrows the actual calls it forwards:
     otherwise a read-only worker (reviewer, auditor, explorer, architect...)
     was told it had every ``allowed_tools`` entry, including
     ``index_repository``, and then had every such call refused at the gateway.
@@ -507,7 +507,7 @@ def with_attached_servers(meta: dict, servers, workspace_root: str | None = None
 #: interim messages. The coordinator's text is the user's view of the task,
 #: so its role instructions govern it; its one rule here closes the turn after
 #: a user question, where a full rewrite of the details was observed
-#: (r_5c2679466a0e) and the runtime now withholds such text.
+#: live and the runtime now withholds such text.
 _CORTEX_TOOLS = (
     "The `cortex` MCP server is the runtime's channel: use its `read_report` for retained reports, "
     "`read_skill` for conditional Cortex skills, draft/publication tools for reports, and role-appropriate "
@@ -563,7 +563,7 @@ _ROLE_BLOCKS = {
         "work": "# Project boundaries\n\n- Consult from the packet and retained reports only; do not create or change project files.\n" + _PRESERVATION,
         "evidence": "- Evaluate the supplied evidence; name missing evidence in your report instead of running checks or inventing results.",
         "commands": "",
-        # Owner decision D8: the consultant asks the user nothing and
+        # The consultant asks the user nothing and
         # requests no access; it is offered neither tool.
         "missing": "If information you need is missing, record it in your report as a limitation, with the exact data that would resolve it, instead of inventing it; you ask the user nothing.",
     },
@@ -611,7 +611,7 @@ _ROLE_REFUSAL = {
 
 
 #: How a session finds what it works from. The senior consultant works only
-#: from its consultation packet and retained reports (owner decision): it is
+#: from its consultation packet and retained reports: it is
 #: attached no code index or other external MCP server and offered no project
 #: reads or commands, so its variant names those materials instead.
 _FINDING_CODE = "\n".join((

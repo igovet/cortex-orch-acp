@@ -6,7 +6,7 @@ cannot perform that operation: task creation is completed by trusted
 bootstrap, before the channel is issued.  Keep this filter in one small
 dependency-free module so ``tools/list`` and recovery capsules cannot drift.
 
-C-27 investigation note: ``redact_values`` looked unused on every channeled
+Why ``redact_values`` stays: it looked unused on every channeled
 tool at first reading of ``store._call`` (only its ``create_task`` branch
 reads it there). It is not: ``store.Store._transaction`` reads
 ``args.get("redact_values", [])`` for *any* operation's own steering-source
@@ -15,8 +15,7 @@ a live ``steering_source`` and no pending delivery) -- confirmed live by
 ``tests/test_storage_v11.py``'s ``write_report`` case, which actually
 redacts a steering capture this way. So a live consumer exists across the
 channeled surface, not only for the excluded ``create_task``/
-``set_governance`` entries; keeping it is the correct D11 outcome here, not
-removing it.
+``set_governance`` entries; it is kept, not removed.
 """
 from __future__ import annotations
 

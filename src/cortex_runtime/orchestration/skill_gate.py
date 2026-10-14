@@ -3,7 +3,7 @@
 Naming a situational skill with its trigger was not enough: on 2026-09-28 a
 Claude worker changed runtime behavior and edited the documentation that
 described it without ever calling ``read_skill`` for ``documentation-sync``
-(live report r_b735ce31a5b5), while Codex workers read such skills. Inlining
+(observed live), while Codex workers read such skills. Inlining
 the skill is not a substitute; the model must load it when its case arises.
 
 So the runtime checks at a boundary it owns for both engines. Codex edits

@@ -60,8 +60,18 @@ HOST_WIDE = frozenset({DEVELOPMENT, AUTO})
 #: The receipt profile of a ``command_run`` by a role without a write grant
 #: and of an automatic verification check, in every mode: the host read-only
 #: except tool caches and private temp
-#: (``orchestration.sandbox.readonly_command``).
-READ_ONLY_COMMAND_PROFILE = "restricted"
+#: (``orchestration.sandbox.readonly_command``). Distinct from the Guarded
+#: writer profile, so receipts, check observations, reviewer reuse and gap
+#: closure can tell the two apart.
+READ_ONLY_COMMAND_PROFILE = "read_only"
+#: The receipt profile of a writing worker's ``command_run`` in Guarded
+#: (``orchestration.sandbox.gateway_command``: writable only inside its
+#: scopes). Receipts recorded before the read-only profile had its own name
+#: (including earlier read-only and verification runs) also carry it.
+GUARDED_COMMAND_PROFILE = "restricted"
+#: The receipt profile of a writing worker's ``command_run`` in Development
+#: and Auto (``orchestration.sandbox.development_command``: host-writable).
+HOST_WRITABLE_COMMAND_PROFILE = "development"
 
 
 def command_profile(mode) -> str:
@@ -69,7 +79,7 @@ def command_profile(mode) -> str:
     ``mode`` gets: ``development`` (host-writable) or ``restricted``.
     Receipts record it. A role without a write grant and an automatic
     verification check always get :data:`READ_ONLY_COMMAND_PROFILE`."""
-    return "development" if normalize(mode) in HOST_WIDE else "restricted"
+    return HOST_WRITABLE_COMMAND_PROFILE if normalize(mode) in HOST_WIDE else GUARDED_COMMAND_PROFILE
 LABELS = {DEVELOPMENT: "Development mode", GUARDED: "Guarded mode", AUTO: "Auto mode"}
 DESCRIPTIONS = {
     DEVELOPMENT: "Workers can work anywhere on this computer without asking. A deletion still asks you first. Docker and arbitrary code can bypass filesystem masks.",

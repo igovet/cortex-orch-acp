@@ -249,6 +249,12 @@ below -- never a silent reference. (A coordinator's cross-referenced
 assignment brief and node objective, by contrast, are resolvable via
 `task_get_context`, so they still compact normally.)
 
+A worker's delivery prompt carries its literal assignment brief once, as runtime instructions. When
+that prompt contains the brief verbatim, the capsule rendered in front of it refers to the brief
+instead of repeating it: `own_assignment.title`, `own_assignment.brief` and the node `objective`
+become `status: referenced` entries. The built capsule, its revision and `read_capsule` keep the full
+text, and a continuation prompt that does not contain the brief keeps the full text in the capsule.
+
 Every other string is clamped by a generic per-level allowance (32 KB
 down to 512 B). Text of 512 bytes or less always stays inline.
 

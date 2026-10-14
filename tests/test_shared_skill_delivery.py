@@ -44,7 +44,7 @@ def _check_split(role_id, kind):
     assert composed.startswith(role.body_portable.strip()[:80]), "the role's own body comes first"
     for skill_id in INLINED_SKILLS[kind]:
         assert f"### Skill `{skill_id}`\n\n" + _read(skill_id, kind).strip() in composed, skill_id
-    for skill_id in NAMED_SKILLS[kind]:
+    for skill_id, _ in situational_skill_triggers(kind, role_id):
         if skill_id in INLINED_SKILLS[kind]:
             continue
         assert f"`{skill_id}` --" in composed, f"{skill_id} was never named"
@@ -60,11 +60,11 @@ def test_a_coordinator_gets_its_everyday_skills_and_is_told_when_to_read_the_res
     assert "live tool descriptions and schemas" in role.body_portable
     # A commentary-then-final-answer host otherwise treats a detailed
     # pre-call message and the final answer as two separate, never-collapsed
-    # turns and repeats the content in both (investigation r_af50d7468665,
-    # session c2016029): tell the model explicitly not to. The rule was later
-    # strengthened from banning only a *shorter* recap to banning any
-    # restatement, of any length (r_5c2679466a0e; docs/project/decisions.md
-    # "the runtime withholds coordinator text after its own question").
+    # turns and repeats the content in both (observed live): tell the model
+    # explicitly not to. The rule was later strengthened from banning only a
+    # *shorter* recap to banning any restatement, of any length
+    # (docs/project/decisions.md "the runtime withholds coordinator text
+    # after its own question").
     assert "never follow it with a recap, summary or rewritten version of any length in the same turn" in " ".join(role.body_portable.split())
 
 
@@ -132,7 +132,12 @@ def test_only_shared_skills_are_readable():
 def test_every_named_skill_is_readable_by_its_role():
     """A role is told these ids; each must resolve through the reader for it."""
     for kind, skills in NAMED_SKILLS.items():
+        from cortex_runtime.portable.roles import shared_skill_ids, DESIGN_SKILL_ROLES
         for skill_id in skills:
+            if skill_id in DESIGN_SKILL_ROLES:
+                # Stage-specific skills are not readable without an assigned role.
+                assert skill_id not in shared_skill_ids(kind)
+                continue
             assert _read(skill_id, kind).strip(), (kind, skill_id)
     # The coordinator's retention command is not a worker's to run.
     assert "cortex-control" not in NAMED_SKILLS["worker"]

@@ -1,4 +1,4 @@
-"""Consultation is escalation-only and the runtime builds the packet (D8).
+"""Consultation is escalation-only and the runtime builds the packet.
 
 An escalation-created senior consultant reads no project source, so its
 brief must carry the escalated revision's published reports and their

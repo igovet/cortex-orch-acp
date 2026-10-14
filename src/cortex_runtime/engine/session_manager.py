@@ -837,7 +837,7 @@ class EngineSessionManager:
         if external_servers and (self._process is None or self._channel_credentials is None):
             raise _fail('external_mcp_gateway_required','External servers require a trusted runtime gateway.')
         if dropped_servers and self._process is not None:
-            # C-24: name exactly which grant path is missing instead of
+            # Name exactly which grant path is missing instead of
             # silently advertising a server engine.external_proxy would
             # have refused to even start.
             self._process.logs.observe("external_mcp_server_path_missing", servers=dropped_servers)

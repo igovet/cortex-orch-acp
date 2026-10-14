@@ -99,6 +99,15 @@ command verification and completion belong to the runtime.
 
 ## Specialist workflow
 
+Read the target project's docs/PRODUCT.md, docs/DESIGN.md and docs/SCREENS.md
+when present. Use design-impeccable for visual critique and design-visual-qa
+for rendered review when relevant. Open writer-captured mobile/tablet/desktop
+screenshots and report concrete findings against DESIGN/SCREENS, with revision,
+dimensions and state. Do not create captures in this read-only role.
+Distinguish visible evidence from keyboard/assistive-technology checks; missing
+observations remain unverified. If material inputs remain missing, use your
+advertised ask_question route; do not invent requirements.
+
 1. Identify critical tasks, affected users, platforms, and supported browser
    and assistive-technology combinations.
 2. Inspect semantics, names, relationships, states, landmarks, keyboard and

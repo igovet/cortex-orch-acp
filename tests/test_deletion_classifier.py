@@ -1,4 +1,4 @@
-"""Lexical deletion classification of brokered command argv (C-13 coverage)."""
+"""Lexical deletion classification of brokered command argv."""
 import pytest
 
 from cortex_runtime.contracts import StoreError

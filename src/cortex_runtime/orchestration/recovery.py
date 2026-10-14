@@ -167,8 +167,16 @@ def retry_lost(runtime,task_id,node):
         retry=dict(node=node['node_id'],revision=node['revision'],retry=len(retried)+1,
                    previous_assignment=assignment,observed_session='absent' if provision else 'not_provisioned')
         failure_class=payload.get('failure_class')
+        if not failure_class and (failure is None or reason=='recovery_worker_lost'):
+            # No failure event at all means the worker's process vanished
+            # (host disconnect, runtime restart) before it could report or
+            # fail; recovery's own write-off of such a worker predates its
+            # failure class. Both are infrastructure loss, not a signal
+            # about the work.
+            from .state import WORKER_LOST_FAILURE_CLASS
+            failure_class=WORKER_LOST_FAILURE_CLASS
         if failure_class:
-            # C-18: durably carries why this retry happened, so routing
+            # Durably carries why this retry happened, so routing
             # (orchestration.state.attempt_routing) can tell an
             # infrastructure-caused retry from one a quality signal caused
             # and never raise the model tier for the former alone.
@@ -236,7 +244,7 @@ def _reconcile_request(store, task_id, request):
     if len(matching) != 1 or matching[0]['origin'] != request['actor']:
         raise StoreError('ambiguous_result_publication')
     observed = json.loads(matching[0]['payload_json'])
-    observed_checks = [{k: c[k] for k in ('name', 'outcome', 'tool_call_ref', 'blocker', 'claimed_outcome', 'evidence_gap', 'closed_by', 'command')
+    observed_checks = [{k: c[k] for k in ('name', 'outcome', 'tool_call_ref', 'blocker', 'claimed_outcome', 'evidence_gap', 'closed_by', 'command', 'invocation_error', 'retracted_by')
                         if k in c and c[k] is not None}
                        for c in observed.get('checks', [])]
     if observed.get('summary') != result['summary'] or observed_checks != result['checks']:

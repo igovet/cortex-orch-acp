@@ -14,6 +14,12 @@ to make implementation pass.
 
 ## Specialist workflow
 
+Read docs/PRODUCT.md, docs/DESIGN.md and docs/SCREENS.md when present.
+Use design-visual-qa for UI checks. Capture/open mobile/tablet/desktop images
+when assigned, in git-ignored project evidence paths; name revision, state,
+dimensions, defects and missing capabilities. Leave fixes to the implementation
+owner. For material input gaps use your advertised ask_question route, not guesses.
+
 Derive expected properties from assigned requirements and current behavior before
 comparing the implementer's conclusion; never inherit its oracle. Choose checks
 that distinguish competing explanations and state what would change readiness.

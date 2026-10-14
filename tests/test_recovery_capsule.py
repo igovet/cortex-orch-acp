@@ -838,7 +838,7 @@ def test_worker_capsule_of_large_task_is_bounded(tmp_path):
 
 
 def test_worker_own_huge_brief_stays_verbatim_never_a_null_tool_reference(tmp_path):
-    """P1 regression (review r_f5018dc7eebf): a worker's own assignment
+    """P1 regression: a worker's own assignment
     title/brief/acceptance must never be compacted into an unresolvable
     ``status="referenced"``/``retrieve.tool=None`` object -- that would
     strip a recovered worker of the only readable copy of its mandatory

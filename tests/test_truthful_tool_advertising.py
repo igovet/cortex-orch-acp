@@ -1,4 +1,4 @@
-"""WP7: prompts advertise only what the role really has (C-22..C-27, C-39).
+"""Prompts advertise only what the role really has.
 
 Exercises the fixes directly against the functions they touch, without a
 live engine or subprocess.
@@ -17,7 +17,7 @@ from cortex_runtime.portable.roles import NAMED_SKILLS, situational_skill_trigge
 
 
 # ---------------------------------------------------------------------------
-# C-23: the attached-MCP section must list only tools actually granted after
+# The attached-MCP section must list only tools actually granted after
 # external_proxy's own role-based filtering (external_proxy.py:124-125), and
 # must not send a read-only role to run index_repository.
 # ---------------------------------------------------------------------------
@@ -57,7 +57,7 @@ def test_coordinator_still_uses_coordinator_tools_not_the_new_read_only_path():
 
 
 # ---------------------------------------------------------------------------
-# C-24: an external MCP server refused because a read_paths entry is
+# An external MCP server refused because a read_paths entry is
 # missing must not be advertised; the caller gets a clear diagnostic naming
 # the missing path instead of a silent omission.
 # ---------------------------------------------------------------------------
@@ -86,7 +86,7 @@ def test_a_server_with_every_grant_path_present_is_advertised_normally(tmp_path)
 
 
 # ---------------------------------------------------------------------------
-# C-26: the coordinator's own reference skills (NAMED_SKILLS["coordinator"])
+# The coordinator's own reference skills (NAMED_SKILLS["coordinator"])
 # must be named with a trigger, and the base prompt's one worked example of
 # `read_skill` must never name a skill the role cannot actually read.
 # ---------------------------------------------------------------------------

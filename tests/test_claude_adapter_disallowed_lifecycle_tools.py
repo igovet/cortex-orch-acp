@@ -1,4 +1,4 @@
-"""Audit finding C-25 (owner D9, recommended option): the Claude engine
+"""The Claude engine
 session for Cortex coordinator/workers must not expose native EnterWorktree,
 ExitWorktree, PushNotification, EnterPlanMode, ExitPlanMode or TaskStop --
 their outcome belongs to the Cortex runtime's own workspace scope, plan/

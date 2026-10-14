@@ -373,7 +373,7 @@ def test_plan_usage_decides_between_suitable_engines_before_affinity():
     the kind of work."""
     assert auto_route.USAGE_MARGIN == 10.0
     picked, decision = _rank("standard", "worker-backend-dev", codex=95, claude=75)
-    # C-19 (rank version 11): the hot/non-hot quota flag now decides before
+    # Rank version 11: the hot/non-hot quota flag now decides before
     # the usage-gap band even applies; the pick is unchanged.
     assert picked.route.model == "sonnet" and decision["decided_by"] == "quota"
     assert decision["rank_version"] == 11
@@ -869,7 +869,7 @@ def test_a_preference_near_its_quota_band_is_ignored_in_every_tier():
 
 def test_every_tier_orders_a_hot_account_last():
     """Light work used to spend a hot plan first (7b7aca22); the hot/non-hot
-    quota flag (C-19, rank version 11) now decides this directly, ahead of
+    quota flag (rank version 11) now decides this directly, ahead of
     the usage-gap band."""
     assert auto_route._order_key(10.0) < auto_route._order_key(95.0)
     assert auto_route._order_key(None) == auto_route._order_key(0.0)
@@ -880,10 +880,10 @@ def test_every_tier_orders_a_hot_account_last():
     assert picked is CLAUDE[2] and decision["decided_by"] == "quota"
 
 
-# --- quota band restored ahead of affinity (rank version 11, C-19) --------
+# --- quota band restored ahead of affinity (rank version 11) --------
 
 def test_a_known_hot_candidate_now_always_outranks_affinity():
-    """C-19 (owner D5): even a one-point, far-inside-USAGE_MARGIN crossing
+    """Even a one-point, far-inside-USAGE_MARGIN crossing
     of HOT_PERCENT now outranks engine affinity -- the task/model fit --
     though a prior design (rank version 6) let affinity decide here. A
     known >=95% candidate must rank behind any non-hot one, known or
@@ -924,7 +924,7 @@ def test_boundary_percentages_around_94_95_96(codex, claude, expected_engine, ex
 
 def test_a_large_gap_also_decides_through_the_now_earlier_quota_flag():
     """A gap well past USAGE_MARGIN still picks the non-hot candidate, but
-    (rank version 11, C-19) the hot/non-hot quota flag decides it directly,
+    (rank version 11) the hot/non-hot quota flag decides it directly,
     ahead of the usage-gap band it used to reach first."""
     entries = [CODEX[4], CLAUDE[1]]
     picked, decision = auto_route.rank("standard", entries, _usage(codex=95, claude=20), models=MODELS)
@@ -934,7 +934,7 @@ def test_a_large_gap_also_decides_through_the_now_earlier_quota_flag():
 def test_both_hot_candidates_are_still_separated_by_the_usage_gap_or_exact_percent():
     entries = [CODEX[4], CLAUDE[1]]
     # Codex (99%) is hot; Claude (87%) is not, so quota decides this one
-    # directly now (C-19) -- not the usage-gap band it used to reach first.
+    # directly now -- not the usage-gap band it used to reach first.
     picked, decision = auto_route.rank("standard", entries, _usage(codex=99, claude=87), models=MODELS)
     assert picked.route.engine == "claude-agent-acp" and decision["decided_by"] == "quota"
     # An immaterial gap between two hot plans: exact used percent decides.

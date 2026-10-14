@@ -333,6 +333,8 @@ list.
 
 Cortex may pass session MCP entries supplied by the ACP client, and it can load owner-managed stdio servers from `$XDG_CONFIG_HOME/cortex/mcp-servers.json`. A project-local MCP registry is deliberately unsupported: changing project contents must not install a persistent executable capability. The loader is `configuration.mcp_servers.load_mcp_servers`; setup and engine sessions validate explicit tool grants and containment.
 
+An owner entry whose `command`, or any `read_paths`/`write_paths` value, does not exist on the host is not forwarded to engine sessions: the checkout drops it and logs `external_mcp_server_path_missing`. A deployed package that predates this filter forwards it, and the client then sees the server close at once (`CONNECTION_CLOSED`). Correct the path or refresh the deployed package; see [browser and Playwright status](features/design-workflow/index.md#browser-and-playwright-status).
+
 Example (replace executable, tool names and paths with values appropriate to your installed server):
 
 ```json
@@ -447,9 +449,12 @@ register its own connections/MCP servers and resolve the exact coordinator again
 one observed selectable route. Missing or unsupported model/effort observations
 still fail closed; this snapshot is not live qualification.
 
-The snapshot retains the Opus UI/UX design condition in `preferred_when`,
-including the frontend implementation exception and narrowly scoped complex
-backend condition. Opus is configured for the `deep`, `flagship` and
+The snapshot retains the Opus UI/UX condition in `preferred_when` and the
+narrowly scoped complex backend condition. Since 2026-10-14 the condition
+covers all UI/UX work, including frontend layout and styling that implement
+or change a UI design, and asks the coordinator not to mark such nodes `low`
+complexity (the light tier has no Opus route). The `codex-acp/gpt-6.1-sol`
+condition excludes the same work. Opus is configured for the `deep`, `flagship` and
 `standard` tiers so that condition can apply to standard-tier design work
 (`ux-designer`), and `request_names` `opus`/`опус` let the user request it by
 name. This is an advisory conditional preference, not a role pin

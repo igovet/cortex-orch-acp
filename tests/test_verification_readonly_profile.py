@@ -1,5 +1,5 @@
 """Runtime verification runs in the read-only host profile in every access
-mode (owner decision D1), and gap closure accepts that profile.
+mode, and gap closure accepts that profile.
 
 Launch preparation and lifecycle are checked here without namespaces; the
 ``requires_bwrap`` cases execute real containment and skip where bubblewrap
@@ -162,12 +162,12 @@ def test_verification_records_the_read_only_profile_and_survives_a_mode_switch(t
     thread.join()
     [check] = observed['checks']
     assert not observed['stale'] and check['exit_code'] == 0 and check['complete'], observed
-    assert check['profile'] == access_mode.READ_ONLY_COMMAND_PROFILE == 'restricted'
+    assert check['profile'] == access_mode.READ_ONLY_COMMAND_PROFILE == 'read_only'
     with store.connection() as db:
         started_event = json.loads(db.execute(
             "SELECT payload_json FROM runtime_events WHERE type='CHECK_EXECUTION_STARTED'").fetchone()[0])
         failure = db.execute('SELECT failure FROM large_outputs WHERE id=?', (check['large_output_id'],)).fetchone()[0]
-    assert started_event['profile'] == 'restricted'
+    assert started_event['profile'] == 'read_only'
     assert failure is None
 
 
@@ -213,7 +213,7 @@ def test_real_verification_writes_caches_and_temp_not_home_or_project(tmp_path, 
     ])
     assert not observed.get('blocker') and not observed['stale'], observed
     assert [c['exit_code'] for c in observed['checks']] == [0, 0, 0], observed
-    assert all(c['complete'] and c['profile'] == 'restricted' for c in observed['checks'])
+    assert all(c['complete'] and c['profile'] == 'read_only' for c in observed['checks'])
     assert (home / '.cache/tool').read_text() == 'ok' and (project / 'build/out').read_text() == 'ok'
     assert (home / '.bashrc').read_text() == '# owner\n' and not (home / 'new').exists()
     assert (project / 'a.txt').read_text() == 'one\n' and not (project / '.pytest_cache').exists()
@@ -324,6 +324,25 @@ def test_host_writable_pass_never_closes_a_gap_once_guarded(tmp_path, monkeypatc
     assert 'backend tests' in error.value.correction
     # A reviewer's read-only pass of the same argv closes it in Guarded.
     reviewer = _pass_for_node(state, channel, '_review_1', 'code-reviewer', command, 'reviewer-pass')
-    assert reviewer['profile'] == 'restricted'
+    assert reviewer['profile'] == 'read_only'
     _declare(state, channel, command, [('N0', writer['tool_call_ref']), ('_review_1', reviewer['tool_call_ref'])])
     assert state.submit_synthesis(channel, 'Verified')['recorded']
+
+
+@pytest.mark.usefixtures('unjailed_gateway_command')
+def test_a_guarded_writer_pass_still_closes_a_gap_in_every_mode(tmp_path, monkeypatch):
+    """The read-only profile's own name changes nothing about which passes
+    close a gap: a Guarded writer pass (``restricted``, the name read-only
+    passes were also recorded under before) closes it in Guarded and after a
+    switch to Development."""
+    state, channel = _gap_task(tmp_path, monkeypatch)
+    access_mode.switch(state.store, channel.task_id, 'guarded', origin='acp_set_mode')
+    command = ['python3', '-B', '-c', 'assert 2 + 2 == 4']
+    writer = _pass_for_node(state, channel, 'N0', 'backend-dev', command, 'guarded-writer-pass')
+    assert writer['profile'] == access_mode.GUARDED_COMMAND_PROFILE == 'restricted'
+    _declare(state, channel, command, [('N0', writer['tool_call_ref'])])
+    from cortex_runtime.orchestration.state import synthesis_checks
+    for mode in ('guarded', 'development'):
+        access_mode.switch(state.store, channel.task_id, mode, origin='acp_set_mode')
+        with state.store.connection() as db:
+            assert synthesis_checks(db, channel.task_id, 1)[1] == {}, mode

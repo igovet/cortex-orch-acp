@@ -279,13 +279,16 @@ def test_literal_arguments_need_no_deletion_consent(development, monkeypatch, re
     receipt = gateway.dispatch(store, worker, "command_run", dict(argv=argv, request_key="literal"))
     assert receipt["exit_code"] == 0 and receipt["complete"], receipt
     assert receipt["output"] == literal + ("\n" if program == "echo" else "")
-    assert receipt["profile"] == ("restricted" if read_only else "development")
+    assert receipt["profile"] == ("read_only" if read_only else "development")
 
 
 def test_command_identity_does_not_collide():
     args = dict(argv=["python3", "-m", "pytest"], cwd="/tmp/one", profile="development")
     assert command_identity("command_run", args) != command_identity("command_run", dict(args, cwd="/tmp/two"))
     assert command_identity("command_run", args) != command_identity("command_run", dict(args, profile="restricted"))
+    # The read-only profile and the Guarded writer profile are distinct runs.
+    assert (command_identity("command_run", dict(args, profile="read_only"))
+            != command_identity("command_run", dict(args, profile="restricted")))
     assert command_identity("command_run", args) != command_identity("command_run", dict(argv=args["argv"]))
 
 
@@ -311,6 +314,40 @@ def test_policy_switch_stops_owned_process_and_fences_retry(development):
     assert not result["receipt"]["complete"]
     # Return the retained incomplete outcome, never execute the command again.
     assert gateway.dispatch(store, worker, "command_run", args) == result["receipt"]
+
+
+@pytest.mark.usefixtures("unjailed_gateway_command")
+@pytest.mark.parametrize("target", ["guarded", "auto"])
+def test_policy_switch_never_stops_a_read_only_roles_command(development, monkeypatch, target):
+    """A read-only command's profile does not depend on the mode, so a mode
+    switch while it runs (a reviewer's long test run) lets it finish."""
+    root, store, worker, home = development
+    monkeypatch.setattr(gateway, "_authority", lambda db, ch: ([], "read-only"))
+    started, switched = home / "started", home / "switched"
+    script = ("import pathlib, time\n"
+              f"pathlib.Path({str(started)!r}).write_text('yes')\n"
+              "deadline = time.monotonic() + 20\n"
+              f"while not pathlib.Path({str(switched)!r}).exists() and time.monotonic() < deadline:\n"
+              "    time.sleep(.02)\n"
+              f"raise SystemExit(0 if pathlib.Path({str(switched)!r}).exists() else 9)\n")
+    args = dict(argv=[sys.executable, "-B", "-c", script], request_key="reviewer-long")
+    result = {}
+    thread = threading.Thread(target=lambda: result.setdefault("receipt", gateway.dispatch(store, worker, "command_run", args)))
+    thread.start()
+    try:
+        deadline = time.monotonic() + 5
+        while not started.exists() and time.monotonic() < deadline:
+            time.sleep(.01)
+        assert started.exists()
+        access_mode.switch(store, worker.task_id, target, origin="acp_set_mode")
+        time.sleep(.3)  # several of the runner's poll intervals
+        switched.write_text("yes")
+    finally:
+        thread.join(timeout=25)
+    assert not thread.is_alive()
+    receipt = result["receipt"]
+    assert receipt["failure"] is None and receipt["complete"] and receipt["exit_code"] == 0, receipt
+    assert receipt["profile"] == "read_only"
 
 
 @pytest.mark.requires_bwrap
@@ -359,9 +396,9 @@ def test_read_only_role_command_is_restricted_in_every_mode(development, monkeyp
             gateway.dispatch(store, worker, "command_run", dict(argv=["true"], cwd=str(home), request_key="outside"))
     else:
         receipt = gateway.dispatch(store, worker, "command_run", dict(argv=["true"], cwd=str(home), request_key="outside"))
-        assert receipt["complete"] and receipt["cwd"] == str(home) and receipt["profile"] == "restricted", receipt
+        assert receipt["complete"] and receipt["cwd"] == str(home) and receipt["profile"] == "read_only", receipt
     receipt = gateway.dispatch(store, worker, "command_run", dict(argv=["true"], request_key="inside"))
-    assert receipt["profile"] == "restricted" and receipt["complete"], receipt
+    assert receipt["profile"] == "read_only" and receipt["complete"], receipt
     assert used == [mode] * (1 if mode == "guarded" else 2)
 
 
@@ -393,7 +430,7 @@ def test_real_read_only_role_writes_caches_not_host_or_project(development, monk
         f"assert not Path('/proc/{os.getpid()}').exists(), 'host processes visible'\n"
         "print('read-only host')\n")
     result = gateway.dispatch(store, worker, "command_run", dict(argv=[sys.executable, "-B", "-c", script], request_key="ro"))
-    assert result["exit_code"] == 0 and result["complete"] and result["profile"] == "restricted", result
+    assert result["exit_code"] == 0 and result["complete"] and result["profile"] == "read_only", result
     assert result["output"].strip() == "read-only host"
     assert (home / ".bashrc").read_text() == "# owner\n"
     assert not any(path.exists() for path in refused[1:])

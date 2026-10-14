@@ -21,7 +21,7 @@ def test_reviewer_defaults_to_inline_report_without_weakening_shared_protocol():
 
 def test_known_role_ids_counts():
     ids = roles.known_role_ids()
-    assert len(ids) == 35
+    assert len(ids) == 42
     assert "orchestrator" in ids
     assert "worker-backend-dev" in ids
     assert "cortex-control" in ids
@@ -145,3 +145,89 @@ def test_consultant_receives_reporting_but_no_source_discovery_skill():
         assert f"`{skill_id}` --" not in delivered
     worker = roles.composed_instructions(roles.load_role("worker-backend-dev"))
     assert "### Skill `code-and-evidence`" in worker
+
+
+DESIGN_ROLE_MATRIX = {
+    "design-reference-analysis": {"worker-ux-designer"},
+    "design-ui-ux-pro-max": {"worker-ux-designer", "worker-mobile-dev"},
+    "design-frontend-design": {"worker-frontend-dev", "worker-mobile-dev"},
+    "design-impeccable": {"worker-ux-designer", "worker-accessibility-auditor", "worker-frontend-dev"},
+    "design-visual-qa": {"worker-ux-designer", "worker-accessibility-auditor",
+                         "worker-frontend-dev", "worker-mobile-dev", "worker-qa-engineer"},
+}
+
+
+@pytest.mark.parametrize("role_id", tuple(roles.WORKER_ALIASES.values()) + (None,))
+def test_design_skills_are_role_scoped_in_delivery_and_reader(monkeypatch, role_id):
+    from cortex_runtime.delegation import mcp_tools
+    from cortex_runtime.contracts import StoreError
+
+    monkeypatch.setattr(mcp_tools, "_own_role_id", lambda store, channel: role_id)
+    allowed = roles.shared_skill_ids("worker", role_id)
+    triggers = dict(roles.situational_skill_triggers("worker", role_id))
+    schema = mcp_tools._enumerate_skills(
+        {"properties": {"skill": {"type": "string"}}}, "worker", role_id)
+    advertised = schema["properties"]["skill"]["description"]
+    for reference, (parent_skill, relative_path) in roles.DESIGN_REFERENCE_PATHS.items():
+        expected = role_id in DESIGN_ROLE_MATRIX[parent_skill]
+        assert (reference in roles.reference_ids("worker", role_id)) == expected
+        assert (reference in advertised) == expected
+        if expected:
+            body = mcp_tools._shared_read_skill(None, None, {"skill": reference})["body"]
+            assert body == (roles.SKILLS_ROOT / parent_skill / relative_path).read_text()
+        else:
+            with pytest.raises(StoreError, match="unknown_skill"):
+                mcp_tools._shared_read_skill(None, None, {"skill": reference})
+            with pytest.raises(PortableError, match="unknown_reference"):
+                roles.read_reference(reference, role_kind="worker", role_id=role_id)
+    for skill_id, owners in DESIGN_ROLE_MATRIX.items():
+        assert (skill_id in allowed) == (role_id in owners)
+        assert (skill_id in triggers) == (role_id in owners)
+        assert (skill_id in advertised) == (role_id in owners)
+        if role_id in owners:
+            body = mcp_tools._shared_read_skill(None, None, {"skill": skill_id})["body"]
+            assert body == roles.load_role(skill_id).body_portable
+        else:
+            with pytest.raises(StoreError, match="unknown_skill"):
+                mcp_tools._shared_read_skill(None, None, {"skill": skill_id})
+
+
+def test_coordinator_design_intake_is_situational_and_not_worker_readable():
+    from cortex_runtime.delegation import mcp_tools
+    from cortex_runtime.contracts import StoreError
+    from types import SimpleNamespace
+
+    coordinator = roles.composed_instructions(roles.load_role("orchestrator"))
+    triggers = dict(roles.situational_skill_triggers("coordinator"))
+    for skill_id in ("requirements-intake", "design-workflow"):
+        assert skill_id in roles.COORDINATOR_ONLY_SHARED_ROLE_IDS
+        assert skill_id in triggers
+        assert f"`{skill_id}` --" in coordinator
+        assert roles.load_role(skill_id).body_portable[:200] not in coordinator
+        assert mcp_tools._shared_read_skill(
+            None, SimpleNamespace(role="coordinator"), {"skill": skill_id})["body"]
+        with pytest.raises(StoreError, match="unknown_skill"):
+            mcp_tools._shared_read_skill(None, None, {"skill": skill_id})
+    assert not (set(DESIGN_ROLE_MATRIX) & roles.shared_skill_ids("coordinator"))
+    assert not (set(DESIGN_ROLE_MATRIX) & set(triggers))
+    for reference in roles.DESIGN_REFERENCE_PATHS:
+        with pytest.raises(StoreError, match="unknown_skill"):
+            mcp_tools._shared_read_skill(
+                None, SimpleNamespace(role="coordinator"), {"skill": reference})
+
+
+@pytest.mark.parametrize("reference_id", (
+    "question-banks", "agreed-spec", "design-intake",
+    "PRODUCT", "DESIGN", "SCREENS", "visual-review",
+))
+def test_coordinator_design_resources_resolve_through_existing_reader(reference_id):
+    from cortex_runtime.delegation import mcp_tools
+    from cortex_runtime.contracts import StoreError
+    from types import SimpleNamespace
+
+    result = mcp_tools._shared_read_skill(
+        None, SimpleNamespace(role="coordinator"), {"skill": f"references/{reference_id}.md"})
+    assert result["body"] == roles.read_reference(reference_id, role_kind="coordinator")
+    assert result["body"].startswith("# ")
+    with pytest.raises(StoreError, match="unknown_skill"):
+        mcp_tools._shared_read_skill(None, None, {"skill": reference_id})

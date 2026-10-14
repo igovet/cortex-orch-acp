@@ -323,7 +323,7 @@ def test_all_23_profiles_require_structured_questions_and_preserve_free_text():
         body = (root / 'skills' / ('worker-' + Path(profile['source']).stem) / 'SKILL.md').read_text()
         normalized = ' '.join(body.split())
         if profile['name'] == 'senior_consultant':
-            # Owner decision D8: the consultant asks the user nothing; missing
+            # The consultant asks the user nothing; missing
             # evidence is a limitation in its report.
             assert 'Ask the user nothing: no prose-only question, no native engine question tool' in normalized
             assert 'record it in your report as a limitation' in normalized

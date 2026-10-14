@@ -217,6 +217,35 @@ def _matches(path, scopes):
                or fnmatch.fnmatchcase(path,scope) or (scope.endswith('/**') and path==scope[:-3]) for scope in scopes)
 
 
+def _normalized_path(value):
+    try:
+        return '/'.join(_parts(value))
+    except StoreError:
+        return value
+
+
+def write_denied(path, denials):
+    """Whether a user deny-write entry covers the project path ``path``.
+
+    Exact entries compare the same normalized path parts as the write effect
+    itself: './secrets/key.txt' and 'secrets/key.txt' match one entry. New
+    entries are exact paths only (``policy.parse_denials``); an entry an
+    older runtime stored with a wildcard still guards, matched conservatively
+    as a glob against the normalized and the given path."""
+    normalized = _normalized_path(path)
+    for denial in denials:
+        if any(char in denial for char in '*?['):
+            patterns = {denial, _normalized_path(denial)}
+            if _matches(normalized, patterns) or _matches(path, patterns):
+                return True
+            continue
+        denial = _normalized_path(denial)
+        # An entry naming the project root itself ('.') covers everything.
+        if denial in {'', '.'} or normalized == denial or normalized.startswith(denial + '/'):
+            return True
+    return False
+
+
 def _read_regular_file(fd):
     """Read and hash one regular, single-link file through its open descriptor."""
     info = os.fstat(fd)
@@ -532,7 +561,8 @@ def _command(store,channel,root,scopes,args,ref,owner,effects):
     # A role without a write grant (reviewer, auditor, explorer...) gets the
     # read-only host profile in every mode (sandbox.readonly_command); the
     # mode only lets it choose a cwd outside the task tree.
-    from ..configuration.access_mode import command_profile, READ_ONLY_COMMAND_PROFILE
+    from ..configuration.access_mode import (command_profile, READ_ONLY_COMMAND_PROFILE,
+                                             GUARDED_COMMAND_PROFILE, HOST_WRITABLE_COMMAND_PROFILE)
     read_only = not scopes
     development = command_profile(policy['mode']) == 'development'
     from ..engine.permissions import declared_command_deletion
@@ -577,7 +607,11 @@ def _command(store,channel,root,scopes,args,ref,owner,effects):
                 raise StoreError('gateway_command_cwd_changed')
             code, failure = _run_command_process(
                 store, channel, command, (*fds, cwd_fd), output, effects,
-                clamp_timeout(args.get('timeout_seconds')), policy=policy if development else None,
+                clamp_timeout(args.get('timeout_seconds')),
+                # A mode switch ends a writing worker's host-wide command; a
+                # read-only command's profile does not depend on the mode, so
+                # a switch never kills it.
+                policy=policy if development and not read_only else None,
                 directory=(cwd, cwd_fd))
         output.seek(0)
         data=output.read()
@@ -601,7 +635,8 @@ def _command(store,channel,root,scopes,args,ref,owner,effects):
                                 'completed' if code==0 and not failure else 'failed')
     # argv is retained so a check citing this receipt can be matched against it.
     return dict(tool_call_ref=ref,argv=list(args['argv']),cwd=cwd,
-                profile=(READ_ONLY_COMMAND_PROFILE if read_only else 'development' if development else 'restricted'),
+                profile=(READ_ONLY_COMMAND_PROFILE if read_only else
+                         HOST_WRITABLE_COMMAND_PROFILE if development else GUARDED_COMMAND_PROFILE),
                 access_policy=policy,
                 exit_code=code,complete=failure is None,failure=failure,
                 output=data.decode('utf-8',errors='replace'),large_output_id=retained['id'])
@@ -635,7 +670,7 @@ def _outside(store,channel,root,operation,args,ref,owner,effects):
     project=Path(root).resolve()
     resolved=Path(os.path.normpath(str(target)))
     if operation=='outside_write':
-        # Resolve real paths too (C-12): a parent-directory symlink alias
+        # Resolve real paths too: a parent-directory symlink alias
         # can make a literally-outside path land inside the project, which
         # the normalized path alone would miss.
         candidates={resolved}
@@ -827,19 +862,8 @@ def dispatch(store,channel,operation,args):
         if operation in {'project_write','project_edit','project_mkdir','project_delete'}:
             # A private path is refused before anything else (a deletion
             # there once asked the user to confirm what was then refused).
-            parts=_parts(args['path'])
-            # Compare the same normalized path parts as the write effect
-            # itself (C-10), not the raw argument string: './secrets/key.txt'
-            # and 'secrets/key.txt' must match one deny-write entry, however
-            # the denial itself happens to be stored.
-            normalized='/'.join(parts)
-            def _normalized_denial(value):
-                try:
-                    return '/'.join(_parts(value))
-                except StoreError:
-                    return value
-            denied=any(normalized==denial or normalized.startswith(denial+'/')
-                       for denial in map(_normalized_denial,write_denials(db,channel.task_id)))
+            _parts(args['path'])
+            denied=write_denied(args['path'],write_denials(db,channel.task_id))
             if not _matches(args['path'],scopes) or denied:
                 error=StoreError('gateway_scope_denied')
                 _record_gateway_refusal_tx(store,db,channel,operation,error)
@@ -962,7 +986,7 @@ def dispatch(store,channel,operation,args):
                             result=dict(created=False)
                 elif operation in {'project_write','project_edit'}:
                     # Recheck deny-write policy at the effect boundary, not just dispatch.
-                    if not _matches(args['path'],scopes) or _matches(args['path'],write_denials(db,channel.task_id)):
+                    if not _matches(args['path'],scopes) or write_denied(args['path'],write_denials(db,channel.task_id)):
                         raise StoreError('gateway_scope_denied')
                     from .project_files import read_state
                     state = read_state(db,channel,root,args['path'])

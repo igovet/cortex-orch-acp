@@ -1,6 +1,6 @@
 """A coordinator's text after its own accepted question never reaches the user.
 
-Session bb142018 (investigation r_5c2679466a0e): the coordinator wrote the
+In one live session the coordinator wrote the
 details, asked with user_question_request, then wrote a full rewrite of the
 same details in the same turn, and the runtime forwarded both. The prompt-only
 rule against a recap did not hold, so the controller now withholds text that

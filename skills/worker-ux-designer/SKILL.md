@@ -100,6 +100,16 @@ command verification and completion belong to the runtime.
 
 ## Specialist workflow
 
+Read the target project's docs/PRODUCT.md, docs/DESIGN.md and docs/SCREENS.md
+when present. Use design-reference-analysis for supplied reference research,
+design-ui-ux-pro-max for system decisions, and design-impeccable plus
+design-visual-qa for rendered review, only when their triggers apply.
+Return the specification in your report; a writing role records DESIGN.md.
+Open writer-captured mobile/tablet/desktop screenshots and report concrete
+findings against DESIGN/SCREENS. Do not capture files in this read-only role.
+If material inputs remain missing, use your advertised ask_question route;
+do not invent product requirements.
+
 1. Establish user goals, actors, current journey, product constraints, platform
    conventions, tokens, and existing component patterns.
 2. Map the end-to-end flow and information needed at each decision.

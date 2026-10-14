@@ -4,6 +4,7 @@ how long it lasts, and how a node's retry treats it
 (orchestration.recovery.retry_lost / orchestration.state.attempt_routing)."""
 from __future__ import annotations
 
+import json
 import time
 from datetime import datetime
 from types import SimpleNamespace
@@ -241,6 +242,63 @@ def test_a_fallback_refused_for_another_failure_class_is_still_not_retried(execu
     _fail(store, channel.task_id, node, "xa_0", error="fallback_refused:no_untried_authorized_route",
           failure_class="rate_limited")
     with pytest.raises(StoreError, match="worker_failure_not_retryable:fallback_refused:no_untried_authorized_route"):
+        retry_lost(runtime, channel.task_id, node)
+
+
+def _provision_only(store, task_id, node, attempt_id):
+    with store.connection() as db:
+        db.execute(
+            "INSERT INTO delegation_provisioning(idempotency_key,task_id,assignment_id,attempt_id,role_id,step,status,"
+            "owner_epoch,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+            (node["assignment_ref"], task_id, "as_" + attempt_id, attempt_id, "worker-backend-dev", "ready", "ready",
+             1, "2026-09-23T00:00:00+00:00", "2026-09-23T00:00:00+00:00"),
+        )
+        db.commit()
+
+
+def _retries(store, task_id):
+    with store.connection() as db:
+        return [json.loads(row[0]) for row in db.execute(
+            "SELECT payload_json FROM runtime_events WHERE task_id=? AND type='ASSIGNMENT_RETRIED' ORDER BY rowid",
+            (task_id,))]
+
+
+def test_a_worker_lost_without_any_failure_event_is_retried_without_escalation(executing):
+    """A worker whose process vanished (host disconnect, runtime restart)
+    leaves no failure event; its retry is infrastructure, not quality."""
+    store, machine, channel, runtime = executing
+    node = _running_node(machine, channel)
+    _provision_only(store, channel.task_id, node, "xa_gone")
+    retry_lost(runtime, channel.task_id, node)
+    assert _retries(store, channel.task_id)[-1]["failure_class"] == "worker_lost"
+    node = _running_node(machine, channel)
+    _provision_only(store, channel.task_id, node, "xa_next")
+    assert attempt_routing(store, channel.task_id, "xa_next").escalate is False
+
+
+@pytest.mark.parametrize("failure_class", ["worker_lost", None])
+def test_a_worker_recovery_wrote_off_is_retried_without_escalation(executing, failure_class):
+    """Recovery's ``recovery_worker_lost`` write-off, with its class or as
+    recorded by an older runtime without one, never raises the tier."""
+    store, machine, channel, runtime = executing
+    node = _running_node(machine, channel)
+    _fail(store, channel.task_id, node, "xa_lost", error="recovery_worker_lost", failure_class=failure_class)
+    retry_lost(runtime, channel.task_id, node)
+    assert _retries(store, channel.task_id)[-1]["failure_class"] == "worker_lost"
+    node = _running_node(machine, channel)
+    _provision_only(store, channel.task_id, node, "xa_next")
+    assert attempt_routing(store, channel.task_id, "xa_next").escalate is False
+
+
+def test_lost_worker_retries_stay_bounded(executing):
+    store, machine, channel, runtime = executing
+    for index in range(MAX_ATTEMPT_RETRIES):
+        node = _running_node(machine, channel)
+        _provision_only(store, channel.task_id, node, f"xa_{index}")
+        retry_lost(runtime, channel.task_id, node)
+    node = _running_node(machine, channel)
+    _provision_only(store, channel.task_id, node, "xa_last")
+    with pytest.raises(StoreError, match="worker_retry_limit"):
         retry_lost(runtime, channel.task_id, node)
 
 

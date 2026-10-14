@@ -140,7 +140,7 @@
               "review",
               "analysis"
             ],
-            "preferred_when": "Use for any work of the listed kinds. Always use for UI/UX design tasks, including interface design, visual concepts, mockups, wireframes, and design systems, regardless of complexity or scope. Do not use for frontend implementation, HTML/CSS layout, or styling tasks unless they explicitly involve UI/UX design decisions. For backend work, use only for very complex, narrowly scoped tasks.",
+            "preferred_when": "Use for any work of the listed kinds. Always use for all UI/UX work, whatever its scope: interface and visual design, UX flows, mockups, wireframes, design systems, and frontend layout and styling that implement or change a UI design (HTML/CSS, markup, responsive layout, UI components, visual polish). Never mark such nodes low complexity: that leaves Opus ineligible. For backend work, use only for very complex, narrowly scoped tasks.",
             "request_names": [
               "opus",
               "опус"
@@ -218,7 +218,7 @@
               "operations",
               "analysis"
             ],
-            "preferred_when": "Any work of the listed kinds, except frontend work that concerns layout design.",
+            "preferred_when": "Any work of the listed kinds, except UI/UX design and frontend layout or styling work, which belong to Opus.",
             "request_names": null
           }
         }

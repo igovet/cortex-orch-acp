@@ -33,6 +33,9 @@ _SHARED_SKILL_DIRS = (
     "content-safety", "tool-discipline", "knowledge-harvest",
     "documentation-sync", "context-compaction", "skill-management",
     "tool-discipline-worker", "skill-authoring", "knowledge-harvest-scope",
+    "requirements-intake", "design-workflow",
+    "design-frontend-design", "design-ui-ux-pro-max", "design-impeccable",
+    "design-reference-analysis", "design-visual-qa",
 )
 
 
@@ -56,14 +59,14 @@ def test_scanned_file_set_is_nonempty():
 
 
 def test_all_t001_specializations_load():
-    """23 workers + orchestrator + 11 shared skills all load as portable roles."""
+    """23 workers + orchestrator + 18 shared skills all load as portable roles."""
     all_roles = roles.load_all_roles()
     worker_roles = [r for r in all_roles.values() if r.kind == "worker"]
     coordinator_roles = [r for r in all_roles.values() if r.kind == "coordinator"]
     shared_roles = [r for r in all_roles.values() if r.kind == "shared"]
     assert len(worker_roles) == 23
     assert len(coordinator_roles) == 1
-    assert len(shared_roles) == 11
+    assert len(shared_roles) == 18
     for role in all_roles.values():
         assert role.body_portable.strip()
         assert role.sha256

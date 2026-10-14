@@ -1,6 +1,6 @@
 """What Codex code mode actually shows the model, modeled from one observed
-projection (investigation r_af50d7468665, session c2016029, transcript line
-59): Codex 0.155.1 renders each MCP tool as a TypeScript declaration that
+projection (one live Codex session transcript): Codex 0.155.1 renders each
+MCP tool as a TypeScript declaration that
 keeps every property's own ``description`` and its type/enum/optionality, but
 drops ``minItems``, ``maxItems``, ``minLength``, ``maxLength`` and
 ``pattern``, and drops the ``description`` of a scalar array's items.
@@ -57,7 +57,7 @@ def test_every_required_array_states_its_minimum_in_its_own_description(kind, ro
     assert gaps == []
 
 
-# Live qualification r_236acb13fabb (task t_c6513be0469a): the Codex rollout
+# A live qualification: the Codex rollout
 # shows the model received the whole verification description, "Send 1 to 16
 # items." included, and still sent ``verification: []``. The project
 # documented no verification, and the description only said to copy commands

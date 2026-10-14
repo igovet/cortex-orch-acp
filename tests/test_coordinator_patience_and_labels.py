@@ -621,8 +621,8 @@ def test_a_workers_header_is_resolved_when_the_card_is_drawn_not_before():
 # -- a worker that published its report and never said so -------------------
 
 def test_a_silent_worker_that_published_a_report_delivers_it_instead_of_failing(tmp_path):
-    """Live (2026-09-19, the user's own thread): a worker published report
-    r_1777da4c6513 through its own channel at 14:43:10, the runtime declared
+    """Live (2026-09-19, the user's own thread): a worker published its report
+    through its own channel at 14:43:10, the runtime declared
     the assignment empty five seconds later, and the coordinator delegated
     the identical work again from scratch. The work existed; only the
     sentence about it was missing."""

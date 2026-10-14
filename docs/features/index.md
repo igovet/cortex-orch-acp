@@ -21,6 +21,8 @@ Runtime lifecycle and coordination:
 - [Orchestration](orchestration/index.md)
 - [Task lifecycle and scheduling](task-lifecycle/index.md)
 - [Roles and delegation](roles-and-delegation/index.md)
+- [Requirements intake](requirements-intake/index.md)
+- [UI/UX design workflow](design-workflow/index.md)
 - [Automatic routing, mixed teams and authorized fallback](routing-and-fallback/index.md)
 - [Summaries, weak models and budgets](summaries-and-budgets/index.md)
 - [Steering, questions and cancellation](steering-and-questions/index.md)

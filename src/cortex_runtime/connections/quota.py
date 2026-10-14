@@ -70,7 +70,7 @@ _ROLLOUT_TAIL_BYTES = 256 * 1024
 _ROLLOUT_FILES_SCANNED = 10
 # Paid extra usage is not part of the plan and must not look like headroom.
 _IGNORED_WINDOWS = ("overage",)
-# C-20: a rejected window the engine reported with no resetsAt at all must
+# A rejected window the engine reported with no resetsAt at all must
 # still expire, rather than blocking its route forever. Bounded and
 # conservative -- comfortably longer than Claude's own longest named plan
 # window (seven_day) so a real window is never cut short by this fallback,
@@ -164,7 +164,7 @@ def observe(connection_id: str, info: object, environ: Mapping[str, str] | None 
         if info.get("status") == "rejected":
             used = 100.0
             if reset_at is None:
-                # C-20: never let an unresettable rejection block the route
+                # Never let an unresettable rejection block the route
                 # forever -- expire it after a bounded TTL instead.
                 reset_at = time.time() + _REJECTED_WINDOW_DEFAULT_TTL_SECONDS
         elif isinstance(utilization, (int, float)):
@@ -373,7 +373,7 @@ def _merge_claude_windows(connection_id: str, environ: Mapping[str, str] | None,
         if isinstance(existing_observed, (int, float)) and existing_observed > now:
             continue  # a newer rate_limit_event (or a racing CLI read) already won
         windows[name] = dict(used=window["used"], resets_at=window.get("resets_at"), observed_at=now, source="cli")
-    # C-20: a successful CLI read is a complete snapshot of the CLI's own
+    # A successful CLI read is a complete snapshot of the CLI's own
     # windows; one this run no longer reports (a scope that stopped
     # applying) vanished and must not linger as stale cached usage forever.
     # Never prunes a window ``observe()`` itself wrote (``source=="event"``).

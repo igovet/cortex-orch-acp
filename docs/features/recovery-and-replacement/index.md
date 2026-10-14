@@ -108,7 +108,8 @@ A host transport disconnect before the restart (for example a Paseo plugin
 update) leaves task, node and assignment state as persisted rather than
 cancelling it; step 3 then records its interrupted workers as
 `recovery_worker_lost`, and a restarted runtime never re-dispatches the old
-delegation request. See
+delegation request. Such a worker is retried with the failure class `worker_lost`: the retry still
+counts against the retry limit, but it never raises the model tier. See
 [failures and disconnects](../failures-and-cancellation/index.md#4-disconnect).
 
 ## Cross-process liveness

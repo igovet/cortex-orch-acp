@@ -18,7 +18,7 @@ _NOTHING_NEEDED_HINT = (
 )
 # Per-channel digest of the last task_get_context read, so an unchanged repeat
 # poll (the same coordinator turn calling this over and over while nothing
-# progressed, see r_310cd92bc78e's 57-call regression) costs a small receipt
+# progressed; one live coordinator polled it 57 times) costs a small receipt
 # instead of resending the whole plan/nodes payload. Bounded like the wire
 # emitter's own repeat memory; a lost entry after eviction or restart only
 # costs one full resend, never a wrong answer.
@@ -197,7 +197,9 @@ def dispatch(store, channel, operation, args):
                                          'a later passed check citing a rerun of exactly this argv, or assignment_outcome="failed"',
                                          f"This check remains failed.{command} Rerun exactly the receipt's argv "
                                          "(and outside_command cwd), retain the failed check and cite the later passed "
-                                         "receipt in this result; a different argv does not close it. Or explicitly send "
+                                         "receipt in this result; a different argv does not close it. A supported standalone Python probe "
+                                         "syntax/regex invocation error may instead be explicitly retracted with invocation_error "
+                                         "(corrected_by and reason), retaining both observed receipts. Or explicitly send "
                                          'assignment_outcome="failed" to submit an intentional failed assignment. '
                                          "If this run's own output shows the check never started because its command line "
                                          "was mistyped (usage, unknown-option or file-not-found error for the command "
@@ -257,7 +259,7 @@ def dispatch(store, channel, operation, args):
             node_status=db.execute('SELECT status FROM runtime_nodes WHERE task_id=? AND assignment_ref=?',
                                    (channel.task_id,provision['idempotency_key'])).fetchone()[0]
         # The receipt shows the worker every check the runtime did not accept as claimed.
-        result = dict(result, node_status=node_status, report_ref=accepted['report_ref'], checks=[{key: check[key] for key in ('name', 'outcome', 'claimed_outcome', 'evidence_gap', 'blocker', 'closed_by')
+        result = dict(result, node_status=node_status, report_ref=accepted['report_ref'], checks=[{key: check[key] for key in ('name', 'outcome', 'claimed_outcome', 'evidence_gap', 'blocker', 'closed_by', 'invocation_error', 'retracted_by')
                                        if key in check} for check in accepted['checks']])
         with store.connection() as db:
             db.execute('BEGIN IMMEDIATE')

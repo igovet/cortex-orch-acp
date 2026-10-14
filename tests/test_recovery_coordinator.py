@@ -281,6 +281,8 @@ def test_worker_lost_without_result_is_marked_failed_not_relaunched(tmp_path):
 
     payload = _json.loads(row["payload_json"])
     assert payload["error"] == "recovery_worker_lost"
+    # Infrastructure loss: its retry must not raise the model tier.
+    assert payload["failure_class"] == "worker_lost"
     assert attempt_id in engine.terminate_calls
 
     # The recovery event and the executable graph attempt are one durable

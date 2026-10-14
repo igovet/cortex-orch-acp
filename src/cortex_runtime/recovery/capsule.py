@@ -1484,18 +1484,16 @@ _SECTION_BUILDERS = (
 
 
 def _apply_inline_delivery_dedup(sections: dict, recipient: Mapping[str, Any]) -> None:
-    """C-30: the *inline* delivery of this exact capsule (the one prefixed
-    onto a worker's first prompt or a post-compaction continuation -- see
-    ``acp.orchestrating_runtime._begin_generation_delivery``) is always
-    followed, in that same message, by the literal task brief itself
-    (which that same caller strips of its own now-redundant copy of
-    ``own_assignment['brief']`` -- see its own C-30 comment). Within the
+    """The *inline* delivery of this exact capsule (the one prefixed onto a
+    worker's first prompt or a post-compaction continuation -- see
+    ``acp.orchestrating_runtime._begin_generation_delivery``). Within the
     capsule, a worker's own node ``objective`` and its assignment
     ``title`` (always a prefix of that very same objective -- see
-    ``orchestration.controller._title_from_objective``) are therefore
-    redundant with ``own_assignment['brief']``, which stays the one place
-    the full objective remains verbatim. Replaced here with an explicit,
-    inspectable reference, never silently dropped.
+    ``orchestration.controller._title_from_objective``) are redundant with
+    ``own_assignment['brief']``. Replaced here with an explicit, inspectable
+    reference, never silently dropped. When the same message also carries
+    the literal brief in its assignment instructions, the rendered capsule
+    references that instead (:func:`reference_brief_delivered_inline`).
 
     A capsule fetched later through the ``read_capsule`` tool
     (``inline_delivery=False``, the default -- it is not accompanied by
@@ -1525,6 +1523,49 @@ def _apply_inline_delivery_dedup(sections: dict, recipient: Mapping[str, Any]) -
                 node["objective"] = dict(reference)
 
 
+def reference_brief_delivered_inline(capsule: Mapping[str, Any], delivered_text: str) -> Mapping[str, Any]:
+    """The capsule to render in front of ``delivered_text``, a worker's own
+    prompt that carries its literal assignment brief as runtime-authored
+    instructions.
+
+    The objective then appears once, in that instruction section the worker
+    treats as its assignment, not a second time inside the capsule's
+    data-labelled ``own_assignment``: the capsule's own brief, title and
+    node objective become an explicit reference to it. Returns ``capsule``
+    itself, unchanged, for any other recipient or when ``delivered_text``
+    does not contain the brief verbatim (a continuation without it), so the
+    capsule then still carries the full brief. Rendering only: the built
+    capsule, its revision and ``read_capsule`` are unaffected."""
+    import copy
+
+    sections = capsule.get("sections") if isinstance(capsule, Mapping) else None
+    pipeline = sections.get("pipeline_and_assignments") if isinstance(sections, Mapping) else None
+    own = pipeline.get("own_assignment") if isinstance(pipeline, Mapping) else None
+    brief = own.get("brief") if isinstance(own, Mapping) else None
+    if (not isinstance(capsule.get("recipient"), Mapping) or capsule["recipient"].get("role") != "worker"
+            or not isinstance(brief, str) or not brief or not isinstance(delivered_text, str)
+            or brief not in delivered_text):
+        return capsule
+    rendered = copy.deepcopy(dict(capsule))
+    pipeline = rendered["sections"]["pipeline_and_assignments"]
+    reference = dict(
+        status="referenced", trust_label="derived_summary",
+        note="Delivered once, verbatim, as this assignment's instructions in this same message after the "
+             "capsule; kept there instead of repeated here.",
+        retrieve=dict(tool=None, note=_NO_TOOL_NOTE),
+    )
+    own = pipeline["own_assignment"]
+    for key in ("title", "brief"):
+        if key in own:
+            own[key] = dict(reference)
+    runtime = pipeline.get("runtime")
+    if isinstance(runtime, dict):
+        for node in runtime.get("nodes") or []:
+            if isinstance(node, dict) and "objective" in node:
+                node["objective"] = dict(reference)
+    return rendered
+
+
 def build_capsule(
     store, task_id: str, recipient: Mapping[str, Any], at_revision: int | None = None,
     *, candidate_summary: Any = None, inline_delivery: bool = False,
@@ -1539,7 +1580,7 @@ def build_capsule(
     section is not implemented; this is a documented limitation, not a
     silent one).
 
-    ``inline_delivery`` (C-30, default ``False``): set only by the one
+    ``inline_delivery`` (default ``False``): set only by the one
     caller that prefixes this exact rendered capsule onto a worker's own
     delivered prompt text in the same message (never by ``read_capsule``
     or any other caller) -- see :func:`_apply_inline_delivery_dedup`.

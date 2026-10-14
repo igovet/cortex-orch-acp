@@ -1,7 +1,6 @@
 """Generator hardening: assert exactly 23 profiles, and fail on a dropped preamble.
 
-Scope: ``scripts/generate_agent_profiles.py``. These are the two L1/L2 fixes
-from the consolidated audit (r_9731f0fc6d64 C-36 L1, L2): ``sections()``
+Scope: ``scripts/generate_agent_profiles.py``. Two fixes: ``sections()``
 silently dropped any text between a profile's title and its first ``##``
 heading, and ``check()`` never asserted the profile count it reports.
 """

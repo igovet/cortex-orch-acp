@@ -39,6 +39,22 @@ ROLE_REFERENCE_LINK = re.compile(r"\]\(references/([a-z0-9-]+)\.md\)")
 COORDINATOR_PROMPT_BUDGET_CHARS = 21_100
 
 
+def test_intake_and_design_sources_preserve_evidence_and_ownership_rules():
+    intake = load_role("requirements-intake").body_portable
+    design = load_role("design-workflow").body_portable
+    assert "Do not interrogate the user when the request and project evidence suffice" in intake
+    assert "Never ask what docs, code or a retained answer already establish" in intake
+    assert "at most two rounds" in intake
+    assert "do not guess or implement it" in " ".join(intake.split())
+    assert "plan objectives" in intake
+    for phrase in ("read-only", "technical-writer", "same implementation owner",
+                   "git-ignored", "mobile, tablet and desktop", "at most",
+                   "No model self-score", "actually advertised and usable"):
+        assert phrase in design
+    assert "routine frontend" in design
+    assert "runtime still owns" in design
+
+
 def _offered_tool_names(role_kind, role_id=None, stage=None):
     return set(channeled_base_tool_names()) | {
         item["name"]
@@ -285,7 +301,7 @@ def test_s3_rendered_size_ceilings_and_shared_report_ownership():
         kind = "coordinator" if role_id == "orchestrator" else "worker"
         role = composed_instructions(load_role(role_id))
         base = cortex_system_prompt(kind, None, today=date(2026, 10, 4), environ={}, access_class=prompt_access_class(kind, role_id))
-        # C-26: the coordinator now also names its own reference skills
+        # The coordinator now also names its own reference skills
         # (COORDINATOR_REFERENCE_IDS -- cortex-release, governance,
         # host-compatibility, incident, live-qualification,
         # pipeline-publication, recovery, senior-consultation,

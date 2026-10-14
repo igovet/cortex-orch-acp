@@ -60,7 +60,10 @@ def _usable(db, task_id, check):
     if not check or check.get('complete') is not True or type(check.get('exit_code')) is not int:
         return False
     from .. import task_workspace
-    if check.get('profile', 'restricted') not in ('restricted', 'development'):
+    from ..configuration.access_mode import (READ_ONLY_COMMAND_PROFILE, GUARDED_COMMAND_PROFILE,
+                                             HOST_WRITABLE_COMMAND_PROFILE)
+    if check.get('profile', GUARDED_COMMAND_PROFILE) not in (
+            READ_ONLY_COMMAND_PROFILE, GUARDED_COMMAND_PROFILE, HOST_WRITABLE_COMMAND_PROFILE):
         return False
     if check.get('cwd') not in (None, task_workspace.task_root(db, task_id)):
         return False
@@ -173,11 +176,13 @@ def reuse(store, channel, root, args, ref, owner):
                 # Only a check run in the profile the reviewer's own command
                 # gets stands in for it: a reviewer holds no write grant, so
                 # that is the read-only host profile in every mode, which
-                # runtime verification also uses (owner decision D1). A check
-                # retained from a host-writable run is never reused.
+                # runtime verification also uses. A check retained from a
+                # host-writable run, or recorded under the Guarded writer
+                # profile name before the read-only profile had its own, is
+                # never reused.
                 from ..configuration.access_mode import READ_ONLY_COMMAND_PROFILE
                 if (not _usable(db, channel.task_id, check) or
-                        check.get('profile', 'restricted') != READ_ONLY_COMMAND_PROFILE):
+                        check.get('profile') != READ_ONLY_COMMAND_PROFILE):
                     return None
                 break
         remaining = deadline - time.monotonic()
@@ -214,7 +219,7 @@ def reuse(store, channel, root, args, ref, owner):
             (output_id, owner, ref, store._now(), check['large_output_id'], channel.task_id))
         db.commit()
     return dict(tool_call_ref=ref, argv=check['argv'], cwd=str(Path(root).resolve()),
-                profile=check.get('profile', 'restricted'),
+                profile=check['profile'],
                 exit_code=check['exit_code'], complete=True,
                 failure=None, revision_digest=check['revision_digest'], large_output_id=output_id,
                 output='', output_truncated=False, output_inline_omitted=True,

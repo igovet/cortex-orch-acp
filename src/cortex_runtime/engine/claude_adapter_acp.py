@@ -304,7 +304,7 @@ CLAUDE_GATEWAY_ALTERNATIVES = ("Bash", "Read", "Edit", "Write", "Grep", "Glob", 
 # own cancellation and completion path; PushNotification reaches the host
 # outward (desktop/system notifications) outside any Cortex-mediated channel.
 # WebFetch/WebSearch stay available -- they are ordinary read-only tools, not
-# lifecycle/notification surfaces. Audit finding C-25.
+# lifecycle/notification surfaces.
 CLAUDE_NATIVE_LIFECYCLE_TOOLS = ("EnterWorktree", "ExitWorktree", "PushNotification",
                                  "EnterPlanMode", "ExitPlanMode", "TaskStop")
 

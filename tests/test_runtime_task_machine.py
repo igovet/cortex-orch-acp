@@ -1358,9 +1358,9 @@ def test_a_flagship_hint_is_granted_only_by_the_users_own_words(machine, monkeyp
 
 
 def test_a_user_revocation_reaches_attempt_routing(machine, monkeypatch):
-    """C-11: attempt_routing itself now carries the user's revocation of an
+    """attempt_routing itself carries the user's revocation of an
     earlier model request (routing.auto_route.user_model_revocation), not
-    only the grant -- the plumbing r_b98b7ed46749 left open."""
+    only the grant."""
     from cortex_runtime.bootstrap import append_source_event
     from cortex_runtime.orchestration.state import attempt_routing
     from cortex_runtime.routing import auto_route
@@ -1638,7 +1638,7 @@ def test_an_unobservable_project_always_requires_review(machine, monkeypatch):
 
 
 def test_plan_submit_result_tells_coordinator_to_end_turn(machine):
-    """r_310cd92bc78e: a coordinator polled task_get_context 57 times after
+    """A live coordinator polled task_get_context 57 times after
     an accepted plan because dispatch only starts once its turn ends. The
     accepted receipt now says so explicitly instead of leaving the model to
     poll for a state change that needs its own turn to end first."""

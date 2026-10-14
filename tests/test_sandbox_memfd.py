@@ -1,4 +1,4 @@
-"""compact_argv's --args payload fd without memfd_create (C-31).
+"""compact_argv's --args payload fd without memfd_create.
 
 This host's Python build has no ``os.memfd_create`` at all, which is the
 exact gap the fix covers; both branches are exercised through monkeypatch

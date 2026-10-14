@@ -81,7 +81,7 @@ def _problems(tool, path, schema):
         # A code-mode host (e.g. Codex) shows the model only this array-level
         # description, never minItems/maxItems or the item schema's own
         # description, so the bounds and the item's meaning must both live
-        # here (investigation r_af50d7468665).
+        # here (observed in a live Codex session).
         if len(description) < 40 or description in GENERIC:
             yield f"{tool} {path}: no real description"
         min_items, max_items = schema.get("minItems", 0), schema.get("maxItems")
@@ -175,7 +175,7 @@ def test_user_question_request_forbids_a_recap_after_the_call(kind, role_id, sta
     assert "exactly once" in description
     assert "without restating" in description or "not restating" in description
     # A same-length rewrite is banned too, not only a shorter recap
-    # (r_5c2679466a0e); the tool description closes the turn as well.
+    # (observed live); the tool description closes the turn as well.
     assert "write nothing more" in description and "rewriting" in description
     assert "After the call end the turn without writing anything more" in tool["description"]
 
@@ -282,7 +282,7 @@ def test_read_skill_advertises_only_matching_situational_triggers(kind, role_id)
 
 
 def test_the_consultant_is_offered_no_question_or_access_route():
-    """Owner decision D8: the consultant asks the user nothing; missing
+    """The consultant asks the user nothing; missing
     evidence is a limitation in its report."""
     names = {t["name"] for t in mcp_tools.tool_definitions(
         "worker", role_id="worker-senior-consultant", stage="execution")}

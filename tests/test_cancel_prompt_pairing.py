@@ -1,4 +1,4 @@
-"""Paseo cancel+prompt pairing (owner decision D6).
+"""Paseo cancel+prompt pairing.
 
 Paseo sends ``session/cancel`` and then, once that turn settles, a new
 ``session/prompt`` for a follow-up message (CLI ``send``, Desktop "Send
@@ -77,9 +77,9 @@ class _Scenario:
         self.outcomes = []
         self.threads = []
 
-    def prompt(self, session_id, text, cancel_event, surface="Paseo"):
+    def prompt(self, session_id, text, cancel_event, surface="Paseo", emit=None):
         thread = threading.Thread(target=lambda: self.outcomes.append(self.runtime.start_prompt(
-            self.task_id, session_id, text, lambda _text: True, cancel_event, client_surface=surface,
+            self.task_id, session_id, text, emit or (lambda _text: True), cancel_event, client_surface=surface,
         )))
         thread.start()
         self.threads.append(thread)
@@ -192,6 +192,66 @@ def test_prompt_from_another_session_applies_the_held_pause_first(tmp_path):
                   if kind == "progress" and payload.get("kind") == "host_cancel_paused"]
         assert paused[0]["reason"] == "resolved_before_next_turn"
         assert "host_cancel_followed_by_prompt" not in scenario.progress_kinds()
+    finally:
+        scenario.close()
+
+
+def test_a_failed_deferred_pause_leaves_a_durable_trace(tmp_path):
+    scenario = _Scenario(tmp_path, grace=0.3)
+
+    def failing_pause(task_id, hold, reason):
+        raise RuntimeError("pause failed")
+    scenario.runtime._apply_cancel_pause = failing_pause
+    try:
+        _cancel_first_turn(scenario)
+        assert scenario.wait_for(lambda: "host_cancel_pause_failed" in scenario.progress_kinds())
+        [failed] = [payload for kind, payload in scenario.task_events()
+                    if kind == "progress" and payload.get("kind") == "host_cancel_pause_failed"]
+        assert failed["error"] == "RuntimeError" and failed["session_id"] == "s1"
+        assert failed["reason"] == "grace_expired"
+    finally:
+        scenario.close()
+
+
+def test_a_deferred_pause_is_announced_once_on_the_next_turn(tmp_path):
+    """The cancelled turn's host emitters are closed, so the pause a lone
+    cancel applies after it ended is said at the start of the next turn."""
+    scenario = _Scenario(tmp_path, grace=0.3)
+    try:
+        _cancel_first_turn(scenario)
+        assert scenario.wait_for(lambda: "host_cancel_paused" in scenario.progress_kinds(), timeout=30.0)
+        emitted = []
+        scenario.prompt("s1", "Continue", threading.Event(), emit=lambda text: emitted.append(text) or True)
+        assert scenario.wait_for(lambda: any("Your earlier stop paused this task" in text for text in emitted))
+        notes = [payload for kind, payload in scenario.task_events()
+                 if kind == "progress" and payload.get("message_key") == "turn_paused_earlier"]
+        assert len(notes) == 1
+        assert scenario.task_id not in scenario.runtime._pending_pause_notices
+    finally:
+        scenario.close()
+
+
+def test_an_answer_returning_early_after_a_held_cancel_is_steering(tmp_path):
+    """A ``/cortex-answer`` on the cancelled session is a prompt there, even
+    when it returns before reaching the coordinator (here: a question that
+    is no longer open); the held cancel must not pause the task later."""
+    from cortex_runtime.acp import questions_store
+
+    scenario = _Scenario(tmp_path, grace=0.5)
+    try:
+        _cancel_first_turn(scenario)
+        question = questions_store.create_if_absent(scenario.store, scenario.task_id, "stale", "Which one?")
+        with scenario.store.connection() as db:
+            db.execute("UPDATE pending_questions SET status='superseded' WHERE id=?", (question.id,))
+            db.commit()
+        outcome = scenario.runtime.answer_question(
+            scenario.task_id, "s1", question, "First", lambda _text: True, threading.Event())
+        assert outcome == StopReason.END_TURN
+        assert "host_cancel_followed_by_prompt" in scenario.progress_kinds()
+        time.sleep(1.0)  # past the grace window
+        assert "host_cancel_paused" not in scenario.progress_kinds()
+        assert not scenario.worker_cancel[0].is_set()
+        assert scenario.state()["state"] == "EXECUTING"
     finally:
         scenario.close()
 

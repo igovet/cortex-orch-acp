@@ -147,7 +147,7 @@ def coordinator_tools(entry) -> list[str]:
 
 def missing_grant_paths(entry) -> list[str]:
     """The ``read_paths``/``write_paths`` entries of one registry server
-    that do not currently exist on disk (C-24).
+    that do not currently exist on disk.
 
     ``engine.external_proxy.main`` refuses the whole server -- raising
     ``external_mcp_read_grant_invalid``/``external_mcp_write_grant_invalid``
@@ -188,7 +188,7 @@ def host_mcp_servers(servers, *, role: str | None = None, engine: str | None = N
     launch it, and a half-entry is worth an omission, not a crash), any
     entry calling itself ``cortex``, which would shadow this runtime's own
     server and hand a client's process the coordinator's channel name, and
-    (C-24) an entry whose granted ``read_paths``/``write_paths`` include a
+    an entry whose granted ``read_paths``/``write_paths`` include a
     path that does not exist, which ``engine.external_proxy`` would refuse
     entirely at spawn time anyway -- never advertise a server the gateway
     cannot actually start. ``role_id`` (the worker profile, when known) can

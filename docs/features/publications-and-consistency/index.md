@@ -92,7 +92,7 @@ failed, for a cited nonzero exit) with its `evidence_gap`, as described in
 [check evidence](../orchestration/index.md#check-evidence). A failed check stays failed
 in the published result; only an exact later rerun of the same command closes it
 (`closed_by`, see [check history](../orchestration/index.md#check-history-and-current-outcome)),
-and publication and recovery preserve that closure. Before recording a new
+and publication and recovery preserve that closure. An eligible own-probe invocation error is kept as `retracted` history with `retracted_by`, never as a pass, and publication and recovery preserve that as well. Before recording a new
 submission, an open failure returns `open_failed_check` with the check, receipt
 and its observed argv when available. No result request, inline report or result
 is published, and the channel stays active. Retain the failed check and cite a

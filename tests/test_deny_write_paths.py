@@ -1,13 +1,14 @@
-"""Regression coverage for the consolidated audit's C-09/C-10/C-12 fixes:
+"""Deny-write paths and outside-write protection:
 
-- C-09 (owner decision D7): only an explicit ``deny-write: <path>`` steering
-  directive is ever recognized as a denial; natural-language phrasing and
-  wildcard/masked paths never are.
-- C-10: deny-write matching normalizes the write-effect path the same way
-  the gateway's own path validation does, so './secrets/key.txt' and
+- Only an explicit ``deny-write: <path>`` steering directive is ever
+  recognized as a denial; natural-language phrasing and wildcard/masked
+  paths never are. A wildcard entry an older runtime already stored still
+  guards project writes, matched conservatively.
+- Deny-write matching normalizes the write-effect path the same way the
+  gateway's own path validation does, so './secrets/key.txt' and
   'secrets/key.txt' denote one denial regardless of which form is stored or
   requested.
-- C-12: ``outside_write``'s inside-project refusal follows real paths, so a
+- ``outside_write``'s inside-project refusal follows real paths, so a
   parent-directory symlink alias cannot land inside the project unnoticed,
   and the project's git metadata (including an external linked worktree's
   gitdir/commondir) is protected control-plane state.
@@ -50,7 +51,7 @@ def _deny(worker, *paths):
         db.commit()
 
 
-# --- C-10: deny-write matching uses the same normalized path parts as the effect.
+# --- Deny-write matching uses the same normalized path parts as the effect.
 
 def test_deny_write_refuses_a_dot_slash_prefixed_write_path(worker):
     store, channel, coordinator, root = worker
@@ -81,7 +82,44 @@ def test_deny_write_still_refuses_an_exact_match(worker):
         call(worker, 'project_write', path='file.txt', expected_sha256='absent', content='x')
 
 
-# --- C-09 (D7): only an explicit 'deny-write: <path>' directive is recognized.
+@pytest.mark.parametrize('stored,path', [
+    ('secrets/*', 'secrets/key.txt'),
+    ('secrets/*', './secrets/key.txt'),
+    ('secrets/**', 'secrets/deep/key.txt'),
+    ('*.env', 'config/prod.env'),
+    ('config?.yaml', 'config1.yaml'),
+    ('**', 'anything.txt'),
+])
+@pytest.mark.parametrize('operation', ['project_write', 'project_mkdir'])
+def test_a_stored_legacy_wildcard_denial_still_guards_project_writes(worker, stored, path, operation):
+    """Denials stored by an older runtime's parser may hold wildcards; new
+    input never adds one, but an existing one keeps refusing writes."""
+    store, channel, coordinator, root = worker
+    _deny(worker, stored)
+    args = dict(path=path, expected_sha256='absent', content='x') if operation == 'project_write' else dict(path=path)
+    with pytest.raises(StoreError, match='gateway_scope_denied'):
+        call(worker, operation, **args)
+    assert not (root / path).exists()
+
+
+def test_a_stored_legacy_wildcard_denial_leaves_unmatched_paths_writable(worker):
+    store, channel, coordinator, root = worker
+    _deny(worker, 'secrets/*', '*.env')
+    call(worker, 'project_write', path='src/app.py', expected_sha256='absent', content='x')
+    assert (root / 'src' / 'app.py').read_text() == 'x'
+
+
+def test_write_denied_matches_exact_and_legacy_entries():
+    from cortex_runtime.orchestration.gateway import write_denied
+    assert write_denied('./a/b.txt', ['a'])
+    assert write_denied('a/b.txt', ['./a/b.txt'])
+    assert write_denied('anything.txt', ['.'])
+    assert write_denied('docs/x.md', ['docs/*.md'])
+    assert not write_denied('ab/c.txt', ['a'])
+    assert not write_denied('src/x.py', ['docs/*'])
+
+
+# --- Only an explicit 'deny-write: <path>' directive is recognized.
 
 def test_parse_denials_accepts_explicit_directive_quoted_or_not():
     assert parse_denials('deny-write: secrets/key.txt') == ['secrets/key.txt']
@@ -101,7 +139,7 @@ def test_parse_denials_rejects_wildcards_and_masks():
     assert parse_denials('deny-write: config?.yaml') == []
 
 
-# --- C-12: outside_write follows real paths; project git metadata is protected.
+# --- outside_write follows real paths; project git metadata is protected.
 
 def test_outside_write_refuses_through_a_parent_symlink_alias_into_the_project(worker, tmp_path):
     store, channel, coordinator, root = worker

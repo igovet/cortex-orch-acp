@@ -108,7 +108,7 @@ def _decline_reasons(db, task):
     checks, gaps = synthesis_checks(db, task_id, revision)
     open_checks = [dict(code='open_check', node=node, check=check['name'], outcome=check.get('outcome'))
                    for node, check, outcome, assessment, closure in checks
-                   if not closure and (not outcome or outcome['outcome'] != 'passed'
+                   if not closure and (not outcome or outcome['outcome'] not in {'passed', 'retracted'}
                                        or not assessment or assessment['strength'] != 'verified')]
     if gaps and not open_checks:
         # A disclosed gap with no matching current check row still blocks
@@ -162,7 +162,7 @@ def compose(db, task, language):
     if runs is None:
         return None
     checks, gaps = synthesis_checks(db, task_id, revision)
-    if gaps or any(not closure and (not outcome or outcome['outcome'] != 'passed'
+    if gaps or any(not closure and (not outcome or outcome['outcome'] not in {'passed', 'retracted'}
                                    or not assessment or assessment['strength'] != 'verified')
                    for _, _, outcome, assessment, closure in checks):
         return None
@@ -194,6 +194,7 @@ def compose(db, task, language):
                                 current_outcome='passed' if closure else outcome['outcome'],
                                 receipt_ref=check.get('tool_call_ref'),
                                 closed_by=closure or outcome['closed_by'],
+                                retracted_by=outcome.get('retracted_by'), invocation_error=check.get('invocation_error'),
                                 digest_binding='not established for reviewed digest' if not closure else 'current approved digest')))
     lines.extend(['## ' + labels['review'], 'APPROVE', '## ' + labels['verification']])
     for argv, ref in runs:

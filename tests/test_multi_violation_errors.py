@@ -1,6 +1,6 @@
 """validate() reports every simultaneous violation in one error (B4).
 
-Regression for investigation r_af50d7468665: a plan_submit with three empty
+Regression for a live observation: a plan_submit with three empty
 ``scope`` arrays and an empty ``verification`` array previously raised on the
 first violation only, costing one round trip per remaining mistake.
 """

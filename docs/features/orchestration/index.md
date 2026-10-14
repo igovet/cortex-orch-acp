@@ -324,6 +324,8 @@ remain parallel. It never infers a contract change; a reviewer marks one
 `cross_cutting`. `REVIEW_CHANGES_REQUESTED` records
 `targeted` and the `fallback` reason. The three-cycle ceiling is unchanged.
 
+**Fix role.** A fix node never keeps a read-only source role. The runtime replaces a role in its `READ_ONLY` class (for example reviewer, architect, UX designer, consultant or auditor) with a writing specialist chosen from the original node's effective scope: `worker-technical-writer` when every path is under `docs/` or is a Markdown file, `worker-qa-engineer` when every path is under `tests/`, and `worker-backend-dev` for any other scope, including mixed and whole-project scopes. A writing role is kept unchanged. The fix keeps that effective scope exactly, so a finding cannot widen it, and the choice does not read the finding's prose. The same selection applies to targeted and fallback fixes (`fix_role` in `orchestration/state.py`). The review after the fixes remains a fresh reviewer assignment.
+
 Worker results bind to a published report owned by the exact provisioned attempt.
 The result receipt retains a content digest.
 
@@ -491,9 +493,10 @@ verification evidence. Existing exit-code, interruption and project-integrity
 checks still determine whether verification passes.
 
 A command's **identity** is its operation, exact `argv` and effective `cwd`;
-`command_run` also includes its restricted or Development profile. Restricted
-commands run in the task's working tree; Development may select another `cwd`.
-Legacy `command_run` receipts without `cwd` map only to the task root and
+`command_run` also includes its profile: `restricted` (a Guarded writing worker), `development`
+(a host-writable writing worker in Development or Auto) or `read_only` (read-only roles and automatic
+verification). Guarded writer commands run in the task's working tree; Development may select another `cwd`.
+An `outside_command` identity also includes its profile, `outside_confirmed`, which its receipt records, so an outside failure closes only on an exact rerun with the same argv, cwd and profile. Legacy `command_run` receipts without `cwd` map only to the task root and
 restricted profile. An `outside_command` receipt records its `cwd` too. A receipt without
 `argv` (or an `outside_command` receipt without `cwd`) has no identity and
 matches nothing. A run the gateway rejected before executing it
@@ -518,10 +521,11 @@ matches nothing. A run the gateway rejected before executing it
   type check or build that ran and reported failures is always a real failed
   check. The advertised `checks[].outcome` description and the
   `open_failed_check` correction say so.
+- **An own-probe invocation error can be retracted.** A standalone `python` or `python3 -c` probe that the worker wrote, with only `-B`, `-I` or `-S` flags, may fail with a Python syntax error, or with a regex or assertion error from a literal `re` pattern. Its complete retained output must show that error, and the probe must not import `pytest` or `unittest`. Such a failed check may carry `invocation_error: {corrected_by, reason}`. `corrected_by` must name a `passed` check of the same result with the same name, a verified receipt of the same attempt, the same operation, cwd and profile, a different argv, and a later order than the failure. No later run may be unrecorded, or be of the failed identity and not pass, and each correction is cited by exactly one check. A syntax correction may change the probe freely if it still parses. A regex correction may change exactly one pattern literal; every other assertion and product call must stay the same. The submitted outcome stays `failed` as history, the receipt carries the runtime-derived `retracted_by`, and the current outcome is `retracted`, never `passed`. A retracted check does not fail the node, and both receipts stay in the command history. The reason is an attributed claim for independent review; the runtime does not judge whether the product is correct. Test, lint, build and other project-command failures, and runtime verification, cannot be retracted. A submission whose `invocation_error` is not eligible is refused with `invalid_check_retraction` before anything is recorded.
 - **Ambiguity keeps it open.** A rerun with a different `argv` or `cwd`, a
   weak or uncited pass, a failure without its own verified receipt, a later
   run of the same command that failed or has no established result, or an
-  unrecorded later run all leave the failure open. New submissions are refused
+  unrecorded later run all leave the failure open. A later run of a different identity that has a recorded identity does not affect the closure. New submissions are refused
   with `open_failed_check` before publication/channel revocation unless
   `assignment_outcome: "failed"` intentionally submits a failed node. A current failure is never turned into a warning.
 - **The latest run decides for a pass too.** A cited, verified pass whose
@@ -533,7 +537,7 @@ matches nothing. A run the gateway rejected before executing it
   recovery through `reconcile_results`) fails the node on any open failure
   (`delegation.evidence.open_failure`). A stored `closed_by` counts only when
   it equals the closing ref derived again from the runtime's own receipts, so a
-  retained result without it, or with a forged one, still fails.
+  retained result without it, or with a forged one, still fails. A stored `retracted_by` is accepted the same way, only when it equals the retraction derived from the receipts.
 
 Runtime verification follows the same rule: completion requires the *latest*
 `VERIFICATION_PASSED`/`VERIFICATION_FAILED` event to be a pass for the current
@@ -553,11 +557,11 @@ recorded read as `command_unrecorded`.
 At synthesis, a retained `not_run` or `unverified` check remains a gap unless
 closed by the exact-command rule or the command-less compatibility rule. When
 the gap declares a non-empty `command` as literal argv, a verified, still-current
-restricted `command_run` pass with exactly matching argv and the task's working
+`command_run` pass with exactly matching argv and the task's working
 tree as its effective cwd in the same plan revision closes it, including across
-nodes. The pass may come from the task's own command profile (for a writing worker in
-Development or Auto, the host-writable profile) or from the read-only profile; in Guarded
-only restricted passes count. A different cwd cannot substitute for that check. The runtime
+nodes. The pass may come from the read-only profile, from the task's own writer profile (for a writing worker in
+Development or Auto, the host-writable profile), or from the Guarded writer profile (`restricted`); a host-writable
+pass never counts once the task is Guarded. A different cwd cannot substitute for that check. The runtime
 reads argv from the cited `tool_call_ref` receipt and keeps the task and attempt evidence
 checks.
 Alternatively, a runtime-owned final-verification command closes a declared
@@ -595,7 +599,7 @@ Command verification runs literal argv in the read-only host profile
 the tool-cache allowlist; scratch and `/tmp` are private or writable; the command has its own
 PID namespace; the protected control plane is read-only and the task store is masked; only
 the project's git-ignored directories (caches, builds, installed dependencies) are writable.
-The check records the `restricted` profile. Credentials are filtered from the environment,
+The check records the `read_only` profile. Credentials are filtered from the environment,
 but the owner's network is shared, as for every owner command. Missing isolation, failed
 commands, incomplete output or a changed project digest cannot establish a pass. Each
 command runs until it exits, with no runtime time limit; stopping the task ends it, and that

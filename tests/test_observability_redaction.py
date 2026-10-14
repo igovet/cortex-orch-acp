@@ -90,7 +90,7 @@ def test_scrub_text_still_redacts_a_token_assignment_or_claim():
 
 
 # -- H2 regression fix: authorization-scheme, assignment, claim and
-# known-token coverage (fix spec r_84e20c5ca0a6) --------------------------
+# known-token coverage --------------------------
 
 AUTH_HEADER_CASES = [
     ("Authorization: token dummy123456", "Authorization: [REDACTED]"),

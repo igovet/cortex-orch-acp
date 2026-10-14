@@ -303,7 +303,7 @@ def test_redaction_structured_embedded_json_argv_env_headers_and_echo(trace):
 
 
 def test_redaction_authorization_token_header_free_text_preserves_ordinary_token_word(trace):
-    """H2 fix (S6, spec r_84e20c5ca0a6/T8): an ``Authorization: token X``
+    """An ``Authorization: token X``
     free-text line must not leak its credential, and must not cause every
     later literal "token" word in the same payload to be redacted (F8:
     the old ``_ASSIGNMENT``-only learn path treated the bare scheme word

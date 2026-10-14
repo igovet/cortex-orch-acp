@@ -229,7 +229,7 @@ def test_disconnect_with_an_active_worker_is_reconciled_after_restart_not_failed
 
 
 def test_interrupted_worker_card_survives_an_in_place_reload_with_no_confirmed_absence(tmp_path):
-    """r_5d68e3110e69 (in-place plugin reload / full page reload): the host
+    """In-place plugin reload / full page reload: the host
     disconnected this exact session (``host_disconnected`` was durably
     recorded), but nothing in this fresh process/registry can positively
     confirm the old worker's OS process exited -- unlike the process-restart
@@ -266,7 +266,7 @@ def test_interrupted_worker_card_survives_an_in_place_reload_with_no_confirmed_a
 
 def test_interrupted_worker_card_carries_a_localized_title_suffix_paseo_survives(tmp_path):
     """The Paseo client (integrations/paseo) renders an interrupted worker as
-    its own state, never a "Failed" pill (r_ee39c6ff57a2's residual): since
+    its own state, never a "Failed" pill (a review's residual): since
     the installed Paseo ACP bridge drops `_meta` on a `tool_call_update`
     before any plugin code sees it, the durable signal is the same portable
     title-suffix channel T035 already uses for "Cancelled" -- see
@@ -847,7 +847,7 @@ def test_worker_with_a_live_owner_still_reads_working(tmp_path):
 
 
 def test_a_worker_lost_with_its_host_stays_interrupted_after_recovery(tmp_path):
-    """Live (r_b6091be1cd02): after a plugin reload the next message's
+    """Live: after a plugin reload the next message's
     recovery wrote the worker off (``recovery_worker_lost``) and the replan
     cancelled it; the card then read a generic "Failed". It stays
     Interrupted on the live update and on replay over that older history;

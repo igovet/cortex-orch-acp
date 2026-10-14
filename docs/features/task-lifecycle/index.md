@@ -128,7 +128,7 @@ claim about the deliverable.
 
 Only an immutable, attempt-owned report and its structured result close a node.
 A reviewer, required whenever the project changed, submits APPROVE, REQUEST_CHANGES or BLOCK. Changes produce
-fix nodes and another review, with a three-cycle ceiling. Structured review findings confine fixes to the
+fix nodes and another review, with a three-cycle ceiling. A fix node never keeps a read-only role: the runtime gives it a writing role chosen from its scope. Structured review findings confine fixes to the
 named plan tasks when the runtime can verify them; otherwise every original plan task receives a fix
 (see [targeted review fixes](../orchestration/index.md#targeted-review-fixes)). Verification is a
 runtime command observation, independent of model review. Nonzero exit, incomplete
@@ -141,12 +141,13 @@ with the runtime's blocker and `evidence_gap` (see
 failed check fails its node unless an exact later rerun of the same command in
 the same attempt closed it; the failure stays in the result as history with
 `closed_by` (see
-[check history](../orchestration/index.md#check-history-and-current-outcome)). Synthesis is refused while a retained not_run or unverified check
+[check history](../orchestration/index.md#check-history-and-current-outcome)). An eligible own-probe invocation error can instead be retracted: the failure remains as history with `retracted_by`, the check is `retracted` rather than passed, and it does not fail the node. Synthesis is refused while a retained not_run or unverified check
 of the current plan revision is neither closed under the
 [exact-command or command-less compatibility rules](../orchestration/index.md#check-history-and-current-outcome)
 nor listed in synthesis not_verified with its blocker. A worker command receipt
 closes a declared-command gap only with identical argv, the task working tree as
-its effective cwd and the restricted profile; Development cannot substitute.
+its effective cwd, and a read-only, task-mode writer, or Guarded (`restricted`) profile; a
+host-writable receipt cannot close it once the task is Guarded.
 Runtime final verification
 can close a declared-command gap only with identical argv, complete exit-0
 execution and untruncated runtime-owned evidence bound to both the gap author's

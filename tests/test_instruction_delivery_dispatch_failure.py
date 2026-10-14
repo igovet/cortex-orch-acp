@@ -33,8 +33,8 @@ def test_generation_refusal_is_retained_before_assignment_failure(tmp_path, disc
     runtime._worker_recoveries_in_flight = set()
     runtime._shutting_down = threading.Event()
     # Dispatch closes a freshly opened worker only on real transport loss.
-    # transport_lost() is also true while a host cancel is held for steering
-    # (C-08), when workers must keep running, so dispatch must not consult it.
+    # transport_lost() is also true while a host cancel is held for steering,
+    # when workers must keep running, so dispatch must not consult it.
     runtime._transport_closed = lambda task: disconnected
     runtime.transport_lost = lambda task: True
     runtime._task_workspace_root = lambda task: str(tmp_path)

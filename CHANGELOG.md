@@ -2,27 +2,33 @@
 
 ## 1.0.0 (unreleased)
 
+A fix node created after a `REQUEST_CHANGES` review no longer keeps a read-only source role. The runtime gives it a writing role chosen from its effective scope: `worker-technical-writer` for documentation-only scopes, `worker-qa-engineer` for tests-only scopes and `worker-backend-dev` otherwise. A failed check of a worker's own standalone Python probe can be retracted by a later verified passing correction with the same name, operation, cwd and profile; the failure stays as `retracted` history, never as a pass, and runtime verification failures are never retracted. An `outside_command` identity now includes its profile, so an exact outside rerun closes its own failure, and a later unrelated recorded run no longer makes that rerun ambiguous. No live or paid qualification is claimed for these changes.
+
 The 2026-10-14 orchestration audit's owner decisions are recorded in
-[the decisions log](docs/project/decisions.md) (D1-D8). Read-only roles, reviewers and
-automatic runtime verification now run commands in one read-only host profile in every access
+[the decisions log](docs/project/decisions.md). Read-only roles, reviewers and
+automatic runtime verification now run commands in one read-only host profile (receipts name it `read_only`) in every access
 mode: HOME is read-only except an explicit tool-cache allowlist, scratch is private, and the
 command has its own PID namespace. Inside a verification check only the project's git-ignored
 directories are writable. Writing workers keep the access-mode profile. A reviewer's read-only
-pass closes a writer's declared gap again in every mode. The deletion classifier is lexical:
+pass closes a writer's declared gap again in every mode. A mode switch no longer stops a read-only command or a verification check; only a host-writable
+writing-worker command is stopped. The deletion classifier is lexical:
 it recognises more commands than `rm`, and its tool text says so. No paid or live
 qualification is claimed for these changes.
 
 The runtime stop question's Finish now force-finishes the task: it ends `CANCELLED` with
-`USER_FORCE_FINISHED`. Continue resumes the flow and never releases the stop. A direct answer
+`USER_FORCE_FINISHED`. Continue resumes the flow and never releases the stop. The stop question is recognised by a
+structured runtime marker, not by its wording, so a coordinator question worded the same way never
+force-finishes the task. A direct answer
 that would close planned work which did not pass review and verification ends `FAILED` with
 `answer_not_certified:<gap>`, never `COMPLETED`. Only an explicit `deny-write: <path>` creates
 a write denial; a natural-language request such as "do not modify X" creates none, and a
-wildcard value is ignored. Denials match after path normalization, so a `./` spelling no longer
+wildcard value is not stored. A denial that an earlier runtime stored with a wildcard still guards
+writes, matched as a glob. Denials match after path normalization, so a `./` spelling no longer
 bypasses one. The outside-write refusal also resolves real paths and protects a worktree's git
 metadata directories.
 
 Automatic routing honours a user's model revocation in live dispatch (`revoked_by_user`).
-Infrastructure failures (engine and transport failures) retry without escalating the model
+Infrastructure failures (engine and transport failures), and workers lost to a runtime restart or host disconnect (`worker_lost`), retry without escalating the model
 tier. Rank version 11 ranks a known usage at or above 95% behind every non-hot route, known or
 unknown. Expired quota windows are pruned or expire, and a stretch exclusion no longer removes a
 dual-tier model. A pinned effort that the policy does not permit is applied at the nearest
@@ -35,7 +41,7 @@ a plan that names it is refused.
 
 In Paseo, a `session/cancel` followed by a `session/prompt` on the same session is steering: the
 cancelled coordinator turn ends, the task is not paused, and running workers continue. A lone
-cancel still pauses the task after a 5-second grace window. The Paseo plugin answers the bridge's
+cancel still pauses the task after a 5-second grace window; the pause notice appears on the next turn, and a failed deferred pause is recorded as a progress event. The Paseo plugin answers the bridge's
 `session/close` locally, and the dev wrapper strips inherited `PASEO_*` variables.
 
 The brokered MCP relay's handshake token is no longer in process argv or its environment. The
