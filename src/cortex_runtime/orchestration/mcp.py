@@ -1,5 +1,5 @@
 """Channel-scoped proposal dispatch; never executes a model-proposed action."""
-from .contracts import COORDINATOR, WORKER, validate
+from .contracts import COORDINATOR, WORKER, drop_null_optional_fields, validate
 from .state import TaskMachine, event, transition, encoded
 import hashlib
 import json
@@ -75,6 +75,10 @@ def dispatch(store, channel, operation, args):
                 from .gateway import _authority
                 return TaskMachine(store).submit_plan(
                     channel, candidate, args['request_key'], authorization=lambda db: _authority(db, channel))
+    if operation == 'plan_submit':
+        # null for an optional task field means omitted (the advertised
+        # descriptions say so); required fields keep null and are refused.
+        args = drop_null_optional_fields(schema, args)
     if operation == 'result_submit' and isinstance(args, dict):
         # Ignore only write_report fields that are not part of result_submit;
         # preserve all result fields and keep strict validation for everything else.

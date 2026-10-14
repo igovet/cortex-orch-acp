@@ -296,6 +296,8 @@ Within an eligible routing tier, owner `preferred_for` model choices now rank ah
 
 A model's preference can also carry an owner-written `preferred_when` condition (for example "frontend changes without design work"). The coordinator judges each plan node against it and names the model only where it holds; elsewhere the model is an ordinary candidate. In Settings, preferred work kinds are now chosen from the work-kind list instead of typed. See [model policy](docs/configuration.md).
 
+Implementation routing distinguishes backend, frontend without design, and frontend with UI design. The coordinator can classify design work explicitly through the plan schema; retries and fixes retain that classification. The default preset makes Astra flagship-only and lists frontend-with-design only for Opus, retaining the existing conditional-preference and quota rules. Legacy `implementation` settings expand to all three kinds only in effective routing views; editable source values retain their spelling across unrelated Settings saves. See [implementation work classification](docs/configuration.md#implementation-work-classification).
+
 The current Codex adapter is codex-acp 2.0.1 with Codex CLI 0.159.1, with a separately observed offline catalog. The supported Claude fallback is claude-agent-acp 0.88.0. Codex 1.12.0 and 1.13.0 remain supported fallbacks; later Codex adapters still need explicit compatibility support. This one-time update does not change the existing background installer. See [adapter compatibility](docs/features/codex-engine/index.md).
 
 OpenCode v2 (`opencode acp`, any `2.x.x` release) is an optional third engine.

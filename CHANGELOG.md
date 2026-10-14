@@ -2,8 +2,32 @@
 
 ## 1.0.0 (unreleased)
 
-The built-in default routing preset's `codex-acp/gpt-6-astra` now carries both the `flagship`
-and `deep` tiers (previously `flagship` only), matching the current production owner routing.
+Coordinator `plan_submit` no longer refuses legitimate plans on the first attempt for the
+patterns retained in real sessions. A read-only task may name a not-yet-existing literal path
+when a writing task of the same plan whose scope overlaps it is ordered with it (a reviewer of
+the directory its predecessor writer creates, or a task whose dependent writer creates the
+target); an unordered or absent writer is still refused with `read_only_scope_not_writable`, now
+listing every such path in `violations`. JSON `null` for an optional task field (`model_reason`,
+`complexity`, `work_kind`) is treated as omitted. An unexpected field that the tool advertises
+elsewhere (such as `verification` inside a task) gets a correction naming its location. The
+advertised scope and optional-field descriptions state these rules. No live or paid
+qualification is claimed for this change.
+
+Implementation routing now distinguishes `implementation_backend`, `implementation_frontend`
+(without design), and `implementation_frontend_design`. The optional plan-node `work_kind`
+overrides role defaults and survives retries/fixes. Legacy `implementation` preferences,
+standard allowances and affinity expand in memory without rewriting owner configuration.
+The built-in preset makes `codex-acp/gpt-6-astra` flagship-only and lists frontend-with-design
+only in `opus[1m]` preferences; the existing conditional-hint semantics remain unchanged.
+The Paseo plugin's Settings screen already drew its work-kind vocabulary, labels, affinity
+choices and preferred-work switches from the runtime's configuration API, so it shows and edits
+the three new kinds without a protocol change; its own static help text for the old
+`implementation` kind is replaced with one entry per new kind, and the affinity help names them
+by their exact ids. Settings edits the routing file's own raw rules, not the expanded effective
+view, so saving an unrelated change keeps a stored legacy `implementation` affinity, preference or
+standard allowance exactly as written. Such a stored value is shown as a checked
+`implementation (legacy: …)` choice that the owner can turn off explicitly; it is never offered
+for new selections.
 
 A fix node created after a `REQUEST_CHANGES` review no longer keeps a read-only source role. The runtime gives it a writing role chosen from its effective scope: `worker-technical-writer` for documentation-only scopes, `worker-qa-engineer` for tests-only scopes and `worker-backend-dev` otherwise. A failed check of a worker's own standalone Python probe can be retracted by a later verified passing correction with the same name, operation, cwd and profile; the failure stays as `retracted` history, never as a pass, and runtime verification failures are never retracted. An `outside_command` identity now includes its profile, so an exact outside rerun closes its own failure, and a later unrelated recorded run no longer makes that rerun ambiguous. No live or paid qualification is claimed for these changes.
 

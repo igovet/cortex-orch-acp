@@ -464,6 +464,161 @@ test("routing: adding a deny entry and reordering engines produce the typed list
   assert.deepEqual(rules.providers, ["opencode", "codex-acp"]);
 });
 
+const LEGACY_LABEL = "implementation (legacy: implementation_backend, implementation_frontend, implementation_frontend_design)";
+
+function legacyRoutingFixture(target: "user" | "project") {
+  const data = fixtures();
+  const kinds = ["implementation_backend", "implementation_frontend", "implementation_frontend_design"];
+  const rules = {
+    model_policy_version: 2, deny: [`old-${target}-deny`],
+    engine_affinity: { implementation: "claude-agent-acp", implementation_frontend: null, "*": "codex-acp" },
+    models: { "codex-acp": { auto: ["legacy-model"], tiers: { "legacy-model": "standard" }, policy: { "legacy-model": {
+      preferred_for: ["implementation", "implementation_backend", "review"],
+      also_standard_for: ["implementation", "implementation_frontend"],
+    } } } },
+  };
+  const source = {
+    source: target, path: target === "user" ? "~/.config/cortex/routing.json" : "<project>/.cortex/routing.json",
+    writable: true, exists: true, valid: true, revision: REV(target === "user" ? "b" : "p"), rules,
+  };
+  data.routing.sources = [...(data.routing.sources as Array<Record<string, unknown>>).filter((item) => item.source !== target), source];
+  data.routing.effective_source = target;
+  data.routing.effective_rules = {
+    ...rules, engine_affinity: { ...Object.fromEntries(kinds.map((kind) => [kind, "claude-agent-acp"])), implementation_frontend: null, "*": "codex-acp" },
+    models: { "codex-acp": { ...rules.models["codex-acp"], policy: { "legacy-model": {
+      preferred_for: [...kinds, "review"], also_standard_for: kinds,
+    } } } },
+  };
+  (data.routing.builtin as Record<string, unknown>).work_kinds = [...kinds, "review"];
+  return { data, source, rules };
+}
+
+for (const target of ["user", "project"] as const) {
+  test(`routing: unrelated ${target} saves preserve legacy values through the component and save response`, async () => {
+    const { data, source, rules } = legacyRoutingFixture(target);
+    const before = structuredClone(rules);
+    const screen = await openScreen(data);
+    if (target === "project") await screen.press("Project (for project ceiling and project routing): demo — /p/demo");
+    await screen.section("Routing");
+    if (target === "project") await screen.press("File to edit: Project routing file");
+    assert.equal(screen.updates.length, 0, "opening the form never writes");
+    assert.deepEqual(screen.find(`Affinity 1 work kind: ${LEGACY_LABEL}`, "Pressable").props.accessibilityState, { checked: true, disabled: false });
+    assert.deepEqual(screen.find("Affinity 2 engine: None", "Pressable").props.accessibilityState, { checked: true, disabled: false });
+    assert.equal(screen.find("Denied route or engine 1", "TextInput").props.value, `old-${target}-deny`);
+
+    await screen.press("Add denied route or engine");
+    await screen.type("Denied route or engine 2", "unrelated-model");
+    const savedRules = { ...before, deny: [...before.deny, "unrelated-model"] };
+    const savedView = structuredClone(data.routing);
+    const savedSource = (savedView.sources as Array<Record<string, unknown>>).find((item) => item.source === target)!;
+    savedSource.rules = savedRules;
+    savedSource.revision = REV("f");
+    screen.replies.push({ ok: true, binding, result: savedView });
+    await screen.press(`Save ${target} routing`);
+    assert.deepEqual(screen.updates, [{
+      surface: "routing", target, ...(target === "project" ? { workspaceId: "ws1" } : {}),
+      expected_revision: source.revision, rules: savedRules,
+    }]);
+    assert.deepEqual(rules, before, "editing never mutates the read response");
+    assert.ok(screen.texts().some((text) => text.includes(target === "user" ? "profile was not updated" : "project settings are not part of profiles")));
+
+    assert.equal(screen.find("Denied route or engine 2", "TextInput").props.value, "unrelated-model", "successful response rehydrates the saved form");
+    await screen.type("Denied route or engine 2", "another-unrelated-model");
+    await screen.press(`Save ${target} routing`);
+    assert.deepEqual(screen.updates[1], {
+      surface: "routing", target, ...(target === "project" ? { workspaceId: "ws1" } : {}),
+      expected_revision: REV("f"), rules: { ...savedRules, deny: [...before.deny, "another-unrelated-model"] },
+    });
+  });
+}
+
+test("routing: conflict recovery reloads raw legacy source values before the next unrelated save", async () => {
+  const { data, rules } = legacyRoutingFixture("user");
+  const screen = await openScreen(data);
+  await screen.section("Routing");
+  await screen.type("Denied route or engine 1", "discarded-edit");
+  screen.replies.push({
+    ok: false, binding,
+    error: { code: "revision_conflict", message: "routing.json changed after it was read.", field: "expected_revision", currentRevision: REV("f") },
+  });
+  await screen.press("Save user routing");
+  assert.equal(screen.updates.length, 1);
+  assert.ok(screen.texts().some((text) => text.startsWith("Changed elsewhere since this was loaded")));
+  assert.deepEqual((screen.updates[0].rules as Record<string, unknown>).engine_affinity, rules.engine_affinity);
+  assert.deepEqual((screen.updates[0].rules as Record<string, unknown>).models, rules.models);
+
+  const latestRules = { ...rules, deny: ["external-change"] };
+  const latestView = structuredClone(data.routing);
+  const latestSource = (latestView.sources as Array<Record<string, unknown>>).find((item) => item.source === "user")!;
+  latestSource.rules = latestRules;
+  latestSource.revision = REV("f");
+  screen.data.routing = latestView;
+  await screen.press("Reload latest (discards edits here)");
+  assert.equal(screen.updates.length, 1, "a conflict never retries automatically");
+  assert.equal(screen.find("Denied route or engine 1", "TextInput").props.value, "external-change");
+  await screen.type("Denied route or engine 1", "intentional-edit");
+  await screen.press("Save user routing");
+  assert.deepEqual(screen.updates[1], {
+    surface: "routing", target: "user", expected_revision: REV("f"),
+    rules: { ...latestRules, deny: ["intentional-edit"] },
+  });
+});
+
+function legacyPolicyFixture() {
+  const data = fixtures();
+  const rules = data.routing.sources.find((source) => source.source === "user")!.rules as any;
+  rules.models = { "codex-acp": { auto: ["gpt-6-luna"], tiers: { "gpt-6-luna": "light" }, policy: { "gpt-6-luna": {
+    preferred_for: ["implementation", "review"], also_standard_for: ["implementation"],
+  } } } };
+  const builtin = data.routing.builtin as any;
+  builtin.work_kinds = ["implementation_backend", "implementation_frontend", "implementation_frontend_design", "review"];
+  builtin.work_kind_roles = { implementation_backend: ["worker-backend-dev"], implementation_frontend: ["worker-frontend-dev"], implementation_frontend_design: [], review: [] };
+  return { data, rules };
+}
+
+test("routing: a stored legacy preferred work kind is shown checked, kept on other edits and removed only explicitly", async () => {
+  const policy = (screen: Awaited<ReturnType<typeof openScreen>>, key: string, kind: string) =>
+    screen.find(`${key} for codex-acp/gpt-6-luna: ${kind}`, "Pressable").props.accessibilityState;
+  const kept = await openScreen(legacyPolicyFixture().data);
+  await kept.section("Routing");
+  assert.deepEqual(policy(kept, "preferred_for", LEGACY_LABEL), { checked: true, disabled: false }, "the legacy value is visible, not hidden");
+  assert.deepEqual(policy(kept, "also_standard_for", LEGACY_LABEL), { checked: true, disabled: false });
+  assert.deepEqual(policy(kept, "preferred_for", "implementation_backend"), { checked: false, disabled: false });
+  await kept.press("preferred_for for codex-acp/gpt-6-luna: implementation_backend");
+  await kept.press("Save user routing");
+  assert.deepEqual((kept.updates[0].rules as any).models["codex-acp"].policy["gpt-6-luna"],
+    { preferred_for: ["implementation", "review", "implementation_backend"], also_standard_for: ["implementation"] });
+
+  const removed = await openScreen(legacyPolicyFixture().data);
+  await removed.section("Routing");
+  await removed.press(`preferred_for for codex-acp/gpt-6-luna: ${LEGACY_LABEL}`);
+  assert.equal(removed.has(`preferred_for for codex-acp/gpt-6-luna: ${LEGACY_LABEL}`), false, "a removed legacy kind is not offered again");
+  await removed.press("Save user routing");
+  assert.deepEqual((removed.updates[0].rules as any).models["codex-acp"].policy["gpt-6-luna"],
+    { preferred_for: ["review"], also_standard_for: ["implementation"] });
+});
+
+test("engines & models: a stored legacy preferred work kind has its own switch, help and explicit removal", async () => {
+  const label = `${LEGACY_LABEL} — codex-acp/gpt-6-luna`;
+  const kept = await openScreen(legacyPolicyFixture().data);
+  await kept.section("Engines & models");
+  assert.equal(kept.find(label, "Switch").props.value, true);
+  assert.equal(kept.find(label, "Switch").props.disabled, false);
+  assert.ok(kept.texts().some((text) => text.startsWith("Legacy kind kept from an older routing file")
+    && text.includes("• worker-backend-dev") && text.includes("• worker-frontend-dev")), "the legacy switch explains what it covers");
+  await kept.toggle("Review — codex-acp/gpt-6-luna", false);
+  await kept.press("Save engine and model switches to the user routing file");
+  assert.deepEqual((kept.updates[0].rules as any).models["codex-acp"].policy["gpt-6-luna"].preferred_for, ["implementation"]);
+
+  const removed = await openScreen(legacyPolicyFixture().data);
+  await removed.section("Engines & models");
+  await removed.toggle(label, false);
+  assert.equal(removed.has(label), false);
+  await removed.press("Save engine and model switches to the user routing file");
+  assert.deepEqual((removed.updates[0].rules as any).models["codex-acp"].policy["gpt-6-luna"],
+    { preferred_for: ["review"], also_standard_for: ["implementation"] });
+});
+
 test("MCP: editing keeps stored env values and redacted parts; replacing is explicit", async () => {
   const screen = await openScreen();
   await screen.section("MCP servers");
@@ -1107,4 +1262,39 @@ test("each preferred-work switch explains the work kind and the agents it covers
   assert.ok(texts.some((text) => text.startsWith("Независимая проверка готовой работы") && text.includes("Агенты:")));
   assert.ok(texts.some((text) => text.includes("No worker role uses this kind directly.")), "a kind without roles says so");
   assert.ok(texts.some((text) => text.startsWith("Turn a work kind on to rank this model first")));
+});
+
+test("the three implementation work kinds each get their own exact help text, not a generic fallback", async () => {
+  const data = fixtures();
+  (data.routing.builtin as any).work_kinds = ["implementation_backend", "implementation_frontend", "implementation_frontend_design"];
+  (data.routing.builtin as any).work_kind_labels = {
+    implementation_backend: "Backend implementation", implementation_frontend: "Frontend implementation (no design)",
+    implementation_frontend_design: "Frontend implementation with UI design",
+  };
+  (data.routing.builtin as any).work_kind_roles = { implementation_backend: ["worker-backend-dev"], implementation_frontend: ["worker-frontend-dev"], implementation_frontend_design: [] };
+  (data.routing.builtin as any).builtin_affinity = { implementation_backend: "codex-acp", implementation_frontend: "codex-acp", implementation_frontend_design: "claude-agent-acp" };
+  const screen = await openScreen(data);
+  await screen.section("Engines & models");
+  const texts = screen.texts();
+  assert.ok(texts.some((text) => text.startsWith("Backend implementation: APIs, business logic, persistence")
+    && text.includes("• worker-backend-dev — implements APIs")), "backend kind has its own help, not a generic fallback");
+  assert.ok(texts.some((text) => text.startsWith("Frontend implementation that does not need visual design decisions")
+    && text.includes("• worker-frontend-dev — implements UI components")), "frontend-without-design kind has its own help");
+  assert.ok(texts.some((text) => text.startsWith("Frontend implementation that also makes visual design choices")
+    && text.includes("No worker role uses this kind directly.")), "frontend-design kind has its own help even with no direct role");
+  assert.ok(!texts.some((text) => text.includes("Work of kind implementation_backend.")
+    || text.includes("Work of kind implementation_frontend.") || text.includes("Work of kind implementation_frontend_design.")),
+    "none of the three kinds falls back to the generic unknown-kind text");
+});
+
+test("the affinity field's work-kind choices and help list the three implementation kinds by exact id", async () => {
+  const data = fixtures();
+  (data.routing.builtin as any).work_kinds = ["implementation_backend", "implementation_frontend", "implementation_frontend_design", "review"];
+  const screen = await openScreen(data);
+  await screen.section("Routing");
+  await screen.toggle("Engine affinity per work kind", true);
+  await screen.press("Add affinity");
+  const texts = screen.texts();
+  assert.ok(texts.some((text) => text.includes("implementation_backend, implementation_frontend, implementation_frontend_design, testing, review")),
+    "affinity help names the three exact new work-kind ids");
 });

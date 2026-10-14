@@ -54,9 +54,11 @@ ROLE_TIERS = {
 # fix), Claude models for reading, judging and writing prose. Debugging and
 # testing are both, so they are neutral (``None``: no engine bonus, plan
 # usage and engine order decide); investigation is reading. Unlisted roles are
-# "implementation". routing.json ``engine_affinity`` overrides this per kind.
+# "implementation_backend". routing.json ``engine_affinity`` overrides this per kind.
 WORK_KIND_ENGINES = {
-    "implementation": "codex-acp",
+    "implementation_backend": "codex-acp",
+    "implementation_frontend": "codex-acp",
+    "implementation_frontend_design": "claude-agent-acp",
     "operations": "codex-acp",
     "debugging": None,
     "testing": None,
@@ -70,24 +72,24 @@ WORK_KIND_ENGINES = {
 assert tuple(WORK_KIND_ENGINES) == model_policy.WORK_KINDS
 ROLE_WORK_KINDS = {
     "worker-accessibility-auditor": "review",
-    "worker-accessibility-fixer": "implementation",
+    "worker-accessibility-fixer": "implementation_frontend",
     "worker-architect": "design",
-    "worker-backend-dev": "implementation",
+    "worker-backend-dev": "implementation_backend",
     "worker-build-verification": "testing",
     "worker-code-reviewer": "review",
-    "worker-data-engineer": "implementation",
+    "worker-data-engineer": "implementation_backend",
     "worker-database-architect": "design",
     "worker-debugger": "debugging",
     "worker-devops-engineer": "operations",
     "worker-explorer": "investigation",
-    "worker-frontend-dev": "implementation",
-    "worker-fullstack-dev": "implementation",
-    "worker-general": "analysis",
-    "worker-mobile-dev": "implementation",
+    "worker-frontend-dev": "implementation_frontend",
+    "worker-fullstack-dev": "implementation_backend",
+    "worker-general": "implementation_backend",
+    "worker-mobile-dev": "implementation_frontend",
     "worker-performance-engineer": "debugging",
     "worker-planner": "planning",
     "worker-qa-engineer": "testing",
-    "worker-refactorer": "implementation",
+    "worker-refactorer": "implementation_backend",
     "worker-security-auditor": "review",
     "worker-senior-consultant": "design",
     "worker-technical-writer": "writing",
@@ -107,11 +109,15 @@ class Choice:
     route_id: str | None = None
 
 
-def work_kind(role: str | None) -> str | None:
-    return None if role is None else ROLE_WORK_KINDS.get(role, "implementation")
+def work_kind(role: str | None, override: str | None = None) -> str | None:
+    if override is not None:
+        if override not in model_policy.WORK_KINDS:
+            raise ValueError(f"unknown work kind {override!r}")
+        return override
+    return None if role is None else ROLE_WORK_KINDS.get(role, "implementation_backend")
 
 
-def stretch_status(role: str | None, role_tier: str, complexity: str = "normal", kinds=None) -> str:
+def stretch_status(role: str | None, role_tier: str, complexity: str = "normal", kinds=None, *, work_kind_override: str | None = None) -> str:
     """Whether configured light stretch policy may serve this work."""
     if role_tier == "light":
         return "light_tier"
@@ -121,19 +127,19 @@ def stretch_status(role: str | None, role_tier: str, complexity: str = "normal",
         return f"excluded:{role_tier}_work"
     if ROLE_TIERS.get(role or "", "standard") in ("deep", "flagship"):
         return "excluded:deep_role"
-    kind = work_kind(role)
-    if kind not in (() if kinds is None else kinds):
+    kind = work_kind(role, work_kind_override)
+    if kind not in model_policy.expand_work_kinds(kinds or ()):
         return f"not_candidate:work_kind_{kind}"
     return "standard_candidate"
 
 
 def hint_serves_tier(model: str, model_tier: str | None, role: str | None, role_tier: str,
-                     complexity: str = "normal", *, also_standard_for=None) -> bool:
+                     complexity: str = "normal", *, also_standard_for=None, work_kind_override: str | None = None) -> bool:
     """Whether explicit tiers or configured standard allowances serve this work."""
-    kinds = frozenset(also_standard_for or ())
+    kinds = frozenset(model_policy.expand_work_kinds(also_standard_for or ()))
     return model_tier == role_tier or (
         model_tier == "light" and bool(kinds)
-        and stretch_status(role, role_tier, complexity, kinds) == "standard_candidate")
+        and stretch_status(role, role_tier, complexity, kinds, work_kind_override=work_kind_override) == "standard_candidate")
 
 
 def stretch_effort(role_tier: str, escalate: bool = False, ladder: Sequence[str] | None = None) -> str | None:
@@ -157,21 +163,25 @@ def kind_engine(kind: str, affinity: Mapping[str, str | None] | None = None) -> 
     affinity = affinity or {}
     if kind in affinity:
         return affinity[kind]
+    if kind in model_policy.IMPLEMENTATION_KINDS and "implementation" in affinity:
+        return affinity["implementation"]
     if "*" in affinity:
         return affinity["*"]
     return WORK_KIND_ENGINES[kind]
 
 
-def affinity_engine(role: str | None, affinity: Mapping[str, str | None] | None = None) -> str | None:
+def affinity_engine(role: str | None, affinity: Mapping[str, str | None] | None = None, *,
+                    work_kind_override: str | None = None) -> str | None:
     """The engine ``role``'s kind of work leans to, or ``None`` (neutral).
     ``affinity`` is routing.json ``engine_affinity`` (see :func:`kind_engine`)."""
-    kind = work_kind(role)
+    kind = work_kind(role, work_kind_override)
     return None if kind is None else kind_engine(kind, affinity)
 
 
-def suitability(role: str | None, engine: str, affinity: Mapping[str, str | None] | None = None) -> int:
+def suitability(role: str | None, engine: str, affinity: Mapping[str, str | None] | None = None, *,
+                work_kind_override: str | None = None) -> int:
     """1 when ``engine`` is the better fit for ``role``'s kind of work."""
-    preferred = affinity_engine(role, affinity)
+    preferred = affinity_engine(role, affinity, work_kind_override=work_kind_override)
     return int(preferred is not None and preferred == engine)
 
 
@@ -297,7 +307,7 @@ def choose(role: str, project_root=None, environ: Mapping[str, str] | None = Non
            model_reason: str | None = None, previous_engine: str | None = None,
            user_request: Mapping | None = None,
            eligible_route_ids: frozenset[str] | None = None,
-           user_revocation: Mapping | None = None) -> Choice | None:
+           user_revocation: Mapping | None = None, work_kind_override: str | None = None) -> Choice | None:
     """The route this worker role should open on, or ``None`` when nothing
     engine-confirmed is configured (keep the coordinator's route).
     See :func:`tier_for` for ``escalate`` and ``complexity``, and
@@ -328,6 +338,7 @@ def choose(role: str, project_root=None, environ: Mapping[str, str] | None = Non
     from . import availability
 
     overrides = load_overrides(project_root, environ)
+    work_kind(role, work_kind_override)  # Validate before pins or explicit user routes.
     profile_label = _effective_profile_label(project_root, environ)
     connections = connection_registry.read_registry(environ).connections
     entries = [entry for entry in _entries(overrides, connections, environ) if not _is_seed(entry)]
@@ -361,12 +372,12 @@ def choose(role: str, project_root=None, environ: Mapping[str, str] | None = Non
     # deep roles still fail stretch_status here.
     hold_kinds = frozenset().union(
         *(policy.also_standard_for for policy in policies.values() if policy.stretch and policy.selected))
-    if escalate and stretch_status(role, base_role_tier, complexity, hold_kinds) == "standard_candidate":
+    if escalate and stretch_status(role, base_role_tier, complexity, hold_kinds, work_kind_override=work_kind_override) == "standard_candidate":
         role_tier = base_role_tier
     affinity = overrides.get("engine_affinity") or {}
     # Light-tier stretch models follow their own rule (see stretch_status); a
     # tier override that moves one elsewhere routes it like any model.
-    stretch_states = {route_id: stretch_status(role, role_tier, complexity, policy.also_standard_for)
+    stretch_states = {route_id: stretch_status(role, role_tier, complexity, policy.also_standard_for, work_kind_override=work_kind_override)
                       for route_id, policy in policies.items() if policy.stretch}
     stretch_ids = frozenset(stretch_states)
     stretch_summary = _stretch_summary(stretch_states)
@@ -388,7 +399,7 @@ def choose(role: str, project_root=None, environ: Mapping[str, str] | None = Non
             model_hint=model_hint, model_hint_status="honoured", model_hint_reason=model_reason,
             effort_basis=f"user_request:{requested_tier}",
             user_model_request=dict(user_request, status="honoured"),
-            candidates=[_candidate(e, usage, role, False, affinity=affinity) for e in requested],
+            candidates=[_candidate(e, usage, role, False, affinity=affinity, work_kind_override=work_kind_override) for e in requested],
             chosen=model_hint, chosen_connection_id=picked.connection_id)
         if profile_label is not None:
             decision["routing_profile"] = profile_label
@@ -437,7 +448,7 @@ def choose(role: str, project_root=None, environ: Mapping[str, str] | None = Non
             tier=tiers.get(best.route.id), basis="pin",
             preference=preference, preference_status="ignored:pinned" if preference else "none",
             rank_version=RANK_VERSION, effort_basis="pin", decided_by="pin",
-            candidates=[_candidate(e, usage, role, False, affinity=affinity) for e in ranked],
+            candidates=[_candidate(e, usage, role, False, affinity=affinity, work_kind_override=work_kind_override) for e in ranked],
             chosen=_route_label(best), chosen_connection_id=best.connection_id,
         )
         decision.update(model_hint=model_hint, model_hint_status=(
@@ -494,7 +505,8 @@ def choose(role: str, project_root=None, environ: Mapping[str, str] | None = Non
                             role=role, preference=None if status else preference,
                             model_hint=model_hint, model_reason=model_reason,
                             escalated=escalate, previous_engine=previous_engine,
-                            all_entries=entries, providers=providers, affinity=affinity, models=models)
+                            all_entries=entries, providers=providers, affinity=affinity, models=models,
+                            work_kind_override=work_kind_override)
     if decision is not None and status:
         decision.update(preference=preference, preference_status=status)
     if decision is not None and user_request is None and user_revocation is not None and model_hint != "auto":
@@ -611,7 +623,7 @@ def rank(role_tier: str, entries: Sequence, usage, tier_overrides: Mapping[str, 
          all_entries: Sequence | None = None, providers: Sequence[str] | None = None,
          affinity: Mapping[str, str | None] | None = None,
          stretch_standard: frozenset = frozenset(), stretch_status: str | None = None,
-         models: Mapping | None = None):
+         models: Mapping | None = None, work_kind_override: str | None = None):
     """``(best entry, decision)`` for ``role_tier``, or ``(None, None)``.
 
     ``entries`` are in engine order; ``excluded`` route ids are skipped
@@ -674,7 +686,7 @@ def rank(role_tier: str, entries: Sequence, usage, tier_overrides: Mapping[str, 
     ``models`` is routing.json ``models`` (tiers and policy per engine)."""
     superseded = superseded or {}
     policies = model_policy.resolve_policies(entries, dict(tiers=tier_overrides or {}, models=models or {}))
-    kind = work_kind(role)
+    kind = work_kind(role, work_kind_override)
 
     def purpose(e) -> bool:
         policy = policies[e.route.id]
@@ -769,7 +781,7 @@ def rank(role_tier: str, entries: Sequence, usage, tier_overrides: Mapping[str, 
                     _hot(usage(e)),
                     usage_band(e) or 0,
                     not (escalated and previous_engine and e.route.engine != previous_engine),
-                    -suitability(role, e.route.engine, affinity),
+                    -suitability(role, e.route.engine, affinity, work_kind_override=work_kind_override),
                     usage(e) if usage_active else 0.0, order[e.route.id])
 
         ranked = sorted(candidates, key=key)
@@ -795,14 +807,16 @@ def rank(role_tier: str, entries: Sequence, usage, tier_overrides: Mapping[str, 
             usage=dict(compared=used_percent_compared, active=usage_active,
                        status="unavailable" if not used_percent_compared else "active" if usage_active else "below_threshold",
                        threshold=USAGE_SWITCH_PERCENT, margin=USAGE_MARGIN, least_used_percent=least_used),
-            affinity=dict(work_kind=affinity_kind, engine=affinity_engine(role, affinity),
+            affinity=dict(work_kind=affinity_kind, engine=affinity_engine(role, affinity, work_kind_override=work_kind_override),
                           source=("routing.json" if affinity_kind is not None and affinity
-                                  and (affinity_kind in affinity or "*" in affinity) else "default")),
+                                  and (affinity_kind in affinity or "*" in affinity
+                                       or (affinity_kind in model_policy.IMPLEMENTATION_KINDS
+                                           and "implementation" in affinity)) else "default")),
             used_percent_compared=used_percent_compared,
             purpose=dict(work_kind=kind, preferred=[_route_label(e) for e in ranked if purpose(e)],
                          status=purpose_status),
             candidates=[_candidate(e, usage, role, e.route.engine == honoured, usage_band(e),
-                                   affinity=affinity) for e in ranked],
+                                   affinity=affinity, work_kind_override=work_kind_override) for e in ranked],
             unavailable=sorted(_route_label(e) for e in entries
                                if serves(e, tier) and e.route.id not in policy_excluded
                                and (e.route.id in excluded or (usage(e) or 0.0) >= 100.0)),
@@ -878,12 +892,12 @@ def _route_label(entry) -> str:
 
 
 def _candidate(entry, usage, role, preferred: bool, usage_band: int | None = None, *,
-               affinity: Mapping[str, str | None] | None = None) -> dict:
+               affinity: Mapping[str, str | None] | None = None, work_kind_override: str | None = None) -> dict:
     """One ranked candidate as the route audit records it."""
     return dict(route=_route_label(entry), connection_id=entry.connection_id, used_percent=usage(entry),
                 hot=_hot(usage(entry)), quota_state="unknown" if usage(entry) is None else "known",
                 usage_band=usage_band,
-                suitability=suitability(role, entry.route.engine, affinity), preferred=preferred)
+                suitability=suitability(role, entry.route.engine, affinity, work_kind_override=work_kind_override), preferred=preferred)
 
 
 def model_tiers(entries: Sequence, tier_overrides: Mapping[str, str], models: Mapping | None = None) -> dict[str, str]:
@@ -1123,7 +1137,7 @@ def load_overrides(project_root=None, environ: Mapping[str, str] | None = None) 
                 category=PortableErrorCategory.VALIDATION, code="invalid_routing_overrides",
                 remediation=f"Repair {path}: {error}", retry_eligible=False,
             ) from error
-        return data
+        return model_policy.normalize_work_kinds(data)
     require_model_policy({})
     return {}
 
@@ -1155,7 +1169,7 @@ def _validate(data, *, require_policy=True) -> None:
         affinity = data["engine_affinity"]
         if not isinstance(affinity, dict):
             raise ValueError("'engine_affinity' must map a work kind (or \"*\") to an engine id or null")
-        kinds = (*WORK_KIND_ENGINES, "*")
+        kinds = (*WORK_KIND_ENGINES, "implementation", "*")
         for kind, engine in affinity.items():
             if kind not in kinds:
                 raise ValueError(f"'engine_affinity' names unknown work kind {kind!r}; "

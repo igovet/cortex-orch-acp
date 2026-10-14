@@ -41,6 +41,87 @@ def home(tmp_path, monkeypatch):
     return SimpleNamespace(config=config / "cortex", home=user_home, tmp=tmp_path)
 
 
+def test_legacy_work_kinds_load_without_rewriting_owner_file(home):
+    from cortex_runtime.routing import model_policy
+    rules = routing_fixture({"engine_affinity": {"implementation": "claude-agent-acp"},
+                             "models": {"codex-acp": {"policy": {
+                                 "gpt-6-sol": {"preferred_for": ["implementation"]}}}}})
+    path = home.config / "routing.json"
+    _write_json(path, rules)
+    before = path.read_bytes()
+    view = management.read_routing()
+    effective = view["effective_rules"]
+    assert view["effective_valid"]
+    assert effective == auto_route.load_overrides()
+    assert "implementation" not in effective["engine_affinity"]
+    assert all(effective["engine_affinity"][kind] == "claude-agent-acp"
+               for kind in model_policy.IMPLEMENTATION_KINDS)
+    assert effective["models"]["codex-acp"]["policy"]["gpt-6-sol"]["preferred_for"] == list(model_policy.IMPLEMENTATION_KINDS)
+    assert path.read_bytes() == before
+    assert view["sources"][-1]["rules"] == rules
+    assert management.validate_routing_rules(rules) == rules
+    builtin = view["builtin"]
+    assert set(builtin["work_kinds"]) == set(model_policy.WORK_KINDS)
+    assert builtin["work_kind_roles"]["implementation_frontend"] == [
+        "worker-accessibility-fixer", "worker-frontend-dev", "worker-mobile-dev"]
+    assert "worker-fullstack-dev" in builtin["work_kind_roles"]["implementation_backend"]
+
+
+@pytest.mark.parametrize("target", ["user", "project"])
+@pytest.mark.parametrize("shadowed", [False, True])
+def test_legacy_work_kinds_survive_unrelated_routing_save(home, target, shadowed, monkeypatch):
+    from cortex_runtime.routing import model_policy
+
+    project = home.tmp / "project"
+    (project / ".cortex").mkdir(parents=True)
+    rules = routing_fixture({
+        "engine_affinity": {"implementation": "claude-agent-acp",
+                            "implementation_frontend": None, "*": "codex-acp"},
+        "models": {"codex-acp": {"policy": {"gpt-6-sol": {
+            "preferred_for": ["implementation", "implementation_backend", "review"],
+            "also_standard_for": ["testing", "implementation", "implementation_frontend"],
+        }}}},
+    })
+    path = home.config / "routing.json" if target == "user" else project / ".cortex" / "routing.json"
+    _write_json(path, dict(rules, future_key={"preserve": True}))
+    if shadowed and target == "user":
+        _write_json(project / ".cortex" / "routing.json", routing_fixture({"deny": ["shadowed"]}))
+    elif shadowed:
+        # Project still wins over a lower-priority legacy environment source.
+        env_path = home.tmp / "env-routing.json"
+        _write_json(env_path, rules)
+        monkeypatch.setenv("CORTEX_ROUTING", str(env_path))
+
+    view = management.read_routing(str(project))
+    source = next(item for item in view["sources"] if item["source"] == target)
+    assert source["rules"] == rules
+    assert source["ignored_keys"] == ["future_key"]
+    edited = dict(source["rules"], deny=["unrelated-model"])
+    written = management.update_routing(target, source["revision"], edited, project_root=str(project))
+    assert written["changed"]
+    assert json.loads(path.read_text()) == dict(rules, deny=["unrelated-model"], future_key={"preserve": True})
+    saved = next(item for item in written["sources"] if item["source"] == target)
+    assert saved["rules"] == edited
+    loaded = auto_route.load_overrides(str(project))
+    assert written["effective_rules"] == {key: value for key, value in loaded.items()
+                                          if key in management.ROUTING_KEYS}
+    if not (shadowed and target == "user"):
+        effective = written["effective_rules"]
+        assert effective["engine_affinity"] == {
+            "*": "codex-acp", "implementation_backend": "claude-agent-acp",
+            "implementation_frontend": None, "implementation_frontend_design": "claude-agent-acp",
+        }
+        policy = effective["models"]["codex-acp"]["policy"]["gpt-6-sol"]
+        assert policy["preferred_for"] == [*model_policy.IMPLEMENTATION_KINDS, "review"]
+        assert policy["also_standard_for"] == ["testing", *model_policy.IMPLEMENTATION_KINDS]
+    if shadowed and target == "project":
+        env_source = next(item for item in written["sources"] if item["source"] == "env")
+        assert env_source["rules"] == rules and not env_source["writable"]
+    with pytest.raises(management.RevisionConflict):
+        management.update_routing(target, source["revision"], edited, project_root=str(project))
+    assert json.loads(path.read_text()) == dict(edited, future_key={"preserve": True})
+
+
 def _codes(error):
     return {(item["field"], item["code"]) for item in error.errors}
 

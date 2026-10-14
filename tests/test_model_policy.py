@@ -127,3 +127,23 @@ def test_a_configured_tier_list_places_a_model_in_each_tier():
         engines=("codex-acp",), work_kinds=(), reserved_word=lambda word: False)
     assert {where for where, _code, _message in problems} == {
         "models.codex-acp.tiers.a", "models.codex-acp.tiers.b", "models.codex-acp.tiers.c"}
+
+
+def test_legacy_implementation_expands_without_mutating_policy():
+    from copy import deepcopy
+    original = {"models": {"codex-acp": {"auto": ["custom"], "tiers": {"custom": "light"},
+                "policy": {"custom": {"preferred_for": ["implementation", "implementation_frontend"],
+                                     "also_standard_for": ["implementation"]}}}},
+                "engine_affinity": {"implementation": "codex-acp",
+                                    "implementation_frontend_design": None}}
+    saved = deepcopy(original)
+    auto_route.validate_routing(dict(original, model_policy_version=2))
+    normalized = model_policy.normalize_work_kinds(original)
+    assert original == saved
+    assert normalized == model_policy.normalize_work_kinds(normalized)
+    policy = model_policy.policy_for("codex-acp", "custom", original)
+    assert policy.preferred_for == policy.also_standard_for == set(model_policy.IMPLEMENTATION_KINDS)
+    assert normalized["models"]["codex-acp"]["policy"]["custom"]["preferred_for"] == list(model_policy.IMPLEMENTATION_KINDS)
+    assert normalized["engine_affinity"] == {
+        "implementation_backend": "codex-acp", "implementation_frontend": "codex-acp",
+        "implementation_frontend_design": None}

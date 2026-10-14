@@ -56,7 +56,7 @@ but grant no route: pins, deny, automatic membership, providers, tier,
 availability and quota rules remain controlling. Preferences cannot promote
 a model into a different tier. See [configuration](../../configuration.md#user-routing-profiles).
 
-The current install snapshot also preserves the saved 2026-10-12 default
+The current install snapshot refines the saved 2026-10-12 default
 profile: the Opus UI/UX conditional preference, explicit OpenCode denial, and
 `codex-acp/gpt-6.1-sol` coordinator at high effort. The UI/UX wording does not
 create a strict role pin or override tier eligibility. Since 2026-10-13 the
@@ -64,8 +64,8 @@ snapshot also lists Opus in the `standard` tier, so standard-tier UI/UX design
 nodes (`ux-designer`) are eligible for it and the coordinator's exact Opus hint
 is honoured there instead of `ignored:tier_mismatch`, and gives it the request
 labels `opus`/`опус`. Since 2026-10-14 the Opus condition covers all UI/UX
-work, including frontend layout and styling (`frontend-dev` implementation
-nodes), and the `gpt-6.1-sol` condition excludes it. The preference still
+work, including frontend layout and styling (explicit
+`implementation_frontend_design` nodes), and the `gpt-6.1-sol` condition excludes it. The preference still
 applies only on nodes where the coordinator names the exact Opus route, and
 never in the light tier (`low` complexity). See the
 [fresh-install snapshot](../../configuration.md#fresh-install-owner-default-snapshot).
@@ -449,6 +449,29 @@ or engine preference; `tests/test_no_hardcoded_model_names.py` guards that.
 An exact hint may name a route whose model id holds `/` or `,`
 (`opencode/<provider>/<model>`; a model id can also contain `,`).
 
+### Per-node implementation classification
+
+`plan_submit.plan.tasks[].work_kind` optionally overrides the role default with
+a current work-kind enum. The three implementation ids are
+`implementation_backend`, `implementation_frontend` (no visual design), and
+`implementation_frontend_design` (layout, styling, markup, responsive layout,
+UI components and visual polish). Backend/data/refactor/fullstack/general roles
+default to backend; frontend/mobile/accessibility-fixer roles default to frontend
+without design. Classification affects preference ranking, affinity and stretch
+eligibility, not authorization or tier. It is persisted in plan JSON and survives
+retry/fix derivation; absent an override, the actual fix role supplies the default.
+Plan hint previews and route audits report the effective classification.
+
+The default preset places Astra only in flagship and lists frontend-with-design
+only in Opus's `preferred_for`. Opus's conditional preference still requires
+the coordinator's exact route hint, and quality escalation still ignores such
+conditions. This is not a strict ban on other models, nor an automatic promotion
+from the light tier. Existing version-2 files and profiles accept legacy
+`implementation` preferences, stretch allowances and affinity: effective reads
+expand it to all three new kinds without rewriting saved files. Editable source
+rules remain unexpanded so unrelated Settings saves preserve legacy entries.
+Explicit new-kind affinity overrides the legacy umbrella.
+
 ### User-requested flagship route
 
 The historical heading is retained for links; this rule now applies to **every
@@ -656,8 +679,9 @@ eligible candidates the rank criteria are, first difference wins:
 6. On escalation, an engine other than the one whose attempt fell short --
    unless step 4 already sent the work to a meaningfully less-used plan,
    diversification does not retry onto a plan with meaningfully less room.
-7. Engine affinity (role suitability). Built-in defaults
-   (`WORK_KIND_ENGINES`): implementation and operations lean to `codex-acp`;
+7. Engine affinity (effective work-kind suitability). Built-in defaults
+   (`WORK_KIND_ENGINES`): backend implementation, frontend without design and
+   operations lean to `codex-acp`; frontend implementation with UI design,
    investigation, review, design, writing, planning and analysis lean to
    `claude-agent-acp`; debugging and testing are neutral. `routing.json`
    `engine_affinity` overrides it per work kind (see

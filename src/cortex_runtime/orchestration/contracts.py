@@ -1,5 +1,6 @@
 """Advertised model proposal API. Execution handles are runtime-owned."""
 from ..connections.model import SUPPORTED_ENGINES
+from ..routing.model_policy import WORK_KINDS
 from ..contracts import StoreError, expected_fields
 import re
 
@@ -60,17 +61,21 @@ NODE = obj(dict(id=text('Unique plan node name: a letter, then letters, digits, 
                                    'Names (the id values) of predecessor tasks in this same plan.'),
                 scope=array(text('Requested project-relative path or glob; \'.\' is the whole project. Never absolute, never containing \'..\' or a backslash, and never inside .cortex or .git. Runtime policy decides access.', 512),
                             'Write reservation: project-relative paths or globs this task will change, used for scheduling overlap (\'.\' reserves the whole project). Reading needs no scope; do not list read-only paths for writing tasks. Never absolute, never containing \'..\' or a backslash, and never inside .cortex or .git. '
-                            'Read-only roles (' + ', '.join(sorted({r.removeprefix('worker-') for r in READ_ONLY})) + ') never create or change files, so their required non-empty scope is context only, not a write reservation and does not cause scheduling overlap; '
-                            'when such a task must produce a file, have it return the content in its report and give the file to a writing role in a dependent task.',
+                            'Read-only roles (' + ', '.join(sorted({r.removeprefix('worker-') for r in READ_ONLY})) + ') never create or change files, so their required non-empty scope is context only, not a write reservation and does not cause scheduling overlap. '
+                            'Every literal path (no *, ? or [) in a read-only task\'s scope must already exist, unless a writing task of this plan whose scope overlaps that path is ordered with the read-only task: the read-only task depends on it, e.g. a reviewer of the directory its predecessor writer creates, or it depends on the read-only task (directly or transitively); '
+                            'otherwise plan_submit refuses with read_only_scope_not_writable, listing every such path. '
+                            'When such a task must produce a file, have it return the content in its report and give the file to a writing role in a dependent task.',
                             minimum=1),
+                work_kind=dict(type='string', enum=list(WORK_KINDS),
+                               description='Optional work classification overriding the role default for affinity, model preferences and light-model standard allowances, retained for retries and fixes. Use implementation_backend for server work, implementation_frontend for frontend without visual design, and implementation_frontend_design for frontend UI design work: layout, styling, markup, responsive layout, UI components or visual polish. Omit (null is treated as omitted) to use the role default (fullstack and general default to backend). This does not change tier, scope or authorization. Consult list_route_options and honor conditional preferred_when recommendations; do not mark design nodes low when the preferred model has no light tier.'),
                 complexity=dict(type='string', enum=['low', 'normal', 'high'],
                                 description='How hard this task is, judged from the work itself: low for a narrow lookup or mechanical change, '
                                             'high for cross-cutting root-cause analysis, production incidents, concurrency, security or data-loss risk; '
-                                            'omit for normal. The runtime turns it into a stronger or cheaper route; it never names a model.'),
+                                            'omit for normal (null is treated as omitted). The runtime turns it into a stronger or cheaper route; it never names a model.'),
                 model=dict(type='string', minLength=1, maxLength=160,
                            description='Required routing recommendation: "auto", an engine id, or an exact "engine/model" from list_route_options. First honor an explicit model request in this task: name that exact route on every covered node, including retries/fixes. Runtime confirms consent only from recorded user messages and answers, never model_reason or other model text. Confirmed user requests override pins, preferred models, usage ranking and automatic role tiers for all model tiers; hard owner deny/provider/route authorization, unconfigured identities, engine unavailability and exhausted quota refuse visibly without substitution. Otherwise use auto for owner preferred work kinds. For preferred_when, judge the owner condition per node, name its exact route only when the condition and work kind hold, and quote the condition in model_reason. Otherwise use the work-kind affinity or another route with a reason. Unconfirmed hints are advisory, remain within the eligible tier and never bypass hard policy; flagship without user consent is escalation-only. Runtime computes supported effort within per-model policy.'),
                 model_reason=dict(type='string', minLength=1, maxLength=300,
-                                   description='One short sentence explaining a non-auto recommendation; required for non-auto. Explanation is not user consent: only recorded user messages and answers authorize an explicit request.')),
+                                   description='One short sentence explaining a non-auto recommendation; required for non-auto. Omit it for auto (null is treated as omitted). Explanation is not user consent: only recorded user messages and answers authorize an explicit request.')),
            required=['id', 'role', 'objective', 'dependencies', 'scope', 'model'])
 NODE['properties']['model']['pattern'] = (
     r'^(auto|' + '|'.join(re.escape(engine) for engine in SUPPORTED_ENGINES) +
@@ -381,9 +386,51 @@ def _collect(schema, value, field, violations):
         raise StoreError('invalid_schema')
 
 
+def _advertised_locations(schema, name, path):
+    """Every path in this tool's schema where a property called name exists."""
+    kind = schema.get('type', 'object' if 'properties' in schema else None)
+    if kind == 'object':
+        for key, child in schema.get('properties', {}).items():
+            if key == name:
+                yield f'{path}.{key}'
+            yield from _advertised_locations(child, name, f'{path}.{key}')
+    elif kind == 'array' and isinstance(schema.get('items'), dict):
+        yield from _advertised_locations(schema['items'], name, f'{path}[]')
+
+
+def drop_null_optional_fields(schema, value):
+    """Treat JSON null as omission for optional object properties.
+
+    Engines commonly send an optional field as null (observed: a coordinator
+    plan_submit with model_reason null on an auto task was refused, then
+    resubmitted unchanged but for the null). Required properties keep their
+    null so validation still names them.
+    """
+    kind = schema.get('type', 'object' if 'properties' in schema else None)
+    if kind == 'object' and isinstance(value, dict):
+        properties, required = schema.get('properties', {}), set(schema.get('required', ()))
+        return {key: drop_null_optional_fields(properties[key], child) if key in properties else child
+                for key, child in value.items()
+                if not (child is None and key in properties and key not in required)}
+    if kind == 'array' and isinstance(value, list) and isinstance(schema.get('items'), dict):
+        return [drop_null_optional_fields(schema['items'], child) for child in value]
+    return value
+
+
 def validate(schema, value, field='arguments'):
     violations = []
     _collect(schema, value, field, violations)
+    for violation in violations:
+        # A field sent at the wrong level (observed: plan verification inside
+        # a task or beside plan) is not an unknown field: name where it goes.
+        if violation['received'] != 'unexpected field':
+            continue
+        parent, _, name = violation['field'].rpartition('.')
+        locations = [location for location in _advertised_locations(schema, name, field)
+                     if location.rpartition('.')[0] != re.sub(r'\[\d+\]', '[]', parent)]
+        if locations:
+            violation['correction'] = (f'{name} is not a field of {parent}; this tool advertises it only at '
+                                       f'{" and ".join(locations)}. Move it there (or omit it).')
     if violations:
         first = violations[0]
         raise StoreError('invalid_arguments', first['field'], first['received'], first['expected'], first['correction'],

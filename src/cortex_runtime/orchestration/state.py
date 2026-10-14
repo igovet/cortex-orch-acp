@@ -379,6 +379,7 @@ class AttemptRouting(NamedTuple):
     # The newer user refusal that revoked an earlier request for the exact
     # hint (routing.auto_route.user_model_revocation); never consent.
     user_revocation: dict | None = None
+    work_kind: str | None = None
 
 
 # A retry caused only by an infrastructure failure -- the engine/transport
@@ -434,7 +435,8 @@ def attempt_routing(store, task_id, attempt_id):
     return AttemptRouting(bool(fix) or retried, task.get('complexity', 'normal'), hint,
                           task.get('model_reason'), prior['engine'] if prior else None,
                           user_model_request(store, task_id, hint) if '/' in hint else None,
-                          user_model_revocation(store, task_id, hint) if '/' in hint else None)
+                          user_model_revocation(store, task_id, hint) if '/' in hint else None,
+                          task.get('work_kind'))
 
 
 def review_provider_preference(store, task_id, attempt_id):
@@ -629,6 +631,53 @@ def validate_scope(scope):
     return scope
 
 
+def read_only_output_paths(nodes, project_root):
+    """Refuse a read-only task's nonexistent literal scope path no writer owns.
+
+    A read-only role's jail and tools never write, so such a path is usually
+    an output it cannot create; accepted silently, its worker did the work and
+    then fought the read-only project to save it (2026-09-28). The path is
+    legitimate when a writing task of the same plan whose scope overlaps it is
+    ordered with the read-only task: a reviewer of the directory its
+    predecessor writer creates, or a task whose dependent writer creates the
+    target -- the remedy this refusal prescribes. Coordinators wrote exactly
+    those plans and were refused on their first attempt (2026-10-14). An
+    unordered writer is not enough: the read could precede the write.
+    """
+    from .gateway import READ_ONLY
+    from .policy import overlaps
+    deps = {node['id']: set(node['dependencies']) for node in nodes}
+
+    def ancestors(key, seen=None):
+        seen = set() if seen is None else seen
+        for parent in deps[key] - seen:
+            seen.add(parent)
+            ancestors(parent, seen)
+        return seen
+
+    before = {key: ancestors(key) for key in deps}
+    writers = [node for node in nodes if resolve_role(node['role']) not in READ_ONLY]
+    for node in nodes:
+        if resolve_role(node['role']) not in READ_ONLY:
+            continue
+        ordered = [writer for writer in writers
+                   if writer['id'] in before[node['id']] or node['id'] in before[writer['id']]]
+        missing = [scope for scope in node['scope']
+                   if not any(mark in scope for mark in '*?[')
+                   and not os.path.lexists(os.path.join(project_root, scope))
+                   and not any(overlaps(scope, owned) for writer in ordered for owned in writer['scope'])]
+        if missing:
+            field = f"tasks[{node['id']}].scope"
+            correction = (f"{node['role']} is read-only and these paths do not exist: {', '.join(missing)}. "
+                          'Keep only existing paths, or let a writing task whose scope covers each path create it, '
+                          'ordered with this task (this task depends on it, or it depends on this task). '
+                          'When this task must produce the file, have it return the content in its report and give '
+                          'the file to a writing role in a dependent task.')
+            raise StoreError('read_only_scope_not_writable', field, missing[0], 'an existing path to read',
+                             correction, violations=[dict(field=field, received=path, expected='an existing path to read',
+                                                          correction=correction) for path in missing])
+
+
 CONSULTANT_ROLE = 'worker-senior-consultant'
 CONSULTATION_NODE = '_consultation'
 
@@ -691,11 +740,13 @@ def validate_plan(plan):
     ids = set()
     for node in nodes:
         if (not isinstance(node, dict) or not {'id', 'role', 'objective', 'dependencies', 'scope'} <= set(node)
-                or set(node) - {'id', 'role', 'objective', 'dependencies', 'scope', 'complexity', 'provider', 'model', 'model_reason'}
+                or set(node) - {'id', 'role', 'objective', 'dependencies', 'scope', 'complexity', 'provider', 'model', 'model_reason', 'work_kind'}
                 or node.get('complexity', 'normal') not in {'low', 'normal', 'high'}
                 or node.get('provider', SUPPORTED_ENGINES[0]) not in SUPPORTED_ENGINES):
             raise StoreError('invalid_plan_node')
         from .contracts import NODE, validate as validate_contract
+        if 'work_kind' in node:
+            validate_contract(NODE['properties']['work_kind'], node['work_kind'], 'work_kind')
         if 'model' in node:
             validate_contract(NODE['properties']['model'], node['model'], 'model')
             if node['model'] != 'auto':
@@ -928,7 +979,7 @@ class TaskMachine:
         digest = hashlib.sha256(encoded(plan).encode()).hexdigest()
         # Exact model labels must be in the currently confirmed, policy-allowed
         # menu. Engine hints and auto do not require a catalog at plan time.
-        from ..routing.auto_route import hint_serves_tier, route_menu, tier_for
+        from ..routing.auto_route import hint_serves_tier, route_menu, tier_for, work_kind
         exact_hints = [n['model'] for n in plan['tasks'] if '/' in n.get('model', '')]
         if exact_hints:
             menu = route_menu(self.store.project_root)
@@ -942,7 +993,8 @@ class TaskMachine:
         def preview(n):
             model, role = n.get('model', 'auto'), resolve_role(n['role'])
             complexity = n.get('complexity', 'normal')
-            item = dict(node=n['id'], model=model, tier_now=tier_for(role, complexity=complexity))
+            item = dict(node=n['id'], model=model, tier_now=tier_for(role, complexity=complexity),
+                        work_kind=work_kind(role, n.get('work_kind')))
             if '/' not in model:
                 item['preview_status'] = 'auto' if model == 'auto' else 'pending_dispatch'
                 return item
@@ -956,7 +1008,8 @@ class TaskMachine:
             if request is not None:
                 item.update(preview_status='pending_dispatch:user_request', user_request=request['source_ref'])
             elif not any(hint_serves_tier(model.partition('/')[2], tier, role, item['tier_now'], complexity,
-                                          also_standard_for=(hinted.get('policy') or {}).get('also_standard_for'))
+                                          also_standard_for=(hinted.get('policy') or {}).get('also_standard_for'),
+                                          work_kind_override=n.get('work_kind'))
                          for tier in hinted_tiers or [None]):
                 item['preview_status'] = 'ignored:tier_mismatch'
             else:
@@ -986,21 +1039,12 @@ class TaskMachine:
                 raise StoreError('plan_not_expected')
             from .policy import validate_grants
             project = db.execute('SELECT project_root FROM tasks WHERE id=?', (channel.task_id,)).fetchone()
+            from .gateway import READ_ONLY
             for node in plan['tasks']:
-                from .gateway import READ_ONLY
                 if resolve_role(node['role']) not in READ_ONLY:
                     validate_grants(db, channel.task_id, node['scope'])
-                elif project is not None:
-                    # A read-only role's jail and tools never write, so a path
-                    # that does not exist yet can only be an output it cannot
-                    # create; accepted silently, its worker did the work and
-                    # then fought the read-only project to save it.
-                    for scope in node['scope']:
-                        if not any(mark in scope for mark in '*?[') and not os.path.lexists(os.path.join(project[0], scope)):
-                            raise StoreError('read_only_scope_not_writable', f"tasks[{node['id']}].scope", scope,
-                                             'an existing path to read',
-                                             f"{node['role']} is read-only: have it return the content in its report and "
-                                             'give the file to a writing role in a dependent task.')
+            if project is not None:
+                read_only_output_paths(plan['tasks'], project[0])
             proposed_nodes=plan['tasks']
             request=db.execute("SELECT payload_json FROM runtime_events WHERE task_id=? AND type='REPLAN_REQUEST_ACCEPTED' ORDER BY id DESC LIMIT 1",(channel.task_id,)).fetchone()
             escalation=json.loads(request[0]) if request else {}

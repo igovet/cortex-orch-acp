@@ -22,6 +22,11 @@ authorization. If the runtime cannot establish the request, ask for the missing
 material user decision rather than manufacture consent or silently substitute a
 route.
 
+Classify frontend nodes involving UI design with the design implementation work
+kind, rather than the role default: this includes layout, styling, markup,
+responsive layout, UI components and visual polish. Follow the live plan schema
+and routing menu for the field, eligibility and any conditional preference.
+
 ## Specialist catalogue
 
 - `accessibility-auditor`: Accessibility auditor for WCAG conformance, keyboard navigation, and assistive-technology risks.

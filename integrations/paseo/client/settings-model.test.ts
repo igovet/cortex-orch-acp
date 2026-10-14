@@ -337,6 +337,45 @@ test("routing rules round-trip through the typed form, including absent keys", (
   if (sparse.ok) assert.deepEqual(buildRoutingRules(sparse.form, routingVocabulary(view)), { ok: true, value: { deny: [] } });
 });
 
+test("legacy routing source values survive an unrelated Settings save without using effective rules", () => {
+  const kinds = ["implementation_backend", "implementation_frontend", "implementation_frontend_design"];
+  const rules = {
+    model_policy_version: 2,
+    engine_affinity: { implementation: "claude-agent-acp", implementation_frontend: null, "*": "codex-acp" },
+    models: { "codex-acp": { auto: ["model"], tiers: { model: "standard" }, policy: { model: {
+      preferred_for: ["implementation", "implementation_backend", "review"],
+      also_standard_for: ["testing", "implementation", "implementation_frontend"],
+    } } } },
+  };
+  for (const target of ["user", "project"] as const) {
+    const view = routing(rules);
+    view.builtin.work_kinds = [...kinds, "review", "testing"];
+    view.effective_rules = { ...rules, engine_affinity: { ...Object.fromEntries(kinds.map((kind) => [kind, "claude-agent-acp"])), implementation_frontend: null } };
+    if (target === "project") {
+      view.sources[0] = { ...view.sources[0], exists: true, valid: true, revision: REV("a"), rules };
+      view.effective_source = "project";
+    }
+    assert.equal(routingVocabulary(view).workKinds.includes("implementation"), false);
+    const state = routingTarget(view, target);
+    assert.equal(state.editable, true);
+    const form = { ...state.form!, deny: ["unrelated-model"] };
+    assert.deepEqual(buildRoutingUpdate(view, target, "ws1", form), {
+      ok: true, value: { surface: "routing", target, workspaceId: "ws1",
+        expected_revision: REV(target === "user" ? "b" : "a"),
+        rules: { ...rules, deny: ["unrelated-model"] } },
+    });
+    const invalid = structuredClone(form);
+    invalid.engine_affinity!.push({ kind: "unknown-kind", engine: "" });
+    assert.equal(buildRoutingUpdate(view, target, "ws1", invalid).ok, false);
+    const badPreference = structuredClone(form);
+    badPreference.models!["codex-acp"].policy.model.preferred_for = ["unknown-kind"];
+    assert.equal(buildRoutingUpdate(view, target, "ws1", badPreference).ok, false);
+    const duplicate = structuredClone(form);
+    duplicate.engine_affinity!.push({ kind: "implementation", engine: "" });
+    assert.equal(buildRoutingUpdate(view, target, "ws1", duplicate).ok, false);
+  }
+});
+
 test("routing writes target one file with that file's own revision", () => {
   const view = routing({ pin: { "*": "opencode/anthropic/claude-sonnet-4-5:high" } });
   const state = routingTarget(view, "user");

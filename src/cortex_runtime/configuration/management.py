@@ -712,6 +712,7 @@ def _routing_file_view(source: str, path: Path) -> dict[str, object]:
     except (UnicodeDecodeError, ValueError) as error:
         view.update(valid=False, error=dict(code="invalid_routing_overrides", message=str(error)))
         return view
+    # Editable source rules must retain the owner's spelling across unrelated saves.
     view.update(valid=True, rules={key: document[key] for key in ROUTING_KEYS if key in document},
                 ignored_keys=sorted(key for key in document if key not in ROUTING_KEYS))
     return view
@@ -741,11 +742,14 @@ def read_routing(project_root: str | None = None, environ: Mapping[str, str] | N
     pairs = _routing_sources(project_root, env)
     views = [_routing_file_view(source, path) for source, path in pairs]
     effective = next((view for (_, path), view in zip(pairs, views) if path.is_file()), None)
+    effective_rules = {} if effective is None else effective.get("rules")
+    if effective_rules is not None:
+        effective_rules = model_policy.normalize_work_kinds(effective_rules)
     return dict(
         surface="routing", project_root=project_root, precedence=[view["source"] for view in views],
         sources=views, effective_source=effective["source"] if effective is not None else "missing",
         effective_valid=effective is not None and bool(effective.get("valid")),
-        effective_rules={} if effective is None else effective.get("rules"),
+        effective_rules=effective_rules,
         builtin=_routing_builtin(),
     )
 
@@ -844,7 +848,7 @@ def validate_routing_rules(rules, *, require_policy=True) -> dict[str, object]:
                        f"must be a non-empty array of unique engines from {', '.join(engines)}")
     if "engine_affinity" in rules:
         affinity = rules["engine_affinity"]
-        kinds = (*auto_route.WORK_KIND_ENGINES, "*")
+        kinds = (*auto_route.WORK_KIND_ENGINES, "implementation", "*")
         if not isinstance(affinity, Mapping):
             errors.add("rules.engine_affinity", "invalid_type", "must map a work kind or * to an engine or null")
         else:

@@ -727,7 +727,8 @@ def test_the_default_deny_removes_haiku_from_automatic_routing_and_the_selector(
 
 def test_default_engine_affinity_leans_only_implementation_and_operations_to_codex():
     codex_kinds = {kind for kind, engine in auto_route.WORK_KIND_ENGINES.items() if engine == "codex-acp"}
-    assert codex_kinds == {"implementation", "operations"}
+    assert codex_kinds == {"implementation_backend", "implementation_frontend", "operations"}
+    assert auto_route.WORK_KIND_ENGINES["implementation_frontend_design"] == "claude-agent-acp"
     assert auto_route.WORK_KIND_ENGINES["debugging"] is None
     assert auto_route.WORK_KIND_ENGINES["testing"] is None
     assert auto_route.WORK_KIND_ENGINES["investigation"] == "claude-agent-acp"
@@ -748,7 +749,7 @@ def test_engine_affinity_override_per_kind_then_star():
     entries = [CODEX[4], CLAUDE[1]]
     picked, decision = auto_route.rank("standard", entries, _usage(), role="worker-backend-dev", models=MODELS)
     assert picked is CODEX[4] and decision["affinity"] == dict(
-        work_kind="implementation", engine="codex-acp", source="default")
+        work_kind="implementation_backend", engine="codex-acp", source="default")
     picked, decision = auto_route.rank("standard", entries, _usage(), role="worker-backend-dev",
                                        affinity={"implementation": "claude-agent-acp"}, models=MODELS)
     assert picked is CLAUDE[1] and decision["decided_by"] == "affinity"
@@ -762,7 +763,7 @@ def test_engine_affinity_validation(tmp_path):
     route_file = project / ".cortex" / "routing.json"
     valid = {"engine_affinity": {"implementation": "claude-agent-acp", "debugging": None, "*": "codex-acp"}}
     route_file.write_text(json.dumps(routing_fixture(valid)))
-    assert auto_route.load_overrides(project, environ) == routing_fixture(valid)
+    assert auto_route.load_overrides(project, environ) == model_policy.normalize_work_kinds(routing_fixture(valid))
     for bad, needle in (({"engine_affinity": ["codex-acp"]}, "must map"),
                         ({"engine_affinity": {"coding": "codex-acp"}}, "unknown work kind 'coding'"),
                         ({"engine_affinity": {"review": "gemini-acp"}}, "unknown engine 'gemini-acp'"),
@@ -1290,7 +1291,7 @@ def test_route_menu_names_the_user_request_exception(tmp_path, monkeypatch):
     assert {item["route"] for item in menu["tiers"]["flagship"]} >= {ASTRA, FABLE}
     assert set(menu["flagship"]["routes"]) >= {ASTRA, FABLE}
     assert menu["flagship"]["request_names"][ASTRA] == ["astra", "астр"]
-    assert menu["affinity"]["implementation"] == "codex-acp" and menu["affinity"]["testing"] is None
+    assert menu["affinity"]["implementation_backend"] == "codex-acp" and menu["affinity"]["testing"] is None
     assert menu["role_work_kinds"]["worker-qa-engineer"] == "testing"
     assert menu["preferred"] == {}
 
@@ -1681,10 +1682,10 @@ def test_deep_work_leaves_a_model_the_owner_placed_only_in_lower_tiers(tmp_path,
 def test_route_menu_withholds_affinity_engines_the_owner_turned_off(tmp_path, monkeypatch):
     project, environ = _opencode_preferred(monkeypatch, tmp_path)
     menu = auto_route.route_menu(project, environ)
-    assert menu["affinity"]["implementation"] is None and menu["affinity"]["operations"] is None
-    assert menu["affinity_not_eligible"] == {"implementation": "codex-acp", "operations": "codex-acp"}
+    assert menu["affinity"]["implementation_backend"] is None and menu["affinity"]["operations"] is None
+    assert menu["affinity_not_eligible"] == {"implementation_backend": "codex-acp", "implementation_frontend": "codex-acp", "operations": "codex-acp"}
     assert menu["affinity"]["review"] == "claude-agent-acp"
-    assert menu["preferred"]["implementation"] == [NEBULA]
+    assert menu["preferred"]["implementation_backend"] == [NEBULA]
 
 
 @pytest.mark.parametrize("opencode,claude,expected,status", [
@@ -1749,7 +1750,7 @@ def test_profile_activation_materializes_preferences_but_does_not_override_proje
     assert changed["profile"]["state"] == "modified"
     assert auto_route.choose("worker-backend-dev", project, environ).connection_id == "claude"
     profiles("activate", discard_modifications=True)
-    assert auto_route.load_overrides(project, environ) == routing_fixture(OPENCODE_PREFERRED)
+    assert auto_route.load_overrides(project, environ) == model_policy.normalize_work_kinds(routing_fixture(OPENCODE_PREFERRED))
     choice = auto_route.choose("worker-backend-dev", project, environ, model_hint="claude-agent-acp")
     assert _route(choice) == NEBULA
     assert auto_route._effective_profile_label(project, environ) == {"name": "opencode-first", "state": "in_sync"}

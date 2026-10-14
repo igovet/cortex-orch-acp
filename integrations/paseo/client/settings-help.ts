@@ -313,11 +313,11 @@ export const HELP = {
       "Решение при равенстве: к какому движку склоняться для вида работы, когда кандидаты в остальном равны. Не отменяет закрепления, запреты, список движков, доступность и лимиты.",
     ),
     [
-      ["Affinity N work kind", h("implementation, testing, review, design… or * for all.", "implementation, testing, review, design… или * для всех.")],
+      ["Affinity N work kind", h("implementation_backend, implementation_frontend, implementation_frontend_design, testing, review, design… or * for all.", "implementation_backend, implementation_frontend, implementation_frontend_design, testing, review, design… или * для всех.")],
       ["Affinity N engine", h("Preferred engine, or None for no lean.", "Предпочтительный движок или None — без предпочтения.")],
       ["Recommended", h(
-        "off — built-in leaning (Codex for implementation/operations, Claude for review, design, writing, planning, analysis) works well.",
-        "выключено — встроенные предпочтения (Codex — реализация/операции, Claude — ревью, дизайн, тексты, планирование, анализ) работают хорошо.",
+        "off — built-in leaning (Codex for backend implementation, frontend implementation without design, and operations; Claude for frontend implementation with UI design, review, design, writing, planning, analysis) works well.",
+        "выключено — встроенные предпочтения (Codex — backend-реализация, frontend-реализация без дизайна и операции; Claude — frontend-реализация с UI-дизайном, ревью, дизайн, тексты, планирование, анализ) работают хорошо.",
       )],
     ],
   ),
@@ -430,11 +430,24 @@ export const HELP = {
   ),
 } as const satisfies Record<string, HelpText>;
 
-/** What each work kind covers (keys are the runtime's work kinds). */
+/** What each work kind covers (keys are the runtime's work kinds, plus the legacy
+ * `implementation` spelling a stored version-2 file may still use). */
 export const WORK_KIND_HELP: Record<string, HelpText> = {
   implementation: h(
-    "Writing and changing product code: features, fixes, refactoring, data pipelines, accessibility fixes. Also every role the runtime does not list elsewhere.",
-    "Написание и изменение кода продукта: функции, исправления, рефакторинг, обработка данных, исправления доступности. Сюда же попадают роли, не отнесённые к другим видам.",
+    "Legacy kind kept from an older routing file: it covers implementation_backend, implementation_frontend and implementation_frontend_design. Saving keeps it unchanged; turn it off and turn on the current kinds to choose them separately.",
+    "Устаревший вид из старого файла маршрутизации: охватывает implementation_backend, implementation_frontend и implementation_frontend_design. При сохранении он остаётся как есть; выключите его и включите текущие виды, чтобы выбирать их по отдельности.",
+  ),
+  implementation_backend: h(
+    "Backend implementation: APIs, business logic, persistence, data pipelines, server-side refactoring. Also every role the runtime does not list elsewhere.",
+    "Бэкенд-реализация: API, бизнес-логика, хранение данных, обработка данных, серверный рефакторинг. Сюда же попадают роли, не отнесённые к другим видам.",
+  ),
+  implementation_frontend: h(
+    "Frontend implementation that does not need visual design decisions: UI components, client state, styling to an existing design, accessibility fixes.",
+    "Frontend-реализация без визуальных дизайн-решений: компоненты интерфейса, состояние клиента, стили по уже готовому дизайну, исправления доступности.",
+  ),
+  implementation_frontend_design: h(
+    "Frontend implementation that also makes visual design choices: new screens, layout and visual design-system work without a prior design to follow.",
+    "Frontend-реализация с собственными визуальными решениями: новые экраны, верстка и работа с визуальной дизайн-системой без готового дизайна.",
   ),
   operations: h(
     "Infrastructure work: CI/CD, containers, deployment, operational diagnostics.",

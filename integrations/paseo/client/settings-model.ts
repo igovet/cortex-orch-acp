@@ -564,6 +564,22 @@ export function routingVocabulary(view: RoutingView): RoutingVocabulary {
   };
 }
 
+/** Version-2 work-kind spellings the runtime still reads, with the current kinds
+ * each one covers. Only effective routing expands them; Settings shows and saves a
+ * stored legacy value unchanged and lets the owner remove it, but never offers it. */
+export const LEGACY_WORK_KINDS: Readonly<Record<string, readonly string[]>> = {
+  implementation: ["implementation_backend", "implementation_frontend", "implementation_frontend_design"],
+};
+
+export function isLegacyWorkKind(kind: string): boolean {
+  return Object.prototype.hasOwnProperty.call(LEGACY_WORK_KINDS, kind);
+}
+
+/** Choice label for a stored work kind the current vocabulary does not offer. */
+export function storedWorkKindLabel(kind: string): string {
+  return isLegacyWorkKind(kind) ? `${kind} (legacy: ${LEGACY_WORK_KINDS[kind].join(", ")})` : `${kind} (unknown)`;
+}
+
 export type RoutingFormResult = { ok: true; form: RoutingForm } | { ok: false; reason: string };
 
 /** The eight supported keys as form rows, or why the stored rules cannot be
@@ -769,7 +785,8 @@ export function buildRoutingRules(form: RoutingForm, vocabulary: RoutingVocabula
       for (const [model, policy] of Object.entries(value.policy)) {
         const preferred = policy.preferred_for;
         if (preferred != null) {
-          if (!isStringArray(preferred) || preferred.some((kind) => !vocabulary.workKinds.includes(kind)))
+          // Legacy v2 values round-trip unchanged; only effective routing expands them.
+          if (!isStringArray(preferred) || preferred.some((kind) => !isLegacyWorkKind(kind) && !vocabulary.workKinds.includes(kind)))
             addError(errors, `rules.models.${engine}.policy.${model}.preferred_for`, "Choose known work kinds.");
           if (Array.isArray(preferred) && preferred.length > 0 && auto !== null && !auto.includes(model))
             addError(errors, `rules.models.${engine}.policy.${model}.preferred_for`, "Select this model for automatic ranking first.");
@@ -803,7 +820,7 @@ export function buildRoutingRules(form: RoutingForm, vocabulary: RoutingVocabula
     const affinity: Record<string, string | null> = {};
     form.engine_affinity.forEach((row, index) => {
       const key = `rules.engine_affinity[${index}]`;
-      if (!vocabulary.workKinds.includes(row.kind)) addError(errors, key, `Work kind must be one of ${vocabulary.workKinds.join(", ")}.`);
+      if (!isLegacyWorkKind(row.kind) && !vocabulary.workKinds.includes(row.kind)) addError(errors, key, `Work kind must be one of ${vocabulary.workKinds.join(", ")}.`);
       else if (row.kind in affinity) addError(errors, key, "Each work kind appears once.");
       if (row.engine && !engines.includes(row.engine)) addError(errors, key, `Engine must be none or one of ${engines.join(", ")}.`);
       affinity[row.kind] = row.engine || null;

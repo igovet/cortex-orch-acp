@@ -92,6 +92,8 @@ import {
   type CatalogEngine,
   type CeilingForm,
   type CeilingView,
+  LEGACY_WORK_KINDS,
+  storedWorkKindLabel,
   type ConnectionView,
   type ConnectionsView,
   type EnvRow,
@@ -762,6 +764,9 @@ function PolicyEditor({ form, onChange, vocabulary, theme, errors }: {
   form: RoutingForm; onChange: (form: RoutingForm) => void; vocabulary: RoutingVocabulary; theme: Theme; errors: FieldErrors;
 }) {
   const kindOptions = vocabulary.workKinds.filter((kind) => kind !== "*").map((value) => ({ value, label: value }));
+  // A stored kind the vocabulary does not offer (a legacy spelling) stays visible and removable.
+  const kindOptionsWith = (stored: readonly string[]) => [...kindOptions,
+    ...stored.filter((kind) => !kindOptions.some((option) => option.value === kind)).map((value) => ({ value, label: storedWorkKindLabel(value) }))];
   const [engine, setEngine] = useState("");
   const [model, setModel] = useState("");
   const put = (engineId: string, modelId: string, key: string, value: unknown) => {
@@ -792,7 +797,7 @@ function PolicyEditor({ form, onChange, vocabulary, theme, errors }: {
               onChange={(value) => put(engineId, modelId, key, value || null)} />
             : <ReadOnlyNotice key={key} theme={theme} text={`${key} has unsupported data; kept unchanged.`} />)}
           {["also_standard_for", "preferred_for"].map((key) => policy[key] == null || (Array.isArray(policy[key]) && (policy[key] as unknown[]).every((item) => typeof item === "string"))
-            ? <MultiChoiceField key={key} label={`${key} for ${id}`} values={policy[key] as string[] ?? []} options={kindOptions} theme={theme}
+            ? <MultiChoiceField key={key} label={`${key} for ${id}`} values={policy[key] as string[] ?? []} options={kindOptionsWith(policy[key] as string[] ?? [])} theme={theme}
               error={errorAt(errors, `rules.models.${engineId}.policy.${modelId}.${key}`)} onChange={(value) => put(engineId, modelId, key, value)} />
             : <ReadOnlyNotice key={key} theme={theme} text={`${key} has unsupported data; kept unchanged.`} />)}
           {policy.preferred_when == null || typeof policy.preferred_when === "string"
@@ -901,7 +906,7 @@ function RoutingEditor({ form, onChange, vocabulary, theme, errors }: {
         renderRow={(row, update, index) => <View style={{ gap: 6 }}>
           <ChoiceField label={`Affinity ${index + 1} work kind`} value={row.kind} theme={theme} onChange={(kind) => update({ ...row, kind })}
             options={[...vocabulary.workKinds.map((kind) => ({ value: kind, label: kind })),
-              ...(vocabulary.workKinds.includes(row.kind) ? [] : [{ value: row.kind, label: `${row.kind} (unknown)` }])]} />
+              ...(vocabulary.workKinds.includes(row.kind) ? [] : [{ value: row.kind, label: storedWorkKindLabel(row.kind) }])]} />
           <ChoiceField label={`Affinity ${index + 1} engine`} value={row.engine} theme={theme} onChange={(engine) => update({ ...row, engine })}
             options={[{ value: "", label: "None" }, ...engineOptions,
               ...(row.engine && !vocabulary.engines.includes(row.engine) ? [{ value: row.engine, label: `${row.engine} (unknown)` }] : [])]} />
@@ -1108,6 +1113,9 @@ function ModelRow({ group, form, onChange, target, tiers, availableModels, workK
   const title = group.key;
   const deny = modelDenyState(route, form, target);
   const auto = modelAutoAllowState(route, form, target);
+  const preferredFor = form.models?.[route.engine]?.policy?.[route.model]?.preferred_for;
+  const storedKinds = Array.isArray(preferredFor)
+    ? (preferredFor as unknown[]).filter((kind): kind is string => typeof kind === "string" && !workKinds.includes(kind)) : [];
   return <View style={{ borderTopWidth: 1, borderColor: theme.colors.border, paddingTop: 8, gap: 4 }}>
     <Text style={{ color: theme.colors.foreground, fontSize: 13, fontWeight: "600" }}>{route.model_name}</Text>
     <ReadOnlyRow label="Model" value={title} theme={theme} />
@@ -1126,6 +1134,11 @@ function ModelRow({ group, form, onChange, target, tiers, availableModels, workK
           ? route.automatic !== "eligible" : !form.models[route.engine].auto?.includes(route.model))}
         theme={theme} onValueChange={(on) => onChange(setModelPreferredFor(form, route.engine, route.model, kind, on,
           route.automatic === "eligible"))} help={workKindHelp(kind, workKindRoles[kind] ?? [])} />)}
+      {storedKinds.map((kind) => <ToggleField key={kind} label={`${storedWorkKindLabel(kind)} — ${title}`} value theme={theme}
+        disabled={deny.on || (form.models?.[route.engine]?.auto == null
+          ? route.automatic !== "eligible" : !form.models[route.engine].auto?.includes(route.model))}
+        onValueChange={(on) => onChange(setModelPreferredFor(form, route.engine, route.model, kind, on, route.automatic === "eligible"))}
+        help={workKindHelp(kind, [...new Set((LEGACY_WORK_KINDS[kind] ?? []).flatMap((covered) => workKindRoles[covered] ?? []))])} />)}
       <TextField label={`Prefer ${title} when`} help={PREFERRED_WHEN_HELP} theme={theme} multiline
         value={(form.models?.[route.engine]?.policy?.[route.model]?.preferred_when as string | null | undefined) ?? ""}
         placeholder="e.g. frontend changes without design work"

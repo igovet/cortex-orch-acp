@@ -1118,14 +1118,14 @@ def test_only_retries_and_review_fixes_escalate_the_route(machine):
     with state.store.connection() as db:
         db.execute("INSERT INTO delegation_provisioning(idempotency_key,task_id,attempt_id,role_id,step,status,owner_epoch,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
                    (node['assignment_ref'], channel.task_id, 'xa_first', 'worker-debugger', 'ready', 'ready', 0, 'now', 'now')); db.commit()
-    assert attempt_routing(state.store, channel.task_id, 'xa_first') == (False, 'high', 'auto', None, None, None, None)
+    assert attempt_routing(state.store, channel.task_id, 'xa_first') == (False, 'high', 'auto', None, None, None, None, None)
     with state.store.connection() as db:
         event(db, channel.task_id, 'ASSIGNMENT_RETRIED', dict(node=node['node_id'], revision=1, retry=1)); db.commit()
-    assert attempt_routing(state.store, channel.task_id, 'xa_first') == (True, 'high', 'auto', None, None, None, None)
+    assert attempt_routing(state.store, channel.task_id, 'xa_first') == (True, 'high', 'auto', None, None, None, None, None)
     with state.store.connection() as db:
         db.execute("UPDATE runtime_nodes SET node_id='_fix_0_N0' WHERE task_id=?", (channel.task_id,))
         db.execute("DELETE FROM runtime_events WHERE type='ASSIGNMENT_RETRIED'"); db.commit()
-    assert attempt_routing(state.store, channel.task_id, 'xa_first') == (True, 'high', 'auto', None, None, None, None)  # a fix keeps its node's complexity
+    assert attempt_routing(state.store, channel.task_id, 'xa_first') == (True, 'high', 'auto', None, None, None, None, None)  # a fix keeps its node's complexity
 
 
 def test_a_planned_provider_preference_reaches_routing(machine):
@@ -1138,7 +1138,7 @@ def test_a_planned_provider_preference_reaches_routing(machine):
         db.execute("INSERT INTO delegation_provisioning(idempotency_key,task_id,attempt_id,role_id,step,status,owner_epoch,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
                    (node['assignment_ref'], channel.task_id, 'xa_first', 'worker-debugger', 'ready', 'ready', 0, 'now', 'now')); db.commit()
         db.execute("UPDATE runtime_nodes SET node_id='_fix_0_N0' WHERE task_id=?", (channel.task_id,)); db.commit()
-    assert attempt_routing(state.store, channel.task_id, 'xa_first') == (True, 'normal', 'codex-acp', None, None, None, None)  # a fix keeps it too
+    assert attempt_routing(state.store, channel.task_id, 'xa_first') == (True, 'normal', 'codex-acp', None, None, None, None, None)  # a fix keeps it too
 
 
 def test_plan_provider_is_optional_and_bounded(machine):
@@ -1312,7 +1312,7 @@ def test_exact_model_hint_requires_live_menu_and_reports_tier_mismatch(machine, 
     receipt = state.submit_plan(channel, proposal, 'hint-preview')
     assert receipt['model_hints'] == [{
         'node': 'N0', 'model': 'codex-acp/gpt-6-astra',
-        'tier_now': 'standard', 'preview_status': 'ignored:tier_mismatch'}]
+        'tier_now': 'standard', 'work_kind': 'implementation_backend', 'preview_status': 'ignored:tier_mismatch'}]
 
 
 def _provision(state, channel, node_id, attempt_id):
@@ -1462,6 +1462,7 @@ def test_plan_preview_names_the_user_request_for_a_flagship_hint(tmp_path, monke
     proposal['tasks'][1].update(model='codex-acp/gpt-6-astra', model_reason='Astra is stronger.')
     hints = state.submit_plan(channel, proposal, 'fable-plan')['model_hints']
     assert hints[0] == dict(node='N0', model='claude-agent-acp/claude-fable-5-1[1m]', tier_now='standard',
+                            work_kind='implementation_backend',
                             preview_status='pending_dispatch:user_request', user_request=f'{task.report_id}:-1')
     assert hints[1]['preview_status'] == 'ignored:tier_mismatch' and 'user_request' not in hints[1]
 

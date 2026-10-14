@@ -18,7 +18,7 @@ from cortex_runtime.store import Store
 from cortex_runtime.trusted_channel import issue_channel_tx, resolve_channel
 
 
-def _review(tmp_path, role, scope, findings=True):
+def _review(tmp_path, role, scope, findings=True, **node_fields):
     # Read-only plan admission requires its context paths to exist.
     for name in ('src/handler.py', 'tests/test_handler.py', 'docs/guide.md'):
         path = tmp_path / name
@@ -31,7 +31,7 @@ def _review(tmp_path, role, scope, findings=True):
     channel = resolve_channel(store, task.channel_id, task.secret)
     state.submit_plan(channel, dict(
         tasks=[dict(id='source', role=role, objective='Investigate the implementation',
-                    dependencies=[], scope=scope, model='auto')],
+                    dependencies=[], scope=scope, model='auto', **node_fields)],
         verification=[['python3', '-B', '-m', 'pytest', '-q']],
     ), 'plan')
     state.move(task.task_id, 'EXECUTING')

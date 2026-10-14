@@ -7,6 +7,7 @@ family or version supplies membership, tiers, effort or request labels.
 from __future__ import annotations
 
 import re
+from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Callable, Iterable, Mapping, Sequence
 
@@ -23,14 +24,40 @@ MAX_SELECTED = 1000
 MAX_REQUEST_NAMES = 16
 #: Longest owner-written ``preferred_when`` condition, in characters.
 MAX_PREFERRED_WHEN = 500
-WORK_KINDS = ("implementation", "operations", "debugging", "testing", "investigation",
+IMPLEMENTATION_KINDS = ("implementation_backend", "implementation_frontend", "implementation_frontend_design")
+WORK_KINDS = (*IMPLEMENTATION_KINDS, "operations", "debugging", "testing", "investigation",
               "review", "design", "writing", "planning", "analysis")
 WORK_KIND_LABELS = {
-    "implementation": "Implementation", "operations": "Operations", "debugging": "Debugging",
+    "implementation_backend": "Backend implementation",
+    "implementation_frontend": "Frontend implementation (no design)",
+    "implementation_frontend_design": "Frontend implementation with UI design",
+    "operations": "Operations", "debugging": "Debugging",
     "testing": "Testing", "investigation": "Investigation", "review": "Review",
     "design": "Design and architecture", "writing": "Documentation and writing",
     "planning": "Planning", "analysis": "Analysis",
 }
+
+def expand_work_kinds(kinds: Sequence[str]) -> list[str]:
+    """Expand the legacy implementation umbrella, preserving order without duplicates."""
+    return list(dict.fromkeys(expanded for kind in kinds
+                              for expanded in (IMPLEMENTATION_KINDS if kind == "implementation" else (kind,))))
+
+
+def normalize_work_kinds(overrides: Mapping) -> dict:
+    """Normalize validated version-2 policy in memory; never rewrite an owner file."""
+    result = deepcopy(dict(overrides))
+    affinity = result.get("engine_affinity") or {}
+    if "implementation" in affinity:
+        legacy = affinity.pop("implementation")
+        for kind in IMPLEMENTATION_KINDS:
+            affinity.setdefault(kind, legacy)
+    for config in (result.get("models") or {}).values():
+        for policy in (config.get("policy") or {}).values():
+            for key in ("preferred_for", "also_standard_for"):
+                if policy.get(key) is not None:
+                    policy[key] = expand_work_kinds(policy[key])
+    return result
+
 
 # --- resolution ----------------------------------------------------------------
 
@@ -122,8 +149,8 @@ def _policy(engine: str, model: str, overrides: Mapping, tiers: tuple[str, ...],
         selection="listed", selected=selected,
         effort_floor=attributes.get("effort_floor"), max_effort=attributes.get("max_effort"),
         effort_ladder=tuple(attributes.get("effort_ladder") or ()),
-        also_standard_for=frozenset(attributes.get("also_standard_for") or ()),
-        preferred_for=frozenset(attributes.get("preferred_for") or ()),
+        also_standard_for=frozenset(expand_work_kinds(attributes.get("also_standard_for") or ())),
+        preferred_for=frozenset(expand_work_kinds(attributes.get("preferred_for") or ())),
         preferred_when=attributes.get("preferred_when"),
         request_names=tuple(attributes.get("request_names") or ()),
         attribute_sources={name: sources[name] for name in POLICY_ATTRIBUTES if name in sources},
@@ -184,7 +211,7 @@ def validate_models(value, *, engines: Sequence[str], work_kinds: Sequence[str],
     if not isinstance(value, Mapping):
         add(prefix, "invalid_type", "must map an engine id to {auto, tiers, policy}")
         return problems
-    kinds = tuple(work_kinds)
+    kinds = (*work_kinds, "implementation")
     for engine, config in value.items():
         base = f"{prefix}.{engine}"
         if engine not in engines:

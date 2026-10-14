@@ -25,9 +25,9 @@ def test_public_asset_preserves_exact_baseline_tiers_efforts_and_coordinator():
     # Complete portable production default snapshot, saved 2026-10-12 at 14:23 UTC;
     # 2026-10-13: Opus also standard-tier (UI/UX preferred_when) with request labels;
     # 2026-10-14: the Opus condition covers frontend layout/styling, Sol's excludes it;
-    # 2026-10-14: gpt-6-astra also deep-tier, matching the production routing update.
+    # 2026-10-14: implementation kinds split; Astra is flagship-only.
     canonical = json.dumps(template, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
-    assert hashlib.sha256(canonical.encode()).hexdigest() == "799ef3ed8c8a5457770c6e16dfc824d84259e14db4c1cfcc1959e93ab96d9a5a"
+    assert hashlib.sha256(canonical.encode()).hexdigest() == "7298d4bde4c47bb9c02b38e3915418626352475557cef94c6944f579004457a2"
     expected = {
         ("claude-agent-acp", "default"): ("deep",),
         ("claude-agent-acp", "opus[1m]"): ("flagship", "deep", "standard"),
@@ -35,7 +35,7 @@ def test_public_asset_preserves_exact_baseline_tiers_efforts_and_coordinator():
         ("claude-agent-acp", "claude-sonnet-5"): ("standard",),
         ("claude-agent-acp", "haiku"): ("light",),
         ("codex-acp", "gpt-6.1-sol"): ("deep", "standard"),
-        ("codex-acp", "gpt-6-astra"): ("flagship", "deep"),
+        ("codex-acp", "gpt-6-astra"): ("flagship",),
         ("codex-acp", "gpt-6-luna"): ("light",),
     }
     assert {(e, m) for e, models in routing["enabled"].items() for m in models} == set(expected)
@@ -159,3 +159,31 @@ def test_default_opus_serves_standard_design_work(role, hint, chosen, hint_statu
     assert decision["tier"] == "standard"
     assert decision["chosen"] == chosen
     assert decision["model_hint_status"] == hint_status
+
+
+def test_default_design_preference_is_only_opus_and_astra_never_serves_deep():
+    routing = defaults.default_routing()
+    design = "implementation_frontend_design"
+    preferred = [(engine, model) for engine, config in routing["models"].items()
+                 for model, policy in config["policy"].items()
+                 if design in (policy.get("preferred_for") or ())]
+    assert preferred == [("claude-agent-acp", "opus[1m]")]
+    assert all(design not in (policy.get("also_standard_for") or ())
+               for config in routing["models"].values() for policy in config["policy"].values())
+    entries = [entry(engine, model) for engine, models in routing["enabled"].items() for model in models]
+    for escalated in (False, True):
+        picked, decision = auto_route.rank(
+            "deep" if escalated else "standard", entries, lambda e: 10.0,
+            role="worker-frontend-dev", work_kind_override=design, models=routing["models"],
+            model_hint="claude-agent-acp/opus[1m]", escalated=escalated)
+        # Conditional preferences/hints remain ignored on quality escalation.
+        if not escalated:
+            assert picked.route.model == "opus[1m]"
+        assert decision["purpose"]["work_kind"] == design
+        assert "codex-acp/gpt-6-astra" not in [c["route"] for c in decision["candidates"]]
+    # An unconfirmed Astra hint cannot promote a flagship-only model into deep.
+    picked, decision = auto_route.rank("deep", entries, lambda e: 10.0,
+                                      role="worker-backend-dev", models=routing["models"],
+                                      model_hint="codex-acp/gpt-6-astra")
+    assert picked.route.model != "gpt-6-astra"
+    assert decision["model_hint_status"] == "ignored:tier_mismatch"

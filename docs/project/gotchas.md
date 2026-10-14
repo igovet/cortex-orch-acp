@@ -588,10 +588,14 @@ not raise the session cap.
 A read-only role (ux-designer, architect, …) can never write its output file,
 whatever scope the plan gives it: its `command_run` jail binds nothing
 writable, and `project_write` refuses. `plan_submit` refuses a read-only
-task whose scope names a path that does not exist yet
-(`read_only_scope_not_writable`). An existing directory in its scope does not
-make it writable either. Have the task return content in its report and give
-the file to a writing role in a dependent task.
+task whose scope names a literal path that does not exist yet
+(`read_only_scope_not_writable`, listing every such path), unless a writing
+task of the same plan whose scope overlaps that path is ordered with it: the
+read-only task depends on the writer (a reviewer of the directory its
+predecessor creates) or the writer depends on it. An unordered writer does not
+count. An existing directory in its scope does not make it writable either.
+Have the task return content in its report and give the file to a writing role
+in a dependent task.
 
 A review binds to an exact project digest. If another writer (the owner or
 another agent session) edits the same checkout during review, the verdict is

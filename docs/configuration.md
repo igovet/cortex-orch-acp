@@ -171,7 +171,7 @@ The routing loader reads eight keys: `pin`, `deny`, `enabled`, `auto_allow`, `ti
   },
   "providers": ["codex-acp", "claude-agent-acp"],
   "engine_affinity": {
-    "implementation": "claude-agent-acp",
+    "implementation_backend": "claude-agent-acp",
     "testing": null,
     "*": "codex-acp"
   },
@@ -199,7 +199,7 @@ writing configuration or dispatching work.
 - `auto_allow`: tokens of the same form that may enter automatic selection despite the built-in Haiku and OpenCode exclusions (on an engine without a `models` selection list; a list replaces these exclusions). OpenCode model IDs name their provider, so an OpenCode entry is the exact route, for example `"opencode/anthropic/claude-sonnet-4-5"`. It does not override `deny`, `providers`, catalog availability, connection readiness or quota limits.
 - `tiers`: object mapping model names to `flagship`, `deep`, `standard`, or `light`, for every engine. Built-in known families/models are classified automatically; this key overrides that classification, and a per-engine `models` tier overrides this key. A Luna model moved out of `light` routes like any model of its new tier; only the Luna effort floor (`high`) and `max` still apply.
 - `providers`: array restricted to `codex-acp`, `claude-agent-acp` and/or `opencode`. When absent, every configured provider is considered. It restricts automatic routing, failover and pins; it does not hide models from the selector or disable manual selection. A disallowed pin is refused.
-- `engine_affinity`: object mapping a work kind or `*` to `codex-acp`, `claude-agent-acp`, `opencode`, or `null` (no lean). Work kinds are `implementation`, `operations`, `debugging`, `testing`, `investigation`, `review`, `design`, `writing`, `planning`, and `analysis` (each worker role's kind is `routing.auto_route.ROLE_WORK_KINDS`; an unlisted role is `implementation`). A kind named here wins, then `*`, then the built-in default: `implementation` and `operations` lean to `codex-acp`; `investigation`, `review`, `design`, `writing`, `planning` and `analysis` lean to `claude-agent-acp`; `debugging` and `testing` are neutral. Affinity breaks ties only after the 95% quota band, plan usage and retry diversification (a plan at least 10 points less used wins first only once known usage reaches 95%): a known route at or above 95% ranks behind any non-hot route, so affinity never overrides that band. It never overrides a pin, `deny`, `providers`, availability or the 100% quota exclusion. An unknown kind or engine makes the file invalid.
+- `engine_affinity`: object mapping a work kind or `*` to `codex-acp`, `claude-agent-acp`, `opencode`, or `null` (no lean). Work kinds are `implementation_backend`, `implementation_frontend`, `implementation_frontend_design`, `operations`, `debugging`, `testing`, `investigation`, `review`, `design`, `writing`, `planning`, and `analysis` (each worker role's kind is `routing.auto_route.ROLE_WORK_KINDS`; an unlisted role is `implementation_backend`). A kind named here wins, then `*`, then the built-in default: `implementation_backend`, `implementation_frontend` and `operations` lean to `codex-acp`; `implementation_frontend_design`, `investigation`, `review`, `design`, `writing`, `planning` and `analysis` lean to `claude-agent-acp`; `debugging` and `testing` are neutral. Affinity breaks ties only after the 95% quota band, plan usage and retry diversification (a plan at least 10 points less used wins first only once known usage reaches 95%): a known route at or above 95% ranks behind any non-hot route, so affinity never overrides that band. It never overrides a pin, `deny`, `providers`, availability or the 100% quota exclusion. An unknown kind or engine makes the file invalid.
 - `models`: object mapping a supported engine id to an object with any of `auto`, `tiers` and `policy`, each keyed by the exact model id the engine reports (OpenCode ids are `<provider>/<model>`). Validation (`routing.model_policy.validate_models`) reports every problem with its field path.
   - `auto`: array of unique model ids. Present, it is the complete list of that engine's models automatic routing may use (`[]`: none), replacing the built-in Haiku/optional-engine exclusions, `auto_allow` and newest-version-only routing for that engine; absent, the built-in rules apply. `deny` and `providers` still win; a `pin` or the model selector can still use any offered model.
   - `tiers`: model id to `flagship`, `deep`, `standard` or `light`, or to a non-empty list of them (for example `["standard", "deep"]`); it wins over the legacy top-level `tiers`, which wins over the built-in classification. A model given several tiers is an automatic-routing candidate of each (it is listed under each in `list_route_options`) and runs at the effort of the tier it was chosen for; a pin or explicit effort may use any effort one of its tiers permits, and it counts as flagship for a user's explicit flagship request when `flagship` is one of its tiers. Only this per-engine key takes a list; the legacy top-level `tiers` stays one tier per model. In Settings > Engines & models the tier control is a multi-select; clearing every tier removes the setting.
@@ -219,7 +219,7 @@ writing configuration or dispatching work.
   are chosen from the work-kind vocabulary, never typed, and the condition
   is a text field next to the preferred-work switches.
 
-  `preferred_for` uses the same ten work kinds as `engine_affinity`. The API's
+  `preferred_for` uses the same twelve work kinds as `engine_affinity`. The API's
   `routing.builtin` includes English `work_kind_labels`, the worker-role list
   `work_kind_roles`, and `builtin_affinity` for each kind. A model with a
   non-empty `preferred_for` must appear in its engine's explicit `models.auto`
@@ -311,7 +311,7 @@ not a universal preset; exact model/connection identifiers must exist locally.
 | Auto-allow | Opts an otherwise built-in-excluded exact route into automatic selection, subject to remaining policy | User or project routing | User: yes; project: no | `["claude-agent-acp/haiku"]` |
 | Model tiers | Assigns automatic-routing candidates to light, standard, deep or flagship tiers | User or project routing | User: yes; project: no | `{"gpt-5.6-luna":"light"}` |
 | Automatic-routing providers | Restricts providers considered for automatic routing, failover and pins | User or project routing | User: yes; project: no | `["opencode","claude-agent-acp"]` |
-| Engine affinity | Breaks remaining routing ties toward an engine for a work kind | User or project routing | User: yes; project: no | `{"implementation":"opencode"}` |
+| Engine affinity | Breaks remaining routing ties toward an engine for a work kind | User or project routing | User: yes; project: no | `{"implementation_backend":"opencode"}` |
 | Per-model automatic selection | Defines the full set of models an engine may automatically route when `models.<engine>.auto` is present | User or project routing | User: yes; project: no | `{"opencode":{"auto":["provider/model-id"]}}` |
 | Per-model policy and work-kind preference | Sets effort/tier behavior and preferred work kinds for an exact model | User or project routing | User: yes; project: no | `{"opencode":{"policy":{"provider/model-id":{"preferred_for":["review"]}}}}` |
 | MCP enabled and usage limits | Controls whether a registered server and its tools, paths, networks, roles or engines may be used | User MCP policy | Yes | `enabled: true` |
@@ -429,10 +429,38 @@ The runtime and coordinator use only the effective first-existing routing file (
 The validated public asset policy/model-settings-default.json is installation/migration input only, not a runtime fallback or overlay. It contains a production-derived baseline candidate and portable coordinator preference, but no account/connection identity or credentials. Setup validates it completely and creates missing owner settings privately without replacement; existing, partial, invalid and legacy owner files and saved profiles are not silently changed. The asset cannot prove installed deployment or a live route. Migration is an explicit two-step operation: preview a candidate (non-mutating), then apply only with explicit consent, the exact preview source revision and candidate digest. Apply verifies a private backup and written bytes and rolls back on failure. Migrate each saved profile from a candidate derived from that profile itself; never fill an inactive profile from current settings or the install template. Retain backups and preview/apply evidence. See [model-policy migration](project/packaging.md#model-policy-installation-and-explicit-migration).
 
 
+### Implementation work classification
+
+The optional `plan_submit.plan.tasks[].work_kind` enum overrides the role's
+classification without changing its tier or authorization:
+- `implementation_backend`: backend-dev, data-engineer, refactorer, fullstack-dev,
+  general and unlisted-role default.
+- `implementation_frontend`: frontend-dev, mobile-dev and accessibility-fixer
+  default, for frontend implementation without visual design.
+- `implementation_frontend_design`: explicitly classify layout, styling, markup,
+  responsive layout, UI components and visual polish this way, including those
+  changes implemented by fullstack or accessibility specialists.
+
+The runtime validates the enum, retains it in the accepted plan JSON, and uses it
+for affinity, preferences and light-model standard allowances at dispatch.
+Retries and review fixes inherit the original explicit classification. Without
+an override, a fix uses its actual writing role's default. `list_route_options`
+exposes all three kinds in affinity and preference metadata; `role_work_kinds`
+continues to describe defaults, not per-node overrides.
+
+Version-2 routing files and older profiles may still use `implementation` in
+`preferred_for`, `also_standard_for` and `engine_affinity`. Runtime and settings
+effective reads expand it to all three kinds in memory, deduplicating mixed
+legacy/new lists. An explicit new-kind affinity wins over the legacy umbrella,
+then the umbrella wins over `*`. Per-source `rules` retain the stored spellings for
+editing; only `effective_rules` expand them. An unrelated Settings save preserves
+legacy affinity, preference and stretch entries rather than migrating them.
+Reads never rewrite the source file or profile; the policy version remains 2. The legacy spelling is not a valid new plan override.
+
 ### Fresh-install owner default snapshot
 
-The public install asset reflects the saved production `default` profile updated
-on 2026-10-12 at 14:23 UTC. Its routing is a non-secret snapshot, including
+The public install asset is based on the saved production `default` profile from
+2026-10-12 at 14:23 UTC, with the implementation-kind and tier refinements below. Its routing is a non-secret snapshot, including
 multi-tier memberships, effort floors/ceilings, preferences, request labels and
 quota-window associations. The portable coordinator is
 `codex-acp/gpt-6.1-sol` with `thought_level: high`; no mode override is
@@ -449,6 +477,9 @@ register its own connections/MCP servers and resolve the exact coordinator again
 one observed selectable route. Missing or unsupported model/effort observations
 still fail closed; this snapshot is not live qualification.
 
+The preset makes `gpt-6-astra` flagship-only, never a deep-tier automatic candidate.
+Only `opus[1m]` lists `implementation_frontend_design` in `preferred_for`;
+other former implementation preferences split into backend and frontend-without-design.
 The snapshot retains the Opus UI/UX condition in `preferred_when` and the
 narrowly scoped complex backend condition. Since 2026-10-14 the condition
 covers all UI/UX work, including frontend layout and styling that implement
@@ -457,7 +488,10 @@ complexity (the light tier has no Opus route). The `codex-acp/gpt-6.1-sol`
 condition excludes the same work. Opus is configured for the `deep`, `flagship` and
 `standard` tiers so that condition can apply to standard-tier design work
 (`ux-designer`), and `request_names` `opus`/`опус` let the user request it by
-name. This is an advisory conditional preference, not a role pin
+name. The coordinator must still name the exact offered Opus route when its
+condition holds; the work-kind override alone does not satisfy free text. Quality
+retries/fixes retain the work kind but ignore conditional hints as before.
+This is an advisory conditional preference, not a role pin
 or a tier override. OpenCode is explicitly denied by `opencode/*` and
 `auto_allow` is empty; dormant OpenCode model policy remains preserved.
 

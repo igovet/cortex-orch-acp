@@ -2058,6 +2058,7 @@ class EngineSessionManagerAdapter:
             unavailable=unavailable, preference=provider, model_hint=model_hint,
             model_reason=model_reason, previous_engine=previous_engine, user_request=user_request,
             eligible_route_ids=eligible_ids, user_revocation=user_revocation,
+            work_kind_override=route.work_kind if route else None,
         )
         if choice is None:
             if configuration is not None:
