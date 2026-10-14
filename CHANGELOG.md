@@ -2,6 +2,9 @@
 
 ## 1.0.0 (unreleased)
 
+The built-in default routing preset's `codex-acp/gpt-6-astra` now carries both the `flagship`
+and `deep` tiers (previously `flagship` only), matching the current production owner routing.
+
 A fix node created after a `REQUEST_CHANGES` review no longer keeps a read-only source role. The runtime gives it a writing role chosen from its effective scope: `worker-technical-writer` for documentation-only scopes, `worker-qa-engineer` for tests-only scopes and `worker-backend-dev` otherwise. A failed check of a worker's own standalone Python probe can be retracted by a later verified passing correction with the same name, operation, cwd and profile; the failure stays as `retracted` history, never as a pass, and runtime verification failures are never retracted. An `outside_command` identity now includes its profile, so an exact outside rerun closes its own failure, and a later unrelated recorded run no longer makes that rerun ambiguous. No live or paid qualification is claimed for these changes.
 
 The 2026-10-14 orchestration audit's owner decisions are recorded in

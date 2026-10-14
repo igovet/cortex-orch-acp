@@ -155,7 +155,10 @@
           "gpt-6-luna"
         ],
         "tiers": {
-          "gpt-6-astra": "flagship",
+          "gpt-6-astra": [
+            "flagship",
+            "deep"
+          ],
           "gpt-6-luna": [
             "light"
           ],

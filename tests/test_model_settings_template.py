@@ -24,9 +24,10 @@ def test_public_asset_preserves_exact_baseline_tiers_efforts_and_coordinator():
     assert template["language"] == "ru"
     # Complete portable production default snapshot, saved 2026-10-12 at 14:23 UTC;
     # 2026-10-13: Opus also standard-tier (UI/UX preferred_when) with request labels;
-    # 2026-10-14: the Opus condition covers frontend layout/styling, Sol's excludes it.
+    # 2026-10-14: the Opus condition covers frontend layout/styling, Sol's excludes it;
+    # 2026-10-14: gpt-6-astra also deep-tier, matching the production routing update.
     canonical = json.dumps(template, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
-    assert hashlib.sha256(canonical.encode()).hexdigest() == "771bcccad9a96cfc818f58655be943a2263c779206fbffad8ef8744034fdc84e"
+    assert hashlib.sha256(canonical.encode()).hexdigest() == "799ef3ed8c8a5457770c6e16dfc824d84259e14db4c1cfcc1959e93ab96d9a5a"
     expected = {
         ("claude-agent-acp", "default"): ("deep",),
         ("claude-agent-acp", "opus[1m]"): ("flagship", "deep", "standard"),
@@ -34,7 +35,7 @@ def test_public_asset_preserves_exact_baseline_tiers_efforts_and_coordinator():
         ("claude-agent-acp", "claude-sonnet-5"): ("standard",),
         ("claude-agent-acp", "haiku"): ("light",),
         ("codex-acp", "gpt-6.1-sol"): ("deep", "standard"),
-        ("codex-acp", "gpt-6-astra"): ("flagship",),
+        ("codex-acp", "gpt-6-astra"): ("flagship", "deep"),
         ("codex-acp", "gpt-6-luna"): ("light",),
     }
     assert {(e, m) for e, models in routing["enabled"].items() for m in models} == set(expected)
