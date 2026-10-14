@@ -25,9 +25,12 @@ def test_public_asset_preserves_exact_baseline_tiers_efforts_and_coordinator():
     # Complete portable production default snapshot, saved 2026-10-12 at 14:23 UTC;
     # 2026-10-13: Opus also standard-tier (UI/UX preferred_when) with request labels;
     # 2026-10-14: the Opus condition covers frontend layout/styling, Sol's excludes it;
-    # 2026-10-14: implementation kinds split; Astra is flagship-only.
+    # 2026-10-14: implementation kinds split; Astra is flagship tier only;
+    # 2026-10-14: synced from the owner's edited production routing.json -- Astra is
+    # preferred for the generic `design` work kind again (tier membership stays
+    # flagship-only) and Opus's configured tiers list is reordered strongest-first.
     canonical = json.dumps(template, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
-    assert hashlib.sha256(canonical.encode()).hexdigest() == "7298d4bde4c47bb9c02b38e3915418626352475557cef94c6944f579004457a2"
+    assert hashlib.sha256(canonical.encode()).hexdigest() == "9c9028518433f735c606c30c8ad27598692f92c6f95b2a87f4b7090e86c57e4f"
     expected = {
         ("claude-agent-acp", "default"): ("deep",),
         ("claude-agent-acp", "opus[1m]"): ("flagship", "deep", "standard"),
@@ -176,9 +179,8 @@ def test_default_design_preference_is_only_opus_and_astra_never_serves_deep():
             "deep" if escalated else "standard", entries, lambda e: 10.0,
             role="worker-frontend-dev", work_kind_override=design, models=routing["models"],
             model_hint="claude-agent-acp/opus[1m]", escalated=escalated)
-        # Conditional preferences/hints remain ignored on quality escalation.
-        if not escalated:
-            assert picked.route.model == "opus[1m]"
+        # Structured frontend-design preference survives quality escalation.
+        assert picked.route.model == "opus[1m]"
         assert decision["purpose"]["work_kind"] == design
         assert "codex-acp/gpt-6-astra" not in [c["route"] for c in decision["candidates"]]
     # An unconfirmed Astra hint cannot promote a flagship-only model into deep.
@@ -187,3 +189,103 @@ def test_default_design_preference_is_only_opus_and_astra_never_serves_deep():
                                       model_hint="codex-acp/gpt-6-astra")
     assert picked.route.model != "gpt-6-astra"
     assert decision["model_hint_status"] == "ignored:tier_mismatch"
+
+
+@pytest.mark.parametrize(
+    "escalated,previous_engine",
+    [
+        pytest.param(False, None, id="initial"),
+        pytest.param(True, "claude-agent-acp", id="quality-retry"),
+        pytest.param(True, "claude-agent-acp", id="review-fix-after-claude-attempt"),
+    ],
+)
+def test_default_frontend_design_uses_opus_on_initial_retry_and_fix(escalated, previous_engine):
+    role = "worker-frontend-dev"
+    design = "implementation_frontend_design"
+    routing = defaults.load_model_settings_template()["routing"]
+    entries = [entry(engine, model) for engine, models in routing["enabled"].items() for model in models]
+
+    picked, _decision = auto_route.rank(
+        auto_route.tier_for(role, escalate=escalated),
+        entries,
+        lambda _entry: 0.0,
+        role=role,
+        models=routing["models"],
+        model_hint="claude-agent-acp/opus[1m]",
+        work_kind_override=design,
+        escalated=escalated,
+        previous_engine=previous_engine,
+    )
+
+    assert picked.route.id == "claude-agent-acp/opus[1m]"
+
+
+def test_default_frontend_design_falls_back_only_on_affinity_engine_when_opus_is_unavailable():
+    role = "worker-frontend-dev"
+    design = "implementation_frontend_design"
+    routing = defaults.load_model_settings_template()["routing"]
+    entries = [
+        entry(engine, model)
+        for engine, models in routing["enabled"].items()
+        for model in models
+        if (engine, model) != ("claude-agent-acp", "opus[1m]")
+    ]
+
+    picked, _decision = auto_route.rank(
+        auto_route.tier_for(role, escalate=True),
+        entries,
+        lambda _entry: 0.0,
+        role=role,
+        models=routing["models"],
+        work_kind_override=design,
+        escalated=True,
+        previous_engine="claude-agent-acp",
+    )
+
+    assert picked.route.engine == "claude-agent-acp"
+    assert picked.route.model != "opus[1m]"
+
+
+@pytest.mark.parametrize("escalated", [False, True])
+@pytest.mark.parametrize("availability", ["available", "unconfigured", "unavailable", "exhausted", "engine_unavailable"])
+def test_default_frontend_design_dispatch_keeps_affinity(monkeypatch, escalated, availability):
+    from cortex_runtime.connections import quota, registry
+
+    routing = defaults.load_model_settings_template()["routing"]
+    entries = [entry(engine, model) for engine, models in routing["enabled"].items() for model in models]
+    if availability == "unconfigured":
+        entries = [e for e in entries if e.route.model != "opus[1m]"]
+    monkeypatch.setattr(auto_route, "load_overrides", lambda *_: routing)
+    monkeypatch.setattr(auto_route, "_effective_profile_label", lambda *_: None)
+    monkeypatch.setattr(registry, "read_registry", lambda _: SimpleNamespace(
+        connections={e.connection_id: SimpleNamespace() for e in entries}))
+    monkeypatch.setattr(auto_route, "_entries", lambda *_: entries)
+    monkeypatch.setattr(auto_route, "_is_seed", lambda _: False)
+    monkeypatch.setattr(quota, "used_percent", lambda _connection, model, *_, **__:
+                        100.0 if availability == "exhausted" and model == "opus[1m]" else 0.0)
+    unavailable = []
+    if availability in ("unavailable", "engine_unavailable"):
+        unavailable = [{"connection_id": "claude-agent-acp", "engine": "claude-agent-acp",
+                        "model": "opus[1m]", "scope": "connection" if availability == "engine_unavailable" else "model",
+                        "reason": "test", "expires_at": "2099-01-01T00:00:00+00:00"}]
+    kwargs = dict(escalate=escalated, work_kind_override="implementation_frontend_design",
+                  previous_engine="claude-agent-acp", model_hint="claude-agent-acp/opus[1m]",
+                  unavailable=unavailable)
+    if availability == "engine_unavailable":
+        # Owner correction: the whole affinity engine (Claude) being
+        # unavailable is no longer a refusal -- dispatch falls back to the
+        # normal cross-engine selection, here the preset's sole remaining
+        # configured engine, Codex, rather than inheriting the coordinator
+        # or refusing visibly.
+        choice = auto_route.choose("worker-frontend-dev", **kwargs)
+        assert choice.decision["chosen_connection_id"] == choice.connection_id
+        assert choice.connection_id != "claude-agent-acp"
+        assert choice.decision["affinity"]["required"] is True
+        assert choice.decision["affinity"]["cross_engine_fallback"] is True
+        return
+    choice = auto_route.choose("worker-frontend-dev", **kwargs)
+    assert choice.connection_id == "claude-agent-acp"
+    assert (choice.model == "opus[1m]") == (availability == "available")
+    assert choice.effort in ("medium", "high", "xhigh")
+    assert choice.decision["affinity"]["required"] is True
+    assert choice.decision["affinity"]["cross_engine_fallback"] is False

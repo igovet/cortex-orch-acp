@@ -443,7 +443,18 @@ classification without changing its tier or authorization:
 
 The runtime validates the enum, retains it in the accepted plan JSON, and uses it
 for affinity, preferences and light-model standard allowances at dispatch.
-Retries and review fixes inherit the original explicit classification. Without
+Retries and review fixes inherit the original explicit classification.
+`implementation_frontend_design` is affinity-bound: automatic attempts prefer
+its effective `engine_affinity` engine (Claude by default), and preserve
+`preferred_for` selection across retries, escalation and eligible fallback tiers,
+without requiring a conditional model hint. Only when that engine has no
+eligible route at all does selection widen to the normal cross-engine
+candidates, never while the affinity engine still has one eligible route.
+No route anywhere, or a neutral affinity, refuses visibly with
+`no_available_route`; a cross-engine pin refuses with `pinned_route_unavailable`
+regardless of fallback. Other kinds retain soft affinity.
+Confirmed explicit user model requests still take precedence, without bypassing
+hard authorization or availability. Without
 an override, a fix uses its actual writing role's default. `list_route_options`
 exposes all three kinds in affinity and preference metadata; `role_work_kinds`
 continues to describe defaults, not per-node overrides.
@@ -481,19 +492,33 @@ The preset makes `gpt-6-astra` flagship-only, never a deep-tier automatic candid
 Only `opus[1m]` lists `implementation_frontend_design` in `preferred_for`;
 other former implementation preferences split into backend and frontend-without-design.
 The snapshot retains the Opus UI/UX condition in `preferred_when` and the
-narrowly scoped complex backend condition. Since 2026-10-14 the condition
-covers all UI/UX work, including frontend layout and styling that implement
-or change a UI design, and asks the coordinator not to mark such nodes `low`
-complexity (the light tier has no Opus route). The `codex-acp/gpt-6.1-sol`
-condition excludes the same work. Opus is configured for the `deep`, `flagship` and
-`standard` tiers so that condition can apply to standard-tier design work
-(`ux-designer`), and `request_names` `opus`/`опус` let the user request it by
-name. The coordinator must still name the exact offered Opus route when its
-condition holds; the work-kind override alone does not satisfy free text. Quality
-retries/fixes retain the work kind but ignore conditional hints as before.
-This is an advisory conditional preference, not a role pin
-or a tier override. OpenCode is explicitly denied by `opencode/*` and
-`auto_allow` is empty; dormant OpenCode model policy remains preserved.
+narrowly scoped complex backend condition. For explicit
+`implementation_frontend_design`, structured `preferred_for` selection now
+applies independently of that text and survives quality retries/fixes: Opus
+remains selected while eligible and not passed over by the existing
+hot-and-meaningfully-worse quota rule. Escalation cannot substitute a different
+engine or a non-preferred higher-tier model while a preferred route remains
+usable in an eligible fallback tier. Opus's `standard`, `deep` and `flagship`
+memberships remain unchanged; even low-complexity design can reach its configured
+standard tier through fallback, not tier promotion.
+
+If Opus is unconfigured, unavailable, automatically excluded, outside the task
+ceiling or exhausted, another eligible route on the affinity engine (Claude in
+the preset) serves this work first. Only once Claude has no eligible route at
+all does dispatch fall back to the normal cross-engine selection -- Sol or
+Astra on Codex in the preset -- instead of refusing; while Claude has even one
+eligible route, Codex is never chosen for this work. If no route is eligible on
+any configured engine, dispatch refuses visibly rather than inheriting the
+coordinator. Pins remain strict; a cross-engine pin is refused regardless of
+this fallback. Confirmed user model requests still precede automatic routing.
+No authorization, tier/effort policy or quota-exhaustion rule is weakened.
+
+Other work kinds, including the role-default `design` kind, still require the
+coordinator's exact offered route hint to satisfy a non-null `preferred_when`,
+and ignore conditional hints on quality escalation. The `request_names`
+`opus`/`опус` still permit explicit user requests. OpenCode is explicitly denied
+by `opencode/*` and `auto_allow` is empty; dormant OpenCode model policy remains
+preserved. See [affinity-bound frontend design](features/routing-and-fallback/index.md#affinity-bound-frontend-design).
 
 ### Haiku 5.5 and Luna parity
 

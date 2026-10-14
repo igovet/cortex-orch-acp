@@ -65,10 +65,51 @@ nodes (`ux-designer`) are eligible for it and the coordinator's exact Opus hint
 is honoured there instead of `ignored:tier_mismatch`, and gives it the request
 labels `opus`/`опус`. Since 2026-10-14 the Opus condition covers all UI/UX
 work, including frontend layout and styling (explicit
-`implementation_frontend_design` nodes), and the `gpt-6.1-sol` condition excludes it. The preference still
-applies only on nodes where the coordinator names the exact Opus route, and
-never in the light tier (`low` complexity). See the
+`implementation_frontend_design` nodes), and the `gpt-6.1-sol` condition excludes it.
+Explicit frontend-design classification now uses structured preferences on every
+attempt, independently of the conditional hint; other work retains conditional
+preference semantics. See [affinity-bound frontend design](#affinity-bound-frontend-design) and the
 [fresh-install snapshot](../../configuration.md#fresh-install-owner-default-snapshot).
+
+## Affinity-bound frontend design
+
+`implementation_frontend_design` is affinity-bound in `routing.auto_route`.
+Initial attempts, quality retries, escalations and review fixes use the inherited
+work kind and only the effective affinity engine (Claude in the current preset).
+On that engine, eligible `preferred_for` routes remain preferred independently of
+`preferred_when`, exact coordinator hints and retry diversification. Selection
+searches configured eligible fallback tiers for preferred routes before accepting
+a non-preferred model in a higher tier; it never invents tier membership. A low
+complexity node can therefore use the configured standard-tier preferred route
+through the existing light → standard → deep fallback order.
+
+The preset's sole frontend-design preference is Opus. If it is unconfigured,
+unavailable, automatically excluded, outside the task ceiling or exhausted,
+fallback first tries another eligible route on the same affinity engine
+(Claude in the preset). Only when that engine has no authorized, available,
+non-exhausted route at all -- unconfigured, denied, excluded by `providers`,
+not auto-selected, outside the task ceiling, or every route unavailable --
+does selection widen to the normal cross-engine candidates (Sol/Astra on Codex
+in the preset), on quality retries, escalations and review fixes alike.
+While the affinity engine has even one eligible route, a different engine is
+never chosen. The existing hot-and-meaningfully-worse quota exception operates
+within whichever pool (same-engine, or the cross-engine fallback) is active.
+Rank version 12 records this as `affinity.cross_engine_fallback`. Only when no
+eligible route exists anywhere, or the affinity is explicitly configured
+neutral, does a `no_available_route` refusal occur, even when no worker
+catalog entries exist; Cortex does not inherit the coordinator route instead.
+A conflicting cross-engine role pin is refused as `pinned_route_unavailable`,
+not replaced. Same-engine pins remain strict.
+
+Confirmed explicit user model requests still precede this automatic restriction.
+Hard authorization, deny/providers, automatic membership, tier/effort policy,
+observed availability and quota exhaustion remain controlling in their existing
+paths, in whichever engine pool selection currently considers. This is a
+work-kind rule using settings-defined identities, not model-name inference or
+new permission. Rank version 12 records `affinity.required: true` for the
+constrained automatic decision, plus `affinity.cross_engine_fallback` (`true`
+only when no affinity-engine route was eligible at all). Other work kinds
+retain soft affinity and ordinary conditional-hint/retry rules.
 
 ## Current preset: Haiku 5.5 and Luna
 
@@ -662,7 +703,10 @@ eligible candidates the rank criteria are, first difference wins:
    as preferred only on a node whose hint names its exact route (the
    coordinator's judgement that the owner's condition holds) and, when its
    `preferred_for` is non-empty, only for those kinds; never on escalation.
-   Legacy provider preference remains first for pre-model stored plans.
+   Affinity-bound frontend design is the exception described above: structured
+   preferences survive escalation, and the candidate pool is restricted before
+   this within-tier ordering. Legacy provider preference remains first for other
+   pre-model stored plans.
 3. Honoured model hint for a new plan (see above), ignored on the same
    hot-and-meaningfully-worse basis.
 4. Quota band (rank version 11): a candidate whose known usage is at or above 95%
@@ -726,7 +770,7 @@ Audit rows retain the decision under `decision_detail.route_decision`,
 including `rank_version`, `role_tier`, tier and effort basis, `model_hint`,
 `model_hint_status`, `model_hint_reason`, `diversify_from`, `usage`
 (`compared`, `margin`, `least_used_percent`), `affinity` (work kind, engine,
-`default` or `routing.json` source), candidates with `used_percent`, `hot`,
+`default` or `routing.json` source, and `required: true` for affinity-bound work), candidates with `used_percent`, `hot`,
 `quota_state`, `usage_band`, `suitability` and `preferred`, `decided_by`,
 `excluded_by_policy`, `unavailable`, `superseded`, `purpose` (`work_kind`
 and the `preferred` candidates, plus `status` since rank version 9), `stretch` (`status`,
@@ -750,6 +794,8 @@ key between `diversify` and `affinity` (no decision changes without
 `models`); 9 moves `purpose` just after legacy `preference`, ahead of hints,
 usage and diversification, and adds the hot-and-meaningfully-worse safety
 exception for owner preferences (no selection change without `preferred_for`). Rank version 10 gates usage bands and exact-percentage comparison at observed usage >=95% and prioritizes confirmed user model requests across every tier; 11 moves the hot-quota criterion back to right after `hint`, ahead of usage bands, retry diversification and engine affinity, so a known route at or above 95% always ranks behind any non-hot route, known or unknown.
+Rank version 12 adds affinity-bound frontend-design candidate restriction and
+structured preference preservation across retries and eligible fallback tiers.
 Older rows keep their own fields
 (`balance`, `balance_excess`, `cross_tier`, `chosen_cross_tier`) and still
 render. These fields are evidence of runtime decisions, not proof of

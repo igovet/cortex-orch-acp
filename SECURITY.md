@@ -18,6 +18,15 @@ for exact paths, artifact-test limits and the next upstream-fix decision.
 
 ## Current ACP boundary (1.0.0)
 
+Frontend-design automatic routing is affinity-bound, including retries and review
+fixes. Same-engine fallback, and cross-engine fallback when the affinity engine
+has no eligible route at all, grants no authorization and does not bypass deny,
+providers, task ceilings, tier/effort policy, unavailable routes or exhausted
+quota. While the affinity engine has one eligible route, no other engine is
+ever chosen. A cross-engine pin is refused, not silently substituted. Confirmed
+explicit user model requests still take precedence under existing hard checks.
+See [design routing](docs/features/routing-and-fallback/index.md#affinity-bound-frontend-design).
+
 Requirements intake and design workflow are coordinator-only situational guidance,
 not additional lifecycle or permission APIs. Bundled design skills are readable
 only by their relevant worker roles; read-only designers/auditors return reports

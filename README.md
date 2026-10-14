@@ -100,6 +100,13 @@ was not refreshed. See [Codex support and limits](docs/features/codex-engine/ind
 
 ## Requirements and UI/UX design
 
+Explicit frontend-design implementation preserves its structured preferred route
+across retries and review fixes. Fallback first tries its affinity engine
+(Claude in the preset); only once that engine has no eligible route at all does
+selection widen to another engine, and only a route nowhere refuses visibly.
+Confirmed user model requests still take priority.
+See [design routing](docs/features/routing-and-fallback/index.md#affinity-bound-frontend-design).
+
 Cortex checks project context before planning and asks grouped, PRD-style
 questions only when missing decisions materially change the result. This applies
 to features, bugs, refactors, design, documentation, operations and investigations.

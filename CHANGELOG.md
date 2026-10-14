@@ -2,6 +2,15 @@
 
 ## 1.0.0 (unreleased)
 
+The built-in default preset (`policy/model-settings-default.json`) is synced again from the
+owner's slightly edited production `routing.json`: `codex-acp/gpt-6-astra`'s `preferred_for`
+is `["design"]` once more (the generic design/architecture work kind), and `claude-agent-acp/opus[1m]`'s
+configured `tiers` list is reordered strongest-first (`flagship`, `deep`, `standard`), matching
+production byte-for-byte. Astra's tier membership stays flagship-only (never a deep-tier automatic
+candidate) and `implementation_frontend_design` remains Opus-only; restoring Astra's generic `design`
+preference does not change either rule. No other preset field differs from production. No live or
+paid qualification is claimed for this change.
+
 Coordinator `plan_submit` no longer refuses legitimate plans on the first attempt for the
 patterns retained in real sessions. A read-only task may name a not-yet-existing literal path
 when a writing task of the same plan whose scope overlaps it is ordered with it (a reviewer of
@@ -18,7 +27,23 @@ Implementation routing now distinguishes `implementation_backend`, `implementati
 overrides role defaults and survives retries/fixes. Legacy `implementation` preferences,
 standard allowances and affinity expand in memory without rewriting owner configuration.
 The built-in preset makes `codex-acp/gpt-6-astra` flagship-only and lists frontend-with-design
-only in `opus[1m]` preferences; the existing conditional-hint semantics remain unchanged.
+only in `opus[1m]` preferences. Frontend-design automatic routing now preserves
+structured preferences across quality retries, escalation and review fixes,
+including eligible fallback tiers, independently of conditional hints.
+Unavailable/exhausted preferred routes first fall back on the work kind's
+affinity engine (Claude in the preset). Owner correction: only once that
+engine has no authorized, available, non-exhausted route at all does selection
+widen to the normal cross-engine candidates (Sol/Astra on Codex in the
+preset); while the affinity engine still has one eligible route, no other
+engine is ever chosen, including on retries, escalations and review fixes. No
+route anywhere, or a neutral affinity, refuses visibly. Cross-engine pins are
+always refused, never substituted, regardless of this fallback. Confirmed user
+model requests still take precedence; hard authorization, quota and
+tier/effort policy remain enforced in whichever engine pool applies. Rank
+version 12 records the required affinity boundary and whether cross-engine
+fallback occurred (`affinity.cross_engine_fallback`). Other work kinds retain
+their existing conditional-hint rules. No live or paid qualification is
+claimed for this change.
 The Paseo plugin's Settings screen already drew its work-kind vocabulary, labels, affinity
 choices and preferred-work switches from the runtime's configuration API, so it shows and edits
 the three new kinds without a protocol change; its own static help text for the old

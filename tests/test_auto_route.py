@@ -376,7 +376,7 @@ def test_plan_usage_decides_between_suitable_engines_before_affinity():
     # Rank version 11: the hot/non-hot quota flag now decides before
     # the usage-gap band even applies; the pick is unchanged.
     assert picked.route.model == "sonnet" and decision["decided_by"] == "quota"
-    assert decision["rank_version"] == 11
+    assert decision["rank_version"] == 12
     assert decision["usage"] == dict(compared=True, active=True, status="active", threshold=95.0, margin=10.0, least_used_percent=75)
     assert {c["route"]: c["usage_band"] for c in decision["candidates"]} == {
         "claude-agent-acp/sonnet": 0, "codex-acp/gpt-5.6-sol": 2, "codex-acp/gpt-5.6-terra": 2}
@@ -1360,7 +1360,7 @@ def test_a_selection_list_makes_exactly_the_listed_models_automatic(tmp_path, mo
     assert {c["route"] for c in choice.decision["candidates"]} == {
         "codex-acp/gpt-5.6-terra", "claude-agent-acp/claude-sonnet-5", f"opencode/{OPENCODE_VARIANT}"}
     assert choice.model == "gpt-5.6-terra" and choice.decision["decided_by"] == "affinity"
-    assert choice.decision["rank_version"] == 11
+    assert choice.decision["rank_version"] == 12
     # An exact hint may now name a route whose id holds '/' and ','.
     hinted = auto_route.choose("worker-backend-dev", project, environ, model_hint=f"opencode/{OPENCODE_VARIANT}",
                                model_reason="The owner selected it.")
@@ -1802,3 +1802,140 @@ def test_arbitrary_configured_model_has_neutral_stretch_audit(
     if not pin:
         tier = "light" if role == "worker-explorer" else "standard"
         assert choice.decision["effort_basis"] == "stretch:" + tier + (":escalated" if escalate else "")
+
+
+# Arbitrary identities prove design routing depends on structured policy, not names.
+def _design_routing():
+    kind = "implementation_frontend_design"
+    entries = [_entry("codex", "other"), _entry("claude", "preferred"), _entry("claude", "backup")]
+    models = {
+        "codex-acp": {"auto": ["other"], "tiers": {"other": ["standard", "deep", "flagship"]}},
+        "claude-agent-acp": {"auto": ["preferred", "backup"],
+                            "tiers": {"preferred": ["standard", "deep"], "backup": ["standard", "deep", "flagship"]},
+                            "policy": {"preferred": {"preferred_for": [kind], "preferred_when": "Owner prose"}}},
+    }
+    return entries, {"model_policy_version": 2, "models": models,
+                     "enabled": {"codex-acp": ["other"], "claude-agent-acp": ["preferred", "backup"]}}
+
+
+@pytest.mark.parametrize("tier,escalated", [("light", False), ("standard", False), ("deep", True), ("flagship", True)])
+@pytest.mark.parametrize("hint", ["auto", "codex-acp/other", "claude-agent-acp/preferred"])
+def test_design_preference_survives_retry_and_tier_fallback(tier, escalated, hint):
+    entries, routing = _design_routing()
+    picked, decision = auto_route.rank(
+        tier, entries, lambda _: 0.0, role="worker-fullstack-dev",
+        work_kind_override="implementation_frontend_design", models=routing["models"],
+        model_hint=hint, escalated=escalated, previous_engine="claude-agent-acp",
+        preference="codex-acp")
+    assert picked.route.model == "preferred"
+    assert decision["purpose"]["status"] == "honoured"
+    assert decision["affinity"]["required"] is True
+    assert all(c["route"].startswith("claude-agent-acp/") for c in decision["candidates"])
+    assert decision["tier"] in ("standard", "deep")
+
+
+@pytest.mark.parametrize("reason", ["unconfigured", "unavailable", "exhausted", "hot"])
+def test_design_fallback_respects_availability_and_quota_without_crossing_engines(reason):
+    entries, routing = _design_routing()
+    if reason == "unconfigured":
+        entries = [e for e in entries if e.route.model != "preferred"]
+    excluded = frozenset({"claude:preferred"}) if reason == "unavailable" else frozenset()
+    def usage(e):
+        return (100.0 if reason == "exhausted" else 98.0) if e.route.model == "preferred" else 0.0
+    picked, _ = auto_route.rank(
+        "deep", entries, usage, excluded=excluded, role="worker-frontend-dev",
+        work_kind_override="implementation_frontend_design", models=routing["models"],
+        escalated=True, previous_engine="claude-agent-acp")
+    assert picked.route.model == "backup"
+    assert picked.route.engine == "claude-agent-acp"
+
+
+def test_design_affinity_is_configured_not_a_hardcoded_engine():
+    entries, routing = _design_routing()
+    picked, decision = auto_route.rank(
+        "deep", entries, lambda _: 0.0, role="worker-frontend-dev",
+        work_kind_override="implementation_frontend_design", models=routing["models"],
+        affinity={"implementation_frontend_design": "codex-acp"}, escalated=True)
+    assert picked.route.model == "other"
+    assert decision["affinity"]["engine"] == "codex-acp"
+
+
+def _design_choose(monkeypatch, entries, routing):
+    from cortex_runtime.connections import registry
+    monkeypatch.setattr(auto_route, "load_overrides", lambda *_: routing)
+    monkeypatch.setattr(auto_route, "_effective_profile_label", lambda *_: None)
+    monkeypatch.setattr(registry, "read_registry", lambda _: SimpleNamespace(
+        connections={e.connection_id: SimpleNamespace() for e in entries}))
+    monkeypatch.setattr(auto_route, "_entries", lambda *_: entries)
+    monkeypatch.setattr(auto_route, "_is_seed", lambda _: False)
+    monkeypatch.setattr(quota, "used_percent", lambda *_, **__: 0.0)
+
+
+@pytest.mark.parametrize("blocker", ["empty", "neutral", "quota"])
+def test_design_choose_refuses_when_no_route_is_eligible_on_any_engine(monkeypatch, blocker):
+    """Refusal survives the cross-engine fallback only when literally nothing
+    (no entries at all, an explicitly neutral affinity, or every engine
+    exhausted) can serve the work -- never merely \"Claude is unavailable\"."""
+    entries, routing = _design_routing()
+    if blocker == "empty":
+        entries = []
+    elif blocker == "neutral":
+        routing["engine_affinity"] = {"implementation_frontend_design": None}
+    _design_choose(monkeypatch, entries, routing)
+    if blocker == "quota":
+        monkeypatch.setattr(quota, "used_percent", lambda *_, **__: 100.0)
+    with pytest.raises(PortableError, match="no_available_route") as error:
+        auto_route.choose("worker-frontend-dev", escalate=True,
+                          work_kind_override="implementation_frontend_design")
+    assert "affinity" in error.value.remediation
+
+
+@pytest.mark.parametrize("blocker", ["missing", "deny", "providers", "auto", "ceiling"])
+def test_design_choose_falls_back_to_another_engine_when_affinity_engine_has_no_route(monkeypatch, blocker):
+    """Owner correction: when the affinity engine (Claude) has no eligible
+    route at all -- unconfigured, denied, excluded by 'providers', not
+    auto-selected or outside the task ceiling -- dispatch falls back to the
+    normal cross-engine selection (here, the only remaining candidate, Codex)
+    instead of refusing."""
+    entries, routing = _design_routing()
+    kwargs = {}
+    if blocker == "missing":
+        entries = entries[:1]
+    elif blocker == "deny":
+        routing["deny"] = ["claude-agent-acp/*"]
+    elif blocker == "providers":
+        routing["providers"] = ["codex-acp"]
+    elif blocker == "auto":
+        routing["models"]["claude-agent-acp"]["auto"] = []
+    elif blocker == "ceiling":
+        kwargs["eligible_route_ids"] = frozenset({"codex:other"})
+    _design_choose(monkeypatch, entries, routing)
+    choice = auto_route.choose("worker-frontend-dev", escalate=True,
+                               work_kind_override="implementation_frontend_design", **kwargs)
+    assert choice.model == "other" and choice.decision["chosen"] == "codex-acp/other"
+    assert choice.decision["affinity"] == dict(
+        work_kind="implementation_frontend_design", engine="claude-agent-acp",
+        source="default", required=True, cross_engine_fallback=True)
+
+
+@pytest.mark.parametrize("escalated", [False, True])
+def test_explicit_user_model_request_still_precedes_design_affinity(monkeypatch, escalated):
+    entries, routing = _design_routing()
+    _design_choose(monkeypatch, entries, routing)
+    choice = auto_route.choose(
+        "worker-frontend-dev", escalate=escalated, work_kind_override="implementation_frontend_design",
+        model_hint="codex-acp/other", user_request={"source": "test"})
+    assert (choice.model, choice.basis) == ("other", "auto:user_request")
+    routing["deny"] = ["codex-acp/other"]
+    with pytest.raises(PortableError, match="user_requested_route_unavailable"):
+        auto_route.choose(
+            "worker-frontend-dev", escalate=escalated, work_kind_override="implementation_frontend_design",
+            model_hint="codex-acp/other", user_request={"source": "test"})
+
+
+def test_design_cross_engine_pin_is_refused_not_substituted(monkeypatch):
+    entries, routing = _design_routing()
+    routing["pin"] = {"worker-frontend-dev": "codex-acp/other"}
+    _design_choose(monkeypatch, entries, routing)
+    with pytest.raises(PortableError, match="pinned_route_unavailable"):
+        auto_route.choose("worker-frontend-dev", work_kind_override="implementation_frontend_design")

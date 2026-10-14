@@ -60,8 +60,8 @@
             "light"
           ],
           "opus[1m]": [
-            "deep",
             "flagship",
+            "deep",
             "standard"
           ]
         },
@@ -176,7 +176,9 @@
             "effort_floor": "low",
             "effort_ladder": null,
             "max_effort": "high",
-            "preferred_for": [],
+            "preferred_for": [
+              "design"
+            ],
             "request_names": [
               "astra",
               "астр"

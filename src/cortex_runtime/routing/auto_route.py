@@ -70,6 +70,10 @@ WORK_KIND_ENGINES = {
     "analysis": "claude-agent-acp",
 }
 assert tuple(WORK_KIND_ENGINES) == model_policy.WORK_KINDS
+
+# These work kinds require their affinity engine, not merely a ranking bonus.
+# Model identities and eligible tiers still come exclusively from owner policy.
+AFFINITY_BOUND_WORK_KINDS = frozenset({"implementation_frontend_design"})
 ROLE_WORK_KINDS = {
     "worker-accessibility-auditor": "review",
     "worker-accessibility-fixer": "implementation_frontend",
@@ -404,9 +408,17 @@ def choose(role: str, project_root=None, environ: Mapping[str, str] | None = Non
         if profile_label is not None:
             decision["routing_profile"] = profile_label
         return Choice(picked.connection_id, picked.route.model, effort, "auto:user_request", decision, picked.route.id)
+    kind = work_kind(role, work_kind_override)
+    bound_engine = kind_engine(kind, affinity) if kind in AFFINITY_BOUND_WORK_KINDS else None
+    if kind in AFFINITY_BOUND_WORK_KINDS and bound_engine is None:
+        raise _policy_error("no_available_route", f"{kind} requires a non-neutral engine affinity; no substitution permitted.")
     pin = _pin_for(overrides, role)
     if pin is not None:
         engine, model, effort = pin
+        if bound_engine is not None and engine != bound_engine:
+            raise _policy_error("pinned_route_unavailable",
+                                f"{kind} requires affinity engine {bound_engine}; the pin names {engine}. "
+                                "Change the pin or confirm an explicit user model request; no substitution permitted.")
         providers = overrides.get("providers")
         if providers is not None and engine not in providers:
             raise PortableError(
@@ -516,6 +528,10 @@ def choose(role: str, project_root=None, environ: Mapping[str, str] | None = Non
     if decision is not None and profile_label is not None:
         decision["routing_profile"] = profile_label
     if picked is None:
+        if bound_engine is not None:
+            raise _policy_error("no_available_route",
+                                f"No authorized, available, non-exhausted route on affinity engine {bound_engine} "
+                                f"or any other configured engine can serve {kind} in an eligible tier.")
         if not entries:
             # Nothing engine-confirmed at all -- unrelated to 'providers'.
             return None
@@ -602,7 +618,7 @@ def pick(role_tier: str, entries: Sequence, usage, tier_overrides: Mapping[str, 
 
 
 # Generic rank ordering; historical decision keys remain readable by clients.
-RANK_VERSION = 11
+RANK_VERSION = 12
 # The rank key's parts in order, named for the decision's ``decided_by``.
 # ``quota`` moved from right after ``hint`` to right before ``used_percent``
 # in rank version 6 (a late tie breaker, behind the usage-gap signal,
@@ -647,10 +663,16 @@ def rank(role_tier: str, entries: Sequence, usage, tier_overrides: Mapping[str, 
        preferred only for a node whose model hint names that exact route,
        the coordinator's judgement that the condition holds; its
        ``preferred_for`` then narrows the kinds of work, and on escalation
-       the condition no longer applies. It never moves the tier;
+       the condition no longer applies. Affinity-bound work instead uses the
+       structured ``preferred_for`` on every attempt, independently of that
+       text or hint, and keeps preferred routes in eligible fallback tiers;
+       it never grants an unconfigured tier or bypasses exclusions;
     3. an honoured model hint (see :data:`HINT_TOLERANCE`), ignored on the
        same hot-and-meaningfully-worse basis; a hint naming no preferred
-       route loses to ``purpose`` and records ``ignored:owner_preferred``;
+       route loses to ``purpose`` and records ``ignored:owner_preferred``.
+       Affinity-bound work still prefers the configured engine's preferred
+       route even over an honoured cross-engine hint while that engine has
+       an eligible candidate at all;
     4. the quota band (unknown is not hot): a candidate whose *known*
        usage is at or above :data:`HOT_PERCENT` ranks behind every
        candidate below that band, known or unknown usage alike --
@@ -670,6 +692,15 @@ def rank(role_tier: str, entries: Sequence, usage, tier_overrides: Mapping[str, 
     8. lower exact used percent, only when usage switching is active;
     9. engine order.
 
+    Affinity-bound work is first restricted to its configured/default engine.
+    If a usable preferred route serves an eligible fallback tier and is not
+    hot and meaningfully worse, only preferred routes compete. Otherwise
+    fallback remains within that engine. Only when that engine has no usable
+    route serving any eligible fallback tier at all does ranking widen to the
+    normal cross-engine candidate pool (still subject to every other rule
+    below); while the affinity engine has one eligible candidate, no other
+    engine is ever chosen. A neutral affinity yields no choice.
+
     How many attempts each engine received before never enters the rank:
     it says nothing about which engine fits the work.
 
@@ -687,21 +718,52 @@ def rank(role_tier: str, entries: Sequence, usage, tier_overrides: Mapping[str, 
     superseded = superseded or {}
     policies = model_policy.resolve_policies(entries, dict(tiers=tier_overrides or {}, models=models or {}))
     kind = work_kind(role, work_kind_override)
+    affinity_bound = kind in AFFINITY_BOUND_WORK_KINDS
+    bound_engine = kind_engine(kind, affinity) if affinity_bound else None
+    if affinity_bound and bound_engine is None:
+        return None, None
 
     def purpose(e) -> bool:
         policy = policies[e.route.id]
-        if policy.preferred_when is None:
+        if policy.preferred_when is None or affinity_bound:
             return kind is not None and kind in policy.preferred_for
         # A conditional preference: the coordinator judged this node against
         # the owner's ``preferred_when`` text and named this exact route.
-        # Retries and fixes ignore hints, so they ignore the condition too.
+        # Ordinary retries/fixes ignore hints and their free-text conditions.
+        # Affinity-bound work above uses structured preferences instead.
         return (not escalated and model_hint == _route_label(e)
                 and (not policy.preferred_for or kind in policy.preferred_for))
-    usable = [e for e in entries if e.route.id not in excluded and (usage(e) or 0.0) < 100.0]
+    usable_all = [e for e in entries if e.route.id not in excluded and (usage(e) or 0.0) < 100.0]
     order = {e.route.id: index for index, e in enumerate(entries)}
 
     def serves(e, tier):
         return tier in policies[e.route.id].tiers or (tier == "standard" and e.route.id in stretch_standard)
+
+    cross_engine_fallback = False
+    if affinity_bound:
+        usable_bound = [e for e in usable_all if e.route.engine == bound_engine]
+        bound_eligible = any(serves(e, tier) for e in usable_bound for tier in _FALLBACK_ORDER[role_tier])
+        if bound_eligible:
+            usable = usable_bound
+        else:
+            # No open, authorized, non-exhausted route on the affinity engine
+            # serves any eligible fallback tier at all: widen to the normal
+            # cross-engine candidate pool instead of refusing. While the
+            # affinity engine has one eligible candidate this branch is never
+            # reached, so another engine is never chosen over it.
+            usable = usable_all
+            cross_engine_fallback = True
+        # Keep structured owner preferences across escalation and tier fallback.
+        # Do not let a higher tier or retry diversification replace a preferred
+        # route still eligible in the fallback order. Quota pressure may still
+        # select another route, within the affinity engine while it has one
+        # eligible, else within the cross-engine fallback pool above.
+        eligible = [e for e in usable if any(serves(e, tier) for tier in _FALLBACK_ORDER[role_tier])]
+        preferred = [e for e in eligible if purpose(e)]
+        if preferred and not _meaningfully_worse(preferred, eligible, usage):
+            usable = preferred
+    else:
+        usable = usable_all
 
     for tier in _FALLBACK_ORDER[role_tier]:
         candidates = [e for e in usable if serves(e, tier)]
@@ -831,6 +893,9 @@ def rank(role_tier: str, entries: Sequence, usage, tier_overrides: Mapping[str, 
                                          if a != b))),
             chosen=_route_label(best), chosen_connection_id=best.connection_id,
         )
+        if affinity_bound:
+            decision["affinity"]["required"] = True
+            decision["affinity"]["cross_engine_fallback"] = cross_engine_fallback
         return best, decision
     return None, None
 
