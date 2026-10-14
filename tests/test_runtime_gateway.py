@@ -203,7 +203,7 @@ def test_project_shapes_that_used_to_refuse_the_worker_now_run(tmp_path, monkeyp
     from cortex_runtime.orchestration import sandbox
     root=tmp_path/'project';root.mkdir();scratch=tmp_path/'scratch';scratch.mkdir()
     (root/'shared').mkdir();(root/'shared'/'settings.json').write_text('secret')
-    (root/'.claude').symlink_to(root/'shared')
+    (root/'.cortex').symlink_to(root/'shared')
     # Bind by a relative name: an absolute path under a long TMPDIR exceeds
     # the 108-byte AF_UNIX limit.
     monkeypatch.chdir(root)

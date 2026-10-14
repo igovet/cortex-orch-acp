@@ -1,8 +1,8 @@
-"""project_skill_link: the one narrow write into .claude.
+"""project_skill_link: the guarded skill link in .claude.
 
 A writing worker may expose a project skill in .agents/skills/<name> to Claude
 as the relative link .claude/skills/<name> -> ../../.agents/skills/<name>.
-Every other .claude path stays private to the generic file tools.
+Other .claude paths are ordinary project files for the generic file tools.
 """
 import os
 import shutil
@@ -184,23 +184,25 @@ def test_only_a_writing_worker_may_link_and_a_user_denial_wins(project, monkeypa
     assert not (root / '.claude').exists()
 
 
-def test_every_other_claude_path_stays_private_to_generic_tools(project):
+def test_other_claude_paths_are_ordinary_project_files(project):
     store, _, worker, root = project
     _skill(root)
     _link(store, worker, 'link')
     for operation, args in [
-            ('project_write', dict(path='.claude/skills/release-notes/SKILL.md', content='x', expected_sha256='absent')),
             ('project_write', dict(path='.claude/settings.json', content='{}', expected_sha256='absent')),
             ('project_mkdir', dict(path='.claude/skills/other')),
-            ('project_delete', dict(path='.claude/skills/release-notes', expected_sha256='0' * 64))]:
-        with pytest.raises(StoreError, match='gateway_path_denied'):
-            dispatch(store, worker, operation, dict(args, request_key=operation + args['path']))
-    with pytest.raises(StoreError, match='gateway_path_denied'):
-        dispatch(store, worker, 'project_read', dict(path='.claude/skills'))
-    with pytest.raises(StoreError, match='forbidden_assignment_scope'):
-        validate_plan(dict(tasks=[dict(id='t', role='worker-backend-dev', objective='Link.', dependencies=[],
-                                       scope=['.claude/skills/**'])], verification=[['true']]))
-    assert not (root / '.claude' / 'settings.json').exists()
+            ('project_write', dict(path='.codex/config.toml', content='', expected_sha256='absent'))]:
+        dispatch(store, worker, operation, dict(args, request_key=operation + args['path']))
+    listing = dispatch(store, worker, 'project_read', dict(path='.claude/skills'))
+    assert {'release-notes', 'other'} <= set(listing['entries'])
+    # The link is never written through: the skill source stays unchanged.
+    with pytest.raises(StoreError):
+        dispatch(store, worker, 'project_write', dict(path='.claude/skills/release-notes/SKILL.md', content='x',
+                                                      expected_sha256='absent', request_key='through-link'))
+    validate_plan(dict(tasks=[dict(id='t', role='worker-backend-dev', objective='Link.', dependencies=[],
+                                   scope=['.claude/skills/**'])], verification=[['true']]))
+    assert (root / '.claude' / 'settings.json').read_text() == '{}'
+    assert (root / '.codex' / 'config.toml').read_text() == ''
 
 
 @pytest.mark.parametrize('parents', ['absent', 'present'])

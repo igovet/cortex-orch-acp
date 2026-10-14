@@ -85,7 +85,7 @@ def test_safe_extension_is_atomic_replayable_and_visible_not_a_fake_remount(boun
 
 
 @pytest.mark.parametrize('path', ['../escape', '/absolute', '.cortex/private', '.git/config',
-                                  '.claude/settings.json', '.', 'dir//file', 'dir/./file',
+                                  'nested/.cortex/x', '.', 'dir//file', 'dir/./file',
                                   'glob/*', 'back\\slash', 'bad\x00path'])
 def test_unsafe_request_is_runtime_denial_without_node_failure(bound, path):
     store, machine, coordinator, workers = bound

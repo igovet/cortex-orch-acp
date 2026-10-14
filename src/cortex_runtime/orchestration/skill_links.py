@@ -1,11 +1,9 @@
 """Project skill links: ``.claude/skills/<name> -> ../../.agents/skills/<name>``.
 
-``.claude`` stays private to every generic file tool (``project_paths``): its
-settings, hooks, agents and commands configure later Claude sessions, the
-owner's own included. This module is the one narrow exception. A writing
-worker may create or remove exactly one relative directory symlink that
-exposes a shared project skill in ``.agents/skills/<name>`` to Claude Code,
-which reads project skills only from ``.claude/skills``. It never writes a
+A writing worker may create or remove exactly one relative directory
+symlink that exposes a shared project skill in ``.agents/skills/<name>`` to
+Claude Code, which reads project skills only from ``.claude/skills``. Unlike
+a generic file or command write there, it verifies the source, never writes a
 file, never follows a link and never touches any other ``.claude`` path.
 
 Rules (see docs/features/permissions-and-containment/index.md, "Project skill links"):
@@ -219,14 +217,13 @@ def git_retention(root, name):
     """Whether the project's Git would ignore the link or its skill source.
 
     Observed with the read-only sandboxed ``git check-ignore`` of
-    ``delegation.revision.sandboxed_git``; that sandbox masks ``.claude``, so
-    an ignore file inside ``.claude`` itself is not seen (``scope`` says so).
+    ``delegation.revision.sandboxed_git``.
     ``None`` values: not a Git checkout, or the check could not run.
     """
     from ..delegation.revision import sandboxed_git
     paths = [link_path(name), f'.agents/skills/{name}/SKILL.md']
     result = dict(link_ignored=None, source_ignored=None,
-                  scope='root and nested .gitignore outside .claude, info/exclude, core.excludesFile')
+                  scope='root and nested .gitignore, info/exclude, core.excludesFile')
     try:
         out = sandboxed_git(str(root), ['check-ignore', '--no-index', '-v', '-n', '--', *paths], ok_codes=(0, 1))
     except Exception:  # noqa: BLE001 - an observation only; the link already exists

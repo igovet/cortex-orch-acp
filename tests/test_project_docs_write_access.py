@@ -73,7 +73,7 @@ def test_missing_parent_with_a_hash_is_a_precise_conflict_and_creates_nothing(tm
     assert not (root / 'docs').exists()
 
 
-@pytest.mark.parametrize('path', ['.cortex/index.md', '.git/index.md', 'docs/.git/index.md', '.codex/x/index.md'])
+@pytest.mark.parametrize('path', ['.cortex/index.md', '.git/index.md', 'docs/.git/index.md', 'docs/.cortex/index.md'])
 def test_private_paths_stay_refused_and_no_parent_is_created(tmp_path, path):
     store, worker, root = _worker(tmp_path)
     before = sorted(p.relative_to(root).as_posix() for p in root.rglob('*'))
