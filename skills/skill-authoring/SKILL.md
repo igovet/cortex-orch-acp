@@ -8,7 +8,7 @@ description: Create, revise or import an authorized project skill and verify its
 Work only on the skill request assigned after explicit /skill-management or
 runtime-approved proposal activation. Existing skills and recurring work grant
 no authorization. Follow worker scope, permission and evidence discipline;
-never edit `.claude` through a generic file or command tool.
+create the `.claude/skills` link only with project_skill_link.
 
 ## Create or revise
 

@@ -17,7 +17,6 @@ from cortex_runtime.contracts import StoreError
 from cortex_runtime.delegation import revision
 from cortex_runtime.orchestration import gateway
 from cortex_runtime.orchestration.controller import _verification
-from cortex_runtime.orchestration.project_paths import PROJECT_NOTES
 from cortex_runtime.orchestration.sandbox import engine_jail, gateway_command
 from cortex_runtime.orchestration.state import TaskMachine, validate_scope
 from cortex_runtime.portable.identity import SourceEvent
@@ -259,17 +258,17 @@ def test_mode_switch_does_not_stop_a_running_verification_check(tmp_path, repo):
     assert failure is None
 
 
-@pytest.mark.parametrize('relative', sorted(PROJECT_NOTES))
-def test_note_scope_and_file_tools_keep_engine_configuration_private(tmp_path, relative):
+@pytest.mark.parametrize('relative', ['.claude/session-history.md', '.claude/settings.json', '.claude/hooks/x',
+                                      '.claude/skills/a/SKILL.md', '.codex/config.toml', 'nested/.claude/CLAUDE.md'])
+def test_project_engine_configuration_is_an_ordinary_project_path(tmp_path, relative):
     root = tmp_path / 'project'
     (root / relative).parent.mkdir(parents=True)
-    validate_scope([relative])
+    prefix = relative.split('/')[0]
+    validate_scope([relative, prefix, prefix + '/**'])
     result = gateway._write(root, dict(path=relative, content='notes', expected_sha256='absent'))
     assert result['sha256'] == hashlib.sha256(b'notes').hexdigest()
     assert gateway._read(root, dict(path=relative, line_numbers=False))['content'] == 'notes'
-    prefix = relative.split('/')[0]
-    for denied in (prefix, prefix + '/**', prefix + '/settings.json', prefix + '/hooks/x',
-                   prefix + '/CLAUDE.md', prefix + '/credentials.json', 'nested/' + relative):
+    for denied in ('.cortex', '.cortex/**', '.git/config', 'nested/.cortex/x', 'nested/.git/hooks/x'):
         with pytest.raises(StoreError):
             validate_scope([denied])
         with pytest.raises(StoreError):
@@ -279,7 +278,7 @@ def test_note_scope_and_file_tools_keep_engine_configuration_private(tmp_path, r
 @pytest.mark.parametrize('native', [False, True])
 @pytest.mark.parametrize('writing,denied', [(True, False), (False, False), (True, 'file'), (True, 'directory')])
 @pytest.mark.requires_bwrap
-def test_note_mounts_obey_role_denials_and_hide_other_state(tmp_path, native, writing, denied):
+def test_engine_configuration_mounts_follow_grants_and_denials(tmp_path, native, writing, denied):
     root = tmp_path / 'project'
     (root / '.claude').mkdir(parents=True)
     note = root / '.claude/session-history.md'
@@ -300,17 +299,20 @@ def test_note_mounts_obey_role_denials_and_hide_other_state(tmp_path, native, wr
         'try: p.write_text("after")\n'
         'except OSError: print("readonly")\n'
         'else: print("written")\n'
-        'try: Path(".claude/settings.json").write_text("bad")\n'
-        'except OSError: pass\n'
-        'else: raise AssertionError("settings writable")\n')
+        'try: Path(".claude/settings.json").write_text("after")\n'
+        'except OSError: print("readonly")\n'
+        'else: print("written")\n')
     argv = ['python3', '-B', '-c', script]
     context = (engine_jail(root, scratch, argv, scopes, env=ENV, readonly=readonly) if native else
                gateway_command(root, scratch, argv, scopes, readonly=readonly, system_root=True))
     with context as (command, fds):
         result = subprocess.run(command, pass_fds=fds, capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
-    assert result.stdout.strip() == ('written' if writing and not denied else 'readonly')
-    assert settings.read_text() == '{}'
+    note_written = writing and not denied
+    settings_written = writing and denied != 'directory'
+    assert result.stdout.split() == ['written' if note_written else 'readonly',
+                                     'written' if settings_written else 'readonly']
+    assert settings.read_text() == ('after' if settings_written else '{}')
 
 
 @pytest.mark.requires_bwrap
@@ -333,7 +335,7 @@ def test_readonly_engine_pytest_cache_is_private_and_writable(tmp_path):
 
 
 @pytest.mark.parametrize('linked_parent', [False, True])
-def test_note_exceptions_do_not_follow_symlinks_or_hardlinks(tmp_path, linked_parent):
+def test_engine_configuration_file_tools_do_not_follow_symlinks_or_hardlinks(tmp_path, linked_parent):
     root = tmp_path / 'project'
     root.mkdir()
     outside = tmp_path / 'outside'

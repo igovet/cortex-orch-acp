@@ -23,7 +23,8 @@ HOME is the owner's real read-only home with selected writable caches. See
 read-only for the coordinator, reviewers and read-only roles. Writing workers
 receive a whole-project writable mount; their declared scopes coordinate parallel
 work but do not restrict the gateway's project write paths.
-`.cortex` is hidden and `.codex`, `.claude` are read-only; `.git` is
+`.cortex` is hidden; the project's `.codex` and `.claude` are ordinary project
+paths, writable for a writing worker; `.git` is
 read-only except what git itself needs for a writing worker (see
 [Git and tool state](#git-and-tool-state)); HOME is read-only apart from its
 tool caches. The engine's own state directory stays writable except its session
@@ -357,19 +358,18 @@ possible side effect keeps its TOOL_REJECTED event but not a replayable auto-key
 receipt, so an identical keyless retry can succeed after correction. An explicit
 key retains the refusal with its full structured field/expected/correction; use a
 new explicit key for the corrected action. File operations use no-follow directory descriptors and
-reject symlinks, hardlinks and private components `.cortex`, `.git`, `.codex`,
-`.claude`. A private path is refused before anything else, so a deletion there
+reject symlinks, hardlinks and private components `.cortex` and `.git`. The
+project's `.claude` and `.codex` follow ordinary project file rules. A private path is refused before anything else, so a deletion there
 never asks the user first. `draft_write` accepts only the exact owned, unpublished
 draft ID and marker. Publication rechecks channel authority inside its
 transaction; published reports are immutable.
 
 ### Project skill links
 
-`project_skill_link` (`orchestration.skill_links`) is the only write `.claude`
-accepts, and it is not a path grant: plan scopes, `project_read`,
-`project_write`, `project_edit`, `project_mkdir` and `project_delete` still refuse every
-`.claude` path, the native shell still sees `.claude` read-only and
-`command_run` still masks it. It creates or removes exactly one directory
+`project_skill_link` (`orchestration.skill_links`) is the guarded way to expose
+a shared skill to Claude. A writing worker can also change `.claude` with the
+ordinary file tools and commands; the operation adds source verification and
+collision protection. It creates or removes exactly one directory
 symlink, `.claude/skills/<name>` -> `../../.agents/skills/<name>`, so Claude
 Code (which loads project skills only from `.claude/skills`) sees a skill kept
 in the shared `.agents/skills` directory.
@@ -399,10 +399,8 @@ in the shared `.agents/skills` directory.
 - Git: the link text is relative and inside the project, so Git stores it as
   a symlink (mode 120000) that resolves in every clone. A `link` result carries
   `git.link_ignored`/`git.source_ignored` from a read-only sandboxed
-  `git check-ignore`, or `null` outside a checkout; that sandbox masks
-  `.claude`, so an ignore file inside `.claude` itself is not seen. The
-  operation never edits `.gitignore`, stages or commits. `project_git`
-  status/diff still exclude `.claude`.
+  `git check-ignore`, or `null` outside a checkout. The operation never edits
+  `.gitignore`, stages or commits; `project_git` status/diff show the link.
 - Receipts: like every gateway mutation it has a durable started receipt; a
   failure after a directory or link may have been created is an uncertain
   outcome that is never re-executed automatically.
@@ -417,8 +415,9 @@ roles always use the read-only profile described in the access-mode table. Both 
 variables and retain validated owner SSH-agent access and shared network
 and mounts the project read-only except for writing workers, who receive the
 whole project writable regardless of their narrower declared coordination work
-area; reviewers and read-only roles receive no writable project paths. `.cortex`, `.codex`
-and `.claude` are masked, including nested ones; the project's `.git` is visible
+area; reviewers and read-only roles receive no writable project paths. `.cortex` is
+masked, including nested ones; `.codex` and `.claude` are ordinary project paths;
+the project's `.git` is visible
 (see below). A command runs until it exits unless it sets `timeout_seconds`, and
 is killed when authority is revoked. There is no unsandboxed fallback.
 `timeout_seconds` advertises only a minimum of 1 on `command_run` and
@@ -461,7 +460,7 @@ the whole project is granted:
 | Other linked worktrees' metadata, `modules/` (submodule repositories) | read-only | denied |
 | The project's `.git` for reviewers and read-only roles | read-only | denied |
 | `.cortex` | hidden | denied |
-| `.codex`, `.claude` | hidden in `command_run`, read-only in the native shell | denied (only `project_skill_link` may create or remove the exact `.claude/skills/<name>` link, see [Project skill links](#project-skill-links)) |
+| The project's `.codex`, `.claude` | writable | allowed (ordinary project files; see also [Project skill links](#project-skill-links)) |
 | Tool state in the project (`.venv`, `node_modules/.cache`, `.pytest_cache`, `__pycache__`, `.mypy_cache`, `target/`, `build/`, ...) | writable | allowed (ordinary project files) |
 
 Those protected git entries configure or redirect git runs the owner makes later,
