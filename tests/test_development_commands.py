@@ -279,7 +279,7 @@ def test_literal_arguments_need_no_deletion_consent(development, monkeypatch, re
     receipt = gateway.dispatch(store, worker, "command_run", dict(argv=argv, request_key="literal"))
     assert receipt["exit_code"] == 0 and receipt["complete"], receipt
     assert receipt["output"] == literal + ("\n" if program == "echo" else "")
-    assert receipt["profile"] == "development"
+    assert receipt["profile"] == ("restricted" if read_only else "development")
 
 
 def test_command_identity_does_not_collide():
@@ -343,33 +343,88 @@ def test_private_cwd_alias_and_read_only_deletion_are_refused(development, monke
 
 
 @pytest.mark.usefixtures("unjailed_gateway_command")
-@pytest.mark.parametrize("mode,profile", [("development", "development"), ("auto", "development"),
-                                          ("guarded", "restricted")])
-def test_read_only_role_command_follows_access_mode(development, monkeypatch, mode, profile):
+@pytest.mark.parametrize("mode", ["development", "auto", "guarded"])
+def test_read_only_role_command_is_restricted_in_every_mode(development, monkeypatch, mode):
     root, store, worker, home = development
     access_mode.switch(store, worker.task_id, mode, origin="acp_set_mode")
     monkeypatch.setattr(gateway, "_authority", lambda db, ch: ([], "read-only"))
-    if profile == "restricted":
+    used = []
+    real = sandbox.readonly_command
+    monkeypatch.setattr(sandbox, "readonly_command", lambda *a, **kw: used.append(mode) or real(*a, **kw))
+    monkeypatch.setattr(sandbox, "development_command", lambda *a, **kw: pytest.fail("host-writable profile"))
+    # The mode still decides whether a cwd outside the task tree is allowed;
+    # the host stays read-only either way.
+    if mode == "guarded":
         with pytest.raises(StoreError, match="gateway_command_cwd_denied"):
             gateway.dispatch(store, worker, "command_run", dict(argv=["true"], cwd=str(home), request_key="outside"))
     else:
         receipt = gateway.dispatch(store, worker, "command_run", dict(argv=["true"], cwd=str(home), request_key="outside"))
-        assert receipt["complete"] and receipt["cwd"] == str(home), receipt
+        assert receipt["complete"] and receipt["cwd"] == str(home) and receipt["profile"] == "restricted", receipt
     receipt = gateway.dispatch(store, worker, "command_run", dict(argv=["true"], request_key="inside"))
-    assert receipt["profile"] == profile and receipt["complete"], receipt
+    assert receipt["profile"] == "restricted" and receipt["complete"], receipt
+    assert used == [mode] * (1 if mode == "guarded" else 2)
 
 
 @pytest.mark.requires_bwrap
-def test_real_read_only_role_writes_host_not_project(development, monkeypatch):
+@pytest.mark.parametrize("mode", ["development", "auto", "guarded"])
+def test_real_read_only_role_writes_caches_not_host_or_project(development, monkeypatch, tmp_path, mode):
+    root, store, worker, home = development
+    access_mode.switch(store, worker.task_id, mode, origin="acp_set_mode")
+    monkeypatch.setattr(gateway, "_authority", lambda db, ch: ([], "read-only"))
+    (home / ".bashrc").write_text("# owner\n")
+    (home / ".nvm").mkdir()
+    sibling = tmp_path / "sibling-project"
+    sibling.mkdir()
+    activity = home / ".docker/buildx/activity"
+    activity.mkdir(parents=True)
+    refused = [home / ".bashrc", home / ".profile", home / ".nvm/node", home / "sdk-state",
+               sibling / "planted", root / "reviewer-wrote"]
+    allowed = [home / ".cache/tool/entry", home / ".npm/_cacache/entry", activity / "default"]
+    script = (
+        "import os, tempfile\nfrom pathlib import Path\n"
+        f"for name in {[str(p) for p in refused]!r}:\n"
+        "    try: Path(name).write_text('bad')\n"
+        "    except OSError: pass\n"
+        "    else: raise AssertionError('writable: ' + name)\n"
+        f"for name in {[str(p) for p in allowed]!r}:\n"
+        "    Path(name).parent.mkdir(parents=True, exist_ok=True); Path(name).write_text('ok')\n"
+        "with tempfile.NamedTemporaryFile() as handle: handle.write(b'ok')\n"
+        # Its own PID namespace: the host's processes (this test) are not visible.
+        f"assert not Path('/proc/{os.getpid()}').exists(), 'host processes visible'\n"
+        "print('read-only host')\n")
+    result = gateway.dispatch(store, worker, "command_run", dict(argv=[sys.executable, "-B", "-c", script], request_key="ro"))
+    assert result["exit_code"] == 0 and result["complete"] and result["profile"] == "restricted", result
+    assert result["output"].strip() == "read-only host"
+    assert (home / ".bashrc").read_text() == "# owner\n"
+    assert not any(path.exists() for path in refused[1:])
+    assert all(path.read_text() == "ok" for path in allowed)
+
+
+@pytest.mark.requires_bwrap
+def test_real_read_only_role_runs_tests_and_git_reads(development, monkeypatch):
     root, store, worker, home = development
     monkeypatch.setattr(gateway, "_authority", lambda db, ch: ([], "read-only"))
-    outside, inside = home / "buildx-activity", root / "reviewer-wrote"
-    script = (f"from pathlib import Path\nPath({str(outside)!r}).write_text('ok')\n"
-              f"try: Path({str(inside)!r}).write_text('bad')\nexcept OSError: print('project read-only')\n"
-              "else: raise AssertionError('project writable')")
-    result = gateway.dispatch(store, worker, "command_run", dict(argv=[sys.executable, "-B", "-c", script], request_key="ro"))
-    assert result["exit_code"] == 0 and result["complete"] and result["profile"] == "development", result
-    assert outside.read_text() == "ok" and not inside.exists()
+    monkeypatch.setenv("PYTHONPATH", str(Path(pytest.__file__).parent.parent))
+    (root / "test_fixture_suite.py").write_text(
+        "def test_cache(pytestconfig, tmp_path):\n"
+        "    pytestconfig.cache.set('example/value', 1)\n"
+        "    (tmp_path / 'scratch').write_text('ok')\n")
+    result = gateway.dispatch(store, worker, "command_run", dict(
+        argv=[sys.executable, "-B", "-m", "pytest", "-q", "test_fixture_suite.py"], request_key="pytest"))
+    assert result["exit_code"] == 0 and result["complete"], result
+    assert not (root / ".pytest_cache").exists()
+    import subprocess
+    identity = dict(os.environ, GIT_AUTHOR_NAME="fixture", GIT_AUTHOR_EMAIL="fixture@example.invalid",
+                    GIT_COMMITTER_NAME="fixture", GIT_COMMITTER_EMAIL="fixture@example.invalid")
+    if not (root / ".git").exists():
+        subprocess.run(["git", "init", "-q"], cwd=root, check=True, env=identity)
+    subprocess.run(["git", "add", "test_fixture_suite.py"], cwd=root, check=True, env=identity)
+    subprocess.run(["git", "commit", "-q", "-m", "fixture"], cwd=root, check=True, env=identity)
+    result = gateway.dispatch(store, worker, "command_run", dict(
+        argv=["sh", "-c", "git status --short >/dev/null && git log -1 --format=%s && git diff --check"],
+        request_key="git"))
+    assert result["exit_code"] == 0 and result["complete"], result
+    assert result["output"].strip() == "fixture"
 
 
 @pytest.mark.parametrize("mode,origin", [("auto", "model"), ("unknown", "acp_set_mode"), ("", "acp_set_mode")])

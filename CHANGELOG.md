@@ -2,6 +2,58 @@
 
 ## 1.0.0 (unreleased)
 
+The 2026-10-14 orchestration audit's owner decisions are recorded in
+[the decisions log](docs/project/decisions.md) (D1-D8). Read-only roles, reviewers and
+automatic runtime verification now run commands in one read-only host profile in every access
+mode: HOME is read-only except an explicit tool-cache allowlist, scratch is private, and the
+command has its own PID namespace. Inside a verification check only the project's git-ignored
+directories are writable. Writing workers keep the access-mode profile. A reviewer's read-only
+pass closes a writer's declared gap again in every mode. The deletion classifier is lexical:
+it recognises more commands than `rm`, and its tool text says so. No paid or live
+qualification is claimed for these changes.
+
+The runtime stop question's Finish now force-finishes the task: it ends `CANCELLED` with
+`USER_FORCE_FINISHED`. Continue resumes the flow and never releases the stop. A direct answer
+that would close planned work which did not pass review and verification ends `FAILED` with
+`answer_not_certified:<gap>`, never `COMPLETED`. Only an explicit `deny-write: <path>` creates
+a write denial; a natural-language request such as "do not modify X" creates none, and a
+wildcard value is ignored. Denials match after path normalization, so a `./` spelling no longer
+bypasses one. The outside-write refusal also resolves real paths and protects a worktree's git
+metadata directories.
+
+Automatic routing honours a user's model revocation in live dispatch (`revoked_by_user`).
+Infrastructure failures (engine and transport failures) retry without escalating the model
+tier. Rank version 11 ranks a known usage at or above 95% behind every non-hot route, known or
+unknown. Expired quota windows are pruned or expire, and a stretch exclusion no longer removes a
+dual-tier model. A pinned effort that the policy does not permit is applied at the nearest
+permitted step and recorded as `pin_effort_clamped`.
+
+The senior consultant is reached only through `escalation_request`. The runtime builds its
+packet from the reports the escalation names and the escalated revision's reports, each with its
+SHA-256 and artifact versions. The consultant receives no `ask_question` or `access_request`, and
+a plan that names it is refused.
+
+In Paseo, a `session/cancel` followed by a `session/prompt` on the same session is steering: the
+cancelled coordinator turn ends, the task is not paused, and running workers continue. A lone
+cancel still pauses the task after a 5-second grace window. The Paseo plugin answers the bridge's
+`session/close` locally, and the dev wrapper strips inherited `PASEO_*` variables.
+
+The brokered MCP relay's handshake token is no longer in process argv or its environment. The
+broker writes it to a 0600 `relay.token` file in its private socket directory, and the relay reads
+it there without following symlinks. Claude's `--mcp-config` had carried the previous environment
+entry on its command line.
+
+A worker's first or continuation prompt carries its assignment objective exactly once. The
+recovery capsule keeps the full brief verbatim and points to it from its other copies. Role
+instructions delivered to engines omit generated skill frontmatter and footer comments. The
+prompt generator asserts 23 profiles and fails on a dropped preamble. Skills no longer copy tool
+argument contracts; the live tool schema is authoritative.
+
+Paseo's plugin dependency `shell-quote` moved to 1.12.0, which fixes a critical advisory. Fifteen
+high and five moderate advisories remain, transitively through React Native, and are recorded in
+the dependency audit. Compact argv launches fall back to an unlinked temporary file where
+`os.memfd_create` is unavailable.
+
 Project file tools now follow the read-before-edit discipline of native editors
 and refuse the partial-read overwrite that truncated a shared research file. A
 text `project_read` pages by 1-based line (`offset` and `limit`, at most 2000

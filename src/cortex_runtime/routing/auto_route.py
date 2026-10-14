@@ -296,7 +296,8 @@ def choose(role: str, project_root=None, environ: Mapping[str, str] | None = Non
            preference: str | None = None, model_hint: str = "auto",
            model_reason: str | None = None, previous_engine: str | None = None,
            user_request: Mapping | None = None,
-           eligible_route_ids: frozenset[str] | None = None) -> Choice | None:
+           eligible_route_ids: frozenset[str] | None = None,
+           user_revocation: Mapping | None = None) -> Choice | None:
     """The route this worker role should open on, or ``None`` when nothing
     engine-confirmed is configured (keep the coordinator's route).
     See :func:`tier_for` for ``escalate`` and ``complexity``, and
@@ -313,7 +314,9 @@ def choose(role: str, project_root=None, environ: Mapping[str, str] | None = Non
     text. For covered exact hints they precede pins, ranking, automatic
     membership and role tiers, including on retries. Hard owner authorization,
     observed identity, availability and exhausted quota still refuse visibly;
-    a requested route is never silently substituted.
+    a requested route is never silently substituted. ``user_revocation``
+    (:func:`user_model_revocation`) is never consent; it is recorded in the
+    decision as ``user_model_request.status='revoked_by_user'``.
 
     Tiers, automatic eligibility and per-model policy come from routing.json
     ``models`` only (:mod:`routing.model_policy`). ``eligible_route_ids`` is
@@ -443,6 +446,8 @@ def choose(role: str, project_root=None, environ: Mapping[str, str] | None = Non
             stretch=dict(status="pinned" if best.route.id in stretch_ids else stretch_summary, chosen=best.route.id in stretch_ids))
         if user_request is not None:
             decision["user_model_request"] = dict(user_request, status="ignored:pinned")
+        elif user_revocation is not None:
+            decision["user_model_request"] = dict(user_revocation, status="revoked_by_user")
         if profile_label is not None:
             decision["routing_profile"] = profile_label
         default_effort = (stretch_effort(role_tier, escalate, best_policy.effort_ladder)
@@ -451,10 +456,23 @@ def choose(role: str, project_root=None, environ: Mapping[str, str] | None = Non
         permitted = efforts_in_any_tier(best, best_policy)
         if best_policy.effort_ladder and default_effort not in permitted:
             raise _policy_error("model_effort_policy_unsupported", "Pinned effort_ladder step is not permitted.")
-        return Choice(best.connection_id, model, nearest(effort or default_effort, permitted),
+        pinned_effort = nearest(effort or default_effort, permitted)
+        if effort is not None and pinned_effort != effort:
+            # C-35 L1: a configured pin effort routing.json's own policy
+            # does not permit is silently lowered/raised to the nearest
+            # permitted step (never refused); record that it happened.
+            decision["pin_effort_clamped"] = dict(configured=effort, applied=pinned_effort)
+        return Choice(best.connection_id, model, pinned_effort,
                       "auto:pin", decision, best.route.id)
     default_denied = {entry.route.id for entry in allowed if _default_auto_denied(overrides, entry)}
-    stretch_denied = frozenset(route_id for route_id, status in stretch_states.items() if status.startswith("excluded:"))
+    # C-21: a model configured with several native tiers (e.g. both
+    # "light" and "standard") keeps its own non-stretch tiers even when its
+    # *stretch* promotion to standard is excluded for this work; only a
+    # model with no other native tier (light-only) is denied outright, so
+    # it is not offered as a bare fallback the owner never configured it
+    # for either.
+    stretch_denied = frozenset(route_id for route_id, status in stretch_states.items()
+                               if status.startswith("excluded:") and policies[route_id].tiers == ("light",))
     stretch_standard = frozenset(route_id for route_id, status in stretch_states.items()
                               if status == "standard_candidate")
     superseded = _applied_superseded(overrides, allowed, superseded_routes(allowed))
@@ -479,7 +497,9 @@ def choose(role: str, project_root=None, environ: Mapping[str, str] | None = Non
                             all_entries=entries, providers=providers, affinity=affinity, models=models)
     if decision is not None and status:
         decision.update(preference=preference, preference_status=status)
-    if decision is not None and request_status is not None:
+    if decision is not None and user_request is None and user_revocation is not None and model_hint != "auto":
+        decision["user_model_request"] = dict(user_revocation, status="revoked_by_user")
+    elif decision is not None and request_status is not None:
         decision["user_model_request"] = dict(user_request or {}, status=request_status)
     if decision is not None and profile_label is not None:
         decision["routing_profile"] = profile_label
@@ -570,13 +590,16 @@ def pick(role_tier: str, entries: Sequence, usage, tier_overrides: Mapping[str, 
 
 
 # Generic rank ordering; historical decision keys remain readable by clients.
-RANK_VERSION = 10
+RANK_VERSION = 11
 # The rank key's parts in order, named for the decision's ``decided_by``.
 # ``quota`` moved from right after ``hint`` to right before ``used_percent``
-# in rank version 6: it is now a late tie breaker rather than an early hard
-# cut, behind the usage-gap signal (``usage``), retry diversification and
-# affinity (see RANK_VERSION).
-RANK_KEYS = ("preference", "purpose", "hint", "usage", "diversify", "affinity", "quota", "used_percent",
+# in rank version 6 (a late tie breaker, behind the usage-gap signal,
+# retry diversification and affinity), then back to right after ``hint``
+# in rank version 11 (C-19): a candidate whose *known* usage reaches
+# :data:`HOT_PERCENT` must rank behind every non-hot candidate -- known or
+# unknown usage alike -- never merely a late, easily-ties-with-unknown tie
+# breaker affinity and diversification could still outrank.
+RANK_KEYS = ("preference", "purpose", "hint", "quota", "usage", "diversify", "affinity", "used_percent",
              "engine_order")
 
 
@@ -616,21 +639,22 @@ def rank(role_tier: str, entries: Sequence, usage, tier_overrides: Mapping[str, 
     3. an honoured model hint (see :data:`HINT_TOLERANCE`), ignored on the
        same hot-and-meaningfully-worse basis; a hint naming no preferred
        route loses to ``purpose`` and records ``ignored:owner_preferred``;
-    4. subscription plan usage, only if every candidate's usage is known
-       and at least one reaches :data:`USAGE_SWITCH_PERCENT` (95%):
-       each full :data:`USAGE_MARGIN` points above the least-used candidate
-       ranks a candidate one step behind (``usage_band``) -- this usage-gap
-       signal, not the quota band below, is what usually separates
-       candidates on remaining quota;
-    5. on escalation, an engine other than the one that fell short (a large
+    4. the quota band (unknown is not hot): a candidate whose *known*
+       usage is at or above :data:`HOT_PERCENT` ranks behind every
+       candidate below that band, known or unknown usage alike (C-19) --
+       this outranks the usage-gap signal, diversification and affinity
+       below, so a hot known candidate never wins merely by being the
+       preferred engine or more suitable for the work;
+    5. subscription plan usage, only if every remaining candidate's usage
+       is known and at least one reaches :data:`USAGE_SWITCH_PERCENT`
+       (95%): each full :data:`USAGE_MARGIN` points above the least-used
+       candidate ranks a candidate one step behind (``usage_band``) --
+       this usage-gap signal is what usually separates candidates on
+       remaining quota once the quota band above has not already decided it;
+    6. on escalation, an engine other than the one that fell short (a large
        usage gap above still wins first: diversification does not send a
        retry to a plan that is meaningfully more used);
-    6. engine affinity (:func:`suitability`), the task's fit;
-    7. the quota band, as a late tie breaker only (unknown is not hot): once
-       plan usage and affinity leave candidates tied, one at or above
-       :data:`HOT_PERCENT` ranks behind one below it. Crossing the band
-       alone no longer overrides plan usage or affinity, and no longer
-       causes a cliff at the boundary;
+    7. engine affinity (:func:`suitability`), the task's fit;
     8. lower exact used percent, only when usage switching is active;
     9. engine order.
 
@@ -735,13 +759,17 @@ def rank(role_tier: str, entries: Sequence, usage, tier_overrides: Mapping[str, 
             purpose_status = "honoured"
 
         def key(e):
+            # C-19: a candidate's own hot/known-quota flag ranks right after
+            # preference/purpose/hint -- before the usage-gap band,
+            # diversification and affinity -- so a known >=95% candidate
+            # always loses to any non-hot one (known or unknown usage).
             return (e.route.engine != honoured,
                     not (purpose_status == "honoured" and purpose(e)),
                     not (hint_status == "honoured" and e in hinted),
+                    _hot(usage(e)),
                     usage_band(e) or 0,
                     not (escalated and previous_engine and e.route.engine != previous_engine),
                     -suitability(role, e.route.engine, affinity),
-                    _hot(usage(e)),
                     usage(e) if usage_active else 0.0, order[e.route.id])
 
         ranked = sorted(candidates, key=key)
@@ -1296,8 +1324,42 @@ _SENTENCE_END = re.compile(r"[.!?;\n]")
 _CLAUSE_BREAK = re.compile(r"[,:()\"«»“”„—–]")
 # An opening quote attached to a request label is not a preceding word.
 _ATTACHED = re.compile(r"\S*\Z")
+# A closing quote attached to a mention is not a clause break after it.
+_ATTACHED_AFTER = re.compile(r"\A[\"'`»”]+")
 REQUEST_WINDOW = 4
 NEGATION_WINDOW = 5
+# Refusal, unavailability and cost words. One anywhere in a mention's own
+# clause segment, before or after it, refuses that mention ("X must never be
+# used", "X is too expensive", "X слишком дорогая", "Opus не нужен"): a
+# missed refusal would run a model the user refused.
+_REFUSAL_WORDS = re.compile(
+    r"not|never|no|without|avoid|cannot|unable|unavailable|expensive|costly|overpriced|pricey"
+    r"|forbidden|banned|prohibited|disallowed"
+    r"|(?:do|does|did|is|are|was|were|has|have|had|ca|could|would|should|must|wo|shall|need)n'?t"
+    r"|не|нет|нельзя|никогда|без|запрещ\w*|недоступ\w*|дорог\w*",
+    re.IGNORECASE,
+)
+# Substitution and stopping words refuse a mention they precede in its clause
+# segment ("use Y instead of X", "stop using X", "замени X"). After a mention
+# they name what it replaces ("use X instead of Y"), so they do not refuse it.
+_SUBSTITUTION_WORDS = re.compile(
+    r"instead|rather|replac\w*|substitut\w*|stop|quit|except"
+    r"|вместо|замен\w*|хватит|прекрат\w*|перестан\w*|отказ\w*|кроме",
+    re.IGNORECASE,
+)
+# Words that always open a new clause segment: contrast and subordination
+# ("use X because Y is too expensive", "используй X, а Y не трогай").
+_SEGMENT_BREAKS = frozenset({
+    "but", "then", "however", "yet", "because", "since", "if", "when", "while", "although",
+    "though", "unless", "until", "so",
+    "а", "но", "затем", "потом", "однако", "зато", "потому", "поскольку", "если", "когда",
+    "пока", "хотя", "чтобы", "чтоб",
+})
+# Coordinators open a new segment only before a new predicate ("... и
+# используй X", "use X and never Y"); "X and Y are too expensive" stays one.
+_COORDINATORS = frozenset({"and", "or", "plus", "и", "или"})
+_REQUEST_CLAUSE_BREAK = re.compile(r"[,()\"«»“”„—–]")
+_PREDICATE_LEADS = _REQUEST_LEAD | {"просто", "только", "также", "тоже", "ещё", "еще"}
 
 
 def family_of(model_hint: str) -> str | None:
@@ -1385,18 +1447,97 @@ def _governed_means(window: list[tuple[str, tuple[str, ...]]], subjunctive: bool
     return any(_request_form(WORK_VERBS, word, lead, subjunctive) for word, lead in window[:position])
 
 
+def _plain_words(text: str) -> list[str]:
+    return [w for w in (token.casefold().strip("'") for token in _WORD.findall(text)) if w]
+
+
+def _segment_break(words: Sequence[str], index: int) -> bool:
+    """Whether ``words[index]`` opens a new clause segment."""
+    word = words[index]
+    if word in _SEGMENT_BREAKS:
+        return True
+    if word not in _COORDINATORS or index + 1 >= len(words):
+        return False
+    following = words[index + 1]
+    return (following in _PREDICATE_LEADS or bool(_REFUSAL_WORDS.fullmatch(following))
+            or any(p.fullmatch(following) for p in (REQUEST_WORDS, WORK_VERBS, NEGATION_WORDS)))
+
+
+def _mention_context(text: str, match: re.Match) -> dict:
+    """The words around one mention: ``sentence`` (every word before it in
+    its sentence, with clause leads), ``clause`` (those of its own clause),
+    ``before``/``after`` (its clause segment on each side) and ``alone``
+    (nothing but the mention in its clause, e.g. a listing item)."""
+    before_text = _ATTACHED.sub("", text[: match.start()]).replace("’", "'")
+    before_sentence = _SENTENCE_END.split(before_text)[-1]
+    before_clause = _CLAUSE_BREAK.split(before_sentence)[-1]
+    after_text = _ATTACHED_AFTER.sub("", text[match.end():].replace("’", "'"))
+    after_clause = _CLAUSE_BREAK.split(_SENTENCE_END.split(after_text)[0])[0]
+    lead, follow = _plain_words(before_clause), _plain_words(after_clause)
+    start = max((i + 1 for i in range(len(lead)) if _segment_break(lead, i)), default=0)
+    end = next((i for i in range(len(follow)) if _segment_break(follow, i)), len(follow))
+    sentence = _clause_words(before_sentence)
+    # A colon introduces what its verb governs ("Use: <identity>"), so the
+    # request clause spans it; every other clause break ends it.
+    governed = len(_plain_words(_REQUEST_CLAUSE_BREAK.split(before_sentence)[-1]))
+    return dict(sentence=sentence, clause=sentence[len(sentence) - governed:] if governed else [],
+                before=lead[start:], after=follow[:end], alone=not lead and not follow,
+                sentence_words=[word for word, _lead in sentence])
+
+
+def _refused_mention(context: Mapping, *, strict: bool = False) -> bool:
+    """Whether a mention is refused, substituted or compared away.
+
+    Clause-wide: a :data:`_REFUSAL_WORDS` word anywhere in its clause segment
+    on either side, or a :data:`_SUBSTITUTION_WORDS` word before it in that
+    segment; a negation before "чтобы"/"что бы" in its sentence ("не хочу,
+    чтобы ..."). Windowed: a refusal or substitution word (any
+    :data:`NEGATION_WORDS` word unless ``strict``) within
+    :data:`NEGATION_WINDOW` words before it in its sentence. ``strict``
+    leaves comparisons and remarks ("compare X with Y", "based on X") out:
+    they decline a grant but do not revoke an earlier one."""
+    if any(_REFUSAL_WORDS.fullmatch(word) or _SUBSTITUTION_WORDS.fullmatch(word) for word in context["before"]):
+        return True
+    if any(_REFUSAL_WORDS.fullmatch(word) for word in context["after"]):
+        return True
+    words = context["sentence_words"]
+    markers = [i for i, word in enumerate(words) if word in _RU_SUBJUNCTIVE_MARKERS
+               or (word == "бы" and i and words[i - 1] == "что")]
+    if markers and any(NEGATION_WORDS.fullmatch(word) for word in words[:markers[-1]]):
+        return True
+    window = words[-NEGATION_WINDOW:]
+    if strict:
+        return any(_REFUSAL_WORDS.fullmatch(word) or _SUBSTITUTION_WORDS.fullmatch(word) for word in window)
+    return any(NEGATION_WORDS.fullmatch(word) for word in window)
+
+
+def refuses_family(text: str, family: str, names: Sequence[str] | None = None,
+                   *, pattern: re.Pattern | None = None) -> str | None:
+    """The first mention of ``family`` in ``text`` that refuses it (see
+    :func:`_refused_mention` with ``strict``), or ``None``. A newer user
+    message with such a mention revokes an earlier grant."""
+    for match in (pattern if pattern is not None else family_pattern(family, names)).finditer(text):
+        if _refused_mention(_mention_context(text, match), strict=True):
+            return match.group(0)
+    return None
+
+
 def requests_family(text: str, family: str, names: Sequence[str] | None = None,
                     *, pattern: re.Pattern | None = None,
                     exact_pattern: re.Pattern | None = None) -> str | None:
     """The first mention of ``family`` in ``text`` that is a request -- within
-    :data:`REQUEST_WINDOW` words before it, in the same sentence, a
+    :data:`REQUEST_WINDOW` words before it, in its own clause, a
     :data:`REQUEST_WORDS` word in request form or a :data:`WORK_VERBS` verb
-    governing a :data:`MEANS_WORDS` preposition right before it, and no
-    :data:`NEGATION_WORDS` word within :data:`NEGATION_WINDOW` -- or ``None``
-    when every mention is bare, a remark or refused. An ``exact_pattern``
-    for enabled identities additionally accepts a direct на/on/via/with or a
-    non-negated request-form verb anywhere in the same message. Labels retain
-    local grammar. ``names`` are extra spellings (see :func:`family_pattern`)."""
+    governing a :data:`MEANS_WORDS` preposition right before it, and the
+    mention is not refused (:func:`_refused_mention`: refusal words anywhere
+    in its clause segment on both sides, substitution words before it, any
+    :data:`NEGATION_WORDS` word within :data:`NEGATION_WINDOW` before it) --
+    or ``None`` when every mention is bare, a remark or refused. An
+    ``exact_pattern`` for enabled identities additionally accepts a direct
+    на/on/via/with, or a listing item (the identity alone in its clause, as in
+    "Part 2: <identity>") governed by a non-negated request-form verb
+    elsewhere in the same message. Labels retain local grammar. ``names``
+    are extra spellings (see :func:`family_pattern`)."""
     # Only enabled exact identities get message-wide request governance and
     # a direct means-preposition grant. Owner-configured labels keep the
     # conservative local grammar; model-authored text never reaches this call.
@@ -1409,41 +1550,58 @@ def requests_family(text: str, family: str, names: Sequence[str] | None = None,
                 message_request = True
                 break
     for match in (pattern if pattern is not None else family_pattern(family, names)).finditer(text):
-        before = _ATTACHED.sub("", text[: match.start()]).replace("’", "'")
-        words = _clause_words(_SENTENCE_END.split(before)[-1])
-        if any(NEGATION_WORDS.fullmatch(word) for word, _lead in words[-NEGATION_WINDOW:]):
+        context = _mention_context(text, match)
+        if _refused_mention(context):
             continue
-        window = words[-REQUEST_WINDOW:]
+        # The governing verb must stand in the mention's own clause.
+        window = context["clause"][-REQUEST_WINDOW:]
         # A refusal before the subjunctive's clause ("не хочу, чтобы ...")
         # may stand outside the negation window; it refuses the whole sentence.
-        subjunctive = not any(NEGATION_WORDS.fullmatch(word) for word, _lead in words)
+        subjunctive = not any(NEGATION_WORDS.fullmatch(word) for word in context["sentence_words"])
         if (any(_request_form(REQUEST_WORDS, word, lead, subjunctive) for word, lead in window)
                 or _governed_means(window, subjunctive)
                 or (match.span() in exact_spans and
-                    (message_request or (window and
+                    ((message_request and context["alone"]) or (window and
                      re.fullmatch(r"на|on|via|with", window[-1][0]))))):
             return match.group(0)
     return None
 
 
+def _timestamp_key(value) -> float:
+    """Sort key of a stored ISO timestamp; unknown values sort oldest."""
+    from datetime import datetime, timezone
+
+    try:
+        parsed = datetime.fromisoformat(str(value))
+    except (TypeError, ValueError):
+        return float("-inf")
+    return (parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)).timestamp()
+
+
 def _user_texts(store, db, task_id: str) -> Iterator[tuple[str, str]]:
     """``(source_ref, text)`` of every user-authored source of the task,
-    newest first: source revisions, then answered questions' answers."""
+    newest first: source revisions (by publication time) and answered
+    questions' answers (by answer time), interleaved so the latest user
+    message comes first."""
     from ..acp import questions_store
 
     rows = db.execute(
-        "SELECT sr.report_id, r.filename FROM source_revisions sr JOIN reports r ON r.id=sr.report_id "
+        "SELECT sr.report_id, r.filename, r.created_at FROM source_revisions sr JOIN reports r ON r.id=sr.report_id "
         "WHERE sr.task_id=? ORDER BY sr.revision DESC", (task_id,),
     ).fetchall()
+    texts = []
     for row in rows:
         try:
             text = (store._task_directory(db, task_id) / row["filename"]).read_bytes().decode("utf-8")
         except (OSError, UnicodeDecodeError):
             continue
-        yield f"{row['report_id']}:-1", text
+        texts.append((_timestamp_key(row["created_at"]), f"{row['report_id']}:-1", text))
     for answer in reversed(questions_store.answered_questions(db, task_id)):
         if isinstance(answer.get("answer_text"), str):
-            yield answer["source_ref"], answer["answer_text"]
+            texts.append((_timestamp_key(answer.get("answered_at")), answer["source_ref"], answer["answer_text"]))
+    # Stable: equal times keep sources before answers, each newest first.
+    for _time, source_ref, text in sorted(texts, key=lambda item: item[0], reverse=True):
+        yield source_ref, text
 
 
 def _reserved_request_word(word: str) -> bool:
@@ -1506,11 +1664,15 @@ def ambiguous_user_model_request(store, task_id: str, model_hint: str) -> dict |
     return None
 
 
-def user_model_request(store, task_id: str, model_hint: str, *, names: Sequence[str] | None = None) -> dict | None:
-    """Match only retained user source text, never coordinator/report text."""
+def _user_model_consent(store, task_id: str, model_hint: str,
+                        names: Sequence[str] | None = None) -> tuple[dict | None, dict | None]:
+    """``(grant, revocation)`` from the newest user message that either
+    refuses or requests ``model_hint``: the latest message wins. A refusal
+    newer than a grant revokes it (``reason='revoked_by_user'``); a refusal
+    with no older grant is neither."""
     family = family_of(model_hint or "")
     if family is None:
-        return None
+        return None, None
     overrides = load_overrides(getattr(store, "project_root", None))
     engine, _, model = model_hint.partition("/")
     configured_names = model_policy.policy_for(engine, model, overrides).request_names
@@ -1520,14 +1682,37 @@ def user_model_request(store, task_id: str, model_hint: str, *, names: Sequence[
     identities = _enabled_model_identities(overrides)
     pattern = _source_request_pattern(family, names, identities)
     exact_pattern = _source_request_pattern(family, (), identities) if family in identities else None
+    refusal = None
     with store.connection() as db:
         for source_ref, text in _user_texts(store, db, task_id):
+            # Within one message a refusal outweighs a grant of the same identity.
+            refused = refuses_family(text, family, names, pattern=pattern)
+            if refused is not None:
+                refusal = refusal or dict(source_ref=source_ref, family=family, matched=refused)
+                continue
             matched = requests_family(text, family, names, pattern=pattern, exact_pattern=exact_pattern)
-            if matched is not None:
-                for engine, config in (overrides.get("models") or {}).items():
-                    for model, policy in (config.get("policy") or {}).items():
-                        identity = f"{engine}/{model}"
-                        if identity != model_hint and family_pattern(identity, policy.get("request_names")).search(matched):
-                            raise _policy_error("model_request_label_ambiguous", "The requested label matches multiple configured identities.")
-                return dict(source_ref=source_ref, family=family, matched=matched)
-    return None
+            if matched is None:
+                continue
+            if refusal is not None:
+                return None, dict(refusal, reason="revoked_by_user", revoked_source_ref=source_ref)
+            for engine, config in (overrides.get("models") or {}).items():
+                for model, policy in (config.get("policy") or {}).items():
+                    identity = f"{engine}/{model}"
+                    if identity != model_hint and family_pattern(identity, policy.get("request_names")).search(matched):
+                        raise _policy_error("model_request_label_ambiguous", "The requested label matches multiple configured identities.")
+            return dict(source_ref=source_ref, family=family, matched=matched), None
+    return None, None
+
+
+def user_model_request(store, task_id: str, model_hint: str, *, names: Sequence[str] | None = None) -> dict | None:
+    """Match only retained user source text, never coordinator/report text.
+    The newest user message that mentions the identity decides: a newer
+    refusal revokes an older request (see :func:`user_model_revocation`)."""
+    return _user_model_consent(store, task_id, model_hint, names)[0]
+
+
+def user_model_revocation(store, task_id: str, model_hint: str) -> dict | None:
+    """The newer user refusal that revoked an earlier request for
+    ``model_hint`` (``source_ref``, ``matched``, ``reason='revoked_by_user'``
+    and the revoked ``revoked_source_ref``), or ``None``. Never consent."""
+    return _user_model_consent(store, task_id, model_hint)[1]

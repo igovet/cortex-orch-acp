@@ -163,16 +163,30 @@ work, and whether a deletion waits for the user.
 | `outside_write` | consent card | no card, except a protected control-plane path (consent card) | runtime answers the card itself |
 | `outside_command` (no sandbox) | consent card | consent card | runtime answers the card itself |
 | Declared deletion (`project_delete`, `command_delete`, native delete) | consent card | consent card | runtime answers the card itself |
-| Read-only/reviewer `command_run` and automatic verification | restricted; project read-only | host-writable masks, any existing cwd; project read-only (verification: git-ignored directories writable) | same as Development |
+| Read-only/reviewer `command_run` (every read-only role, every mode) | restricted read-only profile; cwd inside the task tree | restricted read-only profile; any existing cwd | same as Development |
+| Automatic runtime verification | read-only profile (`restricted`); project read-only, git-ignored directories writable | same read-only profile | same read-only profile |
 | Engine jail and worker mode floor | unchanged | unchanged | jail unchanged; most permissive offered worker mode |
 | Channel, role, revocation, owner deny, review and completion gates | retained | retained | retained |
+
+The read-only profile binds HOME read-only except an explicit allowlist of tool caches
+(for example `.cache`, `.npm`, and the Docker buildx activity records), plus scratch and
+`/tmp`. It runs in a private PID namespace. Read-only roles therefore cannot write
+HOME startup files, sibling projects or the project tree, in any mode. Cache writes
+remain possible, so a read-only command can still poison a cache that a later run reads.
+Automatic runtime verification uses this same profile in every mode (owner decision D1, see
+[the decisions log](../../project/decisions.md)), so a check cannot write host state outside
+the tool-cache allowlist, scratch and `/tmp`. The profile limits writes, not network access: as with every owner command,
+the owner's network is shared.
 
 A missing, refused, cancelled or timed-out answer to a consent card blocks the
 effect. Protected control-plane paths for `outside_write` are the
 `sandbox.control_plane_paths` locations (Cortex, Paseo, Codex, Claude and
 OpenCode state and configuration, `~/.gitconfig`, `~/.git-credentials`, the
 installed runtime, the project's `.cortex` and an external hooks directory),
-existing or not, and anything beneath them, including through a symlinked parent.
+existing or not, and anything beneath them, including through a symlinked parent. The
+worktree's own git metadata directories (its gitdir and, for a linked worktree, the common
+directory) are protected too. An outside-write target whose resolved real path lands inside
+the project is refused as `outside_path_inside_project`, even when its literal path does not.
 
 Development is trusted local development, **not a hostile-code sandbox**.
 `sandbox.development_command` uses `--bind / /`, real HOME and /var/tmp,
@@ -397,8 +411,9 @@ Covered by `tests/test_project_skill_links.py`.
 
 `command_run` requires Linux bubblewrap and has no silent unsandboxed fallback.
 Its effective mounts depend on [access mode](#access-mode-development-guarded-and-auto).
-Restricted commands (Guarded) use read-only real HOME with writable tool caches;
-in Development and Auto every role's commands use real writable host resources. Both filter Cortex/credential environment
+Writing workers' restricted commands (Guarded) use read-only real HOME with writable tool
+caches; in Development and Auto their commands use real writable host resources. Read-only
+roles always use the read-only profile described in the access-mode table. Both filter Cortex/credential environment
 variables and retain validated owner SSH-agent access and shared network
 and mounts the project read-only except for writing workers, who receive the
 whole project writable regardless of their narrower declared coordination work
@@ -418,13 +433,13 @@ retained output could not be written), or an unexpected runtime exception, is
 `storage_error` with `write_state: uncertain` and `field: cause` naming the
 exception class (plus an `OSError`'s reason); the traceback goes to the
 engine's stderr log, and the request key is fenced so it is never re-run.
-Automatic verification may write only the directories the project's git ignores
-(caches, builds, installed dependencies) inside the project; the project's `.git`
-is read-only there. Outside the project it follows the task's access mode like
-`command_run`: restricted in Guarded, the host-writable profile in Development and
-Auto. Each check records its profile; a mode switch stops a running check as
-incomplete (`execution_policy_changed`), and a reviewer reuses a runtime check
-only when it ran in the profile the reviewer's own command would get.
+Automatic verification runs in the read-only profile in every mode, so it may write only
+the directories the project's git ignores (caches, builds, installed dependencies) inside
+the project; the project's `.git` is read-only there, and the rest of the host is read-only
+except the tool-cache allowlist and private scratch. Each check records its profile (`restricted`);
+a mode switch stops a running check as incomplete (`execution_policy_changed`). A reviewer
+reuses a runtime check only when it ran in the read-only profile, which is the profile a
+reviewer's own command gets; a check from a host-writable run is never reused.
 
 ### Git and tool state
 

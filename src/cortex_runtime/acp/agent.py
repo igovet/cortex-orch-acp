@@ -3173,22 +3173,27 @@ class Agent:
             session["cancelling"] = True
             active = session["active"]
             pending = session.pop("pending_prompts", [])
+        try:
+            # Paseo also sends session/cancel before a follow-up prompt. ACP
+            # carries no signal distinguishing that steering from a Stop
+            # click. The runtime ends the turn and, for Paseo, holds the
+            # pause briefly so that a prompt following on this session is
+            # steering (OrchestratingRuntime.cancel). It runs before this
+            # turn's event is set here, so the turn it wakes sees the hold.
+            # The explicit /cortex-stop command remains the task-wide
+            # terminal operation.
+            try:
+                self.runtime.cancel(session_id)
+            except Exception:
+                pass
             if active is not None:
                 active.set()
-        # Waiting requests have not been captured or acknowledged. Stop
-        # cancels them too; none may auto-resume work after interruption.
-        for prompt in pending:
-            prompt[4].set()
-            self.transport.send_response(protocol.result_response(
-                prompt[0], protocol.prompt_result("cancelled")))
-        try:
-            # Paseo also sends session/cancel before an in-flight follow-up
-            # prompt. ACP carries no signal distinguishing that steering from
-            # a Stop click. Preserve the protocol's turn scope; the explicit
-            # /cortex-stop command remains the task-wide terminal operation.
-            self.runtime.cancel(session_id)
-        except Exception:
-            pass
+            # Waiting requests have not been captured or acknowledged. Stop
+            # cancels them too; none may auto-resume work after interruption.
+            for prompt in pending:
+                prompt[4].set()
+                self.transport.send_response(protocol.result_response(
+                    prompt[0], protocol.prompt_result("cancelled")))
         finally:
             with session["lock"]:
                 session["cancelling"] = False

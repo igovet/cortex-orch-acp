@@ -81,7 +81,8 @@ an explicit `{"status": "unavailable"|"unknown", "reason": "..."}` marker
    (or the task's active coordinator revision when no snapshot exists).
    It is not the worker's route. `own_worker_route` separately contains the
    exact attempt's `dispatch_audit` and `worker_configuration_confirmed`
-   event id, engine/model/connection, parameters and native confirmation
+   event id (that event is stored under the provisioning idempotency key, so the
+   capsule's exact-match lookup finds it), engine/model/connection, parameters and native confirmation
    reference. Dispatch without a retained engine confirmation stays explicitly
    unavailable, never inferred as confirmed; sibling/retry confirmations
    cannot stand in for this attempt.

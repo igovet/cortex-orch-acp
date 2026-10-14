@@ -285,7 +285,14 @@ def test_s3_rendered_size_ceilings_and_shared_report_ownership():
         kind = "coordinator" if role_id == "orchestrator" else "worker"
         role = composed_instructions(load_role(role_id))
         base = cortex_system_prompt(kind, None, today=date(2026, 10, 4), environ={}, access_class=prompt_access_class(kind, role_id))
-        budget = 18_500 if kind == "coordinator" else 17_000 if role_id == "worker-senior-consultant" else 25_800
+        # C-26: the coordinator now also names its own reference skills
+        # (COORDINATOR_REFERENCE_IDS -- cortex-release, governance,
+        # host-compatibility, incident, live-qualification,
+        # pipeline-publication, recovery, senior-consultation,
+        # verification-coverage, worker-routing) with a trigger each, so it
+        # can discover them from its own instructions instead of only a
+        # Markdown link in another report; this raises its budget.
+        budget = 19_800 if kind == "coordinator" else 17_000 if role_id == "worker-senior-consultant" else 25_800
         assert len(role) + len(base) <= budget, (role_id, len(role) + len(base))
     for profile in profiles:
         if profile["access_class"] != "consultant":

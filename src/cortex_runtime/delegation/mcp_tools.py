@@ -572,13 +572,13 @@ _OPERATION_DESCRIPTIONS = dict(
     project_mkdir="Create one project directory, including any missing parents; an existing directory returns created: false. Only for a worker whose assignment may write. request_key is optional; identical keyless retries reuse the retained effect receipt. Pre-effect refusals are not replayed under a derived key: fix the precondition, then retry identically; an explicit key retains its refusal and needs a fresh key after correction. Successful calls may return required_before_result_submit skill reminders.",
     project_skill_link="Expose a project skill to Claude: link makes .claude/skills/<name> the relative symlink ../../.agents/skills/<name> (Git keeps it as a symlink); unlink removes only that exact link. The only write .claude accepts; the returned git field says whether the project's .gitignore would drop the link or skill. Replacing a different existing link needs its exact text and the user's confirmation. Every worker whose assignment may write can use it; no particular declared scope is required, and a path the user protected refuses it.",
     project_delete="Delete one existing regular project file (never a directory), identified by its current sha256. The user confirms every deletion first. Only for a worker whose assignment may write. request_key is optional; identical keyless retries reuse the retained effect receipt, never repeating the deletion or confirmation.",
-    command_run="Run one brokered command (argv, no implicit shell) as the owner. Writing workers in Development or Auto get host-writable mounts, an outside cwd and ordinary host resources without routine approval; in Guarded and for read-only roles the host is read-only and writes stay in the granted project scope. Explicit deletion commands require consent (Auto answers it itself). Docker and arbitrary code can bypass direct masks; capability never authorizes hazardous or production actions. Returns argv, exit_code, a tool_call_ref (the evidence a passed result_submit check must cite) and the retained output (read_large_output). Not available to coordinators or consultants.",
+    command_run="Run one brokered command (argv, no implicit shell) as the owner. Writing workers in Development or Auto get host-writable mounts, an outside cwd and ordinary host resources without routine approval; in Guarded, and for read-only roles in every mode, the host is read-only except tool caches and temp, and writes stay in the granted project scope. Deletion commands recognized from the argv text (rm, unlink, rmdir, shred -u, find -delete, git clean/rm, rsync --delete, also through common wrappers and sh -c) require consent (Auto answers it itself) and are refused to read-only roles; a deletion inside a script, interpreter or build tool is not recognized. Docker and arbitrary code can bypass direct masks; capability never authorizes hazardous or production actions. Returns argv, exit_code, a tool_call_ref (the evidence a passed result_submit check must cite) and the retained output (read_large_output). Not available to coordinators or consultants.",
     outside_command="Run one command (argv, no shell) outside the sandbox as the user, for work the sandbox cannot do (in Guarded: a global install, a change in HOME; in Development or Auto, command_run already reaches the host, so only sudo or a protected control-plane path needs this). The user confirms it first on a permission card (Auto answers it itself); a refusal means it did not run. Only for a worker whose assignment may write.",
     outside_write="Write one file OUTSIDE the project as the user (inside the project use project_write or your own tools). In Guarded the user confirms it first; in Development or Auto it needs no card unless the path is protected engine, Cortex, Paseo or git control-plane state. The parent directory must exist. Only for a worker whose assignment may write.",
     draft_write="Replace the whole content of one of your unpublished drafts (from create_draft), keeping the first line create_draft wrote. Publish it with write_report.",
     replan_request="Ask the runtime for a new plan when evidence shows the current decomposition cannot reach the goal. The task enters recovery: end this turn now and do not call plan_submit in the same turn. The runtime stops workers, then requests the new plan. At most three such requests since the user last spoke (a message or an answer), after which the user decides.",
     scope_request="Report that the assignment's scope prevents completion and name the paths it needs. The task enters recovery: end this turn now and do not call plan_submit in the same turn. The runtime stops workers, then requests the new plan; it never widens scope by itself. Counts toward the three re-plans allowed since the user last spoke.",
-    escalation_request="Ask for an independent senior consultation on a problem this attempt cannot resolve. The task enters recovery: end this turn now and do not call plan_submit in the same turn. The runtime stops workers, then requests the new plan with a consultation. Counts toward the three re-plans allowed since the user last spoke.",
+    escalation_request="Ask for an independent senior consultation on a problem this attempt cannot resolve; this is the only route to the senior consultant, which a plan never names. The task enters recovery: end this turn now and do not call plan_submit in the same turn. The runtime stops workers, then requests the new plan and runs the consultation before it, with a packet the runtime builds from your question, your reason and the retained reports. Counts toward the three re-plans allowed since the user last spoke.",
     read_diagnostics="Read this task's own observability/usage diagnostics summary: resource caps, recovery "
                      "latency, prompt re-delivery counts (repeat_calls), schema/validation errors, manual "
                      "interventions, duplicate publications, tokens, concurrency, route outcomes, a per-attempt "
@@ -594,6 +594,26 @@ _OPERATION_DESCRIPTIONS = dict(
 # refused every one of them by the gateway, so they are not offered to it.
 _WRITE_TOOLS = frozenset({"project_write", "project_edit", "project_mkdir", "project_delete", "project_skill_link",
                           "outside_write", "outside_command"})
+
+
+# What the senior consultant is never offered. Besides project source and
+# commands (owner decision 2026-10-04), it requests no paths and asks the user
+# nothing (owner decision D8): missing evidence is a limitation in its report.
+_CONSULTANT_WITHHELD = frozenset({"command_run", "project_read", "project_git", "access_request", "ask_question"})
+# Withheld operations this module's dispatch refuses itself; the gateway
+# refuses the others.
+_CONSULTANT_REFUSED = frozenset({"access_request", "ask_question"})
+
+
+def _consultant_channel(store, channel: ChannelContext) -> bool:
+    """Whether this worker channel runs the senior consultant, read as the
+    gateway reads it: from the attempt's provisioned role."""
+    if channel.role != "worker" or not channel.attempt_id:
+        return False
+    with store.connection() as db:
+        row = db.execute("SELECT role_id FROM delegation_provisioning WHERE attempt_id=?",
+                         (channel.attempt_id,)).fetchone()
+    return bool(row and "consultant" in row["role_id"])
 
 
 def assignment_profile(store, channel: ChannelContext) -> tuple[str | None, str | None]:
@@ -628,7 +648,7 @@ def _offered(name: str, role_kind: str, role_id: str | None, stage: str | None) 
         return False
     # The senior consultant works only from its consultation packet and
     # retained reports: no commands and no project source reads.
-    if "consultant" in role_id and name in {"command_run", "project_read", "project_git"}:
+    if "consultant" in role_id and name in _CONSULTANT_WITHHELD:
         return False
     return True
 
@@ -737,6 +757,11 @@ def dispatch(store, channel: ChannelContext, operation: str, args: Mapping[str, 
     coordinator schema's shape.
     """
     from ..orchestration import gateway
+    if operation in _CONSULTANT_REFUSED and _consultant_channel(store, channel):
+        raise StoreError(
+            "wrong_channel_role", "operation", operation, "a tool offered to the senior consultant",
+            "The senior consultant requests no access and asks the user nothing: record missing "
+            "evidence as a limitation in its report.")
     if channel.role == 'worker' and operation not in {
             'ask_question', 'access_request', 'list_sources', 'read_source', 'read_capsule', 'read_large_output',
             'read_skill', 'read_report', 'list_reports', 'read_draft', 'project_read', 'project_git'}:

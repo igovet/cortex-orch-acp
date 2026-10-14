@@ -157,10 +157,12 @@ def test_gui_terminates_xvfb_and_electron_children_on_sigterm(tmp_path):
     )
     fake_xvfb.chmod(0o755)
 
+    # The wrapper drops every inherited PASEO_* variable, so the fixture's own
+    # variable must stay outside that namespace to reach the fake Paseo.
     fake_paseo = tmp_path / "Paseo"
     fake_paseo.write_text(
         "#!/bin/sh\n"
-        'echo $$ > "$PASEO_PID_FILE"\n'
+        'echo $$ > "$FAKE_GUI_PID_FILE"\n'
         "while :; do sleep 1; done\n"
     )
     fake_paseo.chmod(0o755)
@@ -169,8 +171,22 @@ def test_gui_terminates_xvfb_and_electron_children_on_sigterm(tmp_path):
     environment.update({
         "PATH": f"{tmp_path}:{environment['PATH']}",
         "XVFB_PID_FILE": str(xvfb_pid_file),
-        "PASEO_PID_FILE": str(paseo_pid_file),
+        "FAKE_GUI_PID_FILE": str(paseo_pid_file),
     })
+
+    def _alive(pid):
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        return True
+
+    def _recorded_pid(path):
+        try:
+            text = path.read_text().strip()
+        except OSError:
+            return None
+        return int(text) if text.isdigit() else None
 
     wrapper = subprocess.Popen(
         [sys.executable, str(SCRIPT), "gui", "--user-data-dir", str(tmp_path / "electron-profile"), "--paseo", str(fake_paseo),
@@ -180,26 +196,32 @@ def test_gui_terminates_xvfb_and_electron_children_on_sigterm(tmp_path):
     )
     try:
         deadline = time.monotonic() + 10
-        while time.monotonic() < deadline and not paseo_pid_file.exists():
+        while time.monotonic() < deadline and _recorded_pid(paseo_pid_file) is None:
             time.sleep(0.05)
-        assert paseo_pid_file.exists(), "fake Paseo never started"
+        assert _recorded_pid(paseo_pid_file) is not None, "fake Paseo never started"
 
         wrapper.send_signal(signal.SIGTERM)
         wrapper.communicate(timeout=10)
     finally:
         if wrapper.poll() is None:
             wrapper.kill()
-            wrapper.communicate()
+            # A SIGKILLed wrapper cannot clean up: the fake Paseo session it
+            # started keeps the pipes open, so stop the children here and
+            # never wait unboundedly.
+            for leaked, kill in ((_recorded_pid(paseo_pid_file), os.killpg),
+                                 (_recorded_pid(xvfb_pid_file), os.kill)):
+                if leaked is not None:
+                    try:
+                        kill(leaked, signal.SIGKILL)
+                    except (ProcessLookupError, PermissionError):
+                        pass
+            try:
+                wrapper.communicate(timeout=10)
+            except subprocess.TimeoutExpired:
+                pass
 
     xvfb_pid = int(xvfb_pid_file.read_text().strip())
     paseo_pid = int(paseo_pid_file.read_text().strip())
-
-    def _alive(pid):
-        try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
-            return False
-        return True
 
     deadline = time.monotonic() + 5
     while time.monotonic() < deadline and (_alive(xvfb_pid) or _alive(paseo_pid)):
@@ -453,6 +475,33 @@ def test_cli_drops_inherited_paseo_agent_target(tmp_path):
     )
     assert result.returncode == 0
     assert result.stdout.strip() == "agent=unset cwd=unset"
+
+
+@pytest.mark.parametrize("mode", ["cli", "gui"])
+def test_inherited_paseo_home_and_endpoint_overrides_are_dropped(tmp_path, mode):
+    fake_paseo = tmp_path / "Paseo"
+    fake_paseo.write_text(
+        "#!/bin/sh\n"
+        'printf "home=%s host=%s listen=%s\\n" "${PASEO_HOME-unset}" "${PASEO_HOST-unset}" "${PASEO_LISTEN-unset}"\n'
+    )
+    fake_paseo.chmod(0o755)
+    dev_home = tmp_path / "dev-home"
+    dev_home.mkdir()
+    env = dict(os.environ, PASEO_HOME=str(Path.home() / ".paseo"),
+               PASEO_HOST="127.0.0.1:6767", PASEO_LISTEN="127.0.0.1:6767")
+    if mode == "gui":
+        argv = ["gui", "--user-data-dir", str(tmp_path / "electron-profile")]
+        tail = []
+    else:
+        argv = []
+        tail = ["--", "status"]
+    result = subprocess.run(
+        [sys.executable, str(SCRIPT), *argv, "--paseo", str(fake_paseo),
+         "--home", str(dev_home), *tail],
+        capture_output=True, text=True, cwd=str(ROOT), env=env,
+    )
+    assert result.returncode == 0, result.stderr
+    assert f"home={dev_home} host=unset listen=unset" in result.stdout
 
 
 def test_gui_uses_private_cortex_xdg_paths_and_current_source_root(tmp_path):

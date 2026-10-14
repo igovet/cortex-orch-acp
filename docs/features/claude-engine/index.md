@@ -280,9 +280,13 @@ byte-for-byte after the fact.
 
 Every Cortex-created session at this pinned version, coordinator or worker,
 sends `strictMcpConfig: true`, empty `plugins`,
-`managedSettings.disableAllHooks`, and disallows native subagents plus `Bash`,
-`Read`, `Edit`, `Write`, `Grep`, `Glob`, `Skill` and `NotebookEdit` through the
-Claude-specific SDK `disallowedTools` option. MCP tools are not disallowed.
+`managedSettings.disableAllHooks`, `managedSettings.autoMemoryEnabled: false` (native
+auto-memory read and write is off), and disallows native subagents plus `Bash`,
+`Read`, `Edit`, `Write`, `Grep`, `Glob`, `Skill`, `NotebookEdit`, `EnterWorktree`,
+`ExitWorktree`, `PushNotification`, `EnterPlanMode`, `ExitPlanMode` and `TaskStop`
+through the Claude-specific SDK `disallowedTools` option. These six lifecycle tools
+belong to the runtime, not the model. `WebFetch` and `WebSearch` are not disallowed.
+MCP tools are not disallowed.
 The installed 0.78.0 and 0.81.2 option-forwarding paths are statically checked,
 and fake-wire tests check the emitted payload. The isolated CLI diagnosis
 observed a 0.81.2 session *before* this restriction with full MCP schemas and

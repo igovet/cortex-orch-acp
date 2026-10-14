@@ -194,9 +194,10 @@ _CATALOG: dict[str, dict[str, str]] = {
         "en": "Continue: let the coordinator decide how to proceed",
         "ru": "Продолжить: пусть координатор решит, как быть дальше",
     },
+    # Force-finish: the task ends CANCELLED, never as verified COMPLETED.
     "stop_option_finish": {
-        "en": "Finish: accept the current results and close the task",
-        "ru": "Завершить: принять текущие результаты и закрыть задачу",
+        "en": "Finish: close the task as is, without certifying unfinished work",
+        "ru": "Завершить: закрыть задачу как есть, без подтверждения незавершённой работы",
     },
     "stop_reason.worker_failed": {
         "en": "a worker finished, but not all of its checks passed",

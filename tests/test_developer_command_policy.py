@@ -157,14 +157,18 @@ def test_automatic_verification_can_inspect_git_but_cannot_write(tmp_path, repo,
     assert (root / 'a.txt').read_text() == 'one\n'
 
 
-@pytest.mark.parametrize('mode,profile', [('development', 'development'), ('auto', 'development'),
-                                          ('guarded', 'restricted')])
+@pytest.mark.parametrize('mode', ['development', 'auto', 'guarded'])
 @pytest.mark.requires_bwrap
 @pytest.mark.real_verification_sandbox
-def test_automatic_verification_follows_access_mode(tmp_path, repo, monkeypatch, mode, profile):
+def test_automatic_verification_is_read_only_in_every_mode(tmp_path, repo, monkeypatch, mode):
+    # Owner decision D1: verification uses the read-only host profile in
+    # every mode; the tool-cache allowlist (buildx activity included) stays
+    # writable, the rest of HOME does not.
     from cortex_runtime.configuration import access_mode
+    profile = access_mode.READ_ONLY_COMMAND_PROFILE
     home = tmp_path / 'home'
     (home / '.docker/buildx/activity').mkdir(parents=True)
+    (home / '.bashrc').write_text('# owner\n')
     monkeypatch.setenv('HOME', str(home))
     runtime_root = tmp_path / 'runtime'
     runtime_root.mkdir()
@@ -178,11 +182,11 @@ def test_automatic_verification_follows_access_mode(tmp_path, repo, monkeypatch,
     activity = home / '.docker/buildx/activity/default'
     script = (
         'from pathlib import Path\n'
-        f'try: Path({str(activity)!r}).write_text("now")\n'
-        'except OSError: print("host read-only")\n'
-        'try: Path("a.txt").write_text("forbidden")\n'
-        'except OSError: pass\n'
-        'else: raise AssertionError("project writable")\n')
+        f'Path({str(activity)!r}).write_text("now")\n'
+        f'for name in ("a.txt", {str(home / ".bashrc")!r}, {str(home / "new")!r}):\n'
+        '    try: Path(name).write_text("forbidden")\n'
+        '    except OSError: pass\n'
+        '    else: raise AssertionError(name)\n')
     context = dict(revision=1, nodes=[dict(stage='review', result=dict(project_digest=digest))],
                    plan=dict(verification=[['python3', '-B', '-c', script]]))
     recorded = []
@@ -194,7 +198,8 @@ def test_automatic_verification_follows_access_mode(tmp_path, repo, monkeypatch,
     _verification(runtime, task.task_id, machine, None, threading.Event())
     [check] = recorded[0][1]
     assert check['exit_code'] == 0 and check['complete'] and check['profile'] == profile, check
-    assert activity.exists() == (profile == 'development')
+    assert activity.read_text() == 'now'
+    assert (home / '.bashrc').read_text() == '# owner\n' and not (home / 'new').exists()
     assert (repo / 'a.txt').read_text() == 'one\n'
     with store.connection() as db:
         started = json.loads(db.execute("SELECT payload_json FROM runtime_events WHERE type='CHECK_EXECUTION_STARTED'").fetchone()[0])
@@ -203,7 +208,9 @@ def test_automatic_verification_follows_access_mode(tmp_path, repo, monkeypatch,
 
 @pytest.mark.requires_bwrap
 @pytest.mark.real_verification_sandbox
-def test_mode_switch_stops_a_running_verification_check(tmp_path, repo):
+def test_mode_switch_does_not_stop_a_running_verification_check(tmp_path, repo):
+    # The profile no longer depends on the mode, so a switch leaves the
+    # running check alone (it used to stop it as execution_policy_changed).
     from cortex_runtime.configuration import access_mode
     runtime_root = tmp_path / 'runtime'
     runtime_root.mkdir()
@@ -211,10 +218,20 @@ def test_mode_switch_stops_a_running_verification_check(tmp_path, repo):
     task = bootstrap_task(store, SourceEvent(origin='verify-test', event_id='one'), 'Verify', 'owner')
     TaskMachine(store).create(task.task_id, 'Verify')
     access_mode.switch(store, task.task_id, 'development', origin='acp_set_mode')
+    # Signalled through a git-ignored project directory: the check can write
+    # there and the host sees it (the sandbox's /var/tmp is private).
+    (repo / '.gitignore').write_text('.cortex/\nsignal/\n')
+    git('commit', '-qam', 'ignore signal', cwd=repo)
+    (repo / 'signal').mkdir()
     before = revision.capture_revision(str(repo))
     digest = before.get('dirty_digest') or before.get('digest')
-    started = tmp_path / 'started'
-    script = f'from pathlib import Path;import time;Path({str(started)!r}).write_text("yes");time.sleep(30)'
+    started, switched = repo / 'signal/started', repo / 'signal/switched'
+    script = ('import pathlib, time\n'
+              f'pathlib.Path({str(started)!r}).write_text("yes")\n'
+              'deadline = time.monotonic() + 20\n'
+              f'while not pathlib.Path({str(switched)!r}).exists() and time.monotonic() < deadline:\n'
+              '    time.sleep(.02)\n'
+              f'raise SystemExit(0 if pathlib.Path({str(switched)!r}).exists() else 9)\n')
     context = dict(revision=1, nodes=[dict(stage='review', result=dict(project_digest=digest))],
                    plan=dict(verification=[['python3', '-B', '-c', script]]))
     recorded = []
@@ -225,19 +242,21 @@ def test_mode_switch_stops_a_running_verification_check(tmp_path, repo):
                               _task_workspace_root=lambda _: str(repo))
     def switch():
         import time
-        deadline = time.monotonic() + 10
+        deadline = time.monotonic() + 20
         while not started.exists() and time.monotonic() < deadline:
             time.sleep(.01)
         access_mode.switch(store, task.task_id, 'guarded', origin='acp_set_mode')
+        time.sleep(.3)  # several of the runner's poll intervals
+        switched.write_text('yes')
     thread = threading.Thread(target=switch)
     thread.start()
     _verification(runtime, task.task_id, machine, None, threading.Event())
     thread.join()
     [check] = recorded[0][1]
-    assert not check['complete'] and check['profile'] == 'development', check
+    assert check['complete'] and check['exit_code'] == 0 and check['profile'] == 'restricted', check
     with store.connection() as db:
         failure = db.execute('SELECT failure FROM large_outputs WHERE id=?', (check['large_output_id'],)).fetchone()[0]
-    assert failure == 'execution_policy_changed'
+    assert failure is None
 
 
 @pytest.mark.parametrize('relative', sorted(PROJECT_NOTES))

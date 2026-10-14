@@ -173,7 +173,7 @@ def test_deep_work_moves_off_the_account_above_the_threshold(tmp_path):
     assert detail["decision_detail"]["route_basis"] == "auto"
     assert detail["decision_detail"]["effort"] == "high"
     decision = detail["decision_detail"]["route_decision"]
-    assert decision["rank_version"] == 10
+    assert decision["rank_version"] == 11
     assert "balance" not in decision
     assert decision["used_percent_compared"] is False
     assert decision["usage"] == dict(compared=False, active=False, status="unavailable", threshold=95.0, margin=10.0, least_used_percent=None)
@@ -182,26 +182,51 @@ def test_deep_work_moves_off_the_account_above_the_threshold(tmp_path):
     adapter.terminate_owned(result.attempt_id)
 
 
-def test_crossing_the_hot_band_alone_no_longer_overrides_affinity(tmp_path):
-    """Rank version 6: with no known cheaper alternative, a forced affinity
-    still keeps light work on the (barely) hot account -- crossing
-    HOT_PERCENT alone no longer overrides task/model fit."""
+def test_worker_configuration_confirmed_is_findable_by_its_own_recovery_capsule(tmp_path):
+    """C-22: the event used to be stored with assignment_ref=None (``launch``
+    never had an "assignment_ref" key -- only the unrelated work-graph
+    "assignment_id" -- so ``launch.get("assignment_ref")`` was always
+    ``None``), and recovery.capsule's own lookup is an exact match on the
+    real assignment_ref (the provisioning idempotency_key). Confirm the real
+    end-to-end delegate() -> build_capsule path now finds it."""
+    from cortex_runtime.recovery.capsule import build_capsule
+
+    store, channel, provisioning, adapter, connection_a, connection_b, log_a, log_b, project, environ = _setup(tmp_path)
+    result = provisioning.delegate(channel, "Audit", "Audit it.", "security-auditor", "Report.", "req-confirm-1")
+    assert result.status == "ready"
+    capsule = build_capsule(store, channel.task_id,
+                            dict(role="worker", assignment_ref=result.assignment_ref, attempt_id=result.attempt_id))
+    confirmed = capsule["sections"]["route_and_config"]["own_worker_route"]["worker_configuration_confirmed"]
+    assert confirmed.get("status") != "unavailable", confirmed
+    assert confirmed["attempt_id"] == result.attempt_id
+    assert confirmed["confirmation_evidence_ref"]
+    adapter.terminate_owned(result.attempt_id)
+
+
+def test_a_known_hot_account_now_loses_to_an_unknown_alternative_despite_affinity(tmp_path):
+    """C-19 (owner D5), rank version 11: a known >=95%-used candidate
+    always loses to a non-hot one now, even an *unknown*-usage
+    alternative and even when engine affinity would otherwise keep the
+    work on the hot account -- rank version 6's 'no known cheaper
+    alternative keeps it' premise no longer holds."""
     store, channel, provisioning, adapter, connection_a, connection_b, log_a, log_b, project, environ = _setup(tmp_path)
     _routing(project, {"engine_affinity": {"*": "codex-acp"}})
     _codex_used(connection_a, 95.0)
     result = provisioning.delegate(channel, "Look", "Find it.", "explorer", "Found.", "req-1")
     assert result.status == "ready"
-    assert "session/new" in [entry["method"] for entry in _read_log(log_a)]
-    assert _read_log(log_b) == []
-    assert _effort_calls(log_a)[-1]["params"]["value"] == "low"
+    assert "session/new" in [entry["method"] for entry in _read_log(log_b)]
+    assert _read_log(log_a) == []
+    assert _effort_calls(log_b)[-1]["params"]["value"] == "low"
     decision = routing_store.list_audit_for_attempt(store, result.attempt_id)[0]["decision_detail"]["route_decision"]
-    assert decision["decided_by"] == "affinity"
+    assert decision["decided_by"] == "quota"
     adapter.terminate_owned(result.attempt_id)
 
 
 def test_light_work_still_moves_off_the_account_above_the_threshold_on_a_meaningful_gap(tmp_path):
     """A meaningfully cheaper known alternative still moves light work off
-    the hot account, through the usage-gap signal."""
+    the hot account; the hot/non-hot quota flag decides it directly now
+    (C-19, rank version 11), ahead of the usage-gap signal it used to
+    reach through."""
     store, channel, provisioning, adapter, connection_a, connection_b, log_a, log_b, project, environ = _setup(tmp_path)
     _routing(project, {"engine_affinity": {"*": "codex-acp"}})
     _codex_used(connection_a, 95.0)
@@ -212,7 +237,7 @@ def test_light_work_still_moves_off_the_account_above_the_threshold_on_a_meaning
     assert _read_log(log_a) == []
     assert _effort_calls(log_b)[-1]["params"]["value"] == "low"
     decision = routing_store.list_audit_for_attempt(store, result.attempt_id)[0]["decision_detail"]["route_decision"]
-    assert decision["decided_by"] == "usage"
+    assert decision["decided_by"] == "quota"
     adapter.terminate_owned(result.attempt_id)
 
 
@@ -712,6 +737,31 @@ def test_a_user_requested_flagship_is_dispatched_and_audited(tmp_path, monkeypat
         assert (audit["engine"], audit["model"], detail["route_basis"]) == ("claude-agent-acp", "claude-sonnet-5", "auto")
         assert decision["model_hint_status"] == "ignored:tier_mismatch"
         assert decision["user_model_request"] == dict(status="not_requested_by_user")
+    adapter.terminate_owned(result.attempt_id)
+
+
+def test_a_user_revocation_reaches_the_live_route_audit(tmp_path, monkeypatch):
+    """C-11: ``orchestration.state.attempt_routing`` and
+    ``delegation.live_adapters._resolve_runtime_route`` carry the user's
+    revocation (``routing.auto_route.user_model_revocation``) through to
+    the real dispatch, not merely at the ``auto_route.choose()`` level --
+    the gap ``r_b98b7ed46749`` left open."""
+    from cortex_runtime.orchestration import state
+
+    store, channel, provisioning, adapter, connection_a, connection_b, log_a, log_b, project, environ = _setup(
+        tmp_path, model_a="gpt-6-astra", model_b="claude-sonnet-5")
+    user_revocation = dict(source_ref="r_0123456789ab:-1", family="astra", matched="Astra",
+                           reason="revoked_by_user", revoked_source_ref="r_fedcba987654:-1")
+    monkeypatch.setattr(state, "attempt_routing", lambda store, task_id, attempt_id: state.AttemptRouting(
+        False, "normal", "codex-acp/gpt-6-astra", "The user asked for Astra.", None, None, user_revocation))
+    result = provisioning.delegate(channel, "Build", "Build it.", "backend-dev", "Done.", "req-user-revocation")
+    assert result.status == "ready"
+    audit = routing_store.list_audit_for_attempt(store, result.attempt_id)[0]
+    decision = audit["decision_detail"]["route_decision"]
+    # The revoked family is never substituted in: the ordinary non-flagship
+    # route is dispatched, exactly as an absent/unrequested hint would be.
+    assert (audit["engine"], audit["model"]) == ("claude-agent-acp", "claude-sonnet-5")
+    assert decision["user_model_request"] == dict(user_revocation, status="revoked_by_user")
     adapter.terminate_owned(result.attempt_id)
 
 

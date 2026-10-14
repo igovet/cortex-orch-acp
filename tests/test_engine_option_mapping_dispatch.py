@@ -46,7 +46,7 @@ def test_option_mapping_for_dispatches_by_engine_name():
     assert _option_mapping_for("some-future-engine") is None
 
 
-GATEWAY_ONLY = dict(disallowedTools=['Agent','Task','Workflow','TeamCreate','TeamDelete','SendMessage','ScheduleWakeup','Monitor','CronCreate','CronDelete','CronList','RemoteTrigger','Bash','Read','Edit','Write','Grep','Glob','Skill','NotebookEdit'],strictMcpConfig=True,skills=[],plugins=[],managedSettings=dict(disableAllHooks=True))
+GATEWAY_ONLY = dict(disallowedTools=['Agent','Task','Workflow','TeamCreate','TeamDelete','SendMessage','ScheduleWakeup','Monitor','CronCreate','CronDelete','CronList','RemoteTrigger','EnterWorktree','ExitWorktree','PushNotification','EnterPlanMode','ExitPlanMode','TaskStop','Bash','Read','Edit','Write','Grep','Glob','Skill','NotebookEdit'],strictMcpConfig=True,skills=[],plugins=[],managedSettings=dict(disableAllHooks=True,autoMemoryEnabled=False))
 # With the unified Cortex prompt Claude's own skill listing, attribution and
 # git instructions are switched off as well.
 UNIFIED = dict(GATEWAY_ONLY, skills=[], settings=dict(attribution=dict(commit='', pr=''), includeGitInstructions=False))
@@ -280,7 +280,7 @@ def test_claude_0_88_dispatch_includes_native_tool_policy(role, instructions):
     assert options["effort"] == "high"
     assert "tools" not in options
     assert options["plugins"] == []
-    assert options["managedSettings"] == {"disableAllHooks": True}
+    assert options["managedSettings"] == {"disableAllHooks": True, "autoMemoryEnabled": False}
     if instructions:
         assert isinstance(meta["systemPrompt"], str)
         assert instructions in meta["systemPrompt"]

@@ -110,7 +110,12 @@ task, the turn ends with a localized `turn_paused` line saying so, plus
 `turn_paused_unknown_actions` with the number of worker actions this stop cut
 off mid-way (open receipts whose channel the stop revoked). It is distinct from a queued
 Paseo steer, which uses a concurrent configuration request and does not call
-`session/cancel`. The cancellation path records `TURN_INTERRUPTED`, not
+`session/cancel`. On a Paseo session, a `session/cancel` followed by a
+`session/prompt` on the same session is steering rather than Stop: the cancelled
+coordinator turn ends at once, running workers continue, and the prompt is applied
+as steering. A lone cancel pauses the task only after a 5-second grace window with no
+following prompt (`DEFAULT_HOST_CANCEL_GRACE_SECONDS`); other clients pause at once.
+The cancellation path records `TURN_INTERRUPTED`, not
 `USER_STEERING`; `turn_interrupted` classifies as `cancellation` even when
 an adapter prefixes it with `engine_error`, and a cancelled worker never
 enters fallback routing. A worker whose engine open was still queued, or still

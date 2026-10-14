@@ -9,7 +9,9 @@ descriptions and raw inputs never supply tool identity.
 
 Deletion is recognized lexically from what the engine declares: ACP's
 ``delete``/``move`` kinds and declared ``rm`` shell invocations. Code that
-hides an ``rm`` invocation from that text is outside this fence.
+hides an ``rm`` invocation from that text is outside this fence. A brokered
+``command_run`` argv is classified more widely by
+:func:`declared_command_deletion` (still lexical).
 """
 import re
 import shlex
@@ -171,24 +173,126 @@ def _shell_command_deletion(script):
     return False
 
 
+#: Programs whose every invocation removes files or directories.
+_DELETING_PROGRAMS = frozenset({'rm', 'unlink', 'rmdir'})
+#: Wrappers that run the rest of their argv as a command: (options taking a
+#: value, positional operands before the command, options meaning no command
+#: runs). ``env``/``sudo``/``xargs``/``exec`` keep their own handling.
+_RUNNING_WRAPPERS = {
+    'timeout': ({'-s', '--signal', '-k', '--kill-after'}, 1, frozenset()),
+    'nice': ({'-n', '--adjustment'}, 0, frozenset()),
+    'ionice': ({'-c', '--class', '-n', '--classdata'}, 0, frozenset({'-p', '--pid', '-P', '--pgid', '-u', '--uid'})),
+    'nohup': (set(), 0, frozenset()),
+    'setsid': (set(), 0, frozenset()),
+    'stdbuf': ({'-i', '--input', '-o', '--output', '-e', '--error'}, 0, frozenset()),
+    'time': ({'-f', '--format', '-o', '--output'}, 0, frozenset()),
+    'doas': ({'-u', '-C'}, 0, frozenset({'-C'})),
+    'command': (set(), 0, frozenset({'-v', '-V'})),
+    'busybox': (set(), 0, frozenset()),
+}
+_RSYNC_DELETION = re.compile(r'--(?:delete(?:-[a-z-]+)?|remove-source-files|del)(?:=.*)?$')
+_GIT_VALUE_OPTIONS = frozenset({'-C', '-c', '--git-dir', '--work-tree', '--namespace', '--super-prefix',
+                                '--config-env', '--exec-path', '--list-cmds'})
+
+
+def _running_wrapper(argv, executable):
+    """The command a _RUNNING_WRAPPERS program runs, or None for none."""
+    value_options, positional, no_command = _RUNNING_WRAPPERS[executable]
+    at = 1
+    while at < len(argv):
+        arg = argv[at]
+        if arg == '--':
+            at += 1
+            break
+        if arg in no_command or arg.split('=', 1)[0] in no_command:
+            return None
+        if arg in value_options:
+            at += 2
+        elif arg.startswith('-') and arg != '-':
+            at += 1
+        else:
+            break
+    return argv[at + positional:]
+
+
+def _short_cluster_has(arg, flag, value_flags):
+    """``-xyz`` contains ``flag`` before any option that takes the rest as a value."""
+    if not arg.startswith('-') or arg.startswith('--'):
+        return False
+    for char in arg[1:]:
+        if char == flag:
+            return True
+        if char in value_flags:
+            return False
+    return False
+
+
+def _shred_removes(argv):
+    for arg in argv[1:]:
+        if arg == '--':
+            return False
+        if arg == '--remove' or arg.startswith('--remove=') or _short_cluster_has(arg, 'u', 'ns'):
+            return True
+    return False
+
+
+def _git_deletion(argv):
+    """``git clean`` (unless a dry run) and ``git rm`` of working-tree files."""
+    at = 1
+    while at < len(argv) and argv[at].startswith('-'):
+        at += 2 if argv[at] in _GIT_VALUE_OPTIONS else 1
+    if at >= len(argv):
+        return False
+    subcommand, options = argv[at], argv[at + 1:]
+    options = options[:options.index('--')] if '--' in options else options
+    if subcommand == 'clean':
+        return not any(arg in {'-n', '--dry-run'} or _short_cluster_has(arg, 'n', 'e') for arg in options)
+    if subcommand == 'rm':
+        return not any(arg in {'--cached', '-n', '--dry-run'} or _short_cluster_has(arg, 'n', '') for arg in options)
+    return False
+
+
 def declared_command_deletion(argv) -> bool:
-    """Lexical declaration only: neither interpreters nor daemons are a firewall."""
+    """Lexical declaration only: neither interpreters nor daemons are a firewall.
+
+    Recognized: ``rm``, ``unlink``, ``rmdir``, ``shred -u``/``--remove``,
+    ``find -delete`` and ``find -exec``/``-execdir``/``-ok``/``-okdir`` of a
+    deletion, ``git clean`` (not ``-n``) and ``git rm`` (not ``--cached``),
+    ``rsync --delete*``/``--remove-source-files``; through the ``env``,
+    ``sudo``, ``doas``, ``xargs``, ``exec``, ``timeout``, ``nice``,
+    ``ionice``, ``nohup``, ``setsid``, ``stdbuf``, ``time``, ``command`` and
+    ``busybox`` wrappers and explicit ``sh``/``bash``/``dash``/``zsh -c``
+    scripts. A deletion performed by an interpreter, a script file, a build
+    tool, an alias or a daemon is not seen.
+    """
     # Only executable positions and explicit shell scripts carry command syntax.
     while argv:
         executable = argv[0].rsplit('/', 1)[-1]
-        if executable == 'rm':
+        if executable in _DELETING_PROGRAMS:
             return True
         if executable in {'env', 'sudo', 'xargs', 'exec'}:
             argv = _wrapped_command(argv, executable)
+            continue
+        if executable in _RUNNING_WRAPPERS:
+            argv = _running_wrapper(argv, executable)
+            if argv is None:
+                return False
             continue
         if executable in {'sh', 'bash', 'dash', 'zsh'}:
             script = _shell_script(argv, executable)
             return script is not None and _shell_command_deletion(script)
         if executable == 'find':
             return any(
-                declared_command_deletion(argv[at + 1:])
-                for at, arg in enumerate(argv) if arg in {'-exec', '-execdir'}
+                arg == '-delete' or (arg in {'-exec', '-execdir', '-ok', '-okdir'}
+                                     and declared_command_deletion(argv[at + 1:]))
+                for at, arg in enumerate(argv)
             )
+        if executable == 'shred':
+            return _shred_removes(argv)
+        if executable == 'git':
+            return _git_deletion(argv)
+        if executable == 'rsync':
+            return any(_RSYNC_DELETION.match(arg) for arg in argv[1:])
         return False
     return False
 

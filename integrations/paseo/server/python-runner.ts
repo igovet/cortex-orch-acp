@@ -49,14 +49,22 @@ export type ProcessRunOptions = {
   cwd?: string;
 };
 
-/** Run `python3 -B -c <script> ...args` asynchronously, bounded by the
- * shared concurrency limit above. Mirrors the `spawnSync` result shape
+/** The store readers' fixed working directory: never a project or plugin
+ * directory a planted module could be imported from. */
+export const STORE_READER_CWD = "/";
+
+/** Run `python3 -I <args>` (the store readers pass `-B -c <script> ...`)
+ * asynchronously, bounded by the shared concurrency limit above. `-I`
+ * (isolated mode) ignores PYTHON* environment variables and the user site
+ * directory and keeps the script and working directories off `sys.path`;
+ * the working directory is fixed to `STORE_READER_CWD`. The readers use the
+ * standard library only. Mirrors the `spawnSync` result shape
  * (`status`/`stdout`) the store readers already check, so callers are
  * unchanged beyond adding `await`. A timeout or nonzero exit is reported as
  * a nonzero `status`, matching `spawnSync`'s own timeout behavior (`status`
  * is `null`, which the existing `!== 0` checks already treat as failure). */
 export async function runPython(args: readonly string[], options: { timeoutMs: number; maxBuffer?: number }): Promise<PythonRunResult> {
-  return runProcess("python3", args, options);
+  return runProcess("python3", ["-I", ...args], { ...options, cwd: STORE_READER_CWD });
 }
 
 /** `runPython` for an explicit interpreter, with optional stdin, environment

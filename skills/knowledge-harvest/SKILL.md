@@ -124,8 +124,9 @@ A fallback must remain limited to the requested scope; never silently fall back
 or chain multiple fallback searches.
 
 Run the repository's deterministic knowledge-census validator when available.
-Its result is advisory evidence for the model and verification worker, never a
-backend gate, authorization decision, or substitute for source confirmation.
+Its result is advisory evidence for the model's own readiness judgment and the
+runtime's independent review, never a backend gate, authorization decision, or
+substitute for source confirmation.
 
 Use `<!-- GENERATED:START -->` and `<!-- GENERATED:END -->` for refreshable
 facts. Preserve text outside generated blocks and do not overwrite manual
@@ -200,9 +201,9 @@ contracts. Split it into discoverable feature pages and link shared flows.
 
 ## Coverage matrix
 
-The feature index must contain a source-backed matrix with at least:
+The feature index must contain a source-backed matrix.
 
-It must also use these five literal Markdown section headings; prose mentions
+It must use these five literal Markdown section headings; prose mentions
 do not substitute for them:
 
 ```text
@@ -306,8 +307,8 @@ or replaces independent source confirmation and the model's readiness judgment.
 
 ## Corrective findings
 
-Record a finding and dispatch the appropriate corrective owner instead of
-claiming completion when:
+Record a finding in your report as unresolved, for the coordinator to decide,
+instead of claiming completion when:
 
 - only recent commits were scanned without a validated complete baseline;
 - a large repository received one broad explorer with no domain partitioning;

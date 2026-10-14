@@ -13,7 +13,7 @@ import tempfile
 import threading
 import time
 
-from .state import TaskMachine, encoded, event, now, transition
+from .state import CONSULTATION_NODE, TaskMachine, encoded, event, now, transition
 from .prompt_context import coordinator_prompt_context
 from . import user_text
 from .worker_brief import build_worker_brief
@@ -67,11 +67,29 @@ _EXECUTION_LOCKS = {}
 _EXECUTION_LOCKS_GUARD = threading.Lock()
 
 
+def _title_from_objective(objective, max_chars=200):
+    """A short display title for an assignment card/capsule entry.
+
+    A hard ``[:max_chars]`` slice can land mid-word (C-30). Cut at the last
+    whitespace within the limit instead; an objective with no whitespace
+    before the limit falls back to the hard slice rather than growing
+    unbounded."""
+    if len(objective) <= max_chars:
+        return objective
+    cut = objective[:max_chars]
+    boundary = cut.rfind(' ')
+    return (cut[:boundary] if boundary > 0 else cut).rstrip()
+
+
 def _dispatch_ready(runtime, machine, task_id, channel, context, emit_tool_call):
     for node in machine.claim_ready(task_id, channel.channel_id):
         dependencies = set(json.loads(node['dependencies_json']))
         inputs = [dict(node=n['node_id'], report_ref=n['result']['report_ref'])
                   for n in context['nodes'] if n['node_id'] in dependencies and n['result']]
+        if node['node_id'] == CONSULTATION_NODE:
+            # An escalation-created consultant reads no project source: its
+            # packet is the runtime-built report selection (owner decision D8).
+            inputs = machine.consultation_reports(task_id, node.get('revision', context['revision'])) + inputs
         review_evidence = []
         if node['stage'] == 'review':
             from .artifacts import project_git_evidence
@@ -104,7 +122,7 @@ def _dispatch_ready(runtime, machine, task_id, channel, context, emit_tool_call)
         )
         from .scheduler import dispatch_assignment
         dispatch_assignment(runtime._store, channel, dict(
-            title=node['objective'][:200], brief=brief, role=node['role'],
+            title=_title_from_objective(node['objective']), brief=brief, role=node['role'],
             acceptance='Publish a truthful immutable report and structured result. '
                        + ('Publish the complete review report inline with result_submit and include a review verdict.'
                           if node['stage'] == 'review' else 'Complete the assigned objective.'),
@@ -140,22 +158,20 @@ def _verification_output_tail(output):
 
 
 @contextlib.contextmanager
-def _verification_command(root, scratch, argv, profile='restricted'):
+def _verification_command(root, scratch, argv):
     """Prepare the production sandbox; tests may replace only this launch seam.
 
-    ``profile`` follows the task's access mode, as a worker's command_run
-    does: ``development`` makes the host writable (a ``docker build`` writes
-    ~/.docker/buildx) while the project stays read-only outside its
-    git-ignored directories either way."""
-    from .sandbox import as_owner, gateway_command, development_command, with_umask, readonly_test_cache
+    Every access mode runs a check in the read-only host profile of a role
+    without a write grant (``sandbox.readonly_command``, owner decision D1):
+    the host and HOME read-only except the explicit tool-cache allowlist, a
+    private TMPDIR and /var/tmp, its own PID namespace, the protected control
+    plane read-only. Only the project's git-ignored directories (caches,
+    builds, node_modules) are writable, so sources stay untouched and the
+    revision (which skips ignored paths) cannot drift. pytest's cache goes
+    to the scratch directory."""
+    from .sandbox import readonly_command, with_umask, readonly_test_cache
     scopes = [path + '/**' for path in revision.ignored_directories(str(root))]
-    mount = (development_command(root, scratch, with_umask(argv), scopes, environ=os.environ)
-             if profile == 'development' else
-             gateway_command(root, scratch, with_umask(argv), scopes, system_root=True,
-                             reveal=frozenset({'.git'})))
-    with mount as (command, fds):
-        if profile != 'development':
-            as_owner(command, os.environ)
+    with readonly_command(root, scratch, with_umask(argv), environ=os.environ, scopes=scopes) as (command, fds):
         readonly_test_cache(command, scratch, os.environ)
         yield command, fds
 
@@ -163,11 +179,10 @@ def _verification_command(root, scratch, argv, profile='restricted'):
 def _verification_observation(runtime, task_id, context, expected, emit_tool_call, cancel, run_id):
     """Run retained literal argv commands to completion with complete output.
 
-    The project is read-only outside its git-ignored directories; the rest
-    of the host follows the task's access mode, as a worker's command_run
-    does (read-only in Guarded, writable outside the protected control plane
-    in Development and Auto). A mode switch during a check stops it,
-    incomplete. The real runtime store is inaccessible.
+    The project is read-only outside its git-ignored directories and the
+    rest of the host is read-only except tool caches and private temp, in
+    every access mode (``_verification_command``), so a mode switch during a
+    check changes nothing about it. The real runtime store is inaccessible.
     Missing OS isolation is a failure, never an unsandboxed fallback.
     """
     root = Path(runtime._task_workspace_root(task_id))
@@ -197,11 +212,10 @@ def _verification_observation(runtime, task_id, context, expected, emit_tool_cal
             # node_modules) are writable, so sources stay untouched and the
             # revision (which skips ignored paths) cannot drift. No access to
             # the real private store, even from an interpreter.
-            from ..configuration import access_mode
-            profile = access_mode.command_profile(access_mode.current(runtime._store, task_id))
+            from ..configuration.access_mode import READ_ONLY_COMMAND_PROFILE
+            profile = READ_ONLY_COMMAND_PROFILE
             try:
-                command, fds = stack.enter_context(
-                    _verification_command(root, scratch, argv, profile=profile))
+                command, fds = stack.enter_context(_verification_command(root, scratch, argv))
             except StoreError as error:
                 if trace is not None:
                     trace.record("verification", "in", dict(blocker=str(error)),
@@ -230,20 +244,21 @@ def _verification_observation(runtime, task_id, context, expected, emit_tool_cal
                     if trace is not None:
                         trace.record("verification", "in", dict(launch_error=type(error).__name__),
                                      task_id=task_id, command_ref=ref)
-                    raise
+                    if emit_tool_call:
+                        emit_tool_call(dict(tool_call_id=ref, new=False, status='failed',
+                                            raw_output=dict(launch_error=type(error).__name__)))
+                    # A visible stop with its reason; re-raised, the same
+                    # launch crashed every later VERIFYING turn again.
+                    return dict(blocker=f'verification_execution_error:{type(error).__name__}', stale=False)
                 finally:
                     for extra in set(launch_fds) - set(fds):
                         os.close(extra)
                 # No time limit, as for a worker's command_run: a project's
                 # full suite runs to completion; only a task stop ends it.
-                interrupted = policy_changed = False
+                interrupted = False
                 while proc.poll() is None:
                     if cancel.wait(.1):
                         interrupted = True
-                        _kill_verification(proc)
-                        break
-                    if access_mode.command_profile(access_mode.current(runtime._store, task_id)) != profile:
-                        interrupted = policy_changed = True
                         _kill_verification(proc)
                         break
                 code = proc.wait()
@@ -270,8 +285,7 @@ def _verification_observation(runtime, task_id, context, expected, emit_tool_cal
                 saved = persist_output_stream(
                     runtime._store, task_id=task_id, owner_scope='coordinator',
                     source_kind='terminal', source_ref=ref, stream=output,
-                    exit_code=code, failure=('execution_policy_changed' if policy_changed
-                                             else 'interrupted' if interrupted else None),
+                    exit_code=code, failure='interrupted' if interrupted else None,
                 )
                 output_tail = _verification_output_tail(output)
         failed = interrupted or code != 0 or not unchanged
@@ -318,8 +332,16 @@ def _verification(runtime, task_id, machine, emit_tool_call, cancel):
     reviews = [node for node in context['nodes'] if node['stage'] == 'review']
     expected = ((reviews[-1]['result'] or {}).get('project_digest') if reviews
                 else (context['review_not_required'] or {}).get('revision_digest'))
-    observed = _verification_observation(
-        runtime, task_id, context, expected, emit_tool_call, cancel, time.monotonic_ns())
+    try:
+        observed = _verification_observation(
+            runtime, task_id, context, expected, emit_tool_call, cancel, time.monotonic_ns())
+    except Exception as error:  # noqa: BLE001 - any runner failure is a visible stop, never a crash loop
+        if cancel.is_set():
+            return
+        # Steering is not applied in VERIFYING: an escaping exception left
+        # the task there and crashed every later turn the same way.
+        machine.move(task_id, 'BLOCKED', blocker=f'verification_execution_error:{type(error).__name__}')
+        return
     if cancel.is_set():
         return
     if observed.get('blocker'):
@@ -539,11 +561,16 @@ def _run(runtime, task_id, session_id, channel, session_ref, content, emit_updat
             prompted.clear()
             continue
         if state == 'ANSWER_READY':
-            machine.move(task_id,'COMPLETED')
+            # COMPLETED only for an informational answer or certified work: a
+            # final answer on work whose review/verification did not pass is
+            # shown, and the task ends FAILED (answer_not_certified:...).
+            closed = machine.close_answer(task_id)
             from .pipeline import publish
             publish(runtime._store,channel,machine.context(task_id))
-            runtime._set_state(task_id,'accepted',wait_reason=None)
             emit_update(_own_paragraph(context['synthesis']))
+            if closed != 'COMPLETED':
+                continue
+            runtime._set_state(task_id,'accepted',wait_reason=None)
             return StopReason.END_TURN
         if state == 'RECOVERING':
             # Explicit cancellation/replanning revokes first, then terminates
@@ -636,8 +663,13 @@ def _run(runtime, task_id, session_id, channel, session_ref, content, emit_updat
             # Reassert the selected turn language after English report/context
             # blocks. Worker text is evidence, never the coordinator's locale.
             message += '\n\n' + localized_messages.render('answer_in_language',language)
-            message, delivery_id, delivery_blocked = runtime._begin_generation_delivery(
-                task_id, session_ref, 'orchestrator', message, emit_update=emit_update, language=language)
+            try:
+                message, delivery_id, delivery_blocked = runtime._begin_generation_delivery(
+                    task_id, session_ref, 'orchestrator', message, emit_update=emit_update, language=language)
+            except BaseException:
+                # Nothing reached the coordinator: its claimed events stay deliverable.
+                events.release_claim(runtime._store, task_id, delivery_marker)
+                raise
             if delivery_blocked:
                 events.release_claim(runtime._store,task_id,delivery_marker)
                 with runtime._store.connection() as db:
@@ -726,6 +758,12 @@ def _run(runtime, task_id, session_id, channel, session_ref, content, emit_updat
                           dict(engine_session_id=session_ref, stop_reason=outcome.stop_reason.value))
                     db.commit()
             except Exception as error:
+                # The prompt raised (or was cancelled by raising): its delivery
+                # is unconfirmed, so the claimed events (worker results, user
+                # messages) are released for the next prompt instead of being
+                # lost for the rest of this process. At-least-once, as
+                # mark_delivered documents.
+                events.release_claim(runtime._store, task_id, delivery_marker)
                 # G6: pairs with COORDINATOR_TURN_STARTED above -- this
                 # prompt() call raised instead of returning.
                 with runtime._store.connection() as db:
@@ -758,7 +796,6 @@ def _run(runtime, task_id, session_id, channel, session_ref, content, emit_updat
                             except Exception:
                                 pass
                             else:
-                                events.release_claim(runtime._store, task_id, delivery_marker)
                                 prompted[key] -= 1
                                 continue
                     machine.move(task_id, 'BLOCKED', blocker=str(error) if isinstance(error,StoreError) else ('engine_failure:'+kind if kind else f'coordinator_prompt_failed:{type(error).__name__}'))
@@ -1161,9 +1198,10 @@ def _released_request(runtime, task_id):
     with runtime._store.connection() as db:
         task = db.execute('SELECT * FROM runtime_tasks WHERE task_id=?', (task_id,)).fetchone()
         released = bool(task) and released_by_user(db, task)
-    return ('The runtime stopped this task and the user answered its stop question (see retained events). '
+    return ('The runtime stopped this task and the user answered its stop question in their own words (see retained events). '
             'If the user chose to finish or stop, submit answer_submit with a final summary grounded in the retained reports, '
-            'stating plainly which checks did not pass. Otherwise submit a new plan or ask the user. ') if released else ''
+            'stating plainly which checks did not pass; the runtime then closes the task without certifying work whose '
+            'review or verification did not pass. Otherwise submit a new plan or ask the user. ') if released else ''
 
 
 def _unknown_outcome_request(runtime, task_id):

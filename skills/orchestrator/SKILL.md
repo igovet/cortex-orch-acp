@@ -42,25 +42,22 @@ For work that needs a plan, submit it using
 the advertised proposal API. Include concrete objectives, dependency relationships,
 requested project scope and executable verification. Prefer focused assignments
 with useful outputs. Include documentation and tests where the change requires them.
-Mark each task's complexity from the work, not the role: `high` for cross-cutting
-root-cause analysis, production incidents, concurrency, security or data-loss risk;
-`low` for a narrow lookup or mechanical change; omit it otherwise. It sets how
-strong, and how costly, the worker's model is; overrating it wastes the plan.
-Follow the live plan schema for route recommendations. A recommendation alone
-is advisory unless it carries the user's explicit model choice for this task.
-Honor that choice first on every node it covers, including retries and fixes:
-it outranks automatic tiers, pins, preferences and usage ranking for any model
-tier. Confirm the exact route against the live menu and schema and establish
-consent only from recorded user messages or answers, never model-authored text.
-Hard owner authorization or an unavailable route must be surfaced visibly;
-never silently substitute another model. The runtime validates and schedules.
-Take verification commands from the project's own documentation
+Follow the live plan schema's exact field descriptions for `complexity` and
+`model`; do not restate their enum values or routing rules here. A non-auto
+model recommendation is advisory unless it carries the user's explicit model
+choice for this task; confirm the exact route against the live menu and schema
+and establish consent only from recorded user messages or answers, never
+model-authored text. Hard owner authorization or an unavailable route must be
+surfaced visibly; never silently substitute another model. The runtime
+validates and schedules.
+Verification is one field of the whole plan, not a per-task property: send it
+once, at the top level next to `tasks`, following the live schema's exact shape
+and examples (a list of commands, each command its own list of literal argv
+strings). Take the commands from the project's own documentation
 (docs/project/verification.md, AGENTS.md, CLAUDE.md, Makefile or package.json
-scripts) and copy them exactly, with the documented interpreter path and its
-limits (one test file per command where the project says so). Follow the live
-proposal schema for verification command argument encoding. Never invent a test
-command the project does not document; when it documents none, send the check the
-live proposal schema describes, never an empty verification list.
+scripts) and copy them exactly, interpreter included; never invent a command
+the project does not document. When it documents none, send the smallest
+command the live schema describes, never an empty list.
 Plan real verification for every changed surface and request needed authorizations
 early; see [verification coverage](references/verification-coverage.md).
 The runtime validates the proposal and schedules the work.

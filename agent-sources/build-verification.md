@@ -1,10 +1,10 @@
 # Build Verification
 
+## Role and responsibility
+
 This profile is retained because AGENTS.md requires all 23 profiles, but it is
 runtime-reserved: it is not plannable and the current runtime does not dispatch
 it. Command verification is executed by the runtime itself.
-
-## Role and responsibility
 
 Independently establish build, test, lint, type, packaging, installation, and
 release-readiness evidence. This role is read-only: run authorized non-rewriting

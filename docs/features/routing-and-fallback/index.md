@@ -553,7 +553,7 @@ a built-in fallback. Setting the attributes to `null` removes them.
   Ranking, hints, preferences, quota safety and retry diversification still
   apply; stretch candidacy does not guarantee selection.
 - **Exclusions.** For ordinary automatic routing, high complexity, deep/flagship work and deep roles
-  exclude light stretch candidates, even as a fallback. When no permitted
+  exclude light stretch candidates, even as a fallback. A model configured with several native tiers (for example light and standard) keeps its other tiers when its stretch promotion is excluded; only a light-only model is denied outright. When no permitted
   route remains, dispatch refuses with `no_available_route`.
 - **Audits.** New decisions emit `stretch` (`status`, `candidate`,
   `chosen`, `outranked_by`; pins emit `status` and `chosen`).
@@ -636,29 +636,31 @@ eligible candidates the rank criteria are, first difference wins:
    Legacy provider preference remains first for pre-model stored plans.
 3. Honoured model hint for a new plan (see above), ignored on the same
    hot-and-meaningfully-worse basis.
-4. Plan usage (rank version 10), only when every candidate's usage is known
+4. Quota band (rank version 11): a candidate whose known usage is at or above 95%
+   (HOT_PERCENT) ranks behind every candidate that is not hot, whether that candidate's usage
+   is known or unknown. The criterion sits here, ahead of the usage-gap band, diversification
+   and affinity, so no affinity or diversification preference moves a hot route ahead of a
+   non-hot one. Unknown usage is never treated as hot.
+5. Plan usage, only when every candidate's usage is known
    and at least one reaches the named USAGE_SWITCH_PERCENT threshold of 95%.
    Below 95%, usage bands and exact percentages do not affect selection,
    regardless of the gap; normal preferences, hints, diversification, affinity
    and stable order apply. Once active, each full 10-point USAGE_MARGIN gap
    above the least-used candidate ranks it one step behind.
-5. On escalation, an engine other than the one whose attempt fell short --
+6. On escalation, an engine other than the one whose attempt fell short --
    unless step 4 already sent the work to a meaningfully less-used plan,
    diversification does not retry onto a plan with meaningfully less room.
-6. Engine affinity (role suitability). Built-in defaults
+7. Engine affinity (role suitability). Built-in defaults
    (`WORK_KIND_ENGINES`): implementation and operations lean to `codex-acp`;
    investigation, review, design, writing, planning and analysis lean to
    `claude-agent-acp`; debugging and testing are neutral. `routing.json`
    `engine_affinity` overrides it per work kind (see
    [configuration](../../configuration.md#routing-rules)).
-7. Quota band as a late tie breaker: observed usage at or above 95%
-   (HOT_PERCENT, the same threshold) ranks behind cooler candidates only
-   after steps 1–6 tie. Unknown usage is never treated as hot.
-8. Exact used percentage only when usage switching is active (step 4).
+8. Exact used percentage only when usage switching is active (step 5).
 9. Stable engine order.
 
-`decided_by` names the first of these keys (`preference`, `purpose`, `hint`, `usage`,
-`diversify`, `affinity`, `quota`, `used_percent`, `engine_order`) that
+`decided_by` names the first of these keys (`preference`, `purpose`, `hint`, `quota`, `usage`,
+`diversify`, `affinity`, `used_percent`, `engine_order`) that
 separated the chosen candidate from the runner-up, or `only_candidate`; a pin
 records `pin`. It is never `balance`. The runner-up can be another model on
 the same engine, in which case `engine_order` is the usual answer.
@@ -666,10 +668,10 @@ the same engine, in which case `engine_order` is the usual answer.
 Unknown quota is not inferred to exceed the threshold. The audit's usage
 status is unavailable when any candidate has unknown usage, below_threshold
 when all are known but below 95%, and active otherwise. It retains the threshold,
-active and compared fields and raw candidate values. Steps 4 and 8 compare
-nothing while inactive. A genuinely known-hot route may still lose the late
-quota tie breaker to an unknown route; this does not claim the unknown route's
-percentage was observed.
+active and compared fields and raw candidate values. Steps 5 and 8 compare
+nothing while inactive. Step 4 applies whatever the usage status: a known-hot route loses to
+any non-hot route, including one whose usage is unknown. That does not claim the unknown
+route's percentage was observed.
 
 Effort is derived from the runtime-selected tier, task complexity/escalation,
 and each model's supported effort list. `effort_basis` records whether it came
@@ -717,7 +719,7 @@ built-in defaults, skips supersede on LISTED engines and adds the `purpose`
 key between `diversify` and `affinity` (no decision changes without
 `models`); 9 moves `purpose` just after legacy `preference`, ahead of hints,
 usage and diversification, and adds the hot-and-meaningfully-worse safety
-exception for owner preferences (no selection change without `preferred_for`). Rank version 10 gates usage bands and exact-percentage comparison at observed usage >=95% and prioritizes confirmed user model requests across every tier.
+exception for owner preferences (no selection change without `preferred_for`). Rank version 10 gates usage bands and exact-percentage comparison at observed usage >=95% and prioritizes confirmed user model requests across every tier; 11 moves the hot-quota criterion back to right after `hint`, ahead of usage bands, retry diversification and engine affinity, so a known route at or above 95% always ranks behind any non-hot route, known or unknown.
 Older rows keep their own fields
 (`balance`, `balance_excess`, `cross_tier`, `chosen_cross_tier`) and still
 render. These fields are evidence of runtime decisions, not proof of
@@ -832,6 +834,10 @@ Retries (`orchestration.recovery.retry_lost`):
   - does not escalate the model tier (`orchestration.state.attempt_routing`),
     because no model fell short;
   - is bounded by `MAX_ROUTE_RETRIES` (6).
+- A retry whose failure class is `engine_failure` or `transport_failure` (a crash,
+  EOF or poisoned session) does not raise the model tier either. Only quality
+  causes, or retries with no failure class, escalate, as before
+  (`orchestration.state.attempt_routing`, `_INFRASTRUCTURE_RETRY_CLASSES`).
 
 Known limits:
 
@@ -919,8 +925,16 @@ A request-form verb anywhere in the same retained user message governs every
 exact identity in it, even when the model list precedes the request or spans
 sentences. These deliberate owner-naming rules can include an exact token in
 an otherwise descriptive sentence; there is no inferred model-family grant.
-Negation/comparison/substitution guards still apply around each mention, and a
-negated request verb does not govern a later list. A verb in a different user
+Negation/comparison/substitution guards apply around each mention. A refusal,
+unavailability or cost word anywhere in the mention's own clause blocks a grant
+(either side of the mention); substitution or stop words ("instead", "replace",
+"stop", "except"; Russian equivalents) block only when they come before it. The
+governing request verb must sit in the same clause as the mention. Message-wide
+governance of a model list applies only to an identity that stands alone in its
+clause, such as a listing item. A refusal of a model in a newer user message
+revokes an earlier grant for that identity (the recorded `user_model_request`
+status becomes `revoked_by_user`); a comparison or remark declines a grant without revoking one.
+A negated request verb does not govern a later list. A verb in a different user
 message cannot authorize a bare list.
 
 Separately configured `request_names` retain their existing case-insensitive

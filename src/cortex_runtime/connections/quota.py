@@ -70,6 +70,12 @@ _ROLLOUT_TAIL_BYTES = 256 * 1024
 _ROLLOUT_FILES_SCANNED = 10
 # Paid extra usage is not part of the plan and must not look like headroom.
 _IGNORED_WINDOWS = ("overage",)
+# C-20: a rejected window the engine reported with no resetsAt at all must
+# still expire, rather than blocking its route forever. Bounded and
+# conservative -- comfortably longer than Claude's own longest named plan
+# window (seven_day) so a real window is never cut short by this fallback,
+# but still finite.
+_REJECTED_WINDOW_DEFAULT_TTL_SECONDS = 14 * 86400.0
 
 # The Claude Code CLI's own local `/usage` command: refreshed lazily, at
 # most this often per connection (successes and failures alike).
@@ -152,15 +158,22 @@ def observe(connection_id: str, info: object, environ: Mapping[str, str] | None 
             return
         name = info.get("rateLimitType") or "unscoped"
         utilization = info.get("utilization")
+        reset_at = info.get("resetsAt")
+        if isinstance(reset_at, bool) or not isinstance(reset_at, (int, float)):
+            reset_at = None
         if info.get("status") == "rejected":
             used = 100.0
+            if reset_at is None:
+                # C-20: never let an unresettable rejection block the route
+                # forever -- expire it after a bounded TTL instead.
+                reset_at = time.time() + _REJECTED_WINDOW_DEFAULT_TTL_SECONDS
         elif isinstance(utilization, (int, float)):
             # The SDK reports a fraction of the window (0..1).
             used = float(utilization) * 100.0
         else:
             return
         windows = _load(connection_id, environ)
-        windows[str(name)] = dict(used=used, resets_at=info.get("resetsAt"), observed_at=time.time(), source="event")
+        windows[str(name)] = dict(used=used, resets_at=reset_at, observed_at=time.time(), source="event")
         _write_windows(connection_id, environ, windows)
     except Exception:  # noqa: BLE001 - quota is advisory, never fails a turn
         return
@@ -360,6 +373,13 @@ def _merge_claude_windows(connection_id: str, environ: Mapping[str, str] | None,
         if isinstance(existing_observed, (int, float)) and existing_observed > now:
             continue  # a newer rate_limit_event (or a racing CLI read) already won
         windows[name] = dict(used=window["used"], resets_at=window.get("resets_at"), observed_at=now, source="cli")
+    # C-20: a successful CLI read is a complete snapshot of the CLI's own
+    # windows; one this run no longer reports (a scope that stopped
+    # applying) vanished and must not linger as stale cached usage forever.
+    # Never prunes a window ``observe()`` itself wrote (``source=="event"``).
+    for name in [name for name, window in windows.items()
+                if name not in parsed and isinstance(window, Mapping) and window.get("source") == "cli"]:
+        del windows[name]
     _write_windows(connection_id, environ, windows)
 
 

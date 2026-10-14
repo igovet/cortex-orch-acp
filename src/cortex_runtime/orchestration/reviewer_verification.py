@@ -171,10 +171,13 @@ def reuse(store, channel, root, args, ref, owner):
                 return None
             if check:
                 # Only a check run in the profile the reviewer's own command
-                # would get now stands in for it.
-                from ..configuration import access_mode
-                if (not _usable(db, channel.task_id, check) or check.get('profile', 'restricted') !=
-                        access_mode.command_profile(access_mode.current(store, channel.task_id))):
+                # gets stands in for it: a reviewer holds no write grant, so
+                # that is the read-only host profile in every mode, which
+                # runtime verification also uses (owner decision D1). A check
+                # retained from a host-writable run is never reused.
+                from ..configuration.access_mode import READ_ONLY_COMMAND_PROFILE
+                if (not _usable(db, channel.task_id, check) or
+                        check.get('profile', 'restricted') != READ_ONLY_COMMAND_PROFILE):
                     return None
                 break
         remaining = deadline - time.monotonic()

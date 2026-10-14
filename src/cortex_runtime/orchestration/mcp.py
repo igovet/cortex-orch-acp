@@ -160,7 +160,12 @@ def dispatch(store, channel, operation, args):
                                  'a fresh key for a new result or the identical original payload for a retry',
                                  'Retry with the exact original arguments, or use a new key for a new result and publish a new report when its content changed.')
             if previous and json.loads(previous['result_json']).get('complete'):
-                return json.loads(previous['result_json'])['receipt']
+                closed = json.loads(previous['result_json'])
+                if closed.get('error'):
+                    # A result refused for good after its publication: an
+                    # identical retry gets the same refusal, never a receipt.
+                    raise StoreError(closed['error'], **(closed.get('error_detail') or {}))
+                return closed['receipt']
             if previous is None:
                 from ..delegation.evidence import accept_checks, current_outcomes, assess_checks
                 _authority(db, channel)
@@ -225,6 +230,8 @@ def dispatch(store, channel, operation, args):
                 saved = json.loads(db.execute('SELECT result_json FROM runtime_requests WHERE task_id=? AND actor=? AND request_key=?',
                                               (channel.task_id, channel.channel_id, args['request_key'])).fetchone()[0])
                 if saved.get('complete'):
+                    if saved.get('error'):
+                        raise StoreError(saved['error'], **(saved.get('error_detail') or {}))
                     return saved['receipt']
                 db.execute('UPDATE runtime_requests SET result_json=? WHERE task_id=? AND actor=? AND request_key=?',
                            (encoded(dict(saved, accepted=accepted)),
@@ -235,7 +242,17 @@ def dispatch(store, channel, operation, args):
             # and refused before its result is published (never accepted).
             machine.check_review_binding(channel.task_id, provision['idempotency_key'], args['request_key'])
         result = _worker_publish_result(store, channel, {key: value for key, value in accepted.items() if key not in {'verdict', 'findings'}})
-        machine.record_result(channel.task_id, provision['idempotency_key'], accepted, args['request_key'])
+        try:
+            machine.record_result(channel.task_id, provision['idempotency_key'], accepted, args['request_key'])
+        except StoreError as error:
+            # Published, then refused for good (the node was cancelled or
+            # replanned meanwhile, or the review re-bound): close the request
+            # with its refusal now, or reconciliation would retry it on
+            # every later turn. A non-terminal failure stays open for it.
+            from .recovery import refuse_result_request
+            refuse_result_request(store, channel.task_id, channel.channel_id, args['request_key'], error,
+                                  result.get('cursor'))
+            raise
         with store.connection() as db:
             node_status=db.execute('SELECT status FROM runtime_nodes WHERE task_id=? AND assignment_ref=?',
                                    (channel.task_id,provision['idempotency_key'])).fetchone()[0]

@@ -722,8 +722,8 @@ def test_user_steering_applies_denials_only_after_active_work(machine):
     state.submit_plan(ch, plan(), 'old')
     state.move(ch.task_id, 'EXECUTING')
     state.claim_ready(ch.task_id, ch.channel_id)
-    assert steer(state.store, ch.task_id, 'Не меняй database', 'user:one')
-    assert not steer(state.store, ch.task_id, 'Не меняй database', 'user:one')
+    assert steer(state.store, ch.task_id, 'deny-write: database', 'user:one')
+    assert not steer(state.store, ch.task_id, 'deny-write: database', 'user:one')
     context = state.context(ch.task_id)
     assert context['state'] == 'EXECUTING'
     assert context['nodes'][0]['status'] == 'running'
@@ -1094,13 +1094,19 @@ def test_stop_asks_the_user_and_only_their_answer_lets_the_coordinator_close(mac
         state.submit_answer(channel, 'Done.', 'unasked')  # the coordinator alone cannot skip review
     state.move(channel.task_id, 'BLOCKED', blocker='structured_proposal_missing')
     question = pending(state.store, channel.task_id)
-    assert answer(state.store, question['question_id'], 'Finish', 'text')
+    # The stop question's own Finish is a force-finish (CANCELLED, see
+    # test_stop_question_finish.py); an answer in the user's own words
+    # releases the coordinator to give the final answer.
+    assert answer(state.store, question['question_id'], 'Stop and summarize what you found', 'text')
     assert resume_answered(state.store, channel.task_id)
     assert state.context(channel.task_id)['state'] == 'RECOVERING'
     state.move(channel.task_id, 'PLANNING')
     assert state.submit_answer(channel, 'Report r_x: root cause found; checks not run.', 'final')['state'] == 'ANSWER_READY'
-    state.move(channel.task_id, 'COMPLETED')
-    assert state.context(channel.task_id)['state'] == 'COMPLETED'
+    # The answer is shown, but unreviewed, unverified work is never COMPLETED.
+    with pytest.raises(StoreError, match='completion_nodes_incomplete'):
+        state.move(channel.task_id, 'COMPLETED')
+    assert state.close_answer(channel.task_id) == 'FAILED'
+    assert state.context(channel.task_id)['blocker'] == 'answer_not_certified:completion_nodes_incomplete'
 
 
 def test_only_retries_and_review_fixes_escalate_the_route(machine):
@@ -1112,14 +1118,14 @@ def test_only_retries_and_review_fixes_escalate_the_route(machine):
     with state.store.connection() as db:
         db.execute("INSERT INTO delegation_provisioning(idempotency_key,task_id,attempt_id,role_id,step,status,owner_epoch,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
                    (node['assignment_ref'], channel.task_id, 'xa_first', 'worker-debugger', 'ready', 'ready', 0, 'now', 'now')); db.commit()
-    assert attempt_routing(state.store, channel.task_id, 'xa_first') == (False, 'high', 'auto', None, None, None)
+    assert attempt_routing(state.store, channel.task_id, 'xa_first') == (False, 'high', 'auto', None, None, None, None)
     with state.store.connection() as db:
         event(db, channel.task_id, 'ASSIGNMENT_RETRIED', dict(node=node['node_id'], revision=1, retry=1)); db.commit()
-    assert attempt_routing(state.store, channel.task_id, 'xa_first') == (True, 'high', 'auto', None, None, None)
+    assert attempt_routing(state.store, channel.task_id, 'xa_first') == (True, 'high', 'auto', None, None, None, None)
     with state.store.connection() as db:
         db.execute("UPDATE runtime_nodes SET node_id='_fix_0_N0' WHERE task_id=?", (channel.task_id,))
         db.execute("DELETE FROM runtime_events WHERE type='ASSIGNMENT_RETRIED'"); db.commit()
-    assert attempt_routing(state.store, channel.task_id, 'xa_first') == (True, 'high', 'auto', None, None, None)  # a fix keeps its node's complexity
+    assert attempt_routing(state.store, channel.task_id, 'xa_first') == (True, 'high', 'auto', None, None, None, None)  # a fix keeps its node's complexity
 
 
 def test_a_planned_provider_preference_reaches_routing(machine):
@@ -1132,7 +1138,7 @@ def test_a_planned_provider_preference_reaches_routing(machine):
         db.execute("INSERT INTO delegation_provisioning(idempotency_key,task_id,attempt_id,role_id,step,status,owner_epoch,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
                    (node['assignment_ref'], channel.task_id, 'xa_first', 'worker-debugger', 'ready', 'ready', 0, 'now', 'now')); db.commit()
         db.execute("UPDATE runtime_nodes SET node_id='_fix_0_N0' WHERE task_id=?", (channel.task_id,)); db.commit()
-    assert attempt_routing(state.store, channel.task_id, 'xa_first') == (True, 'normal', 'codex-acp', None, None, None)  # a fix keeps it too
+    assert attempt_routing(state.store, channel.task_id, 'xa_first') == (True, 'normal', 'codex-acp', None, None, None, None)  # a fix keeps it too
 
 
 def test_plan_provider_is_optional_and_bounded(machine):
@@ -1349,6 +1355,37 @@ def test_a_flagship_hint_is_granted_only_by_the_users_own_words(machine, monkeyp
     assert routed.model_hint == 'codex-acp/gpt-6-astra'
     assert routed.user_request == dict(source_ref=f'{added.report_id}:-1', family='codex-acp/gpt-6-astra', matched='Astra')
     assert attempt_routing(state.store, channel.task_id, 'xa_other').user_request is None
+
+
+def test_a_user_revocation_reaches_attempt_routing(machine, monkeypatch):
+    """C-11: attempt_routing itself now carries the user's revocation of an
+    earlier model request (routing.auto_route.user_model_revocation), not
+    only the grant -- the plumbing r_b98b7ed46749 left open."""
+    from cortex_runtime.bootstrap import append_source_event
+    from cortex_runtime.orchestration.state import attempt_routing
+    from cortex_runtime.routing import auto_route
+    state, channel = machine
+    _hint_policy(state.store)
+    monkeypatch.setattr(auto_route, 'route_menu', lambda *_: {
+        'tiers': {'flagship': [{'route': 'codex-acp/gpt-6-astra'}],
+                  'deep': [], 'standard': [], 'light': []}})
+    proposal = plan()
+    proposal['tasks'][0].update(model='codex-acp/gpt-6-astra', model_reason='The user wants Astra.')
+    state.submit_plan(channel, proposal, 'astra-plan')
+    state.move(channel.task_id, 'EXECUTING')
+    state.claim_ready(channel.task_id, channel.channel_id)
+    _provision(state, channel, 'N0', 'xa_astra')
+    granted_source = append_source_event(state.store, SourceEvent(origin='test', event_id='astra-grant'),
+                                         'Please run the implementation on Astra.', channel.task_id)
+    granted = attempt_routing(state.store, channel.task_id, 'xa_astra')
+    assert granted.user_request is not None and granted.user_revocation is None
+    append_source_event(state.store, SourceEvent(origin='test', event_id='astra-refusal'),
+                        'Stop using Astra, it is too expensive.', channel.task_id)
+    revoked = attempt_routing(state.store, channel.task_id, 'xa_astra')
+    assert revoked.user_request is None
+    assert revoked.user_revocation is not None
+    assert revoked.user_revocation['reason'] == 'revoked_by_user'
+    assert revoked.user_revocation['revoked_source_ref'] == f'{granted_source.report_id}:-1'
 
 
 @pytest.mark.parametrize('text,requested', [

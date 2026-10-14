@@ -42,10 +42,11 @@ route.
 - `qa-engineer`: QA specialist for acceptance coverage, automated tests, reproduction scenarios, and quality-risk evidence.
 - `refactorer`: Refactoring specialist for safe structural improvements that preserve public behavior and contracts.
 - `security-auditor`: Security auditor for authentication, authorization, secrets, cryptography, dependencies, and data-protection risks.
-- `senior-consultant`: Bounded senior consultant for coordinator-requested decisions using selected published reports only.
 - `technical-writer`: Documentation specialist for project knowledge, feature docs, ADRs, and evidence-backed developer guidance.
 - `ux-designer`: UX designer for accessible layouts, component hierarchy, interaction flows, and responsive behavior.
 
 ## Runtime-reserved (not plannable)
 
 `code-reviewer` and `build-verification` are runtime-reserved roles. The runtime adds independent review (whenever the planned work changed the project) and final verification; do not include either role in a plan proposal.
+
+`senior-consultant` is escalation-only: the runtime adds it, with the consultation packet it builds, after an `escalation_request`; do not include it in a plan proposal.

@@ -2,6 +2,7 @@
 import json
 import shutil
 import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -112,12 +113,18 @@ def test_apply_changes_nothing_when_disabled(environ, tmp_path):
 
 
 @pytest.fixture
-def agent(tmp_path):
+def agent():
     """A listening unix socket standing in for the owner's ssh-agent; each
-    connection is answered with 'agent-ok'."""
+    connection is answered with 'agent-ok'.
+
+    A short directory of its own, not ``tmp_path`` (whose xdist worker and
+    parametrized-test segments can push the socket path past Linux's
+    108-byte ``AF_UNIX`` limit), keeps ``bind`` working under xdist."""
     import socket
+    import tempfile
     import threading
-    path = tmp_path / 'agent.sock'
+    directory = tempfile.mkdtemp(prefix='cortex-agent-')
+    path = Path(directory) / 'a.sock'
     server = socket.socket(socket.AF_UNIX)
     server.bind(str(path))
     server.listen()
@@ -131,8 +138,11 @@ def agent(tmp_path):
             with connection:
                 connection.sendall(b'agent-ok')
     threading.Thread(target=serve, daemon=True).start()
-    yield str(path)
-    server.close()
+    try:
+        yield str(path)
+    finally:
+        server.close()
+        shutil.rmtree(directory, ignore_errors=True)
 
 
 def test_host_agent_passes_only_an_owned_socket(agent, tmp_path):

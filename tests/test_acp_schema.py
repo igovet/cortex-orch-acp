@@ -22,9 +22,11 @@ def _schema_document():
 
 def _validator(def_name):
     document = _schema_document()
-    resolver = jsonschema.RefResolver.from_schema(document)
-    schema = {"$ref": f"#/$defs/{def_name}"}
-    return jsonschema.Draft202012Validator(schema, resolver=resolver)
+    from referencing import Registry, Resource
+    uri = "urn:acp-schema"
+    registry = Registry().with_resource(uri, Resource.from_contents(document))
+    schema = {"$ref": f"{uri}#/$defs/{def_name}"}
+    return jsonschema.Draft202012Validator(schema, registry=registry)
 
 
 def _send(proc, message):

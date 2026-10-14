@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
-import { runProcess, runPython } from "./python-runner.ts";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { runProcess, runPython, STORE_READER_CWD } from "./python-runner.ts";
 
 // Basic correctness: argv passthrough, stdout capture, exit-code mapping.
 {
@@ -10,6 +13,27 @@ import { runProcess, runPython } from "./python-runner.ts";
 {
   const result = await runPython(["-B", "-c", "import sys; sys.exit(3)"], { timeoutMs: 5000 });
   assert.notEqual(result.status, 0);
+}
+// Store readers run isolated: a planted stdlib-shadowing module on
+// PYTHONPATH or in the daemon's working directory is never imported, and
+// the working directory is fixed.
+{
+  const planted = mkdtempSync(join(tmpdir(), "cortex-runner-planted-"));
+  const previousPath = process.env.PYTHONPATH;
+  const previousCwd = process.cwd();
+  try {
+    writeFileSync(join(planted, "json.py"), "raise SystemExit(42)\n");
+    process.env.PYTHONPATH = planted;
+    process.chdir(planted);
+    const result = await runPython(["-B", "-c", "import json, os, sys; print(json.dumps([os.getcwd(), sys.flags.isolated]))"], { timeoutMs: 5000 });
+    assert.equal(result.status, 0);
+    assert.deepEqual(JSON.parse(result.stdout), [STORE_READER_CWD, 1]);
+  } finally {
+    process.chdir(previousCwd);
+    if (previousPath === undefined) delete process.env.PYTHONPATH;
+    else process.env.PYTHONPATH = previousPath;
+    rmSync(planted, { recursive: true, force: true });
+  }
 }
 {
   // A slow script exceeding the timeout is reported as a failure, not hung.

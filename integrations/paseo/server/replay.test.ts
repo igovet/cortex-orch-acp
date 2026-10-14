@@ -51,9 +51,11 @@ const fixture = join(dir, "agent.py");
 writeFileSync(fixture, `
 import json, sys, os
 config_calls = os.path.join(os.path.dirname(__file__), "config-calls.jsonl")
+methods = os.path.join(os.path.dirname(__file__), "methods.log")
 def send(frame): print(json.dumps(frame, ensure_ascii=False), flush=True)
 for line in sys.stdin:
     req = json.loads(line)
+    with open(methods, "a") as log: log.write(str(req.get("method")) + "\\n")
     if req.get("method") == "initialize":
         send({"jsonrpc":"2.0","id":req["id"],"result":{"protocolVersion":1,"agentCapabilities":{"loadSession":True}}})
     elif req.get("method") in ("session/set_config_option", "session/set_mode"):
@@ -100,7 +102,7 @@ for line in sys.stdin:
              "options":[{"value":"available-model","name":"Available"}]}]}})
         if sid == "crash-after": os._exit(9)
 `);
-async function load(nativeId: string | null, staleConfig = false, configureAfter = false) {
+async function load(nativeId: string | null, staleConfig = false, configureAfter = false, closeAfter = false) {
   const command = ["env", "CORTEX_ACP_TARGET=" + JSON.stringify({ argv: ["python3", "-B", fixture] }),
     process.execPath, fileURLToPath(new URL("./acp-load-shim.mjs", import.meta.url))] as [string, ...string[]];
   const replay = new ReplayController(command);
@@ -134,6 +136,16 @@ async function load(nativeId: string | null, staleConfig = false, configureAfter
       await Promise.race([configured, new Promise((_, reject) => {
         configTimer = setTimeout(() => reject(new Error("test configure timed out")), 5000);
       })]).finally(() => clearTimeout(configTimer!));
+    }
+    if (closeAfter) {
+      const closed = new Promise<void>(resolve => connection.onEvent(event => {
+        if ((event.type === "request.failed" || event.type === "request.completed") && event.requestId === "close") resolve();
+      }));
+      await connection.send({type:"session.close",requestId:"close",sessionId:"boundary"});
+      let closeTimer: ReturnType<typeof setTimeout>;
+      await Promise.race([closed, new Promise((_, reject) => {
+        closeTimer = setTimeout(() => reject(new Error("test close timed out")), 5000);
+      })]).finally(() => clearTimeout(closeTimer!));
     }
     return events;
   } finally { await connection.close(); }
@@ -178,6 +190,16 @@ try {
   assert.equal(calls.length, 1);
   assert.equal(calls[0].params.value, "gpt-6-sol");
   rmSync(join(dir, "config-calls.jsonl"));
+  // The bridge's session/close on teardown is answered by the connector:
+  // Cortex does not implement it, and closing the connector ends the process.
+  rmSync(join(dir, "methods.log"), { force: true });
+  const plain = await load(null, false, false, true);
+  assert.ok(plain.some(e => e.type === "session.ready"), JSON.stringify(plain.slice(-2)));
+  assert.ok(plain.some(e => e.type === "session.closed"), JSON.stringify(plain.slice(-2)));
+  assert.ok(!plain.some(e => e.type === "request.failed"), JSON.stringify(plain.slice(-2)));
+  const seen = readFileSync(join(dir, "methods.log"), "utf8").trim().split("\n");
+  assert.ok(seen.includes("session/new"), seen.join(","));
+  assert.ok(!seen.includes("session/close"), "session/close must not reach Cortex: " + seen.join(","));
   const configured = await load("history", false, true);
   assert.ok(configured.some(e => e.type === "session.ready"));
   assert.ok(configured.some(e => e.type === "request.failed" && e.requestId === "configure"

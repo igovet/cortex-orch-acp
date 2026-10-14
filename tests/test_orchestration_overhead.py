@@ -805,9 +805,12 @@ def test_verification_5mb_output_persistence_and_bounded_tool_card(
     monkeypatch.setattr(revision, "ignored_directories", lambda _root: [])
 
     @contextmanager
-    def passthrough_gateway(_root, _scratch, argv, _scopes, **_kwargs):
+    def passthrough_gateway(_root, _scratch, argv, *_args, **_kwargs):
         yield list(argv), []
 
+    # The verification seam's own profile (sandbox.readonly_command) and
+    # the profiles it builds on are replaced by a passthrough launch.
+    monkeypatch.setattr(sandbox, "readonly_command", passthrough_gateway)
     monkeypatch.setattr(sandbox, "gateway_command", passthrough_gateway)
     monkeypatch.setattr(sandbox, "with_umask", lambda argv: argv)
     monkeypatch.setattr(sandbox, "as_owner", lambda *_args, **_kwargs: None)

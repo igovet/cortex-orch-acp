@@ -50,6 +50,22 @@ def is_consultant_role(role_id: str | None) -> bool:
     return WORKER_ALIASES.get(role_id, role_id) == CONSULTANT_ROLE_ID
 
 
+def is_read_only_role(role_id: str | None) -> bool:
+    """Whether ``role_id`` (a profile id or its short alias) names a role
+    whose engine jail and tools are read-only whatever scope a plan
+    requests (``orchestration.contracts.READ_ONLY``) -- the same set the
+    coordinator always counts as, and the same set the external MCP
+    gateway (``engine.external_proxy``) actually narrows to
+    ``read_only_tools`` at call time. Used to keep the attached-MCP prompt
+    section truthful for these roles too, not only for the coordinator."""
+    if not isinstance(role_id, str) or not role_id:
+        return False
+    from ..orchestration.contracts import READ_ONLY
+    from ..portable.roles import WORKER_ALIASES
+
+    return WORKER_ALIASES.get(role_id, role_id) in READ_ONLY
+
+
 def receives_external_mcp(role_id: str | None) -> bool:
     """Whether a session for ``role_id`` may be offered any external MCP
     server (the registry's or the client's).
@@ -129,21 +145,57 @@ def coordinator_tools(entry) -> list[str]:
     return list(entry.get("read_only_tools") or ()) if tools is None else list(tools)
 
 
+def missing_grant_paths(entry) -> list[str]:
+    """The ``read_paths``/``write_paths`` entries of one registry server
+    that do not currently exist on disk (C-24).
+
+    ``engine.external_proxy.main`` refuses the whole server -- raising
+    ``external_mcp_read_grant_invalid``/``external_mcp_write_grant_invalid``
+    before the child ever starts -- when a configured grant path does not
+    exist (a stale or not-yet-created directory). Before this check, the
+    prompt still advertised that server and its tools as available, so the
+    first call always failed closed for a reason the model was never told
+    (observed live: a stale Playwright path left the server
+    ``CONNECTION_CLOSED``). This is a lighter existence-only check, not the
+    proxy's full admission rule (project overlap, symlink ancestry,
+    ``PRIVATE`` paths): those remaining cases are genuine configuration
+    errors an administrator must fix, not a stale path a restart could
+    repair, and the proxy still refuses them regardless of this check.
+    """
+    if not isinstance(entry, dict):
+        return []
+    missing = []
+    for key in ("read_paths", "write_paths"):
+        values = entry.get(key)
+        if not isinstance(values, list):
+            continue
+        for value in values:
+            if isinstance(value, str) and not Path(value).exists():
+                missing.append(value)
+    return missing
+
+
 def host_mcp_servers(servers, *, role: str | None = None, engine: str | None = None,
-                     role_id: str | None = None) -> list[dict[str, object]]:
+                     role_id: str | None = None, dropped: list | None = None) -> list[dict[str, object]]:
     """The client's own MCP servers, as they must look on the wire to an
     engine.
 
     The user asked for what they configure in their editor -- a code-memory
     server, for instance -- to be available to the coordinator and to every
     worker, which means passing the client's list through instead of
-    dropping it. Two things are still refused rather than forwarded: an
+    dropping it. Three things are still refused rather than forwarded: an
     entry that does not have a usable name and command (an engine cannot
-    launch it, and a half-entry is worth an omission, not a crash), and any
+    launch it, and a half-entry is worth an omission, not a crash), any
     entry calling itself ``cortex``, which would shadow this runtime's own
-    server and hand a client's process the coordinator's channel name.
-    ``role_id`` (the worker profile, when known) can withhold every server:
-    see :func:`receives_external_mcp`.
+    server and hand a client's process the coordinator's channel name, and
+    (C-24) an entry whose granted ``read_paths``/``write_paths`` include a
+    path that does not exist, which ``engine.external_proxy`` would refuse
+    entirely at spawn time anyway -- never advertise a server the gateway
+    cannot actually start. ``role_id`` (the worker profile, when known) can
+    withhold every server: see :func:`receives_external_mcp`. When
+    ``dropped`` is given, one ``{"name": ..., "missing_paths": [...]}``
+    entry is appended per server skipped for a missing grant path, so a
+    caller can emit a diagnostic naming it instead of silently omitting it.
 
     Entries are copied, not referenced, and nothing here is ever written to
     storage or a log: a client's ``env``/``headers`` values are its
@@ -184,9 +236,28 @@ def host_mcp_servers(servers, *, role: str | None = None, engine: str | None = N
             continue
         if engines is not None and engine not in engines:
             continue
+        missing = missing_grant_paths(entry)
+        if missing:
+            if dropped is not None:
+                dropped.append({"name": name, "missing_paths": missing})
+            continue
         # Registry admission rules are internal, never ACP wire data.
         forwarded.append({key: value for key, value in entry.items() if key not in ("roles", "engines")})
     return forwarded
+
+
+def relay_launch(relay_endpoint: str) -> tuple[list[str], list[dict[str, str]]]:
+    """The ``(args, env)`` of one stdio relay entry.
+
+    The entry carries no secret at all: the relay reads its handshake token
+    from the broker's private token file beside ``relay_endpoint`` (see
+    ``broker.relay_token_path``). Engines may put both ``args`` and ``env``
+    on a world-readable command line (the Claude Agent SDK hands the server
+    map to the ``claude`` CLI as ``--mcp-config <json>``).
+    """
+    if not isinstance(relay_endpoint, str) or not relay_endpoint.startswith("/"):
+        raise ValueError("relay endpoint must be an absolute path.")
+    return ["-B", str(MCP_RELAY_SCRIPT), "--relay", relay_endpoint], []
 
 
 def build_mcp_servers(
@@ -198,7 +269,6 @@ def build_mcp_servers(
     script_path: str | Path | None = None,
     role: str | None = None,
     relay_endpoint: str | None = None,
-    relay_token: str | None = None,
 ) -> list[dict[str, object]]:
     """``role`` (optional, ``"coordinator"``/``"worker"``) -- when given,
     every server name this builds is asserted to be in
@@ -215,18 +285,17 @@ def build_mcp_servers(
     script = str(script_path or CORTEX_MCP_SCRIPT)
     if role is not None:
         assert "cortex" in allowed_mcp_servers(role)
-    if (relay_endpoint is None) != (relay_token is None):
-        raise ValueError("relay_endpoint and relay_token must be supplied together.")
-    args = ["-B", script]
     if relay_endpoint is not None:
-        if not relay_endpoint.startswith("/") or not relay_token:
-            raise ValueError("relay endpoint and token must be valid.")
-        args = ["-B", str(MCP_RELAY_SCRIPT), "--relay", relay_endpoint, relay_token]
-    environment = [] if relay_endpoint is not None else [
-        dict(name="CORTEX_CHANNEL_ID", value=channel_id),
-        dict(name="CORTEX_CHANNEL_SECRET", value=secret),
-        dict(name="CORTEX_CHANNEL_PROJECT_ROOT", value=project_root),
-    ]
+        # Channel credentials stay in the broker, and the relay entry names
+        # only the broker socket (its token is in the broker's private dir).
+        args, environment = relay_launch(relay_endpoint)
+    else:
+        args = ["-B", script]
+        environment = [
+            dict(name="CORTEX_CHANNEL_ID", value=channel_id),
+            dict(name="CORTEX_CHANNEL_SECRET", value=secret),
+            dict(name="CORTEX_CHANNEL_PROJECT_ROOT", value=project_root),
+        ]
     return [
         dict(
             name="cortex",

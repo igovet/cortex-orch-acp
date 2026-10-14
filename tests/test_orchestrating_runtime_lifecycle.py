@@ -220,7 +220,10 @@ def test_coordinator_engine_failure_blocks_without_silent_end_turn(tmp_path):
         ).fetchone()
     assert row["state"] == "waiting_for_user"
     assert row["wait_reason"] == "engine_failure:transport_eof"
-    assert user_message["consumed_by"] is not None  # uncertain transmission is reconciled on recovery
+    # A prompt that raised never confirmed delivery: its claim is released at
+    # once, so the message is delivered again (at-least-once) instead of
+    # staying claimed for the rest of the process.
+    assert user_message["consumed_by"] is None
 
 
 

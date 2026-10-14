@@ -44,6 +44,7 @@ Three tables:
 """
 from __future__ import annotations
 
+import dataclasses
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import errno
@@ -1371,9 +1372,21 @@ def record_user_message_answer_event(
                 (task_id, dedup_key),
             ).fetchone()
             if existing is not None:
+                # A replay reports what really happened: this message
+                # answered the question only when the question holds exactly
+                # its answer. A message first captured another way (a Paseo
+                # queued message is recorded as steering) never answered it.
                 event = delegation_events.TaskEvent._from_row(existing)
+                answered = False
+                if not event.superseded:
+                    question = db.execute(
+                        "SELECT task_id,status,answer_text FROM pending_questions WHERE id=?", (question_id,),
+                    ).fetchone()
+                    answered = bool(question and question["task_id"] == task_id
+                                    and question["status"] == "answered"
+                                    and question["answer_text"] == answer_text)
                 db.commit()
-                return event, not event.superseded
+                return event, answered
             event = delegation_events.append_event_tx(db, task_id, "user_message", dedup_key, payload, origin=origin)
             if ledger_origin is not None and ledger_event_id is not None:
                 db.execute(
@@ -1390,10 +1403,11 @@ def record_user_message_answer_event(
                     "VALUES (?,?,?,?,datetime('now'))",
                     (question_id, task_id, answer_text, answer_source),
                 )
-                db.execute(
+                if db.execute(
                     "UPDATE task_events SET superseded=1 WHERE task_id=? AND id=? AND consumed_by IS NULL AND superseded=0",
                     (task_id, event.id),
-                )
+                ).rowcount == 1:
+                    event = dataclasses.replace(event, superseded=True)
             db.commit()
         except BaseException:
             db.rollback()

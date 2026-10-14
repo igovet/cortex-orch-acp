@@ -79,7 +79,10 @@ NODE['properties']['model']['pattern'] = (
 )
 NODE['properties']['id']['pattern'] = r'^[A-Za-z][A-Za-z0-9_-]{0,63}$'
 from ..portable.roles import WORKER_ALIASES
-NODE['properties']['role']['enum'] = sorted(role for role in WORKER_ALIASES if role not in {'code-reviewer','build-verification'})
+# The senior consultant is escalation-only (owner decision D8): the runtime
+# adds its node with a runtime-built packet, so a plan never names it.
+NODE['properties']['role']['enum'] = sorted(role for role in WORKER_ALIASES
+                                            if role not in {'code-reviewer','build-verification','senior-consultant'})
 PLAN = obj(dict(
     tasks=array(NODE, 'Plan tasks, each a bounded implementation or investigation objective for one specialist role.', minimum=1),
     verification=array(
@@ -214,8 +217,17 @@ REQUESTS = {
                                           'Additional project-relative paths or globs needed to complete this assignment (\'.\' is the whole project). Never absolute, never containing \'..\' or a backslash, and never inside .cortex or .git.',
                                           minimum=1),
                               request_key=text('Unique proposal identity.',128))),
-    'escalation_request': obj(dict(reason=text('Problem requiring independent senior consultation. Runtime retains configured model/effort policy.'),request_key=text('Unique proposal identity.',128))),
+    # Owner decision D8: consultation is escalation-only and the runtime
+    # builds the consultant's packet from these fields and retained reports.
+    'escalation_request': obj(dict(
+        reason=text('Problem requiring independent senior consultation: what was tried and why this attempt cannot resolve it. Runtime retains configured model/effort policy.'),
+        question=text('Optional: the single bounded question the senior consultant answers, without the reasoning that belongs in reason. Omitted: the consultant answers the problem stated in reason.', 2000),
+        report_ids=array(text('Exact published report_id of this task: r_ plus 12 lowercase hex characters.', 14),
+                         'Optional: published reports of this task the consultant should read. The runtime builds the consultation packet itself: these reports first, then every report the escalated plan revision\'s finished tasks published, each with its current SHA-256 and recorded artifact versions. An id that names no report of this task is listed as unavailable, never dropped silently.',
+                         maximum=16),
+        request_key=text('Unique proposal identity.',128)), required=['reason','request_key']),
 }
+REQUESTS['escalation_request']['properties']['report_ids']['items']['pattern'] = r'^r_[0-9a-f]{12}$'
 COORDINATOR['verification_submit'] = obj(dict(
     verification=dict(PLAN['properties']['verification'], description=required_bounds(1, 16) + ' Corrected verification commands. Only after the runtime verification failed and the work itself is fine: it verifies again without redoing the reviewed work. When the code is wrong, submit a new plan instead. ' + VERIFICATION_SOURCE),
     request_key=text('Unique proposal identity.',128)))

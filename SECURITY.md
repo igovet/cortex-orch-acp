@@ -18,6 +18,27 @@ for exact paths, artifact-test limits and the next upstream-fix decision.
 
 ## Current ACP boundary (1.0.0)
 
+Read-only roles (reviewer, auditor, explorer, architect and the other read-only
+profiles) run `command_run` in a restricted read-only profile in every access mode:
+HOME is read-only except an explicit tool-cache allowlist, and the command runs in a
+private PID namespace. Automatic runtime verification uses the same profile in every mode, and
+inside a check only the project's git-ignored directories are writable. Writing workers keep
+the access-mode profile. Cache writes are allowed, so a read-only command can poison a cache
+that a later run reads. The read-only profile shares the owner's network, as every owner
+command does, so it limits writes, not egress. This is not hostile-code isolation. The deletion classifier
+is lexical: it recognises `rm` and the other common deletion commands, but not deletions
+hidden inside scripts, interpreters or build tools.
+
+A brokered MCP relay never receives its handshake token in argv or in its environment. The
+broker writes the token to `relay.token`, a 0600 file beside its socket in a private 0700
+directory, and the relay reads it there without following symlinks. The token is compared in
+constant time and is bound to the connecting peer (same uid, and a descendant of the launched
+engine). An unbound broker's token is single-use. The file is removed with the broker directory.
+PID isolation applies only to the read-only profile, not to writing workers.
+
+A natural-language request such as "do not modify X" creates no write denial. Only an
+explicit `deny-write: <path>` does, and it is matched after path normalization.
+
 Owner-triggered retention removes session access-default rows before deleted host
 sessions, without changing surviving defaults or explicit access choices. The
 foreign-key boundary and committed-deletion recovery remain in force; this grants
@@ -619,11 +640,12 @@ Fresh ACP sessions durably start **Development**. A writing worker's ordinary
 `command_run` uses host-writable mounts, real HOME, real /var/tmp, owner devices,
 groups and shared network through the channel-bound host broker. Docker/Compose,
 SDK/cache state and authorized outside-project cwd need no routine permission
-card merely for crossing the project boundary. The mode, not the role, decides
-the host: read-only roles, reviewers and automatic verification get the same
-host-writable profile (a `docker build` check can record its builder state in
-`~/.docker/buildx`), while their project stays read-only -- verification may
-write only git-ignored directories, and a check that changes the reviewed
+card merely for crossing the project boundary. The mode decides
+the host for writing workers: Development and Auto give them the host-writable profile (a
+`docker build` check can record its builder state in `~/.docker/buildx`), and Guarded keeps
+them restricted. Read-only roles, reviewers and automatic verification always get the
+read-only profile, while their project stays read-only -- verification may write only
+git-ignored directories, and a check that changes the reviewed
 revision or outlives a mode switch is incomplete. Guarded keeps every command
 restricted. Engines themselves stay jailed.
 

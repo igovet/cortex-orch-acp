@@ -383,10 +383,15 @@ def test_engine_session_filters_external_mcp_and_records_bounded_inventory(tmp_p
         session = manager.create_session("t_" + "a" * 12, "xr_" + "0" * 24)
         wire = json.loads(dump_path.read_text(encoding="utf-8"))
         receipt = manager.external_mcp_inventory(session)
+        relay_tokens = [broker.relay_token for broker in manager._process.external_mcp_brokers]
     finally:
         manager.shutdown(grace=2)
     assert [entry["name"] for entry in wire["mcpServers"]] == ["cortex", "code-memory"]
+    # The relay entry carries no secret: an engine may serialize args and
+    # env onto a world-readable command line (claude --mcp-config <json>).
     assert wire["mcpServers"][1]["env"] == []
+    assert len(relay_tokens) == 1 and relay_tokens[0]
+    assert relay_tokens[0] not in json.dumps(wire)
     assert "--relay" in wire["mcpServers"][1]["args"]
     assert secret not in json.dumps(wire)
     assert secret not in (manager._process.logs.directory / "observations.jsonl").read_text(encoding="utf-8")

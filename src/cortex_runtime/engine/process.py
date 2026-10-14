@@ -1020,6 +1020,10 @@ class EngineProcess:
                 self.mcp_broker.close()
             self._release_jail()
             raise
+        if self.mcp_broker is not None:
+            # Before any session/new can hand the engine its relay entry:
+            # only this engine's own process tree may use the relay token.
+            self.mcp_broker.bind_peer_root(self.process.pid)
         from . import process_identity
         self._group_identity = process_identity.capture(self.process.pid, self.process.pid)
         self._termination_lock = threading.Lock()
@@ -1109,7 +1113,7 @@ class EngineProcess:
             time.sleep(.02)
 
     def broker_external_mcp(self, credentials, config):
-        from .mcp_bridge import MCP_RELAY_SCRIPT
+        from .mcp_bridge import relay_launch
         allowed=config.get('allowed_tools')
         if not isinstance(allowed,list) or not allowed:
             raise _validation_error('external_mcp_explicit_tool_grants_required',
@@ -1117,10 +1121,10 @@ class EngineProcess:
         broker=McpBroker(credentials,python_executable=sys.executable,
                          server_script=str(Path(__file__).with_name('external_proxy.py')),
                          server_config=config,observe=self.logs.observe,socket_dir=self._socket_dir,
-                         stderr_log=self.logs.stderr)
+                         stderr_log=self.logs.stderr,peer_root=self.process.pid)
         self.external_mcp_brokers.append(broker)
-        return dict(name=config['name'],command=sys.executable,
-                    args=['-B',str(MCP_RELAY_SCRIPT),'--relay',broker.endpoint,broker.relay_token],env=[])
+        args,env=relay_launch(broker.endpoint)
+        return dict(name=config['name'],command=sys.executable,args=args,env=env)
 
     def terminate(self, *, grace: float = TERMINATE_GRACE_SECONDS) -> None:
         """Bounded graceful shutdown/escalation of the exact launched group."""

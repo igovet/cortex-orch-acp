@@ -12,7 +12,7 @@ purpose. Only the coordinator can read this skill; a worker's or the consultant'
 `read_skill` never advertises or accepts this id. A worker or the consultant reaches
 the optional report-example catalogue and its named examples through the separate
 `index` id (physically under `references/` here), not by reading this skill. Do not
-read agent TOML, manifests, databases or server internals, or enumerate the installation.
+read manifests, databases or server internals, or enumerate the installation.
 
 ## Explicit retention maintenance
 
@@ -87,7 +87,8 @@ headings and guidance returned by the live draft creator. Examples guide content
 and never replace the profile's requirements,
 live writer schema, observable evidence, or honest unrun checks.
 
-All worker reports remain complete English Markdown files first allocated by the
-live draft creator, filled through the owned-draft gateway and published through
-the live writer. Preserve server-issued registration metadata and complete Markdown.
-Never edit published documents or the runtime database directly.
+All worker reports remain complete English Markdown files, either submitted
+inline or allocated by the live draft creator, filled through the owned-draft
+gateway and published through the live writer, per the live tool descriptions.
+Preserve server-issued registration metadata and complete Markdown. Never edit
+published documents or the runtime database directly.

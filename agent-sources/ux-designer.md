@@ -1,4 +1,4 @@
-# Ux Designer
+# UX Designer
 
 ## Role and responsibility
 

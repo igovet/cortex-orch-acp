@@ -38,6 +38,18 @@ _NATIVE_BLOCK = re.compile(
     r"<!--\s*cortex:native\s+[a-z0-9_-]+\s*-->.*?<!--\s*/cortex:native\s*-->",
     re.S,
 )
+# Every canonical SKILL.md (the primary role and every shared/worker skill
+# alike) carries a YAML frontmatter header (``name``/``description``, for
+# a native engine skill loader -- see ``project_skill_link``) and the
+# worker generator additionally appends a closing HTML-comment marker (see
+# ``scripts/generate_agent_profiles.py``'s ``expected_skills``). Neither is
+# role content: an ACP engine has no native skill loader to read them, and
+# pasting them into every delivered prompt (the role body itself, plus once
+# per inlined shared skill -- see ``composed_instructions``) was pure noise
+# (C-30). Strip both from the *portable* body only; the canonical file and
+# its ``sha256``/``title`` are computed from the untouched raw bytes.
+_FRONTMATTER_BLOCK = re.compile(r"\A---\n.*?\n---\n+", re.S)
+_GENERATED_SKILL_FOOTER = re.compile(r"\n*<!--\s*END OF COMPLETE CORTEX[^>]*-->\s*\Z")
 _CRITICAL_BLOCK = re.compile(
     r"<!--\s*cortex:critical\s*-->(?P<body>.*?)<!--\s*/cortex:critical\s*-->",
     re.S,
@@ -356,6 +368,8 @@ def load_role(role_hint: object) -> RoleInstructionSet:
     if kind == "worker" and not critical_rules:
         critical_rules = WORKER_CRITICAL_RULES
     body_portable = _NATIVE_BLOCK.sub("", text)
+    body_portable = _FRONTMATTER_BLOCK.sub("", body_portable, count=1)
+    body_portable = _GENERATED_SKILL_FOOTER.sub("", body_portable)
     return RoleInstructionSet(
         role_id=role_id,
         kind=kind,
@@ -376,7 +390,17 @@ def load_role(role_hint: object) -> RoleInstructionSet:
 NAMED_SKILLS: dict[str, tuple[str, ...]] = {
     "coordinator": ("tool-discipline", "coordinator-communication", "content-safety",
                     "context-compaction", "documentation-sync", "knowledge-harvest-scope",
-                    "cortex-control", "skill-management"),
+                    "cortex-control", "skill-management",
+                    # C-26: these are COORDINATOR_REFERENCE_IDS -- without a matching
+                    # entry here, situational_skill_triggers (and therefore the
+                    # prompt's "Skills, and when to read one" section and the
+                    # read_skill tool's own "Situational ids" description) named
+                    # none of them, so a coordinator could discover them only
+                    # through a Markdown link in another report, not from its own
+                    # instructions or tool schema.
+                    "cortex-release", "governance", "host-compatibility", "incident",
+                    "live-qualification", "pipeline-publication", "recovery",
+                    "senior-consultation", "verification-coverage", "worker-routing"),
     "worker": ("tool-discipline", "tool-discipline-worker", "content-safety", "report-publication", "code-and-evidence",
                "interactive-resources", "index", "context-compaction", "documentation-sync",
                "knowledge-harvest", "skill-authoring"),
@@ -419,6 +443,19 @@ _SKILL_TRIGGERS = {
     "code-and-evidence": "you locate code (code index first) or need saved report detail",
     "interactive-resources": "before starting or using a browser, device, port or server session",
     "index": "you want a full-report example",
+    # C-26: triggers for the coordinator's own reference skills
+    # (COORDINATOR_REFERENCE_IDS), named here so NAMED_SKILLS["coordinator"]
+    # can surface them in the prompt and in the read_skill tool schema.
+    "cortex-release": "before release-sensitive package, profile-generation or live-qualification work",
+    "governance": "the plan carries user constraints, risk tradeoffs or governance wording to state",
+    "host-compatibility": "before describing what the installed ACP client or engine actually supports",
+    "incident": "the user reports a live incident or defect to diagnose and repair",
+    "live-qualification": "before planning or reporting a live/real-client qualification check",
+    "pipeline-publication": "before writing the pipeline or declaring task completion",
+    "recovery": "before continuing after context loss, or on a recovery/continuation turn",
+    "senior-consultation": "before requesting a senior consultation (escalation_request) for a material uncertainty",
+    "verification-coverage": "before choosing or writing the plan's required verification commands",
+    "worker-routing": "before proposing assignment nodes, roles, dependencies or scopes in a plan",
 }
 
 

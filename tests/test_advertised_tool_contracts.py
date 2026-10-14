@@ -281,10 +281,17 @@ def test_read_skill_advertises_only_matching_situational_triggers(kind, role_id)
         assert "cortex-control:" not in entry["description"]
 
 
+def test_the_consultant_is_offered_no_question_or_access_route():
+    """Owner decision D8: the consultant asks the user nothing; missing
+    evidence is a limitation in its report."""
+    names = {t["name"] for t in mcp_tools.tool_definitions(
+        "worker", role_id="worker-senior-consultant", stage="execution")}
+    assert not names & {"ask_question", "access_request"}
+
+
 @pytest.mark.parametrize("role_id,stage", [("worker-backend-dev", "execution"),
                                          ("worker-explorer", "execution"),
-                                         ("worker-code-reviewer", "review"),
-                                         ("worker-senior-consultant", "execution")])
+                                         ("worker-code-reviewer", "review")])
 def test_worker_question_contract_routes_access_and_localizes_all_form_fields(role_id, stage):
     tool = next(t for t in mcp_tools.tool_definitions("worker", role_id=role_id, stage=stage)
                 if t["name"] == "ask_question")

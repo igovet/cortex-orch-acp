@@ -3,10 +3,13 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import hmac
 import json
 import os
 import secrets
 import socket
+import stat
+import struct
 import subprocess
 import sys
 import tempfile
@@ -16,6 +19,101 @@ MAX_HANDSHAKE_BYTES = 128
 IO_CHUNK = 64 * 1024
 _BASE_REPORT_TOOLS = ("create_draft", "write_report")
 _WORKER_REPORT_TOOL = "result_submit"
+#: The relay reads its handshake token from this 0600 file next to the
+#: broker socket, inside the broker's private 0700 directory. Neither the
+#: relay's argv nor its ACP ``mcpServers[].env`` entry carries the token: an
+#: engine may serialize both onto a world-readable command line (the Claude
+#: Agent SDK passes the whole server map, env included, to the ``claude`` CLI
+#: as ``--mcp-config <json>``), and ``/proc/<pid>/cmdline`` is readable by
+#: every process on the host.
+RELAY_TOKEN_FILE = "relay.token"
+#: Upper bound on the token file a relay will read.
+_MAX_TOKEN_FILE_BYTES = 128
+#: Upper bound on the parent-chain walk that binds a relay to its engine.
+_MAX_ANCESTRY_DEPTH = 64
+
+
+def _peer_credentials(conn):
+    """``(pid, uid, gid)`` of the connected Unix-socket peer, or ``None``
+    where the platform has no ``SO_PEERCRED``. The kernel records these at
+    ``connect()``; they are translated into this process's namespaces."""
+    option = getattr(socket, "SO_PEERCRED", None)
+    if option is None:
+        return None
+    size = struct.calcsize("3i")
+    return struct.unpack("3i", conn.getsockopt(socket.SOL_SOCKET, option, size))
+
+
+def _parent_pid(pid: int) -> int:
+    with open(f"/proc/{pid}/stat", "rb") as handle:
+        data = handle.read()
+    # ``comm`` (field 2) may itself contain spaces or ')': fields resume
+    # after its last ')' as ``state ppid ...``.
+    return int(data[data.rindex(b")") + 2:].split()[1])
+
+
+def _is_descendant(pid: int, root: int) -> bool:
+    """Whether ``pid`` is ``root`` or one of its descendants (fail closed)."""
+    current = pid
+    for _ in range(_MAX_ANCESTRY_DEPTH):
+        if current == root:
+            return True
+        if current <= 1:
+            return False
+        try:
+            current = _parent_pid(current)
+        except (OSError, ValueError, IndexError):
+            return False
+    return False
+
+
+def relay_token_path(endpoint: str) -> str:
+    """The token file a relay for ``endpoint`` reads: the broker writes it
+    beside its socket, so the relay entry names only the socket path."""
+    return os.path.join(os.path.dirname(endpoint), RELAY_TOKEN_FILE)
+
+
+def _write_token_file(path: str, token: str) -> None:
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    try:
+        os.write(fd, token.encode("ascii"))
+    finally:
+        os.close(fd)
+
+
+def read_relay_token(endpoint: str) -> str | None:
+    """The relay's handshake token, or ``None`` when its file is missing,
+    not a regular file (a symlink is never followed) or malformed."""
+    try:
+        fd = os.open(relay_token_path(endpoint), os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except OSError:
+        return None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return None
+        data = os.read(fd, _MAX_TOKEN_FILE_BYTES + 1)
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+    if not data or len(data) > _MAX_TOKEN_FILE_BYTES or not data.isascii():
+        return None
+    return data.decode("ascii")
+
+
+def _private_directory(parent):
+    """A fresh 0700 directory owned by this user for one broker's socket."""
+    directory = tempfile.TemporaryDirectory(prefix="cortex-mcp-", dir=parent)
+    try:
+        os.chmod(directory.name, 0o700)
+        info = os.lstat(directory.name)
+        if (not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid()
+                or stat.S_IMODE(info.st_mode) & 0o077):
+            raise OSError("cortex_mcp_socket_directory_not_private")
+    except BaseException:
+        directory.cleanup()
+        raise
+    return directory
 
 
 def _schema_digest(schema) -> str:
@@ -33,7 +131,8 @@ class McpBroker:
     """Keep task-channel credentials in the runtime's MCP child process."""
 
     def __init__(self, channel_credentials, *, python_executable: str, server_script: str,
-                 observe=None, server_config=None, socket_dir=None, stderr_log=None):
+                 observe=None, server_config=None, socket_dir=None, stderr_log=None,
+                 peer_root=None):
         if not channel_credentials or len(channel_credentials) != 3:
             raise ValueError("channel_credentials are required for an MCP broker")
         self._credentials = tuple(channel_credentials)
@@ -53,16 +152,33 @@ class McpBroker:
         # to the engine, but no tool description, argument value, or schema is
         # retained by the host-side broker.
         self._tools_receipt = None
-        # This token is passed as an argparse value after ``--relay``. A raw
-        # URL-safe token can begin with '-', which argparse treats as another
-        # option: the relay exits 2 before it can connect. Prefix a literal
-        # letter without reducing the random portion's entropy.
+        # The relay reads this token from RELAY_TOKEN_FILE in the private
+        # socket directory, never from argv or env. The literal leading
+        # letter keeps a token from ever looking like a command-line option
+        # to a wrapper; the random portion keeps its full entropy.
         self._token = "c" + secrets.token_urlsafe(32)
-        self._tmp = tempfile.TemporaryDirectory(prefix="cortex-mcp-", dir=socket_dir)
+        # Authentication is the token AND the connecting peer: same user, and
+        # (once bound) a process inside the engine's own process tree, so a
+        # token read by any other process is useless. Until a peer root is
+        # bound the token is single-use.
+        self._peer_root = peer_root
+        self._token_consumed = False
+        self._tmp = _private_directory(socket_dir)
         self.endpoint = os.path.join(self._tmp.name, "broker.sock")
         self._listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        self._listener.bind(self.endpoint)
-        os.chmod(self.endpoint, 0o600)
+        try:
+            # Kept for the broker's lifetime (removed with the directory by
+            # close()), not unlinked after a first read: an engine may
+            # relaunch the same relay entry (codex-acp app-server crash
+            # recovery, an MCP reconnect), and peer binding, not file
+            # secrecy, is what refuses processes outside the engine tree.
+            _write_token_file(relay_token_path(self.endpoint), self._token)
+            self._listener.bind(self.endpoint)
+            os.chmod(self.endpoint, 0o600)
+        except BaseException:
+            self._listener.close()
+            self._tmp.cleanup()
+            raise
         self._listener.listen(1)
         self._listener.settimeout(0.25)
         self._stop = threading.Event()
@@ -73,6 +189,37 @@ class McpBroker:
     @property
     def relay_token(self) -> str:
         return self._token
+
+    def bind_peer_root(self, pid: int) -> None:
+        """Accept relays only from ``pid`` (the launched engine) or its
+        descendants. An engine may legitimately restart its MCP client (for
+        example codex-acp's app-server crash recovery) and relaunch the relay
+        with the same token; a bound root keeps that working while refusing
+        every process outside the engine's tree."""
+        if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 1:
+            raise ValueError("peer root must be a real process id")
+        with self._state_lock:
+            self._peer_root = pid
+
+    def _authenticate(self, conn, line: bytes):
+        """``None`` when the handshake is accepted, else a rejection cause."""
+        credentials = _peer_credentials(conn)
+        if credentials is not None and credentials[1] != os.geteuid():
+            return "peer_user"
+        # Always compare in constant time, even when the peer is refused.
+        token_ok = hmac.compare_digest(line, self._token.encode("ascii"))
+        with self._state_lock:
+            root = self._peer_root
+            if root is not None and credentials is not None:
+                if not _is_descendant(credentials[0], root):
+                    return "peer_process"
+                return None if token_ok else "token"
+            if not token_ok:
+                return "token"
+            if self._token_consumed:
+                return "token_replayed"
+            self._token_consumed = True
+            return None
 
     def _event(self, event, **fields):
         # Only locally generated enum/status fields reach persistent logs. Never
@@ -226,6 +373,7 @@ class McpBroker:
                     self._closed.set()
                 self._event("mcp_broker_failure", reason="broker_exception",
                             exception_type=type(exc).__name__)
+            finally:
                 try:
                     conn.close()
                 except OSError:
@@ -242,8 +390,9 @@ class McpBroker:
             if b"\n" in received:
                 break
         line, _, remainder = bytes(received).partition(b"\n")
-        if line.decode("ascii", errors="ignore") != self._token:
-            self._event("mcp_broker_failure", reason="relay_handshake_rejected")
+        cause = self._authenticate(conn, line)
+        if cause is not None:
+            self._event("mcp_broker_failure", reason="relay_handshake_rejected", cause=cause)
             return
         self._event("mcp_relay_connected")
         generation = self._begin_generation()
@@ -385,8 +534,8 @@ class McpBroker:
         self._tmp.cleanup()
 
 
-def relay(endpoint: str, token: str) -> int:
-    if not endpoint.startswith("/") or not token or len(token) > 100:
+def relay(endpoint: str, token: str | None) -> int:
+    if not endpoint.startswith("/") or not token or len(token) > 100 or not token.isascii():
         sys.stderr.write("cortex_mcp_relay_invalid_arguments\n")
         return 2
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -431,10 +580,17 @@ def relay(endpoint: str, token: str) -> int:
 
 def main(argv=None):
     parser = argparse.ArgumentParser(add_help=False)
-    parser.add_argument("--relay", nargs=2)
+    parser.add_argument("--relay", metavar="ENDPOINT")
     args = parser.parse_args(argv)
     if args.relay:
-        raise SystemExit(relay(*args.relay))
+        if not args.relay.startswith("/"):
+            sys.stderr.write("cortex_mcp_relay_invalid_arguments\n")
+            raise SystemExit(2)
+        token = read_relay_token(args.relay)
+        if token is None:
+            sys.stderr.write("cortex_mcp_relay_token_unavailable\n")
+            raise SystemExit(2)
+        raise SystemExit(relay(args.relay, token))
 
 
 if __name__ == "__main__":

@@ -202,8 +202,11 @@ This is trusted local development, **not hostile-code OS isolation**. Direct
 filesystem masks cannot stop arbitrary owner code or a Docker daemon from
 bypassing them. Host capability is not permission for deletion, production/shared
 changes, publication, credentials or paid checks; declared deletion commands
-still require consent, including `env rm`, `sh -c 'env rm file'` and
-`bash -o pipefail -c 'rm file'`. Simple shell assignment prefixes and
+still require consent, including `env rm`, `sh -c 'env rm file'`,
+`bash -o pipefail -c 'rm file'`, `unlink`, `rmdir`, `find -delete`, `git clean`,
+`git rm` and `shred -u`. Read-only roles (reviewer, auditor and similar) are refused these
+commands outright. Deletion recognition is lexical: it does not cover deletions inside
+scripts, interpreters or build tools. Simple shell assignment prefixes and
 conditional/loop command positions are recognized too, for example
 `sh -c 'LABEL=fixture rm fixture'` and `sh -c 'if true; then env rm fixture; fi'`.
 Literal `echo`/`printf` argv arguments are not shell commands. Select **Guarded**

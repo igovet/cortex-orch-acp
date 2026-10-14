@@ -133,6 +133,65 @@ class _CoordinatorTurnCancel:
         return self.is_set()
 
 
+# Paseo sends ``session/cancel`` and, once that turn settles, a new
+# ``session/prompt`` for a follow-up message (CLI ``send``, Desktop "Send
+# now"). ACP carries nothing that tells this apart from a Stop click. A
+# cancel is therefore held this long after the cancelled turn ends: a prompt
+# on the same session within it is steering and the workers keep running; a
+# lone cancel pauses the task when it expires.
+DEFAULT_HOST_CANCEL_GRACE_SECONDS = 5.0
+
+
+class _CancelSteeringHold:
+    """One coordinator turn's host cancel, held for the steering grace window.
+
+    ``idle`` (no cancel) -> ``armed`` (cancel received, the turn is ending)
+    -> ``waiting`` (turn ended, grace timer running) -> ``steered`` (a
+    prompt on the same session followed) or ``expired`` (a lone cancel, or a
+    stop/other session/disconnect resolved it first).
+    """
+
+    def __init__(self, session_id: str, turn_event, paseo: bool) -> None:
+        self.session_id = session_id
+        self.turn_event = turn_event
+        self.paseo = paseo
+        self.state = "idle"
+        self.pause_on_expiry = False
+        self.timer: threading.Timer | None = None
+
+    def holds_workers(self) -> bool:
+        return self.state in {"armed", "waiting", "steered"}
+
+
+class _WorkerTurnCancel:
+    """The worker view of the coordinator turn's cancel event.
+
+    A worker dispatched by a turn observes that turn's cancellation, except
+    while a host cancel is held for steering (and for good once it turned
+    into steering). SessionRuntime only needs Event.wait/is_set.
+    """
+
+    def __init__(self, turn_event, hold: _CancelSteeringHold) -> None:
+        self._turn = turn_event
+        self._hold = hold
+        self._own = threading.Event()
+
+    def set(self) -> None:
+        self._own.set()
+
+    def is_set(self) -> bool:
+        return self._own.is_set() or (self._turn.is_set() and not self._hold.holds_workers())
+
+    def wait(self, timeout: float | None = None) -> bool:
+        deadline = None if timeout is None else time.monotonic() + timeout
+        while not self.is_set():
+            remaining = None if deadline is None else deadline - time.monotonic()
+            if remaining is not None and remaining <= 0:
+                break
+            self._own.wait(min(0.05, remaining) if remaining is not None else 0.05)
+        return self.is_set()
+
+
 
 
 
@@ -1102,9 +1161,11 @@ class OrchestratingRuntime:
         wait_timeout_seconds: float = DEFAULT_WAIT_TIMEOUT_SECONDS,
         host_elicitor: HostElicitor | None = None,
         host_fs_requester: Callable[[str, Mapping[str, Any]], Mapping[str, Any]] | None = None,
+        host_cancel_grace_seconds: float = DEFAULT_HOST_CANCEL_GRACE_SECONDS,
     ) -> None:
         self._store = store
         self._engine = session_runtime
+        self._host_cancel_grace_seconds = max(0.0, float(host_cancel_grace_seconds))
         try:
             import inspect
             self._engine_accepts_prompt_blocks = "prompt_blocks" in inspect.signature(session_runtime.prompt).parameters
@@ -1343,6 +1404,9 @@ class OrchestratingRuntime:
         # Never cleared (a session_id is effectively unique for the life of
         # this process); a stale/unknown session_id is simply a no-op below.
         self._session_task: dict[str, str] = {}
+        # The current (or most recently cancelled) coordinator turn's host
+        # cancel hold per task -- see _CancelSteeringHold.
+        self._cancel_holds: dict[str, _CancelSteeringHold] = {}
 
     def _task_resource_lock(self, task_id: str):
         # Admission and cleanup are serialized per task, never across tasks.
@@ -1412,12 +1476,18 @@ class OrchestratingRuntime:
         plain-text-only behavior unchanged."""
         elicitor = host_elicitor if host_elicitor is not None else self._elicitor
         generation = object()
+        # A held host cancel ends here: this prompt on the same session is
+        # steering; anything else first applies the pause it deferred.
+        self._resolve_cancel_hold(task_id, session_id)
+        hold = _CancelSteeringHold(session_id, cancel_event, _is_panel_surface(client_surface))
+        outcome = None
         with self._task_resource_lock(task_id), self._lock:
             if task_id in self._active_tasks:
                 raise SecondCoordinatorRefused()
             self._active_tasks.add(task_id)
             self._task_resource_generations[task_id] = generation
             self._active_cancel_events[task_id] = cancel_event
+            self._cancel_holds[task_id] = hold
             # A new turn arrives over a live connection.
             self._host_disconnected.discard(task_id)
             self._session_task[session_id] = task_id
@@ -1442,11 +1512,12 @@ class OrchestratingRuntime:
             if host_mcp_servers:
                 self._task_mcp_servers[task_id] = list(host_mcp_servers)
         try:
-            return self._run(task_id, session_id, content, emit_update, cancel_event,
-                              source_origin=source_origin, source_event_id=source_event_id, host_elicitor=elicitor,
-                              emit_tool_call=emit_tool_call,
-                              emit_display_update=emit_display_update,
-                              prompt_blocks=prompt_blocks)
+            outcome = self._run(task_id, session_id, content, emit_update, cancel_event,
+                                source_origin=source_origin, source_event_id=source_event_id, host_elicitor=elicitor,
+                                emit_tool_call=emit_tool_call,
+                                emit_display_update=emit_display_update,
+                                prompt_blocks=prompt_blocks)
+            return outcome
         except Exception:
             # A failed turn is recoverable, not a certified task failure.
             try:
@@ -1478,6 +1549,7 @@ class OrchestratingRuntime:
                 # permission requester here; see
                 # ``_release_task_host_requesters``.
                 self._task_fs_requesters.pop(task_id, None)
+            self._start_cancel_grace(task_id, hold, cancelled=outcome == StopReason.CANCELLED)
 
     def active_session_owner_epoch(self, task_id: str, session_id: str) -> int | None:
         """Expose only the channel this runtime opened for this active host turn."""
@@ -1516,12 +1588,25 @@ class OrchestratingRuntime:
         A ``session_id`` this process never saw start a turn (unknown, or
         only ever handled by a *different* process before a restart) is a
         documented no-op -- true out-of-band cross-process cancellation is
-        not this method's job (see the historical note this replaces)."""
+        not this method's job (see the historical note this replaces).
+
+        For a Paseo turn the cancel is held (see _CancelSteeringHold): the
+        turn ends at once, but its workers keep running and the task is not
+        paused until the grace window after the turn expires without a
+        prompt on the same session. Paseo sends exactly this cancel before
+        a follow-up message; such a prompt continues as steering."""
         task_id = self._session_task.get(session_id)
         if task_id is None:
             return None
         with self._lock:
             active_event = self._active_cancel_events.get(task_id)
+            hold = self._cancel_holds.get(task_id)
+            if (active_event is not None and hold is not None and hold.state == "idle"
+                    and hold.paseo and hold.session_id == session_id
+                    and hold.turn_event is active_event and self._host_cancel_grace_seconds > 0):
+                # Armed before the event is set: the turn it wakes ends
+                # without pausing the task or cancelling its workers.
+                hold.state = "armed"
         if active_event is not None:
             active_event.set()
         session_ref = self._coordinator_sessions.get(task_id)
@@ -1602,6 +1687,12 @@ class OrchestratingRuntime:
                 # An old connection's EOF cannot stop the replacement's live work.
                 task_id = None
             if task_id is not None:
+                # A cancel still held for steering gets no follow-up prompt
+                # over a closed connection: it stops, as a lone cancel does.
+                try:
+                    self._resolve_cancel_hold(task_id, None)
+                except Exception:  # noqa: BLE001 - never block disconnect handling
+                    pass
                 # The host transport is now definitively closed.  Do not leave a
                 # requester closure pointing at it: a later worker permission
                 # request must fail closed rather than block on a dead pipe.
@@ -1648,6 +1739,15 @@ class OrchestratingRuntime:
         owned coordinator/worker process with a confirmed/ambiguous
         release, and shut down the worker-dispatch executor. Idempotent;
         safe to call once at process/runtime teardown."""
+        # A cancel still held for steering can no longer be followed by a
+        # prompt: settle it as the lone cancel it is before teardown.
+        with self._lock:
+            held_tasks = tuple(self._cancel_holds)
+        for held_task in held_tasks:
+            try:
+                self._resolve_cancel_hold(held_task, None)
+            except Exception:  # noqa: BLE001 - teardown must continue
+                pass
         # First, so every turn and worker the teardown interrupts reads it
         # as transport loss rather than a failure (see transport_lost).
         self._shutting_down.set()
@@ -1672,11 +1772,118 @@ class OrchestratingRuntime:
         self._executor.shutdown(wait=False, cancel_futures=True)
 
     def transport_lost(self, task_id: str) -> bool:
-        """Whether this task's host connection closed or this daemon is
-        tearing down: interrupted work then stays as persisted for recovery
-        instead of being cancelled or recorded as failed."""
+        """Whether this task's interrupted turn must leave its work as
+        persisted instead of pausing it: its host connection closed, this
+        daemon is tearing down, or a host cancel is held for steering (see
+        _CancelSteeringHold; the pause then follows only on expiry).
+        Consulted by the orchestration controller only."""
+        with self._lock:
+            if self._shutting_down.is_set() or task_id in self._host_disconnected:
+                return True
+            hold = self._cancel_holds.get(task_id)
+            return hold is not None and hold.state == "armed"
+
+    def _transport_closed(self, task_id: str) -> bool:
+        """Real transport loss only: the host connection closed or this
+        daemon is tearing down."""
         with self._lock:
             return self._shutting_down.is_set() or task_id in self._host_disconnected
+
+    def _worker_cancel_view(self, task_id: str, cancel_event):
+        """The cancel event a worker dispatched by this turn observes."""
+        with self._lock:
+            hold = self._cancel_holds.get(task_id)
+        if hold is None or hold.turn_event is not cancel_event:
+            return cancel_event
+        return _WorkerTurnCancel(cancel_event, hold)
+
+    def _start_cancel_grace(self, task_id: str, hold: _CancelSteeringHold, *, cancelled: bool) -> None:
+        """At the end of a turn: start the grace window of a held cancel."""
+        with self._lock:
+            if self._cancel_holds.get(task_id) is not hold:
+                return
+            if hold.state != "armed":
+                if hold.state == "idle":
+                    self._cancel_holds.pop(task_id, None)
+                return
+            hold.state = "waiting"
+            hold.pause_on_expiry = cancelled
+            timer = threading.Timer(self._host_cancel_grace_seconds, self._expire_cancel_hold, args=(task_id, hold))
+            timer.daemon = True
+            hold.timer = timer
+        timer.start()
+
+    def _expire_cancel_hold(self, task_id: str, hold: _CancelSteeringHold) -> None:
+        """Grace window over without a follow-up prompt: a lone cancel stops."""
+        try:
+            with self._task_resource_lock(task_id):
+                with self._lock:
+                    if self._cancel_holds.get(task_id) is not hold or hold.state != "waiting":
+                        return
+                    hold.state = "expired"
+                    self._cancel_holds.pop(task_id, None)
+                self._apply_cancel_pause(task_id, hold, "grace_expired")
+        except Exception:  # noqa: BLE001 - a timer thread has no caller to report to
+            pass
+
+    def _resolve_cancel_hold(self, task_id: str, session_id: str | None) -> None:
+        """Settle a waiting hold before this task's next turn, stop or
+        disconnect. A prompt on the cancelled session (``session_id``) turns
+        it into steering; anything else (``None``, another session) applies
+        the deferred pause first."""
+        with self._task_resource_lock(task_id):
+            with self._lock:
+                hold = self._cancel_holds.get(task_id)
+                if hold is None or hold.state != "waiting":
+                    return
+                self._cancel_holds.pop(task_id, None)
+                steered = session_id is not None and session_id == hold.session_id
+                hold.state = "steered" if steered else "expired"
+            if hold.timer is not None:
+                hold.timer.cancel()
+            if steered:
+                try:
+                    delegation_events.append_event(
+                        self._store, task_id, "progress", f"host_cancel_steering:{new_id('p_')}",
+                        dict(kind="host_cancel_followed_by_prompt", session_id=session_id,
+                             note="A host cancel followed by a prompt on the same session was taken as "
+                                  "steering; running workers continue."),
+                        origin="runtime",
+                    )
+                except Exception:  # noqa: BLE001 - observability only
+                    pass
+                return
+            self._apply_cancel_pause(task_id, hold, "resolved_before_next_turn")
+
+    def _drop_cancel_hold(self, task_id: str) -> None:
+        """A task stop supersedes a held cancel: its workers observe the
+        cancellation again and the stop itself cancels the work."""
+        with self._lock:
+            hold = self._cancel_holds.get(task_id)
+            if hold is None or hold.state not in {"armed", "waiting"}:
+                return
+            hold.state = "expired"
+            self._cancel_holds.pop(task_id, None)
+        if hold.timer is not None:
+            hold.timer.cancel()
+
+    def _apply_cancel_pause(self, task_id: str, hold: _CancelSteeringHold, reason: str) -> None:
+        """The pause an ordinary cancelled turn applies at once (see
+        orchestration.controller._stop_turn), applied after the hold."""
+        if not hold.pause_on_expiry or self._transport_closed(task_id):
+            return
+        from ..orchestration.controller import _pause_turn
+        from ..orchestration.state import TaskMachine
+
+        with self._lock:
+            emit_tool_call = self._task_tool_call_emitters.get(task_id)
+        _pause_turn(self, task_id, TaskMachine(self._store), emit_tool_call)
+        delegation_events.append_event(
+            self._store, task_id, "progress", f"host_cancel_paused:{new_id('p_')}",
+            dict(kind="host_cancel_paused", reason=reason, session_id=hold.session_id,
+                 note="A host cancel without a follow-up prompt paused the task."),
+            origin="runtime",
+        )
 
     def _release_task_host_requesters(self, task_id: str, *, session_id: str | None = None) -> None:
         """Drop host request relays once no user decision can be delivered.
@@ -1834,7 +2041,7 @@ class OrchestratingRuntime:
     ) -> str:
         with self._task_resource_lock(task_id):
             self._coordinator_open_attempts.setdefault(task_id, set()).add(attempt_ref)
-            if self.transport_lost(task_id):
+            if self._transport_closed(task_id):
                 from ..trusted_channel import revoke_channel
                 revoke_channel(self._store, channel_id)
                 raise StoreError("channel_revoked")
@@ -2195,7 +2402,16 @@ class OrchestratingRuntime:
             recipient_map["assignment_ref"] = generation["assignment_ref"]
             recipient_map["attempt_id"] = pending["attempt_id"]
         try:
-            capsule = build_capsule(self._store, task_id, recipient_map)
+            # C-30: this is the one call site whose rendered capsule is
+            # prefixed onto the worker's own literal prompt text below in
+            # the same message -- ``inline_delivery=True`` removes the
+            # capsule's own redundant copies of the objective (its own
+            # node ``objective`` and assignment ``title``) that would
+            # otherwise duplicate ``own_assignment['brief']`` a second and
+            # third time before the literal brief further down even
+            # starts (see ``recovery.capsule._apply_inline_delivery_dedup``).
+            # ``read_capsule`` and every other caller never pass this.
+            capsule = build_capsule(self._store, task_id, recipient_map, inline_delivery=True)
         except StoreError as error:
             if str(error) != "capsule_oversize":
                 raise
@@ -2333,6 +2549,32 @@ class OrchestratingRuntime:
                 return prompt_text, None, True
 
         prefix = f"{role_blocks_text}\n\n{capsule_text}" if role_blocks_text else capsule_text
+        # C-30: ``capsule``'s own ``own_assignment['brief']`` (always kept
+        # verbatim -- see ``recovery.capsule._compact_pipeline``) is the
+        # same literal text ``_provision_and_prompt_inner`` also embeds
+        # further down in this very ``prompt_text`` (the worker's own
+        # task brief). Once that capsule text is actually about to be
+        # prefixed onto this message, repeating it there a second time
+        # duplicated the objective. Replace that one exact, byte-for-byte
+        # occurrence with a short pointer back to the capsule above it;
+        # every other content of ``prompt_text`` (acceptance, project
+        # catalog, language rules) is untouched. A capsule whose own
+        # brief could not be found verbatim in ``prompt_text`` (never
+        # expected -- both ultimately come from the same
+        # ``delegation_requested`` event payload) leaves ``prompt_text``
+        # exactly as built rather than guessing.
+        if recipient == "worker":
+            own_brief_text = (
+                capsule.get("sections", {}).get("pipeline_and_assignments", {}).get("own_assignment", {}).get("brief")
+            )
+            if isinstance(own_brief_text, str) and own_brief_text and own_brief_text in prompt_text:
+                prompt_text = prompt_text.replace(
+                    own_brief_text,
+                    "(see this same message's recovery capsule above, "
+                    "pipeline_and_assignments.own_assignment.brief, for this assignment's objective, "
+                    "scope, dependency reports and original goal)",
+                    1,
+                )
         new_prompt_text = f"{prefix}\n\n---\n\n{prompt_text}"
         self._engine.mark_delivery_transmitted(session_ref, delivery["id"])
         from .. import _fault_injection
@@ -2494,9 +2736,15 @@ class OrchestratingRuntime:
                 dict(content=content, session_id=session_id), question_id=answering_question.id,
                 answer_text=answer_text, ledger_origin=ledger_origin, ledger_event_id=ledger_event_id,
             )
-            if not answered:
+            if not answered and user_message_event.superseded:
                 emit_update(acp_messages.render("question_already_answered", language))
                 return StopReason.END_TURN
+            if not answered:
+                # This exact message was captured earlier as steering (a
+                # Paseo queued message) and never answered the question:
+                # it continues as that steering, never as a false answer.
+                answering_question = None
+                answer_text = content
         else:
             user_message_event = replay_store.record_user_message_event(
                 self._store, task_id, dedup_key, session_id, dict(content=content, session_id=session_id),
@@ -2593,6 +2841,10 @@ class OrchestratingRuntime:
             self._notify()
             return StopReason.END_TURN
         generation = object()
+        self._resolve_cancel_hold(task_id, session_id)
+        with self._lock:
+            hold = _CancelSteeringHold(session_id, cancel_event, bool(self._worker_panel_mode.get(task_id)))
+        outcome = None
         with self._task_resource_lock(task_id):
             with self._lock:
                 if task_id in self._active_tasks:
@@ -2606,6 +2858,7 @@ class OrchestratingRuntime:
                 self._session_task[session_id] = task_id
                 self._task_requester_sessions[task_id] = session_id
                 self._active_cancel_events[task_id] = cancel_event
+                self._cancel_holds[task_id] = hold
                 self._host_disconnected.discard(task_id)
                 self._task_tool_call_emitters[task_id] = emit_tool_call
                 self._task_display_emitters[task_id] = emit_display_update
@@ -2637,11 +2890,12 @@ class OrchestratingRuntime:
                 dict(content=f"Answered question ({question.text!r}): {answer_text}", session_id=session_id),
                 origin=session_id,
             )
-            return self._continuation_loop(
+            outcome = self._continuation_loop(
                 task_id, session_id, channel, session_ref, text, emit_update, cancel_event, language,
                 emit_tool_call=emit_tool_call,
                 emit_display_update=emit_display_update,
             )
+            return outcome
         except Exception:
             try:
                 self._cleanup_task_resources(task_id, generation=generation)
@@ -2657,6 +2911,7 @@ class OrchestratingRuntime:
                 if self._active_cancel_events.get(task_id) is cancel_event:
                     del self._active_cancel_events[task_id]
                     self._active_tasks.discard(task_id)
+            self._start_cancel_grace(task_id, hold, cancelled=outcome == StopReason.CANCELLED)
 
     def stop_task(
         self, task_id: str, session_id: str, emit_update: Callable[[str], bool],
@@ -2713,6 +2968,7 @@ class OrchestratingRuntime:
                 stop_source = json.loads(source_row["payload_json"])["source"]
         from ..orchestration.state import TaskMachine
         TaskMachine(self._store).cancel(task_id)
+        self._drop_cancel_hold(task_id)
         self._release_task_host_requesters(task_id)
         with self._lock:
             active_event = self._active_cancel_events.get(task_id)
@@ -4477,7 +4733,7 @@ class OrchestratingRuntime:
             if set_cancelled is not None:
                 def question_cancelled():
                     latest = questions_store.get(self._store, question.id)
-                    return (self.transport_lost(task_id) or acp_steering.is_stopped(self._store, task_id)
+                    return (self._transport_closed(task_id) or acp_steering.is_stopped(self._store, task_id)
                             or latest is None or latest.status != "open")
                 set_cancelled(question_cancelled)
             if hasattr(elicitor, "set_question_id"):
@@ -4655,7 +4911,8 @@ class OrchestratingRuntime:
                 self._open_assignments.setdefault(task_id, set()).add(assignment_ref)
             try:
                 future = self._executor.submit(
-                    self._provision_and_prompt, task_id, coordinator_channel, payload, cancel_event,
+                    self._provision_and_prompt, task_id, coordinator_channel, payload,
+                    self._worker_cancel_view(task_id, cancel_event),
                 )
             except Exception as error:  # noqa: BLE001 - convert submit failure into durable assignment state
                 with self._lock:
@@ -5221,7 +5478,7 @@ class OrchestratingRuntime:
         # Close the exact attempt here too, so a stale future cannot leave a
         # newly opened process behind or send a first model turn.
         from ..orchestration.limits import assignment_current
-        if (cancel_event.is_set() or self.transport_lost(task_id)
+        if (cancel_event.is_set() or self._transport_closed(task_id)
                 or not assignment_current(self._store,task_id,assignment_ref)):
             try:
                 self._engine.terminate_owned(result.attempt_id)
@@ -5244,7 +5501,15 @@ class OrchestratingRuntime:
         # engine session launch); this main process never needs to hold the
         # worker's ChannelContext, only its engine session ref.
         self._worker_sessions[(task_id, assignment_ref)] = result.engine_session_ref
-        brief = f"{payload['title']}\n\n{payload['brief']}\n\nAcceptance: {payload['acceptance']}"
+        # C-30: ``title`` is always derived from (a word-boundary-cut prefix
+        # of) the same objective already encoded inside ``brief`` -- see
+        # ``orchestration.controller._dispatch_ready``/``_title_from_objective``
+        # -- so repeating it verbatim here duplicated the objective on every
+        # worker's first prompt. Show it only when it adds information the
+        # brief text does not already carry.
+        _title_value = payload.get('title') or ''
+        _title_block = f"{_title_value}\n\n" if _title_value and _title_value not in payload['brief'] else ''
+        brief = f"{_title_block}{payload['brief']}\n\nAcceptance: {payload['acceptance']}"
         generation_delivery_id = None
         # A clean worker END_TURN with no durable Cortex outcome gets one
         # procedural chance to finish the existing report/publication
@@ -6040,7 +6305,7 @@ class OrchestratingRuntime:
             if question_batches.completed_tx(db, batch):
                 return True
         def finished():
-            return (self.transport_lost(task_id) or acp_steering.is_stopped(self._store, task_id)
+            return (self._transport_closed(task_id) or acp_steering.is_stopped(self._store, task_id)
                     or any(questions_store.get(self._store, q['question_id']).status in {'cancelled','superseded'}
                            for q in batch['questions'])
                     or all(questions_store.get(self._store, q['question_id']).status == 'answered'
@@ -6095,7 +6360,7 @@ class OrchestratingRuntime:
         entry = ("Waiting for the access decision." if initial_wait and initial_wait.get('kind') == 'access'
                  else "Waiting for the user's answer.")
         self._emit_worker_card(feed, assignment_ref, status="in_progress", entry=entry)
-        while (not cancel_event.is_set() and not self.transport_lost(task_id)
+        while (not cancel_event.is_set() and not self._transport_closed(task_id)
                and assignment_current(self._store, task_id, assignment_ref)):
             from ..orchestration.access import reconcile
             reconcile(self._store, task_id)
@@ -6401,16 +6666,35 @@ class OrchestratingRuntime:
                                 reported_work_attempt_ref = json.loads(request["payload_json"]).get("work_attempt_ref")
                             except (TypeError, ValueError, json.JSONDecodeError):
                                 reported_work_attempt_ref = None
+                        silent_summary = ("The worker published this report and then ended its turn "
+                                          "without reporting it. Read the report itself: nothing else "
+                                          "was said about the work.")
                         silent_result = delegation_events.append_event_tx(
                             db, task_id, "worker_result", f"assignment_silent_result:{assignment_ref}",
-                            dict(report_ref=published["report_ref"],
-                                 summary="The worker published this report and then ended its turn "
-                                         "without reporting it. Read the report itself: nothing else "
-                                         "was said about the work.",
-                                 checks=[]),
+                            dict(report_ref=published["report_ref"], summary=silent_summary, checks=[]),
                             origin="runtime", assignment_ref=assignment_ref,
                         )
                         reported_event_id = silent_result.id
+                        # The same transaction records it as the runtime
+                        # node's result: a coordinator-facing event alone
+                        # left the node running, and lost-worker recovery
+                        # then reset and re-dispatched the finished work.
+                        # A review needs the reviewer's own verdict, and a
+                        # node that already moved on keeps its state; both
+                        # refuse here before anything is written.
+                        node = db.execute(
+                            "SELECT stage FROM runtime_nodes WHERE task_id=? AND assignment_ref=?",
+                            (task_id, assignment_ref),
+                        ).fetchone()
+                        if node is not None and node["stage"] != "review":
+                            from ..orchestration.state import TaskMachine
+                            try:
+                                TaskMachine(self._store).record_result_tx(
+                                    db, task_id, assignment_ref,
+                                    dict(report_ref=published["report_ref"], summary=silent_summary, checks=[]),
+                                )
+                            except StoreError:
+                                pass
                     else:
                         # The graph transition is applied after this
                         # transaction; opening another Store connection here
@@ -6474,10 +6758,22 @@ class OrchestratingRuntime:
                 release_observed(self,task_id,row['attempt_id'])
             except Exception:
                 pass
-        delegation_events.append_event(
-            self._store, task_id, "assignment_cancelled", f"assignment_cancelled:{assignment_ref}",
-            dict(reason=reason), origin="runtime", assignment_ref=assignment_ref,
-        )
+        with self._store.connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                delegation_events.append_event_tx(
+                    db, task_id, "assignment_cancelled", f"assignment_cancelled:{assignment_ref}",
+                    dict(reason=reason), origin="runtime", assignment_ref=assignment_ref,
+                )
+                # The cancelled worker's open question ends with it, in the
+                # same transaction: left open, the next user message was
+                # taken as a late answer to it and swallowed.
+                from ..orchestration.worker_waits import cancel_tx
+                cancel_tx(db, task_id, reason, assignment_ref=assignment_ref)
+                db.commit()
+            except BaseException:
+                db.rollback()
+                raise
         # Keep the work graph projection aligned with the cancellation event.
         # The engine attempt id and the graph attempt id are different
         # namespaces; resolve the latter through the original delegation

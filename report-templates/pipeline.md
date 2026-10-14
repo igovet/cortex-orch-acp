@@ -22,7 +22,7 @@
 
 ## State and evidence links
 
-<!-- Link selected reports and artifacts. Distinguish implementation and observed delivery from the evidence supporting the coordinator's task decision; the recorded decision lives in durable task state. State the chosen governance depth and its concrete effects on assignments and checks. Bind Git/CI/deploy/production claims to exact revisions and receipts; explain repeated review or verification with fresh evidence or a rerun reason. Add rollout and incident details only when relevant. -->
+<!-- Link selected reports and artifacts. Distinguish implementation and observed delivery from the evidence supporting the coordinator's task decision; the recorded decision lives in durable task state. Bind Git/CI/deploy/production claims to exact revisions and receipts; explain repeated review or verification with fresh evidence or a rerun reason. Add rollout and incident details only when relevant. -->
 
 ## Decisions, alternatives, discriminating checks, and unresolved deliverable work
 

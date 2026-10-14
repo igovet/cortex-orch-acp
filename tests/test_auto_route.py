@@ -373,8 +373,10 @@ def test_plan_usage_decides_between_suitable_engines_before_affinity():
     the kind of work."""
     assert auto_route.USAGE_MARGIN == 10.0
     picked, decision = _rank("standard", "worker-backend-dev", codex=95, claude=75)
-    assert picked.route.model == "sonnet" and decision["decided_by"] == "usage"
-    assert decision["rank_version"] == 10
+    # C-19 (rank version 11): the hot/non-hot quota flag now decides before
+    # the usage-gap band even applies; the pick is unchanged.
+    assert picked.route.model == "sonnet" and decision["decided_by"] == "quota"
+    assert decision["rank_version"] == 11
     assert decision["usage"] == dict(compared=True, active=True, status="active", threshold=95.0, margin=10.0, least_used_percent=75)
     assert {c["route"]: c["usage_band"] for c in decision["candidates"]} == {
         "claude-agent-acp/sonnet": 0, "codex-acp/gpt-5.6-sol": 2, "codex-acp/gpt-5.6-terra": 2}
@@ -386,7 +388,7 @@ def test_plan_usage_decides_between_suitable_engines_before_affinity():
     assert picked.route.engine == "codex-acp" and decision["decided_by"] == "affinity"
     # The same holds the other way round for review work.
     picked, decision = _rank("deep", "worker-security-auditor", codex=5, claude=95)
-    assert picked.route.engine == "codex-acp" and decision["decided_by"] == "usage"
+    assert picked.route.engine == "codex-acp" and decision["decided_by"] == "quota"
 
 
 def test_rank_has_no_attempt_count_input():
@@ -866,32 +868,32 @@ def test_a_preference_near_its_quota_band_is_ignored_in_every_tier():
 
 
 def test_every_tier_orders_a_hot_account_last():
-    """Light work used to spend a hot plan first (7b7aca22); a large usage
-    gap (the usage-gap signal, not the quota band) is what decides it now
-    that quota is only a late tie breaker."""
+    """Light work used to spend a hot plan first (7b7aca22); the hot/non-hot
+    quota flag (C-19, rank version 11) now decides this directly, ahead of
+    the usage-gap band."""
     assert auto_route._order_key(10.0) < auto_route._order_key(95.0)
     assert auto_route._order_key(None) == auto_route._order_key(0.0)
     entries = [CODEX[2], CLAUDE[2]]  # gpt-6-luna, Claude haiku (both light)
     picked, decision = auto_route.rank("light", entries, _usage(codex=10, claude=95), role="worker-explorer", models=MODELS)
-    assert picked is CODEX[2] and decision["decided_by"] == "usage"
+    assert picked is CODEX[2] and decision["decided_by"] == "quota"
     picked, decision = auto_route.rank("light", entries, _usage(codex=95, claude=10), role="worker-backend-dev", models=MODELS)
-    assert picked is CLAUDE[2] and decision["decided_by"] == "usage"
+    assert picked is CLAUDE[2] and decision["decided_by"] == "quota"
 
 
-# --- softer 95% quota band (rank version 6) --------------------------------
+# --- quota band restored ahead of affinity (rank version 11, C-19) --------
 
-def test_crossing_95_percent_alone_no_longer_overrides_affinity():
-    """A one-point crossing of HOT_PERCENT is not a meaningful usage gap
-    (well under USAGE_MARGIN), so engine affinity -- the task/model fit --
-    still decides, even though the affinity-preferred candidate is the
-    (barely) hot one."""
+def test_a_known_hot_candidate_now_always_outranks_affinity():
+    """C-19 (owner D5): even a one-point, far-inside-USAGE_MARGIN crossing
+    of HOT_PERCENT now outranks engine affinity -- the task/model fit --
+    though a prior design (rank version 6) let affinity decide here. A
+    known >=95% candidate must rank behind any non-hot one, known or
+    unknown, never merely a late tie breaker affinity could still beat."""
     entries = [CODEX[4], CLAUDE[1]]  # gpt-5.6-terra, sonnet (both standard)
-    # Codex is preferred for implementation work; a 2-point gap is far
-    # inside USAGE_MARGIN, so it is not a meaningful usage difference.
+    # Codex is preferred for implementation work, but is the (barely) hot one.
     picked, decision = auto_route.rank("standard", entries, _usage(codex=96, claude=94),
                                        role="worker-backend-dev", models=MODELS)
-    assert picked.route.engine == "codex-acp" and decision["decided_by"] == "affinity"
-    assert decision["candidates"][0]["hot"] is True
+    assert picked.route.engine == "claude-agent-acp" and decision["decided_by"] == "quota"
+    assert decision["candidates"][0]["hot"] is False
 
 
 def test_a_small_near_boundary_gap_falls_to_the_quota_tie_breaker():
@@ -920,20 +922,21 @@ def test_boundary_percentages_around_94_95_96(codex, claude, expected_engine, ex
     assert decision["decided_by"] == expected_decided_by
 
 
-def test_a_large_gap_still_wins_via_the_usage_signal_regardless_of_the_band():
-    """A gap well past USAGE_MARGIN decides through the usage-gap signal,
-    not the quota band -- quota influence is retained, just moved earlier
-    into the existing usage-band mechanism instead of a hard 95% cliff."""
+def test_a_large_gap_also_decides_through_the_now_earlier_quota_flag():
+    """A gap well past USAGE_MARGIN still picks the non-hot candidate, but
+    (rank version 11, C-19) the hot/non-hot quota flag decides it directly,
+    ahead of the usage-gap band it used to reach first."""
     entries = [CODEX[4], CLAUDE[1]]
     picked, decision = auto_route.rank("standard", entries, _usage(codex=95, claude=20), models=MODELS)
-    assert picked.route.engine == "claude-agent-acp" and decision["decided_by"] == "usage"
+    assert picked.route.engine == "claude-agent-acp" and decision["decided_by"] == "quota"
 
 
 def test_both_hot_candidates_are_still_separated_by_the_usage_gap_or_exact_percent():
     entries = [CODEX[4], CLAUDE[1]]
-    # A meaningful (>= USAGE_MARGIN) gap between two hot plans: usage decides.
+    # Codex (99%) is hot; Claude (87%) is not, so quota decides this one
+    # directly now (C-19) -- not the usage-gap band it used to reach first.
     picked, decision = auto_route.rank("standard", entries, _usage(codex=99, claude=87), models=MODELS)
-    assert picked.route.engine == "claude-agent-acp" and decision["decided_by"] == "usage"
+    assert picked.route.engine == "claude-agent-acp" and decision["decided_by"] == "quota"
     # An immaterial gap between two hot plans: exact used percent decides.
     picked, decision = auto_route.rank("standard", entries, _usage(codex=99, claude=96), models=MODELS)
     assert picked.route.engine == "claude-agent-acp" and decision["decided_by"] == "used_percent"
@@ -985,9 +988,9 @@ def test_exhausted_100_percent_remains_a_hard_exclusion_regardless_of_margin():
 @pytest.mark.parametrize("kwargs,expected", [
     (dict(preference="claude-agent-acp"), "preference"),
     (dict(model_hint="claude-agent-acp/sonnet"), "hint"),
-    (dict(usage=_usage(codex=95, claude=10)), "usage"),
+    (dict(usage=_usage(codex=95, claude=10)), "quota"),
     (dict(escalated=True, previous_engine="codex-acp"), "diversify"),
-    (dict(usage=_usage(codex=95, claude=20)), "usage"),
+    (dict(usage=_usage(codex=95, claude=20)), "quota"),
     (dict(), "affinity"),
     (dict(usage=_usage(codex=99, claude=96)), "affinity"),
     (dict(role=None, usage=_usage(codex=99, claude=96)), "used_percent"),
@@ -1065,7 +1068,7 @@ def test_normal_testing_ranks_stretch_with_the_standard_models(tmp_path, monkeyp
     choice = auto_route.choose("worker-qa-engineer", project, environ)
     assert choice.model == "claude-sonnet-5" and choice.effort == "medium"
     assert choice.decision["stretch"] == dict(status="standard_candidate", candidate=True, chosen=False,
-                                           outranked_by="usage")
+                                           outranked_by="quota")
     # A coordinator hint picks either standard model; a Luna hint is not a tier mismatch.
     project, environ = _live_all(monkeypatch, tmp_path)
     choice = auto_route.choose("worker-qa-engineer", project, environ, model_hint="codex-acp/gpt-5.6-terra",
@@ -1174,7 +1177,7 @@ def test_route_menu_and_hint_preview_describe_the_stretch_rule(tmp_path, monkeyp
 
 @pytest.mark.parametrize("previous_engine,codex,claude,reason", [
     ("codex-acp", 20.0, 20.0, "diversify"),
-    ("claude-agent-acp", 95.0, 20.0, "usage"),
+    ("claude-agent-acp", 95.0, 20.0, "quota"),
 ])
 def test_standard_retry_can_choose_claude_over_stretch(tmp_path, monkeypatch, previous_engine, codex, claude, reason):
     project, environ = _live_all(monkeypatch, tmp_path, codex=codex, claude=claude)
@@ -1356,7 +1359,7 @@ def test_a_selection_list_makes_exactly_the_listed_models_automatic(tmp_path, mo
     assert {c["route"] for c in choice.decision["candidates"]} == {
         "codex-acp/gpt-5.6-terra", "claude-agent-acp/claude-sonnet-5", f"opencode/{OPENCODE_VARIANT}"}
     assert choice.model == "gpt-5.6-terra" and choice.decision["decided_by"] == "affinity"
-    assert choice.decision["rank_version"] == 10
+    assert choice.decision["rank_version"] == 11
     # An exact hint may now name a route whose id holds '/' and ','.
     hinted = auto_route.choose("worker-backend-dev", project, environ, model_hint=f"opencode/{OPENCODE_VARIANT}",
                                model_reason="The owner selected it.")
@@ -1464,7 +1467,7 @@ def test_the_owners_preferred_model_for_a_kind_of_work_ranks_first(tmp_path, mon
     assert light.decision["tier"] == "light"
     project, environ = _configured(monkeypatch, tmp_path, routing, codex=95.0, claude=10.0)
     busy = auto_route.choose("worker-security-auditor", project, environ)
-    assert (busy.model, busy.decision["decided_by"]) == ("opus[1m]", "usage")
+    assert (busy.model, busy.decision["decided_by"]) == ("opus[1m]", "quota")
     assert busy.decision["purpose"]["status"] == "ignored:near_quota_limit"
 
 

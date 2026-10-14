@@ -8,9 +8,11 @@ whether a deletion waits for the user:
   permission card, and workers run with the engine mode that keeps every
   mutating tool call visible to ``engine.permissions.PermissionBridge``
   (``configuration.policy.WORKER_MODE_FLOOR``).
-* Development: the whole computer (:data:`HOST_WIDE`). Every brokered
-  command -- any role's ``command_run`` and automatic verification -- gets
-  host-writable mounts (the role and scopes still decide the project), and
+* Development: the whole computer (:data:`HOST_WIDE`). A writing worker's
+  ``command_run`` gets host-writable mounts (the role and scopes still
+  decide the project); a role without a write grant (reviewer, auditor,
+  explorer...) and the runtime's automatic verification keep the read-only
+  host profile (:data:`READ_ONLY_COMMAND_PROFILE`) in every mode; and
   an outside file write needs no card; a recognized deletion, a write to a
   protected control-plane path and a command run outside the sandbox still ask.
 * Auto: the whole computer, and nothing asks. The same host-writable command
@@ -55,11 +57,18 @@ MODES = (DEVELOPMENT, GUARDED, AUTO)
 HOST_WIDE = frozenset({DEVELOPMENT, AUTO})
 
 
+#: The receipt profile of a ``command_run`` by a role without a write grant
+#: and of an automatic verification check, in every mode: the host read-only
+#: except tool caches and private temp
+#: (``orchestration.sandbox.readonly_command``).
+READ_ONLY_COMMAND_PROFILE = "restricted"
+
+
 def command_profile(mode) -> str:
-    """The sandbox profile every runtime-launched command of a task in
-    ``mode`` gets -- a worker's ``command_run`` of any role and an automatic
-    verification check alike: ``development`` (host-writable) or
-    ``restricted``. Receipts and check observations record it."""
+    """The sandbox profile a writing worker's ``command_run`` of a task in
+    ``mode`` gets: ``development`` (host-writable) or ``restricted``.
+    Receipts record it. A role without a write grant and an automatic
+    verification check always get :data:`READ_ONLY_COMMAND_PROFILE`."""
     return "development" if normalize(mode) in HOST_WIDE else "restricted"
 LABELS = {DEVELOPMENT: "Development mode", GUARDED: "Guarded mode", AUTO: "Auto mode"}
 DESCRIPTIONS = {

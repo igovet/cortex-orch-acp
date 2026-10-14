@@ -13,6 +13,78 @@ MAX_ROUTE_RETRIES = 6
 # Refusals of routing itself: retrying the same request cannot change them.
 ROUTING_REFUSALS = frozenset({'no_available_route', 'pinned_route_unavailable', 'invalid_routing_overrides',
                               'route_denied'})
+# record_result refusals no retry of the same result_submit request can ever
+# change: its node moved on (another revision, no longer running, another
+# result recorded) or the review refused this request for good. Such a
+# request is closed with its refusal; left open, reconciliation re-raised it
+# on every turn and blocked the task for ever.
+TERMINAL_RECORD_REFUSALS = frozenset({
+    'stale_assignment_result', 'assignment_not_running', 'conflicting_assignment_result',
+    'review_resubmit_required', 'review_verdict_required', 'review_project_revision_unstable',
+})
+# Refusals after which the published worker_result can never become this
+# node's result: it is superseded so no one acts on it as a completion. A
+# refused review keeps it, because its reviewer may resubmit the same report.
+_ORPHANING_REFUSALS = frozenset({'stale_assignment_result', 'assignment_not_running',
+                                 'conflicting_assignment_result'})
+
+
+def terminal_record_refusal(db, task_id, assignment_ref, request_key, error):
+    """The refusal code when ``error`` can never be cured by a retry of this
+    exact request, else None (a real integrity failure or a transient one)."""
+    code = str(error)
+    if code in TERMINAL_RECORD_REFUSALS:
+        return code
+    if code == 'review_project_revision_changed':
+        # Terminal only once the re-bind refused this request_key; a bare
+        # unavailable observation can still succeed on a retry.
+        refused = db.execute(
+            "SELECT 1 FROM runtime_events WHERE task_id=? AND type='REVIEW_STARTED' "
+            "AND json_extract(payload_json,'$.assignment_ref')=? "
+            "AND json_extract(payload_json,'$.refused_request_key')=? LIMIT 1",
+            (task_id, assignment_ref, request_key)).fetchone()
+        return code if refused else None
+    return None
+
+
+def refuse_result_request(store, task_id, actor, request_key, error, worker_result_id=None):
+    """Close one result_submit request whose published result was refused for
+    good, in one transaction: the request is complete with its refusal (an
+    identical retry raises it again) and an orphaned worker_result is
+    superseded. Returns the refusal code, or None when ``error`` is not
+    terminal (nothing is written then)."""
+    with store.connection() as db:
+        db.execute('BEGIN IMMEDIATE')
+        row = db.execute('SELECT result_json FROM runtime_requests WHERE task_id=? AND actor=? AND request_key=?',
+                         (task_id, actor, request_key)).fetchone()
+        if row is None:
+            db.commit()
+            return None
+        saved = json.loads(row[0])
+        code = terminal_record_refusal(db, task_id, saved['assignment_ref'], request_key, error)
+        if code is None or saved.get('complete'):
+            db.commit()
+            return code
+        superseded = False
+        if worker_result_id is not None and code in _ORPHANING_REFUSALS:
+            node = db.execute('SELECT result_json FROM runtime_nodes WHERE task_id=? AND assignment_ref=?',
+                              (task_id, saved['assignment_ref'])).fetchone()
+            recorded = json.loads(node['result_json']).get('report_ref') if node and node['result_json'] else None
+            report_ref = saved.get('accepted', saved['result']).get('report_ref')
+            if recorded is None or recorded != report_ref:
+                superseded = db.execute(
+                    "UPDATE task_events SET superseded=1 WHERE task_id=? AND id=? "
+                    "AND event_type='worker_result' AND superseded=0",
+                    (task_id, int(worker_result_id))).rowcount == 1
+        detail = {name: getattr(error, name, None) for name in ('field', 'received', 'expected', 'correction', 'violations')}
+        saved.update(complete=True, error=code, error_detail=detail)
+        db.execute('UPDATE runtime_requests SET result_json=? WHERE task_id=? AND actor=? AND request_key=?',
+                   (encoded(saved), task_id, actor, request_key))
+        event(db, task_id, 'RESULT_DELIVERY_REFUSED', dict(
+            assignment_ref=saved['assignment_ref'], request_key=request_key, error=code,
+            worker_result_event=worker_result_id, worker_result_superseded=superseded))
+        db.commit()
+    return code
 
 
 def release_observed(runtime, task_id, attempt_id):
@@ -94,6 +166,13 @@ def retry_lost(runtime,task_id,node):
             raise StoreError('lost_worker_result_changed')
         retry=dict(node=node['node_id'],revision=node['revision'],retry=len(retried)+1,
                    previous_assignment=assignment,observed_session='absent' if provision else 'not_provisioned')
+        failure_class=payload.get('failure_class')
+        if failure_class:
+            # C-18: durably carries why this retry happened, so routing
+            # (orchestration.state.attempt_routing) can tell an
+            # infrastructure-caused retry from one a quality signal caused
+            # and never raise the model tier for the former alone.
+            retry['failure_class']=failure_class
         if unavailable is not None:
             retry.update(route_failure=True,unavailable_route=availability.describe(unavailable))
         event(db,task_id,'ASSIGNMENT_RETRIED',retry)
@@ -101,56 +180,80 @@ def retry_lost(runtime,task_id,node):
 
 
 def reconcile_results(store, task_id):
+    """Record every interrupted result delivery whose publication is exact.
+
+    One request never blocks the others: a refusal no retry can cure closes
+    its request, and an integrity failure is raised only after every other
+    request was reconciled."""
     with store.connection() as db:
         requests = db.execute("SELECT * FROM runtime_requests WHERE task_id=? AND operation='result_submit'", (task_id,)).fetchall()
+    failure = None
     for request in requests:
-        saved = json.loads(request['result_json'])
-        if saved.get('complete'):
-            continue
-        if hashlib.sha256(encoded(saved['result']).encode()).hexdigest() != request['digest']:
-            raise StoreError('result_receipt_digest_mismatch')
-        # The checks the runtime accepted at submission (older rows carry
-        # only the claim; record_result still refuses an unverified pass).
-        result = saved.get('accepted', saved['result'])
-        if 'report' in saved['result']:
-            # An inline report: its report_ref is recorded only after its
-            # publication, and must be the one this request's own keyed
-            # write_report delivery produced. Before that nothing is
-            # published for the result; a live worker's retry continues.
-            if 'report_ref' not in result:
-                continue
-            from ..delegation.mcp_tools import inline_report_ref
-            with store.connection() as db:
-                expected_ref = inline_report_ref(db, task_id, request['actor'], request['request_key'])
-        else:
-            expected_ref = saved['result']['report_ref']
-        if (result['report_ref'], result['summary']) != (expected_ref, saved['result']['summary']):
-            raise StoreError('result_receipt_digest_mismatch')
+        try:
+            _reconcile_request(store, task_id, request)
+        except StoreError as error:
+            if failure is None:
+                failure = error
+    if failure is not None:
+        raise failure
+
+
+def _reconcile_request(store, task_id, request):
+    saved = json.loads(request['result_json'])
+    if saved.get('complete'):
+        return
+    if hashlib.sha256(encoded(saved['result']).encode()).hexdigest() != request['digest']:
+        raise StoreError('result_receipt_digest_mismatch')
+    # The checks the runtime accepted at submission (older rows carry
+    # only the claim; record_result still refuses an unverified pass).
+    result = saved.get('accepted', saved['result'])
+    if 'report' in saved['result']:
+        # An inline report: its report_ref is recorded only after its
+        # publication, and must be the one this request's own keyed
+        # write_report delivery produced. Before that nothing is
+        # published for the result; a live worker's retry continues.
+        if 'report_ref' not in result:
+            return
+        from ..delegation.mcp_tools import inline_report_ref
         with store.connection() as db:
-            provision = db.execute('SELECT attempt_id FROM delegation_provisioning WHERE task_id=? AND idempotency_key=?',
-                                   (task_id, saved['assignment_ref'])).fetchone()
-            if not provision:
-                raise StoreError('result_provision_missing')
-            rows = db.execute("SELECT id,payload_json,origin FROM task_events WHERE task_id=? AND assignment_ref=? AND event_type='worker_result' AND superseded=0",
-                              (task_id, provision['attempt_id'])).fetchall()
-        matching = [row for row in rows if json.loads(row['payload_json']).get('report_ref') == result['report_ref']]
-        if not matching:
-            # A still-live worker may retry. A lost worker remains blocked; no
-            # publication event or success is manufactured from the receipt.
-            continue
-        if len(matching) != 1 or matching[0]['origin'] != request['actor']:
-            raise StoreError('ambiguous_result_publication')
-        observed = json.loads(matching[0]['payload_json'])
-        observed_checks = [{k: c[k] for k in ('name', 'outcome', 'tool_call_ref', 'blocker', 'claimed_outcome', 'evidence_gap', 'closed_by', 'command')
-                            if k in c and c[k] is not None}
-                           for c in observed.get('checks', [])]
-        if observed.get('summary') != result['summary'] or observed_checks != result['checks']:
-            raise StoreError('result_publication_mismatch')
+            expected_ref = inline_report_ref(db, task_id, request['actor'], request['request_key'])
+    else:
+        expected_ref = saved['result']['report_ref']
+    if (result['report_ref'], result['summary']) != (expected_ref, saved['result']['summary']):
+        raise StoreError('result_receipt_digest_mismatch')
+    with store.connection() as db:
+        provision = db.execute('SELECT attempt_id FROM delegation_provisioning WHERE task_id=? AND idempotency_key=?',
+                               (task_id, saved['assignment_ref'])).fetchone()
+        if not provision:
+            raise StoreError('result_provision_missing')
+        rows = db.execute("SELECT id,payload_json,origin FROM task_events WHERE task_id=? AND assignment_ref=? AND event_type='worker_result' AND superseded=0",
+                          (task_id, provision['attempt_id'])).fetchall()
+    matching = [row for row in rows if json.loads(row['payload_json']).get('report_ref') == result['report_ref']]
+    if not matching:
+        # A still-live worker may retry. A lost worker remains blocked; no
+        # publication event or success is manufactured from the receipt.
+        return
+    if len(matching) != 1 or matching[0]['origin'] != request['actor']:
+        raise StoreError('ambiguous_result_publication')
+    observed = json.loads(matching[0]['payload_json'])
+    observed_checks = [{k: c[k] for k in ('name', 'outcome', 'tool_call_ref', 'blocker', 'claimed_outcome', 'evidence_gap', 'closed_by', 'command')
+                        if k in c and c[k] is not None}
+                       for c in observed.get('checks', [])]
+    if observed.get('summary') != result['summary'] or observed_checks != result['checks']:
+        raise StoreError('result_publication_mismatch')
+    try:
         TaskMachine(store).record_result(task_id, saved['assignment_ref'], result, request['request_key'])
-        saved.update(complete=True, receipt=dict(recorded=True, cursor=matching[0]['id'], superseded=False))
-        with store.connection() as db:
-            db.execute('BEGIN IMMEDIATE')
-            db.execute('UPDATE runtime_requests SET result_json=? WHERE task_id=? AND actor=? AND request_key=?',
-                       (encoded(saved), task_id, request['actor'], request['request_key']))
-            event(db, task_id, 'RESULT_DELIVERY_RECOVERED', dict(assignment_ref=saved['assignment_ref'], report_ref=result['report_ref']))
-            db.commit()
+    except StoreError as error:
+        # A refusal no retry can cure closes this request (and its orphaned
+        # worker_result); anything else stays an integrity failure.
+        if refuse_result_request(store, task_id, request['actor'], request['request_key'], error,
+                                 matching[0]['id']) is None:
+            raise
+        return
+    saved.update(complete=True, receipt=dict(recorded=True, cursor=matching[0]['id'], superseded=False))
+    with store.connection() as db:
+        db.execute('BEGIN IMMEDIATE')
+        db.execute('UPDATE runtime_requests SET result_json=? WHERE task_id=? AND actor=? AND request_key=?',
+                   (encoded(saved), task_id, request['actor'], request['request_key']))
+        event(db, task_id, 'RESULT_DELIVERY_RECOVERED', dict(assignment_ref=saved['assignment_ref'], report_ref=result['report_ref']))
+        db.commit()

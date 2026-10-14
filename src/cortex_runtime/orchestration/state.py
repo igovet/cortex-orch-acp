@@ -200,8 +200,12 @@ def reviewed_digest(db, task_id, revision):
     return waiver['revision_digest'] if waiver and waiver['revision'] == revision else None
 
 
+# Kept equal to acp.messages stop_option_continue/stop_option_finish (en).
+# Finish is the owner's force-finish (questions.stop_choice): CANCELLED with
+# USER_FORCE_FINISHED. Continue resumes the runtime flow and never releases
+# the stopped work to a direct answer (released_by_user).
 STOP_OPTIONS = ('Continue: let the coordinator decide how to proceed',
-                'Finish: accept the current results and close the task')
+                'Finish: close the task as is, without certifying unfinished work')
 
 
 # Stops about the work itself: the coordinator knows the context, so it asks
@@ -224,8 +228,12 @@ def _coordinator_should_ask(db, task_id, blocker):
 
 def _ask_about_stop(db, task_id, source, blocker):
     from ..portable.identity import new_id
+    from .worker_waits import cancel_tx
     if source != 'WAITING_USER' and _coordinator_should_ask(db, task_id, blocker):
         event(db, task_id, 'ASK_USER_REQUIRED', dict(blocker=blocker))
+        # The stopped plan's open worker questions end with it: otherwise
+        # the next user message is swallowed as a late answer to them.
+        cancel_tx(db, task_id, 'task_stopped_for_question')
         db.execute("UPDATE runtime_nodes SET status='cancelled' WHERE task_id=? AND status IN ('pending','running')", (task_id,))
         db.execute("UPDATE trusted_channels SET revoked_at=? WHERE task_id=? AND role='worker' AND revoked_at IS NULL",
                    (now(), task_id))
@@ -243,6 +251,9 @@ def _ask_about_stop(db, task_id, source, blocker):
     if source == 'WAITING_USER':
         db.execute("UPDATE pending_questions SET status='superseded',answered_at=? WHERE task_id=? AND status='open'",
                    (now(), task_id))
+    # Two open questions (a stopped worker's and this one) would make the
+    # user disambiguate with /cortex-answer; only the stop question remains.
+    cancel_tx(db, task_id, 'task_stopped_for_question')
     question_id = new_id('pq_')
     text = f'The task stopped: {blocker}. What should happen next?'
     db.execute("INSERT INTO pending_questions(id,task_id,dedup_key,text,options_json,status,created_at) VALUES(?,?,?,?,?,'open',?)",
@@ -259,17 +270,31 @@ def released_by_user(db, task):
     a question the coordinator asked after this revision was verified.
 
     Only then may the coordinator close delegated work with a direct answer;
-    it can never skip review or verification on its own."""
+    it can never skip review or verification on its own. Only an answer in
+    the user's own words releases a stop question: its Continue resumes the
+    runtime flow and its Finish force-finishes the task. A released answer
+    still completes only certified work (answer_needs_certified_work)."""
+    from .questions import stop_choice
     if db.execute("SELECT 1 FROM runtime_nodes WHERE task_id=? AND status IN ('pending','running')",
                   (task['task_id'],)).fetchone():
         return False
     asked = db.execute("SELECT payload_json FROM runtime_events WHERE task_id=? AND type='USER_QUESTION_REQUESTED'",
                        (task['task_id'],)).fetchall()
-    stops = {q['question_id'] for q in map(lambda r: json.loads(r[0]), asked)
+    stops = {q['question_id']: q for q in map(lambda r: json.loads(r[0]), asked)
              if (q.get('blocker') or q.get('after_verification')) and q.get('revision') == task['revision']}
     answered = db.execute("SELECT payload_json FROM runtime_events WHERE task_id=? AND type='USER_ANSWER_RECEIVED'",
                           (task['task_id'],)).fetchall()
-    return any(json.loads(r[0]).get('question_id') in stops for r in answered)
+    for row in answered:
+        received = json.loads(row[0])
+        asked_question = stops.get(received.get('question_id'))
+        if asked_question is None:
+            continue
+        if asked_question.get('blocker') and stop_choice(received.get('answer'), asked_question.get('question')):
+            # The runtime's own options: Continue resumes the flow, Finish
+            # force-finishes; neither hands the stopped work to an answer.
+            continue
+        return True
+    return False
 
 
 def reopened_after_completion(db, task):
@@ -303,15 +328,37 @@ def reopened_after_completion(db, task):
         "AND json_extract(e.payload_json,'$.assignment_ref')=p.idempotency_key)", (task_id, reopened)).fetchone()
 
 
+def _informational(db, task):
+    """No plan, node or worker has ever existed for this task."""
+    return (task['revision'] == 0 and task['plan_json'] is None
+            and not db.execute('SELECT 1 FROM runtime_nodes WHERE task_id=?', (task['task_id'],)).fetchone()
+            and not db.execute("SELECT 1 FROM delegation_provisioning WHERE task_id=? AND role_id!='orchestrator'",
+                               (task['task_id'],)).fetchone())
+
+
 def direct_answer_allowed(db, task):
     """Whether answer_submit may close the task: before any plan or worker
     exists, after the user released a stopped or verified revision, or for a
     follow-up on a completed task with no work planned since it reopened."""
-    return (released_by_user(db, task) or reopened_after_completion(db, task) or (
-        task['revision'] == 0 and task['plan_json'] is None
-        and not db.execute('SELECT 1 FROM runtime_nodes WHERE task_id=?', (task['task_id'],)).fetchone()
-        and not db.execute("SELECT 1 FROM delegation_provisioning WHERE task_id=? AND role_id!='orchestrator'",
-                           (task['task_id'],)).fetchone()))
+    return released_by_user(db, task) or reopened_after_completion(db, task) or _informational(db, task)
+
+
+def answer_needs_certified_work(db, task):
+    """Whether a direct answer closes planned work rather than informing.
+
+    An informational answer (no plan or worker ever) and a follow-up on a
+    task that already reached verified COMPLETED certify nothing new. Any
+    other answer -- one the user released after a stop or after verification
+    -- completes the task only when the current revision's work itself
+    passes every completion gate (TaskMachine.close_answer)."""
+    return not _informational(db, task) and not reopened_after_completion(db, task)
+
+
+# Codes TaskMachine._work_invariants raises: what an uncertified answer lacks.
+WORK_CERTIFICATION_GAPS = frozenset({
+    'completion_nodes_incomplete', 'completion_artifact_changed_or_missing', 'completion_review_missing',
+    'completion_verification_missing', 'completion_project_revision_changed',
+})
 
 
 class AttemptRouting(NamedTuple):
@@ -323,6 +370,17 @@ class AttemptRouting(NamedTuple):
     # The user's own request for the exact hint's model family in this
     # task (routing.auto_route.user_model_request), for every configured tier.
     user_request: dict | None = None
+    # The newer user refusal that revoked an earlier request for the exact
+    # hint (routing.auto_route.user_model_revocation); never consent (C-11).
+    user_revocation: dict | None = None
+
+
+# C-18 (owner D4): a retry caused only by an infrastructure failure --
+# the engine/transport itself became unreachable, not a quality signal
+# about the work -- must not raise the model tier. Mirrors
+# engine.failure_classification's own closed class names so a future
+# class added there is excluded here only by deliberate choice.
+_INFRASTRUCTURE_RETRY_CLASSES = frozenset({'engine_failure', 'transport_failure'})
 
 
 def attempt_routing(store, task_id, attempt_id):
@@ -356,13 +414,18 @@ def attempt_routing(store, task_id, attempt_id):
     planned = fix.group(1) if fix else node['node_id']
     tasks = json.loads(plan['plan_json'])['tasks'] if plan and plan['plan_json'] else []
     task = next((t for t in tasks if t['id'] == planned), {})
+    # C-18: a retry whose own recorded cause is purely an infrastructure
+    # failure never counts toward escalation; a retry recorded before this
+    # fix (no failure_class) or for any other/quality cause still does.
     retried = any(p.get('node') == node['node_id'] and p.get('revision') == node['revision'] and not p.get('route_failure')
+                  and p.get('failure_class') not in _INFRASTRUCTURE_RETRY_CLASSES
                   for p in (json.loads(r[0]) for r in retries))
     hint = task.get('model') or task.get('provider') or 'auto'
-    from ..routing.auto_route import user_model_request
+    from ..routing.auto_route import user_model_request, user_model_revocation
     return AttemptRouting(bool(fix) or retried, task.get('complexity', 'normal'), hint,
                           task.get('model_reason'), prior['engine'] if prior else None,
-                          user_model_request(store, task_id, hint) if '/' in hint else None)
+                          user_model_request(store, task_id, hint) if '/' in hint else None,
+                          user_model_revocation(store, task_id, hint) if '/' in hint else None)
 
 
 def review_provider_preference(store, task_id, attempt_id):
@@ -486,11 +549,15 @@ def synthesis_checks(db, task_id, revision):
         return gap_origin == pass_origin and pass_cycle >= 0 and pass_cycle >= gap_cycle
 
     from .. import task_workspace
-    from ..configuration.access_mode import command_profile
+    from ..configuration.access_mode import command_profile, READ_ONLY_COMMAND_PROFILE
     from .gateway import _command_policy
     command_cwd = task_workspace.task_root(db, task_id)
-    # A pass closes a gap only in the profile the task's mode gives a command now.
-    profile = command_profile(_command_policy(db, task_id)['mode'])
+    # A pass closes a gap only in a profile a command of this task gets now:
+    # the one the task's mode gives a writing worker, or the read-only host
+    # profile that reviewers, other read-only roles and runtime verification
+    # get in every mode (owner decision D1). A host-writable pass never
+    # closes a gap once the task is Guarded.
+    profiles = {command_profile(_command_policy(db, task_id)['mode']), READ_ONLY_COMMAND_PROFILE}
     passes = [(node, check, current, assessment) for node, check, current, assessment, _ in checks
               if check.get('outcome') == 'passed' and current is not None
               and current['outcome'] == 'passed' and assessment['strength'] == 'verified']
@@ -503,7 +570,7 @@ def synthesis_checks(db, task_id, revision):
         if command:
             resolved = isinstance(command, list) and any(
                 assessment.get('identity') == ('command_run', tuple(command), command_cwd, profile)
-                for _, _, _, assessment in passes
+                for _, _, _, assessment in passes for profile in profiles
             )
         else:
             # Compatibility for retained gaps without a declared command.
@@ -527,6 +594,59 @@ def validate_scope(scope):
         if not permitted_path(value):
             raise StoreError('forbidden_assignment_scope')
     return scope
+
+
+CONSULTANT_ROLE = 'worker-senior-consultant'
+CONSULTATION_NODE = '_consultation'
+
+
+def consultation_objective(proposal):
+    """The consultant's objective: the escalation's own question and reason."""
+    question, reason = proposal.get('question'), proposal['reason']
+    return f'{question}\n\nEscalation reason: {reason}' if question else reason
+
+
+def consultation_packet(db, task_id, source_revision, proposal, objective):
+    """Dependency reports of an escalation-created consultant (owner D8).
+
+    The consultant reads no project source, so the runtime -- never the
+    escalating model's free text alone -- selects its evidence: the reports
+    the escalation named, then every report the escalated revision's tasks
+    recorded as their results, each with the report's current SHA-256 and
+    recorded artifact versions. An id that names no report of this task stays
+    listed as unavailable, so the consultant records the gap as a limitation.
+    The brief never truncates dependency reports, so the packet bounds itself
+    explicitly: artifact lists first (read_report returns them), then the
+    trailing entries, counted in a final omission entry.
+    """
+    selected = [('escalation_request', ref) for ref in proposal.get('report_ids') or []]
+    for row in db.execute('SELECT node_id,result_json FROM runtime_nodes WHERE task_id=? AND revision=? '
+                          'AND result_json IS NOT NULL ORDER BY rowid', (task_id, source_revision)):
+        result = json.loads(row['result_json'])
+        if isinstance(result, dict) and isinstance(result.get('report_ref'), str):
+            selected.append((row['node_id'], result['report_ref']))
+    packet, seen = [], set()
+    for node, ref in selected:
+        if ref in seen:
+            continue
+        seen.add(ref)
+        row = db.execute("SELECT e.digest,COALESCE(p.artifacts,'[]') AS artifacts FROM reports r "
+                         'JOIN editions e ON e.report_id=r.id LEFT JOIN report_provenance p ON p.edition_sequence=e.sequence '
+                         'WHERE r.task_id=? AND r.id=? ORDER BY e.sequence DESC LIMIT 1', (task_id, ref)).fetchone()
+        packet.append(dict(node=node, report_ref=ref, available=False) if row is None else
+                      dict(node=node, report_ref=ref, sha256=row['digest'], artifacts=json.loads(row['artifacts'])))
+    from ..delegation.provisioning import WORKER_BRIEF_MAX_CHARS
+    # Room for the objective, the scope and the encoding around them.
+    budget = WORKER_BRIEF_MAX_CHARS - len(encoded(dict(objective=objective, scope=['.']))) - 200
+    if len(encoded(packet)) > budget:
+        for entry in packet:
+            if 'artifacts' in entry:
+                entry['artifacts_omitted'] = len(entry.pop('artifacts'))
+    omitted = 0
+    while packet and len(encoded(packet + [dict(omitted_reports=omitted + 1)])) > budget:
+        packet.pop()
+        omitted += 1
+    return packet + ([dict(omitted_reports=omitted)] if omitted else [])
 
 
 def validate_plan(plan):
@@ -559,6 +679,13 @@ def validate_plan(plan):
         role = resolve_role(node['role'])
         if not role.startswith('worker-') or role in {'worker-code-reviewer', 'worker-build-verification'}:
             raise StoreError('runtime_reserved_role')
+        if role == CONSULTANT_ROLE:
+            # Owner decision D8: consultation is escalation-only. A planned
+            # consultant node had no runtime-built packet to work from.
+            raise StoreError('consultant_requires_escalation', f"tasks[{key}].role", node['role'],
+                             'a non-consultant specialist role',
+                             'Plan no consultant task. A worker or the coordinator calls escalation_request; '
+                             'the runtime then adds the senior consultant with its consultation packet.')
         if not isinstance(node['objective'], str) or not 1 <= len(node['objective']) <= 8000:
             raise StoreError('invalid_node_objective')
         validate_scope(node['scope'])
@@ -576,7 +703,14 @@ def validate_plan(plan):
         for key in ready:
             resolved.add(key)
             del remaining[key]
-    checks = plan['verification']
+    validate_verification(plan['verification'])
+    return plan
+
+
+def validate_verification(checks, field='plan.verification'):
+    """The one verification argv contract, for a plan and for a repair
+    (verification_submit): literal exec-style argv, never shell syntax, and
+    nothing Popen cannot launch (a NUL byte crashed every VERIFYING turn)."""
     if not isinstance(checks, list) or not 1 <= len(checks) <= 16:
         raise StoreError('verification_required')
     for argv in checks:
@@ -587,11 +721,10 @@ def validate_plan(plan):
                             if arg in _VERIFICATION_SHELL_TOKENS or "$(" in arg or "`" in arg), None)
         if shell_token is not None:
             raise StoreError(
-                'verification_shell_syntax', 'plan.verification', shell_token,
+                'verification_shell_syntax', field, shell_token,
                 'literal argv without shell syntax',
                 'Use a documented project command or script. Verification executes argv directly without a shell.',
             )
-    return plan
 
 
 def _relative(path, root):
@@ -841,10 +974,16 @@ class TaskMachine:
             if escalation.get('operation')=='escalation_request' and escalation.get('revision')==task['revision']:
                 # The runtime routes a readonly consultant automatically
                 # (routing.auto_route). The model never chooses a model.
-                proposed_nodes=[dict(id='_consultation',role='senior-consultant',
-                    objective=escalation['proposal']['reason'],dependencies=[],scope=['.'])]+[
-                    dict(node,dependencies=['_consultation',*node['dependencies']]) for node in proposed_nodes]
-                event(db,channel.task_id,'CONSULTATION_REQUIRED',dict(role='worker-senior-consultant',source_revision=task['revision']))
+                # It also builds the consultation packet (owner decision D8);
+                # the controller hands it over as the dependency reports.
+                proposal=escalation['proposal']
+                objective=consultation_objective(proposal)
+                packet=consultation_packet(db,channel.task_id,task['revision'],proposal,objective)
+                proposed_nodes=[dict(id=CONSULTATION_NODE,role='senior-consultant',
+                    objective=objective,dependencies=[],scope=['.'])]+[
+                    dict(node,dependencies=[CONSULTATION_NODE,*node['dependencies']]) for node in proposed_nodes]
+                event(db,channel.task_id,'CONSULTATION_REQUIRED',dict(role=CONSULTANT_ROLE,source_revision=task['revision'],
+                    revision=task['revision']+1,node=CONSULTATION_NODE,dependency_reports=packet))
             revision = task['revision'] + 1
             db.execute('UPDATE runtime_tasks SET revision=?,plan_json=?,synthesis=NULL,review_cycle=0 WHERE task_id=?',
                        (revision, encoded(plan), channel.task_id))
@@ -863,6 +1002,17 @@ class TaskMachine:
             db.commit()
         return result
 
+    def consultation_reports(self, task_id, revision):
+        """The runtime-built packet of the escalation-created consultant node
+        of ``revision``; [] when that revision has none."""
+        with self.store.connection() as db:
+            for (payload,) in db.execute("SELECT payload_json FROM runtime_events WHERE task_id=? "
+                                         "AND type='CONSULTATION_REQUIRED' ORDER BY id DESC", (task_id,)):
+                value = json.loads(payload)
+                if value.get('revision') == revision:
+                    return list(value.get('dependency_reports') or [])
+        return []
+
     def move(self, task_id, target, *, blocker=None):
         with self.store.connection() as db:
             db.execute('BEGIN IMMEDIATE')
@@ -870,6 +1020,32 @@ class TaskMachine:
                 self._completion_invariants(db, task_id)
             transition(db, task_id, target, blocker=blocker)
             db.commit()
+
+    def close_answer(self, task_id):
+        """End ANSWER_READY and return the terminal state.
+
+        COMPLETED only under the completion invariants. A released answer on
+        planned work whose review or verification did not pass is still the
+        user's honest final answer, but not a certified result: the task ends
+        FAILED with the missing gate as its blocker, and no passing review or
+        verification is ever inserted for it."""
+        with self.store.connection() as db:
+            db.execute('BEGIN IMMEDIATE')
+            try:
+                self._completion_invariants(db, task_id)
+            except StoreError as error:
+                task = db.execute('SELECT * FROM runtime_tasks WHERE task_id=?', (task_id,)).fetchone()
+                gap = error.args[0] if error.args else None
+                if (gap not in WORK_CERTIFICATION_GAPS or task is None or task['state'] != 'ANSWER_READY'
+                        or not answer_needs_certified_work(db, task)):
+                    raise
+                event(db, task_id, 'ANSWER_NOT_CERTIFIED', dict(revision=task['revision'], reason=gap))
+                transition(db, task_id, 'FAILED', blocker=f'answer_not_certified:{gap}')
+                db.commit()
+                return 'FAILED'
+            transition(db, task_id, 'COMPLETED')
+            db.commit()
+        return 'COMPLETED'
 
     def submit_answer(self, channel, text, request_key, *, authorization=None):
         """Record an informational proposal; only the runtime completes it.
@@ -1138,67 +1314,75 @@ class TaskMachine:
     def record_result(self, task_id, assignment_ref, result, request_key=None):
         with self.store.connection() as db:
             db.execute('BEGIN IMMEDIATE')
-            task = db.execute('SELECT * FROM runtime_tasks WHERE task_id=?', (task_id,)).fetchone()
-            node = db.execute('SELECT * FROM runtime_nodes WHERE task_id=? AND assignment_ref=?',
-                              (task_id, assignment_ref)).fetchone()
-            if not task or not node or node['revision'] != task['revision'] or task['state'] in TERMINAL:
-                raise StoreError('stale_assignment_result')
-            if node['result_json'] is not None:
-                retained = json.loads(node['result_json'])
-                retained.pop('report_digest', None)
-                retained.pop('project_digest', None)
-                for check in retained.get('checks', []):
-                    if check.get('outcome') in {'not_run', 'unverified'}:
-                        check.pop('closed_by', None)
-                if encoded(retained) != encoded(result):
-                    raise StoreError('conflicting_assignment_result')
-                return
-            if node['status'] != 'running':
-                raise StoreError('assignment_not_running')
-            # Durable publication identity and ownership, never final chat text.
-            report = db.execute('SELECT * FROM reports WHERE id=? AND task_id=?',
-                                (result.get('report_ref'), task_id)).fetchone()
-            provision = db.execute('SELECT attempt_id FROM delegation_provisioning WHERE idempotency_key=? AND task_id=?',
-                                   (assignment_ref, task_id)).fetchone()
-            if report is None or provision is None:
-                raise StoreError('assignment_report_missing')
-            published = db.execute("SELECT payload_json FROM task_events WHERE task_id=? AND assignment_ref IN (?,?) "
-                                   "AND event_type='worker_result' AND superseded=0",
-                                   (task_id, assignment_ref, provision['attempt_id'])).fetchall()
-            if not any(json.loads(r['payload_json']).get('report_ref') == result['report_ref'] for r in published):
-                raise StoreError('assignment_report_mismatch')
-            from .artifacts import report_digest
-            result = dict(result, report_digest=report_digest(self.store, task_id, report['filename']))
-            checks = result.get('checks', [])
-            from ..delegation.evidence import open_failure
-            # A current failure fails the node: a failed check that no exact
-            # later rerun of the same command closed (its closed_by, derived
-            # again here), or a pass without its own verified, still-latest
-            # run (result_submit already records an unverifiable pass as
-            # unverified; this backstops older retained requests). A closed
-            # failure stays in the result as run history. not_run/unverified
-            # are honest disclosures, not failures: an investigation's
-            # evidence steps are rarely runtime command_run receipts, and
-            # failing on them stopped every one. They stay in the result for
-            # review, verification and synthesis.
-            failed = result.get('assignment_outcome') == 'failed' or open_failure(db, task_id, provision['attempt_id'], checks)
-            status = 'failed' if failed else 'completed'
-            if node['stage'] == 'review' and result.get('verdict') not in {'APPROVE', 'REQUEST_CHANGES', 'BLOCK'}:
-                raise StoreError('review_verdict_required')
-            if node['stage'] == 'review':
-                result['project_digest'] = self._review_binding_tx(db, task_id, assignment_ref, request_key)
-            db.execute('UPDATE runtime_nodes SET status=?,result_json=? WHERE task_id=? AND revision=? AND node_id=?',
-                       (status, encoded(result), task_id, task['revision'], node['node_id']))
-            # Accepted results end MCP authority, not engine ownership. Keep
-            # the capacity reservation until an observed process exit; revoke
-            # every channel of this exact attempt in the same transaction.
-            db.execute("UPDATE trusted_channels SET revoked_at=? WHERE task_id=? "
-                       "AND attempt_id=? AND role='worker' AND revoked_at IS NULL",
-                       (now(), task_id, provision['attempt_id']))
-            event(db, task_id, 'WORKER_COMPLETED' if not failed else 'WORKER_FAILED',
-                  dict(node=node['node_id'], assignment_ref=assignment_ref,
-                       attempt_id=provision['attempt_id'], result=result))
+            self.record_result_tx(db, task_id, assignment_ref, result, request_key)
             db.commit()
+
+    def record_result_tx(self, db, task_id, assignment_ref, result, request_key=None):
+        """Record a node result inside the caller's transaction.
+
+        Every refusal is raised before anything is written (a review re-bind
+        commits only its own REVIEW_STARTED event first), so a caller may
+        catch a StoreError and still commit its other writes."""
+        task = db.execute('SELECT * FROM runtime_tasks WHERE task_id=?', (task_id,)).fetchone()
+        node = db.execute('SELECT * FROM runtime_nodes WHERE task_id=? AND assignment_ref=?',
+                          (task_id, assignment_ref)).fetchone()
+        if not task or not node or node['revision'] != task['revision'] or task['state'] in TERMINAL:
+            raise StoreError('stale_assignment_result')
+        if node['result_json'] is not None:
+            retained = json.loads(node['result_json'])
+            retained.pop('report_digest', None)
+            retained.pop('project_digest', None)
+            for check in retained.get('checks', []):
+                if check.get('outcome') in {'not_run', 'unverified'}:
+                    check.pop('closed_by', None)
+            if encoded(retained) != encoded(result):
+                raise StoreError('conflicting_assignment_result')
+            return
+        if node['status'] != 'running':
+            raise StoreError('assignment_not_running')
+        # Durable publication identity and ownership, never final chat text.
+        report = db.execute('SELECT * FROM reports WHERE id=? AND task_id=?',
+                            (result.get('report_ref'), task_id)).fetchone()
+        provision = db.execute('SELECT attempt_id FROM delegation_provisioning WHERE idempotency_key=? AND task_id=?',
+                               (assignment_ref, task_id)).fetchone()
+        if report is None or provision is None:
+            raise StoreError('assignment_report_missing')
+        published = db.execute("SELECT payload_json FROM task_events WHERE task_id=? AND assignment_ref IN (?,?) "
+                               "AND event_type='worker_result' AND superseded=0",
+                               (task_id, assignment_ref, provision['attempt_id'])).fetchall()
+        if not any(json.loads(r['payload_json']).get('report_ref') == result['report_ref'] for r in published):
+            raise StoreError('assignment_report_mismatch')
+        from .artifacts import report_digest
+        result = dict(result, report_digest=report_digest(self.store, task_id, report['filename']))
+        checks = result.get('checks', [])
+        from ..delegation.evidence import open_failure
+        # A current failure fails the node: a failed check that no exact
+        # later rerun of the same command closed (its closed_by, derived
+        # again here), or a pass without its own verified, still-latest
+        # run (result_submit already records an unverifiable pass as
+        # unverified; this backstops older retained requests). A closed
+        # failure stays in the result as run history. not_run/unverified
+        # are honest disclosures, not failures: an investigation's
+        # evidence steps are rarely runtime command_run receipts, and
+        # failing on them stopped every one. They stay in the result for
+        # review, verification and synthesis.
+        failed = result.get('assignment_outcome') == 'failed' or open_failure(db, task_id, provision['attempt_id'], checks)
+        status = 'failed' if failed else 'completed'
+        if node['stage'] == 'review' and result.get('verdict') not in {'APPROVE', 'REQUEST_CHANGES', 'BLOCK'}:
+            raise StoreError('review_verdict_required')
+        if node['stage'] == 'review':
+            result['project_digest'] = self._review_binding_tx(db, task_id, assignment_ref, request_key)
+        db.execute('UPDATE runtime_nodes SET status=?,result_json=? WHERE task_id=? AND revision=? AND node_id=?',
+                   (status, encoded(result), task_id, task['revision'], node['node_id']))
+        # Accepted results end MCP authority, not engine ownership. Keep
+        # the capacity reservation until an observed process exit; revoke
+        # every channel of this exact attempt in the same transaction.
+        db.execute("UPDATE trusted_channels SET revoked_at=? WHERE task_id=? "
+                   "AND attempt_id=? AND role='worker' AND revoked_at IS NULL",
+                   (now(), task_id, provision['attempt_id']))
+        event(db, task_id, 'WORKER_COMPLETED' if not failed else 'WORKER_FAILED',
+              dict(node=node['node_id'], assignment_ref=assignment_ref,
+                   attempt_id=provision['attempt_id'], result=result))
 
     def start_review(self, task_id, assignment_ref, *, observation=None):
         """Bind the review to the project observed now. ``observation``
@@ -1379,6 +1563,10 @@ class TaskMachine:
             event(db, task_id, 'RETURNED_TO_COORDINATOR', dict(reason=reason))
             # As steering does: nothing of the old plan keeps holding its
             # scope (a node left 'running' blocked the new plan forever).
+            # Its open questions go with it, or the next user message is
+            # taken as a late answer to a cancelled worker and swallowed.
+            from .worker_waits import cancel_tx
+            cancel_tx(db, task_id, 'returned_to_coordinator')
             db.execute("UPDATE runtime_nodes SET status='cancelled' WHERE task_id=? AND status IN ('pending','running')", (task_id,))
             db.execute("UPDATE trusted_channels SET revoked_at=? WHERE task_id=? AND role='worker' AND revoked_at IS NULL",
                        (now(), task_id))
@@ -1399,6 +1587,8 @@ class TaskMachine:
                 if previous['operation'] != 'verification_submit' or previous['digest'] != digest:
                     raise StoreError('request_key_conflict')
                 return json.loads(previous['result_json'])
+            # The same argv contract as a plan's verification.
+            validate_verification(verification, 'verification')
             task = db.execute('SELECT * FROM runtime_tasks WHERE task_id=?', (channel.task_id,)).fetchone()
             last = db.execute("SELECT type FROM runtime_events WHERE task_id=? AND type IN ('VERIFICATION_PASSED','VERIFICATION_FAILED','PLAN_ACCEPTED') ORDER BY id DESC LIMIT 1",
                               (channel.task_id,)).fetchone()
@@ -1428,7 +1618,18 @@ class TaskMachine:
             proposal=db.execute("SELECT payload_json FROM runtime_events WHERE task_id=? AND type='ANSWER_SUBMITTED' ORDER BY id DESC LIMIT 1",(task_id,)).fetchone()
             if not proposal or json.loads(proposal[0]).get('text')!=task['synthesis']:
                 raise StoreError('completion_answer_missing')
+            if answer_needs_certified_work(db, task):
+                # A released answer is the user's final word on planned work,
+                # never a substitute for its review and verification.
+                self._work_invariants(db, task_id, task)
             return
+        self._work_invariants(db, task_id, task)
+        if task['blocker'] or not task['synthesis']:
+            raise StoreError('completion_synthesis_or_blocker')
+
+    def _work_invariants(self, db, task_id, task):
+        """The current revision's work is complete, reviewed (or waived) and
+        verified on the observed project. Raises WORK_CERTIFICATION_GAPS."""
         nodes = db.execute('SELECT * FROM runtime_nodes WHERE task_id=? AND revision=? ORDER BY rowid',
                            (task_id, task['revision'])).fetchall()
         if not nodes or any(n['status'] != 'completed' or not n['result_json'] for n in nodes):
@@ -1459,5 +1660,3 @@ class TaskMachine:
         observed = capture_revision(task_workspace.task_root(db, task_id))
         if observed['kind'] != 'observed' or observed['dirty_digest'] != json.loads(evidence['payload_json'])['revision_digest']:
             raise StoreError('completion_project_revision_changed')
-        if task['blocker'] or not task['synthesis']:
-            raise StoreError('completion_synthesis_or_blocker')

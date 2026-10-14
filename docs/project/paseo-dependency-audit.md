@@ -6,6 +6,22 @@
 This is a bounded disposition of the plugin lockfile, not a clean security bill
 or an audit of the installed Paseo host.
 
+## Update 2026-10-14
+
+A later `npm audit` at `integrations/paseo` reported 21 entries: one critical
+(`shell-quote`, command injection, range `>=1.8.4 <1.11.0`, transitive through
+`react-native`), 15 high and 5 moderate. The non-breaking `npm audit fix` (without
+`--force`) raised `shell-quote` from 1.10.0 to 1.12.0 in `package-lock.json`; `package.json`
+was not changed. The critical entry is resolved. The typecheck and the
+`test:activation` and `test:steer` scripts passed after that fix.
+
+The remaining 15 high and 5 moderate entries are all transitive through the
+`react-native` development dependency tree (`@jest/*`, `metro*`, `micromatch`/`braces`,
+`js-yaml`/`argparse`, `sprintf-js`). The only offered fix is `react-native@0.87.1`, a
+semver-major devDependency bump, which is out of scope for a non-breaking fix. These
+entries are not dispositioned here beyond the notes above; their reachability is not
+assessed, and the plugin remains a development dependency only.
+
 `npm --prefix integrations/paseo audit --json` reports 15 high-severity package
 entries, all propagated from one distinct advisory:
 [GHSA-vfj7-8cjw-p6xm](https://github.com/advisories/GHSA-vfj7-8cjw-p6xm)

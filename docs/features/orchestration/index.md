@@ -555,8 +555,11 @@ closed by the exact-command rule or the command-less compatibility rule. When
 the gap declares a non-empty `command` as literal argv, a verified, still-current
 restricted `command_run` pass with exactly matching argv and the task's working
 tree as its effective cwd in the same plan revision closes it, including across
-nodes. Development or different-cwd receipts cannot substitute for that check; the runtime reads argv from the cited
-`tool_call_ref` receipt and keeps the task and attempt evidence checks.
+nodes. The pass may come from the task's own command profile (for a writing worker in
+Development or Auto, the host-writable profile) or from the read-only profile; in Guarded
+only restricted passes count. A different cwd cannot substitute for that check. The runtime
+reads argv from the cited `tool_call_ref` receipt and keeps the task and attempt evidence
+checks.
 Alternatively, a runtime-owned final-verification command closes a declared
 command gap only with byte-for-byte identical argv, complete exit-0 execution,
 complete untruncated retained output and a digest equal to both the gap author's
@@ -587,12 +590,24 @@ insufficient. An `outside_command` has a separate working directory and cannot
 close a command-bearing gap by argv alone. Every remaining synthesis
 `not_verified` item requires the gap's exact check name and a nonblank concrete
 blocker.
-Command verification runs literal argv
-in an explicit Linux namespace sandbox with no user home, inherited credentials,
-network, or access to the real runtime store. Missing isolation, failed commands,
-incomplete output or a changed project digest cannot establish a pass. Each
-command runs until it exits, with no runtime time limit; stopping the task ends
-it, and that interrupted run cannot establish a pass.
+Command verification runs literal argv in the read-only host profile
+(`sandbox.readonly_command`) in every access mode. The host and HOME are read-only except
+the tool-cache allowlist; scratch and `/tmp` are private or writable; the command has its own
+PID namespace; the protected control plane is read-only and the task store is masked; only
+the project's git-ignored directories (caches, builds, installed dependencies) are writable.
+The check records the `restricted` profile. Credentials are filtered from the environment,
+but the owner's network is shared, as for every owner command. Missing isolation, failed
+commands, incomplete output or a changed project digest cannot establish a pass. Each
+command runs until it exits, with no runtime time limit; stopping the task ends it, and that
+interrupted run cannot establish a pass.
+
+Verification argv contract. `plan.verification` is one top-level field of the plan, not a
+property of each task. Each entry is one literal argv command (an array of string arguments,
+no shell); `plan_submit` needs at least one task and at least one verification command.
+Submission rejects shell syntax before any work starts. The coordinator may call
+`verification_submit` only after a runtime verification failed and the work itself is
+correct: it replaces the verification commands and verifies again without redoing the
+reviewed work. Wrong code requires a new plan.
 
 Completion of planned work requires current completed nodes, an approving review
 (or the runtime's `REVIEW_NOT_REQUIRED` record for an unchanged project), complete passing
@@ -738,8 +753,10 @@ stops the work under its own name and is never retried. See
 [routing and fallback](../routing-and-fallback/index.md#automatic-worker-routing-unavailable-routes). Coordinator, worker and review turns have total
 and idle deadlines. Scope reservations remain occupied until engine termination
 is observed. A task waiting for another task's capacity remains pending with a
-bounded wait. Senior escalation inserts a read-only consultant routed automatically
-by the runtime. Three accepted automatic replans since the latest user message or
+bounded wait. Senior escalation (`escalation_request`, the only consultant route) inserts a
+read-only consultant routed automatically by the runtime. The runtime builds that
+consultant's packet from the reports the escalation names and the escalated revision's
+reports; a plan that names the consultant is refused. Three accepted automatic replans since the latest user message or
 answer and three review cycles bound the respective loops; exhausted limits require
 user input or a new plan, and any user message or answer restores the replan budget.
 

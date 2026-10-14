@@ -1,3 +1,97 @@
+## 2026-10-14 orchestration audit decisions D1-D8
+
+An owner-approved audit of the orchestration prompts and logic produced these
+decisions. Each one states the owner's choice and what the code does now. Where
+the implementation is partial, the entry says so.
+
+### D1 read-only roles and the command host profile
+
+Read-only roles (reviewer, auditor, explorer, architect) never receive a host-writable
+`command_run`. Their commands run through `sandbox.readonly_command`, in every access
+mode, with an explicit allowlist of writable home caches (`READ_ONLY_HOME_CACHES`),
+the scratch directory, `/tmp`, and a private PID namespace. The receipt profile is
+`restricted`. Outside-project working directories stay allowed in Development and Auto,
+and refused in Guarded, as before. The earlier entry below ("read-only roles, review,
+verification ... unchanged in every mode") described the intended restriction; this entry
+records what `command_run` now enforces.
+
+Automatic runtime verification (`controller._verification_command`) uses the same
+`sandbox.readonly_command` profile in every access mode, and its receipts record
+`restricted`. Inside a check only the project's git-ignored directories are writable; the
+source and the protected control plane stay read-only. The reviewer reuse rule
+(`reviewer_verification.reuse`) reuses only a check that ran in that read-only profile. The
+synthesis gap check (`state.synthesis_checks`) accepts a declared-command gap closed by a
+pass in the task mode's own command profile or in the read-only profile, so in Development
+and Auto a writing worker's host-writable pass with the same argv and cwd can close it. A
+Guarded task accepts only restricted passes. The read-only profile limits writes, not
+network egress: as with every owner command, the host network is shared.
+
+The owner chose restoring the read-only intent over rewriting it, on the condition that
+nothing breaks. Cache writes stay possible through the allowlist, so ordinary package
+manager and test runs keep working. Residual risk: a read-only command can still poison
+a cache that a later run reads. This narrows exposure; it is not hostile-code isolation.
+
+### D2 runtime stop question: Finish and Continue
+
+On the runtime's own stop question, **Finish** ends the task `CANCELLED` with a
+`USER_FORCE_FINISHED` event. It is recognised by number, by stored text, by the rendered
+English or Russian text, and by its label. **Continue** resumes the runtime flow and never
+releases a direct answer. Only an answer in the user's own words releases the question.
+
+An answer that closes planned work is certified before it becomes `COMPLETED`. If a work
+gate (review or verification) did not pass, the task ends `FAILED` with blocker
+`answer_not_certified:<gap>` and an `ANSWER_NOT_CERTIFIED` event. Informational answers,
+and follow-up answers after a reopened completed task, are unchanged.
+
+### D3 user revocation of a model grant
+
+A newer user message that refuses the model, or a refusal that is newer than the grant,
+revokes the grant within the task. The routing audit then records
+`user_model_request.status = revoked_by_user`. A revocation is never treated as consent.
+Comparisons and remarks ("compare X with Y") decline a grant but do not revoke one.
+The live dispatch path carries the revocation to the recorded route decision.
+
+### D4 no escalation after infrastructure failures
+
+A retry whose failure class is `engine_failure` or `transport_failure` (crash, EOF,
+poisoned session) does not raise the model tier. Only quality causes, or retries with no
+failure class, escalate as before. No owner setting that would allow flagship escalation
+after such a failure exists; it is not implemented.
+
+### D5 quota ranking with a hot account
+
+A known candidate at or above 95% of its plan usage ranks behind any non-hot candidate,
+whether that candidate's usage is known or unknown. This happens before engine affinity.
+The rank key moved the hot flag to position four, and `RANK_VERSION` is 11. Rejected
+quota windows without a reset time expire after a bounded TTL, and a CLI window that stops
+being reported is pruned on the next successful refresh.
+
+### D6 Paseo cancel followed by a prompt
+
+In a Paseo session, `session/cancel` followed by `session/prompt` on the same session is
+steering, not Stop. The cancelled coordinator turn ends at once. Running workers continue,
+and the new prompt is applied as steering. A lone cancel still pauses the task, but only
+after a grace window of 5 seconds (`DEFAULT_HOST_CANCEL_GRACE_SECONDS`) with no follow-up
+prompt. Non-Paseo clients keep the immediate pause. A user who wants Stop sends a lone
+cancel and waits out the window.
+
+### D7 natural-language deny-write
+
+Only the explicit form `deny-write: <path>` (bare, single-quoted, double-quoted or
+backtick-quoted) creates a write denial. Wildcard or mask characters are rejected. Natural
+language such as "do not modify ..." creates no denial. A denial is stored in its
+normalized path form, and a write is matched after the same normalization, so a `./`
+spelling cannot bypass it.
+
+### D8 senior consultation is escalation-only
+
+A senior consultant is reached only through `escalation_request`. A plan that names the
+consultant is refused with `consultant_requires_escalation`. The runtime builds the
+consultant's packet, from the reports the escalation names and then the reports of the
+escalated revision, with each report's SHA-256 and recorded artifact versions. The
+consultant has no `access_request` and no `ask_question` route. It records a missing
+fact as a limitation in its report and asks the user nothing.
+
 ## 2026-10-13 access modes as trust levels
 
 The owner defined the three modes as trust levels over two axes, where a

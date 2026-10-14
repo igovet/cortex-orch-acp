@@ -831,6 +831,13 @@ class ProvisioningService:
                 resolved_connection_id=resolved_route.get("connection_id"),
                 resolved_model=resolved_route.get("model"),
                 coordinator_route_connection_id=preview.get("route_connection_id"),
+                # The capsule's recipient identifies this worker's own
+                # assignment by this exact idempotency_key as
+                # ``assignment_ref`` (see ProvisioningResult.assignment_ref
+                # and recovery.capsule's provisioning lookup); thread it
+                # through so the worker-configuration-confirmed event can be
+                # recorded under the same identity the capsule queries by.
+                idempotency_key=idempotency_key,
             )
             try:
                 session_ref = self._engine.open(row["workspace_binding_id"], launch, composed_instructions(role_set))

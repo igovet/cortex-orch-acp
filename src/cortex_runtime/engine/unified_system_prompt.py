@@ -63,7 +63,7 @@ _COMMON_BODY = """\
 # Cortex skills
 
 - Cortex skills are procedures the runtime keeps for you, read with `read_skill` on the `cortex` server. The engine's own skill loaders, if any, are not part of this session; project and user skills, when there are any, are listed under Project and user skills below.
-- The skills that apply to almost every session are already included in full in your role instructions; follow them from your first action and do not re-read them. The other skills are conditional. Before an action that matches a listed trigger, call the `read_skill` tool from the `cortex` MCP server with that exact skill id and follow its returned body. For example, read `documentation-sync` before assessing documentation impact for a plan or updating affected docs; read `interactive-resources` before using a browser or server session. Do not read a conditional skill when its trigger has not arisen. Reading a matching skill is part of the work, not an optional extra.
+- The skills that apply to almost every session are already included in full in your role instructions; follow them from your first action and do not re-read them. The other skills are conditional. Before an action that matches a listed trigger, call the `read_skill` tool from the `cortex` MCP server with that exact skill id and follow its returned body. For example, @@SKILL_EXAMPLE@@ Do not read a conditional skill when its trigger has not arisen. Reading a matching skill is part of the work, not an optional extra.
 
 @@ROLE_FINDING_CODE@@
 
@@ -73,7 +73,7 @@ _COMMON_BODY = """\
 
 @@ROLE_EVIDENCE@@
 - Keep unrun, failed, truncated and unverifiable checks explicit, with their concrete blocker. A successful tool response or model turn is not proof that the project works.
-- Distinguish what you observed from what you infer. If information you need is missing, ask through the runtime's question tool instead of inventing it.
+- Distinguish what you observed from what you infer. @@ROLE_MISSING@@
 
 # Safety
 
@@ -91,6 +91,35 @@ _COMMON_BODY = """\
 
 - Your context may be compacted during long work. Afterwards, recover the exact assignment and evidence from the runtime (the `context-compaction` skill describes how) instead of guessing from memory.
 """
+
+
+#: C-26: the base prompt's one worked example of the `read_skill` convention
+#: used to name `documentation-sync` and `interactive-resources` for every
+#: role alike, but neither is ever named for the senior consultant
+#: (`portable.roles.CONSULTANT_EXCLUDED_NAMED_SKILLS`), and `interactive-
+#: resources` is never named for the coordinator either
+#: (`portable.roles.NAMED_SKILLS["coordinator"]`). Keyed exactly like
+#: `_ROLE_BLOCKS` (``"coordinator"``/``"write"``/``"read_only"``/
+#: ``"consultant"``) so each role's example only ever names a skill it can
+#: actually load.
+_SKILL_EXAMPLE = {
+    "coordinator": (
+        "read `documentation-sync` before assessing documentation impact for a plan or updating affected docs; "
+        "read `worker-routing` before proposing assignment nodes, roles, dependencies or scopes in a plan."
+    ),
+    "write": (
+        "read `documentation-sync` before assessing documentation impact for a plan or updating affected docs; "
+        "read `interactive-resources` before using a browser or server session."
+    ),
+    "read_only": (
+        "read `documentation-sync` before assessing documentation impact for a plan or updating affected docs; "
+        "read `interactive-resources` before using a browser or server session."
+    ),
+    "consultant": (
+        "read `context-compaction` after context is compacted or runs out mid-work; "
+        "read `index` when you want a full-report example."
+    ),
+}
 
 
 #: Where the engines themselves find skills, observed on 2026-09-28 by pointing
@@ -355,6 +384,7 @@ def code_index_project_name(workspace_root: str | None) -> str | None:
 
 
 def attached_servers_section(servers, workspace_root: str | None = None, *, role: str = "worker",
+                             role_id: str | None = None,
                              code_index_project: str | None = None, native_search: bool = True) -> str | None:
     """What the runtime knows only when a session starts: which external MCP
     servers were really attached to it. Added after the role instructions for
@@ -366,14 +396,29 @@ def attached_servers_section(servers, workspace_root: str | None = None, *, role
     procedure's first step (finding the project) needed a lookup they never
     made. So the section states the fact and the first step. Only tool names
     appear here; arguments stay in each tool's advertised schema.
-    """
-    from .mcp_bridge import coordinator_tools
 
+    ``role_id`` (the worker profile, when known) narrows the listed tools to
+    ``read_only_tools`` for a read-only role exactly as
+    ``engine.external_proxy`` narrows the actual calls it forwards (C-23):
+    otherwise a read-only worker (reviewer, auditor, explorer, architect...)
+    was told it had every ``allowed_tools`` entry, including
+    ``index_repository``, and then had every such call refused at the gateway.
+    """
+    from .mcp_bridge import coordinator_tools, is_read_only_role
+
+    read_only = role == "coordinator" or is_read_only_role(role_id)
     grants = {}
     for server in servers or ():
         if isinstance(server, dict):
             name = server.get("name")
-            tools = coordinator_tools(server) if role == "coordinator" else server.get("allowed_tools", ())
+            if role == "coordinator":
+                tools = coordinator_tools(server)
+            elif read_only:
+                allowed = server.get("allowed_tools", ())
+                readonly = server.get("read_only_tools", ())
+                tools = [tool for tool in allowed if tool in readonly] if isinstance(readonly, (list, tuple)) else ()
+            else:
+                tools = server.get("allowed_tools", ())
             if isinstance(name, str) and name and isinstance(tools, (list, tuple)):
                 grants[name] = {tool for tool in tools if isinstance(tool, str)}
         elif isinstance(server, str) and server:
@@ -434,11 +479,12 @@ def attached_servers_section(servers, workspace_root: str | None = None, *, role
 
 
 def with_attached_servers(meta: dict, servers, workspace_root: str | None = None, *, role: str = "worker",
+                          role_id: str | None = None,
                           code_index_project: str | None = None, native_search: bool = True) -> dict:
     """``meta`` with :func:`attached_servers_section` appended to the text the
     model reads as its instructions: the plain-string ``systemPrompt`` both
     adapters send, or an ``append`` object. Never mutates ``meta``."""
-    note = attached_servers_section(servers, workspace_root, role=role,
+    note = attached_servers_section(servers, workspace_root, role=role, role_id=role_id,
                                     code_index_project=code_index_project, native_search=native_search)
     result = dict(meta)
     if note is None:
@@ -517,8 +563,12 @@ _ROLE_BLOCKS = {
         "work": "# Project boundaries\n\n- Consult from the packet and retained reports only; do not create or change project files.\n" + _PRESERVATION,
         "evidence": "- Evaluate the supplied evidence; name missing evidence in your report instead of running checks or inventing results.",
         "commands": "",
+        # Owner decision D8: the consultant asks the user nothing and
+        # requests no access; it is offered neither tool.
+        "missing": "If information you need is missing, record it in your report as a limitation, with the exact data that would resolve it, instead of inventing it; you ask the user nothing.",
     },
 }
+_MISSING_INFORMATION = "If information you need is missing, ask through the runtime's question tool instead of inventing it."
 
 _ROLE_COMMUNICATION = {
     "coordinator": (
@@ -551,6 +601,11 @@ _ROLE_REFUSAL = {
         "additional project paths (an assignment-local wait that the runtime or the user decides) or the question "
         "tool for a decision only the user can make; otherwise report it as a blocker. Use the scope or replan "
         "request only when the plan itself must change: it stops every worker and uses up a re-plan."
+    ),
+    # The consultant has neither access_request nor the question tool.
+    "consultant": (
+        "If your consultation needs what was refused, name it in your report as a limitation and say "
+        "which evidence or check would resolve it."
     ),
 }
 
@@ -623,17 +678,19 @@ def cortex_system_prompt(role: str, workspace_root: str | None, *, today: dateti
     if native_tools and consultant:
         native = "- Do not read or search project files with any engine-native tool that may remain; it is not a way around the consultation boundary."
     body = _COMMON_BODY
+    skill_example_key = "coordinator" if role == "coordinator" else "consultant" if consultant else access_class
     for marker, value in {
         "ROLE_CORTEX_TOOLS": block["tools"], "ROLE_WORK": block["work"],
         "ROLE_EVIDENCE": block["evidence"], "ROLE_COMMANDS": block["commands"],
-        "NATIVE_TOOLS": native,
+        "NATIVE_TOOLS": native, "SKILL_EXAMPLE": _SKILL_EXAMPLE[skill_example_key],
     }.items():
         body = body.replace("@@" + marker + "@@", value)
     finding = _CONSULTANT_WORKING_MATERIAL if consultant else _FINDING_CODE
     return "\n\n".join(part for part in (
         "# Cortex session\n\n" + _INTRO[role],
         body.replace("@@ROLE_FINDING_CODE@@", finding).replace(
-            "@@ROLE_REFUSAL@@", _ROLE_REFUSAL[role]).replace(
+            "@@ROLE_REFUSAL@@", _ROLE_REFUSAL["consultant" if consultant else role]).replace(
+            "@@ROLE_MISSING@@", block.get("missing", _MISSING_INFORMATION)).replace(
             "@@ROLE_COMMUNICATION@@\n", _ROLE_COMMUNICATION[role] + "\n" if _ROLE_COMMUNICATION[role] else ""
         ).strip(),
         project_skills_section(workspace_root, environ),

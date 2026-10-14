@@ -520,17 +520,20 @@ def _run_command_process(store, channel, launch, fds, output, effects, limit, *,
 
 
 def _command(store,channel,root,scopes,args,ref,owner,effects):
-    from .sandbox import as_owner, gateway_command, development_command, with_umask
+    from .sandbox import as_owner, gateway_command, development_command, readonly_command, with_umask
     from . import ssh_askpass
     from .ignore_guard import snapshot, enforce
     ignore_before = snapshot(root) if scopes else None
     with store.connection() as db:
         _authority(db, channel)
         policy = _command_policy(db, channel.task_id)
-    # Development and Auto: every worker's commands work on the whole computer
-    # (one host-writable profile, named 'development' in receipts); the role
-    # still decides the project, which stays read-only without a write grant.
-    from ..configuration.access_mode import command_profile
+    # Development and Auto: a writing worker's commands work on the whole
+    # computer (one host-writable profile, named 'development' in receipts).
+    # A role without a write grant (reviewer, auditor, explorer...) gets the
+    # read-only host profile in every mode (sandbox.readonly_command); the
+    # mode only lets it choose a cwd outside the task tree.
+    from ..configuration.access_mode import command_profile, READ_ONLY_COMMAND_PROFILE
+    read_only = not scopes
     development = command_profile(policy['mode']) == 'development'
     from ..engine.permissions import declared_command_deletion
     if declared_command_deletion(args['argv']):
@@ -549,13 +552,18 @@ def _command(store,channel,root,scopes,args,ref,owner,effects):
         # Git sees the project's repository: read-only, or with a writing
         # grant updatable except its configuration and hooks (see sandbox).
         planted=[]
-        mount = (development_command(root, scratch, with_umask(args['argv']), scopes,
-                                     environ=os.environ, readonly=denied, git_guard=planted)
-                 if development else gateway_command(root, scratch, with_umask(args['argv']), scopes,
-                                     system_root=True, readonly=denied, reveal=frozenset({'.git'}),
-                                     git_writable=True, git_guard=planted))
+        if read_only:
+            mount = readonly_command(root, scratch, with_umask(args['argv']), environ=os.environ,
+                                     readonly=denied, git_guard=planted)
+        elif development:
+            mount = development_command(root, scratch, with_umask(args['argv']), scopes,
+                                        environ=os.environ, readonly=denied, git_guard=planted)
+        else:
+            mount = gateway_command(root, scratch, with_umask(args['argv']), scopes,
+                                    system_root=True, readonly=denied, reveal=frozenset({'.git'}),
+                                    git_writable=True, git_guard=planted)
         with mount as (command,fds):
-            if not development:
+            if not development and not read_only:
                 as_owner(command,os.environ)
             command[command.index('--chdir') + 1] = cwd
             if not scopes:
@@ -593,7 +601,8 @@ def _command(store,channel,root,scopes,args,ref,owner,effects):
                                 'completed' if code==0 and not failure else 'failed')
     # argv is retained so a check citing this receipt can be matched against it.
     return dict(tool_call_ref=ref,argv=list(args['argv']),cwd=cwd,
-                profile='development' if development else 'restricted', access_policy=policy,
+                profile=(READ_ONLY_COMMAND_PROFILE if read_only else 'development' if development else 'restricted'),
+                access_policy=policy,
                 exit_code=code,complete=failure is None,failure=failure,
                 output=data.decode('utf-8',errors='replace'),large_output_id=retained['id'])
 
@@ -625,9 +634,23 @@ def _outside(store,channel,root,operation,args,ref,owner,effects):
         raise StoreError('outside_path_must_be_absolute','path',str(target),'an absolute path','Give an absolute path.')
     project=Path(root).resolve()
     resolved=Path(os.path.normpath(str(target)))
-    if operation=='outside_write' and (resolved==project or project in resolved.parents):
-        raise StoreError('outside_path_inside_project','path',str(target),'a path outside the project',
-                         'Inside the project, write with your own tools or project_write.')
+    if operation=='outside_write':
+        # Resolve real paths too (C-12): a parent-directory symlink alias
+        # can make a literally-outside path land inside the project, which
+        # the normalized path alone would miss.
+        candidates={resolved}
+        try:
+            candidates.add(target.parent.resolve(strict=True)/target.name)
+        except (OSError, RuntimeError):
+            pass
+        if target.is_symlink() or target.exists():
+            try:
+                candidates.add(target.resolve(strict=True))
+            except (OSError, RuntimeError):
+                pass
+        if any(candidate==project or project in candidate.parents for candidate in candidates):
+            raise StoreError('outside_path_inside_project','path',str(target),'a path outside the project',
+                             'Inside the project, write with your own tools or project_write.')
     def still_allowed():
         with store.connection() as db: _authority(db,channel)
     with store.connection() as db:
@@ -804,8 +827,20 @@ def dispatch(store,channel,operation,args):
         if operation in {'project_write','project_edit','project_mkdir','project_delete'}:
             # A private path is refused before anything else (a deletion
             # there once asked the user to confirm what was then refused).
-            _parts(args['path'])
-            if not _matches(args['path'],scopes) or _matches(args['path'],write_denials(db,channel.task_id)):
+            parts=_parts(args['path'])
+            # Compare the same normalized path parts as the write effect
+            # itself (C-10), not the raw argument string: './secrets/key.txt'
+            # and 'secrets/key.txt' must match one deny-write entry, however
+            # the denial itself happens to be stored.
+            normalized='/'.join(parts)
+            def _normalized_denial(value):
+                try:
+                    return '/'.join(_parts(value))
+                except StoreError:
+                    return value
+            denied=any(normalized==denial or normalized.startswith(denial+'/')
+                       for denial in map(_normalized_denial,write_denials(db,channel.task_id)))
+            if not _matches(args['path'],scopes) or denied:
                 error=StoreError('gateway_scope_denied')
                 _record_gateway_refusal_tx(store,db,channel,operation,error)
                 db.commit()

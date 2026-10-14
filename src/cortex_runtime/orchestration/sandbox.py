@@ -234,10 +234,28 @@ def compact_argv(command, fds):
         return command, tuple(fds)
     # bwrap takes only options from --args; the command stays on argv.
     split = command.index('--')
-    fd = os.memfd_create('cortex-bwrap-args')
-    os.write(fd, b''.join(arg.encode('utf-8', 'surrogateescape') + b'\0' for arg in command[1:split]))
+    payload = b''.join(arg.encode('utf-8', 'surrogateescape') + b'\0' for arg in command[1:split])
+    fd = _args_fd()
+    os.write(fd, payload)
     os.lseek(fd, 0, os.SEEK_SET)
     return [command[0], '--args', str(fd), *command[split:]], (*fds, fd)
+
+
+def _args_fd():
+    """An inheritable, writable, seekable fd with no path of its own, for
+    ``compact_argv``'s payload. ``memfd_create`` (Linux) when the running
+    kernel/libc exposes it; otherwise a temp file unlinked right after
+    opening gives the same anonymous-fd semantics on any POSIX host."""
+    create = getattr(os, 'memfd_create', None)
+    if create is not None:
+        try:
+            return create('cortex-bwrap-args')
+        except OSError:
+            pass
+    import tempfile
+    fd, path = tempfile.mkstemp(prefix='cortex-bwrap-args-')
+    os.unlink(path)
+    return fd
 
 
 def readonly_test_cache(command, scratch, environ):
@@ -252,7 +270,7 @@ def readonly_test_cache(command, scratch, environ):
     command[at:at] = ['--setenv', 'PYTEST_ADDOPTS', options.strip()]
 
 
-def as_owner(command, environ, *, writable_home=False):
+def as_owner(command, environ, *, writable_home=False, home_dirs=None):
     """Run a sandbox command as the owner would in their terminal, in place.
 
     Their name and groups resolve, HOME is their real one (read-only, mounted
@@ -260,6 +278,8 @@ def as_owner(command, environ, *, writable_home=False):
     is theirs without credentials (their ssh-agent socket stays: it holds no
     key material), and the network is shared. Writes remain
     limited to the granted scope and private runtime paths stay masked.
+    ``home_dirs`` replaces the writable HOME tool directories
+    (``tool_state_dirs``) with an explicit list (``readonly_command``).
     """
     home = environ.get('HOME', '')
     mounts = [arg for name in ('/etc/passwd', '/etc/group') if Path(name).is_file()
@@ -267,7 +287,9 @@ def as_owner(command, environ, *, writable_home=False):
     has_home = home.startswith('/') and Path(home).is_dir()
     if has_home and not writable_home:
         mounts += ['--ro-bind', home, home]
-        mounts += [arg for path in tool_state_dirs(home) for arg in ('--bind', path, path)]
+        if home_dirs is None:
+            home_dirs = tool_state_dirs(home)
+    mounts += [arg for path in home_dirs or () for arg in ('--bind', path, path)]
     # After the scratch /tmp mount (a HOME under /tmp must stay read-only),
     # before the project mounts (project grants stay writable on top).
     at = command.index('--ro-bind', _dev_index(command) + 1)
@@ -682,6 +704,13 @@ def control_plane_paths(root, environ):
     hooks = _configured_hooks_dir(root, include_external=True)
     if hooks is not None:
         paths.add(hooks)
+    # The project's own git metadata (config, hooks, commondir, gitdir) --
+    # for a linked worktree this can live outside the project entirely, so
+    # it needs its own protection here, not just the inside-project refusal
+    # (C-12).
+    from ..delegation.revision import git_metadata_dirs
+    for directory in git_metadata_dirs(str(root)) or ():
+        paths.add(Path(directory))
     return paths
 
 
@@ -707,10 +736,11 @@ def protected_host_paths(root, environ):
 def development_command(root, scratch, argv, scopes, *, environ, readonly=(), git_guard=None):
     """Host-writable commands of a Development or Auto task; the engine jail is unchanged.
 
-    The mode decides the host (writable outside the protected control
-    plane); ``scopes`` still decide the project: a writing worker's whole
-    project, a check's git-ignored directories, nothing for a read-only role.
-    Docker, outside aliases and same-user programs can bypass direct masks.
+    Only a writing worker's ``command_run`` uses it: the mode decides the
+    host (writable outside the protected control plane); ``scopes`` still
+    decide the project. Read-only roles and runtime verification checks use
+    ``readonly_command`` in every mode. Docker, outside aliases and
+    same-user programs can bypass direct masks.
     """
     with gateway_command(root, scratch, argv, scopes, system_root=True, readonly=readonly,
                          reveal=frozenset({'.git'}), git_writable=True, git_guard=git_guard) as (command, fds):
@@ -755,6 +785,121 @@ def development_command(root, scratch, argv, scopes, *, environ, readonly=(), gi
                                      else ['--ro-bind', str(target), str(target)])
         at = command.index('--chdir')
         command[at:at] = overlays
+        yield command, fds
+
+
+# What a command of a role without a write grant may write in HOME: package
+# manager and build tool caches, named explicitly. ``tool_state_dirs`` (every
+# hidden HOME directory) is not used here: it also holds code the owner runs
+# later (version managers, shell frameworks, editor plugins, ~/.cargo/bin,
+# ~/.gradle/init.d). Only existing entries are bound, except
+# TOOL_DIRS_CREATED. A cache is still data a later run consumes: this narrows
+# what a read-only command can change, it is not hostile-code isolation.
+READ_ONLY_HOME_CACHES = (
+    '.cache', '.npm', '.yarn/berry/cache', '.pnpm-store', '.local/share/pnpm/store',
+    '.bun/install/cache', '.cargo/registry', '.cargo/git', '.cargo/.package-cache',
+    '.cargo/.package-cache-mutate', '.cargo/.global-cache', '.m2/repository',
+    '.gradle/caches', '.gradle/wrapper/dists', '.gradle/daemon', '.gradle/native', '.gradle/.tmp',
+    '.ivy2/cache', '.nuget/packages', 'go/pkg/mod', '.local/share/virtualenv', '.node-gyp',
+    '.ccache',
+    # `docker build` records the builder's activity on every run.
+    '.docker/buildx/activity', '.docker/buildx/refs',
+)
+# Cache locations the owner moved elsewhere through the environment.
+READ_ONLY_CACHE_ENV = ('XDG_CACHE_HOME', 'npm_config_cache', 'NPM_CONFIG_CACHE', 'npm_config_store_dir',
+                       'PIP_CACHE_DIR', 'UV_CACHE_DIR', 'YARN_CACHE_FOLDER', 'GOMODCACHE', 'GOCACHE',
+                       'PRE_COMMIT_HOME', 'BUN_INSTALL_CACHE_DIR', 'CCACHE_DIR')
+
+
+def read_only_caches(environ, root, protected=()) -> list[str]:
+    """Existing cache locations (READ_ONLY_HOME_CACHES under HOME, then
+    READ_ONLY_CACHE_ENV) a read-only command may write, as real paths. Never
+    the filesystem root, HOME or an ancestor of it, the project, anything
+    containing or inside it, a protected control-plane path, or (for an
+    environment value) anything inside a SENSITIVE_HOME directory."""
+    root = Path(root).resolve()
+    home = environ.get('HOME', '')
+    home = Path(home) if home.startswith('/') and Path(home).is_dir() else None
+    candidates = []
+    if home is not None:
+        for name in TOOL_DIRS_CREATED:
+            path = home / name
+            if not path.exists() and not path.is_symlink():
+                try:
+                    path.mkdir(mode=0o700)
+                except OSError:
+                    pass
+        candidates += [(home / relative, False) for relative in READ_ONLY_HOME_CACHES]
+    candidates += [(Path(environ[name]), True) for name in READ_ONLY_CACHE_ENV
+                   if str(environ.get(name) or '').startswith('/')]
+    real_home = home.resolve() if home is not None else None
+    protected = [Path(path) for path in protected]
+
+    def overlaps(path, other):
+        return path == other or other in path.parents or path in other.parents
+
+    found = []
+    for path, from_environment in candidates:
+        try:
+            real = path.resolve(strict=True)
+            info = real.stat()
+        except (OSError, RuntimeError):
+            continue
+        if not stat.S_ISDIR(info.st_mode) and not (stat.S_ISREG(info.st_mode) and not from_environment):
+            continue
+        if real == Path('/') or overlaps(real, root) or any(overlaps(real, other) for other in protected):
+            continue
+        if real_home is not None and (real == real_home or real in real_home.parents):
+            continue
+        if from_environment and real_home is not None and any(
+                overlaps(real, real_home / name) for name in SENSITIVE_HOME):
+            continue
+        if str(real) not in found:
+            found.append(str(real))
+    return found
+
+
+def _project_mount(command, root) -> int:
+    """Index of ``gateway_command``'s pinned read-only project mount."""
+    return next(i for i in range(len(command) - 2)
+                if command[i] == '--ro-bind' and command[i + 2] == str(root)
+                and command[i + 1].startswith('/proc/self/fd/'))
+
+
+@contextmanager
+def readonly_command(root, scratch, argv, *, environ, scopes=(), readonly=(), git_guard=None):
+    """The command profile of every role without a write grant (reviewer,
+    auditor, explorer, architect...) and of the runtime's own verification
+    checks, the same in every access mode.
+
+    The whole host is visible read-only; the project is read-only except
+    ``scopes`` (only a verification check's git-ignored directories: caches,
+    builds, node_modules -- never a source file, so the reviewed revision
+    cannot drift; a role's command passes none); HOME is
+    read-only except the explicit caches of ``read_only_caches``; the
+    private scratch (TMPDIR, /var/tmp) and the host /tmp stay writable; the
+    protected control plane (``protected_host_paths``) is read-only and the
+    task store masked even where a cache would contain it. The command gets
+    its own PID namespace: it cannot list the host's processes or read their
+    ``/proc/<pid>/environ`` (engines, MCP relays). Without usable bubblewrap
+    the command fails, as every brokered command does.
+    """
+    root = Path(root).resolve(strict=True)
+    protected = protected_host_paths(root, environ)
+    with gateway_command(root, scratch, argv, list(scopes), system_root=True, readonly=readonly,
+                         reveal=frozenset({'.git'}), git_writable=True, git_guard=git_guard) as (command, fds):
+        as_owner(command, environ, home_dirs=read_only_caches(environ, root, protected))
+        overlays = []
+        for path in protected:
+            overlays += (['--tmpfs', str(path), '--remount-ro', str(path)]
+                         if path.name == '.cortex' and path.is_dir()
+                         else ['--ro-bind', str(path), str(path)])
+        # After HOME and its caches, before the project (a task tree below a
+        # protected parent stays visible).
+        at = _project_mount(command, root)
+        command[at:at] = overlays
+        at = command.index('--die-with-parent') + 1
+        command[at:at] = ['--unshare-pid']
         yield command, fds
 
 

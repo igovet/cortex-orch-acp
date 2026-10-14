@@ -81,6 +81,12 @@ first use of a task by a fresh runtime instance) releases the claim
 (`consumed_by` → NULL) so the next continuation reclaims and delivers it
 exactly once. The released row is keyed by the identity described above.
 
+A coordinator prompt that raises, or whose delivery setup raises, releases its own
+claim at once in the same process, so the events are not left claimed. Delivery is
+at-least-once: if the model saw the events before the prompt raised, they are delivered
+again on the next continuation. A prompt that returns, including with a cancelled stop
+reason, still marks its events delivered.
+
 Crash windows are tested directly (new runtime/agent instance over the same
 store) in `tests/test_acp_input_history_and_replay.py`; the runtime never
 promises exactly-once *external* (engine-side) execution, only a

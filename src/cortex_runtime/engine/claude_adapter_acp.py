@@ -296,6 +296,18 @@ CLAUDE_SUBAGENT_TOOLS = ("Agent", "Task", "Workflow", "TeamCreate", "TeamDelete"
 # cannot bypass the workflow while the corresponding MCP tools remain available.
 CLAUDE_GATEWAY_ALTERNATIVES = ("Bash", "Read", "Edit", "Write", "Grep", "Glob", "Skill", "NotebookEdit")
 
+# Native lifecycle/notification tools whose outcome the Cortex runtime, not
+# the model, already owns: EnterWorktree/ExitWorktree bypass the runtime's own
+# workspace scope and git-worktree handling; EnterPlanMode/ExitPlanMode are
+# Claude Code's own plan-mode gate, superseded by Cortex's own plan/execution
+# lifecycle; TaskStop is the engine's native task-stop, superseded by Cortex's
+# own cancellation and completion path; PushNotification reaches the host
+# outward (desktop/system notifications) outside any Cortex-mediated channel.
+# WebFetch/WebSearch stay available -- they are ordinary read-only tools, not
+# lifecycle/notification surfaces. Audit finding C-25.
+CLAUDE_NATIVE_LIFECYCLE_TOOLS = ("EnterWorktree", "ExitWorktree", "PushNotification",
+                                 "EnterPlanMode", "ExitPlanMode", "TaskStop")
+
 
 # A model claude-agent-acp's bundled SDK does not know (an id an
 # ``availableModels`` allowlist names, e.g. ``claude-opus-5[1m]``) keeps its
@@ -330,11 +342,18 @@ def claude_native_subagent_restriction_meta(
 
     Native shell, file and skill alternatives are disallowed in favor of the
     scoped Cortex gateway and external MCP index. Native subagents stay
-    disallowed. The engine jail remains a backstop for any remaining tools.
+    disallowed, along with :data:`CLAUDE_NATIVE_LIFECYCLE_TOOLS` (worktree,
+    plan-mode, task-stop and push-notification tools whose outcome the
+    runtime, not the model, already owns -- WebFetch/WebSearch stay
+    available). The engine jail remains a backstop for any remaining tools.
     The installed adapter forwards ``disallowedTools`` to its SDK; MCP tools
     are not in this list. Native context loading remains at the adapter's
-    user/project/local default. User/project MCP, hooks and plugins are still
-    disabled by their separate options.
+    user/project/local default; the installed SDK's ``managedSettings``
+    disables native auto-memory read/write for this session alongside hooks
+    (confirmed against the pinned/qualified ``claude-agent-acp`` 0.78.0,
+    0.87.0 and 0.88.0 ``Settings.autoMemoryEnabled`` field, forwarded the
+    same way ``disableAllHooks`` already is). User/project MCP, hooks and
+    plugins are still disabled by their separate options.
     """
     if role not in {"coordinator", "worker"}:
         raise PortableError(
@@ -352,8 +371,8 @@ def claude_native_subagent_restriction_meta(
     if native_skills:
         gateway_alternatives = tuple(tool for tool in gateway_alternatives if tool != "Skill")
     options = {"strictMcpConfig": True,
-               "plugins": [], "managedSettings": {"disableAllHooks": True},
-               "disallowedTools": list(CLAUDE_SUBAGENT_TOOLS + gateway_alternatives)}
+               "plugins": [], "managedSettings": {"disableAllHooks": True, "autoMemoryEnabled": False},
+               "disallowedTools": list(CLAUDE_SUBAGENT_TOOLS + CLAUDE_NATIVE_LIFECYCLE_TOOLS + gateway_alternatives)}
     if not native_skills:
         options["skills"] = []
     if effort is not None:

@@ -48,12 +48,27 @@ export class ReplayController {
       child.stdin!.write(JSON.stringify(frame) + "\n", error => error ? reject(error) : resolve()));
     const stop = () => { child.kill("SIGTERM"); };
     const frames = readFrames(child.stdout!);
+    // Responses this connector answers itself, delivered ahead of the next
+    // frame from Cortex (see the session/close case below).
+    const local: AcpStreamMessage[] = [];
+    let wake: (() => void) | undefined;
+    let pending: Promise<IteratorResult<any>> | undefined;
     let load: Load | undefined;
     let loadId: string | number | null | undefined;
     let replaying = false;
     return {
       writable: new WritableStream<AcpStreamMessage>({
         write: async frame => {
+          if ("method" in frame && frame.method === "session/close" && "id" in frame) {
+            // The installed ACP bridge sends session/close before it closes
+            // this connector, whatever the agent advertised; Cortex does
+            // not implement it (-32601). Closing the connector terminates
+            // this Cortex process, which ends the session, so answer here
+            // instead of a round trip that can only fail.
+            local.push({ jsonrpc: "2.0", id: frame.id, result: {} } as AcpStreamMessage);
+            wake?.();
+            return;
+          }
           if ("method" in frame && frame.method === "session/load" && "id" in frame) {
             const nativeId = (frame.params as { sessionId: string }).sessionId;
             load = [...this.loads.values()].find(item => item.nativeId === nativeId);
@@ -70,7 +85,16 @@ export class ReplayController {
       readable: new ReadableStream<AcpStreamMessage>({
         pull: async controller => {
           try {
-            const next = await frames.next();
+            while (!local.length) {
+              pending ??= frames.next();
+              const woken = new Promise<"local">(resolve => { wake = () => resolve("local"); });
+              const first = await Promise.race([pending.then(() => "frame" as const), woken]);
+              wake = undefined;
+              if (first === "frame") break;
+            }
+            if (local.length) { controller.enqueue(local.shift()!); return; }
+            const next = await pending!;
+            pending = undefined;
             if (next.done) {
               if (load && !load.complete) this.fail(load);
               controller.close(); return;

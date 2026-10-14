@@ -1,14 +1,26 @@
 """Bounded authenticated host MCP broker tests."""
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 import json
 
 import pytest
 
+from cortex_runtime.engine import broker as broker_module
 from cortex_runtime.engine.broker import McpBroker
 from cortex_runtime.engine.mcp_bridge import build_mcp_servers
+
+
+def _relay(broker):
+    """The production relay, launched like an engine does: socket path only;
+    the relay reads its token from the broker's private token file."""
+    return subprocess.Popen(
+        [sys.executable, broker_module.__file__, "--relay", broker.endpoint],
+        env=dict(os.environ),
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    )
 
 
 def test_broker_relay_round_trip_and_cleanup(tmp_path):
@@ -24,14 +36,8 @@ def test_broker_relay_round_trip_and_cleanup(tmp_path):
     broker = McpBroker(("ch_0123456789ab", "secret-token-123456", str(project)),
                        python_executable=sys.executable, server_script=str(script))
     try:
-        relay_script = str(tmp_path / "relay.py")
         # Use the production relay module, while the fake server stands in for Cortex.
-        from cortex_runtime.engine import broker as broker_module
-        relay_script = broker_module.__file__
-        proc = subprocess.Popen(
-            [sys.executable, relay_script, "--relay", broker.endpoint, broker.relay_token],
-            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        )
+        proc = _relay(broker)
         proc.stdin.write(b'{"jsonrpc":"2.0"}\n')
         proc.stdin.flush()
         assert proc.stdout.readline() == b'{"jsonrpc":"2.0"}\n'
@@ -47,14 +53,15 @@ def test_broker_relay_round_trip_and_cleanup(tmp_path):
 def test_relay_mcp_entry_does_not_forward_credentials():
     result = build_mcp_servers(
         "ch_0123456789ab", "secret-token-123456", "/tmp",
-        relay_endpoint="/tmp/cortex.sock", relay_token="one-time-token",
+        relay_endpoint="/tmp/cortex.sock",
     )[0]
+    # No secret travels at all: neither the channel's nor the relay's.
     assert result["env"] == []
-    assert "secret-token-123456" not in result["args"]
+    assert "secret-token-123456" not in repr(result)
+    assert result["args"][-2:] == ["--relay", "/tmp/cortex.sock"]
 
 
 def test_broker_observes_actual_relay_tools_list_and_child_exit(tmp_path, monkeypatch):
-    from cortex_runtime.engine import broker as broker_module
     monkeypatch.setattr(broker_module.secrets, "token_urlsafe", lambda _: "-leading-hyphen-token")
     script = tmp_path / "server.py"
     script.write_text(
@@ -74,9 +81,7 @@ def test_broker_observes_actual_relay_tools_list_and_child_exit(tmp_path, monkey
         assert broker.readiness(0) == "not_observed"
         requests = b"".join((json.dumps({"jsonrpc": "2.0", "id": i, "method": method}) + "\n").encode()
                             for i, method in enumerate(("initialize", "tools/list"), 1))
-        proc = subprocess.Popen([sys.executable, __import__("cortex_runtime.engine.broker", fromlist=["__file__"]).__file__,
-                                 "--relay", broker.endpoint, broker.relay_token],
-                                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        proc = _relay(broker)
         output, _ = proc.communicate(requests, timeout=3)
         assert proc.returncode == 0
         assert [json.loads(line)["id"] for line in output.splitlines()] == [1, 2]
@@ -113,11 +118,7 @@ def test_broker_fails_closed_on_observed_incomplete_tools_list(tmp_path):
                        python_executable=sys.executable, server_script=str(script),
                        observe=lambda event, **fields: events.append((event, fields)))
     try:
-        proc = subprocess.Popen(
-            [sys.executable, __import__("cortex_runtime.engine.broker", fromlist=["__file__"]).__file__,
-             "--relay", broker.endpoint, broker.relay_token],
-            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        )
+        proc = _relay(broker)
         output, _ = proc.communicate(
             b'{"jsonrpc":"2.0","id":1,"method":"tools/list"}\n', timeout=3,
         )
@@ -140,9 +141,7 @@ def test_broker_reports_startup_close_without_claiming_readiness(tmp_path):
                        python_executable=sys.executable, server_script=str(script),
                        observe=lambda event, **fields: events.append((event, fields)))
     try:
-        proc = subprocess.Popen([sys.executable, __import__("cortex_runtime.engine.broker", fromlist=["__file__"]).__file__,
-                                 "--relay", broker.endpoint, broker.relay_token],
-                                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        proc = _relay(broker)
         proc.communicate(b'{"jsonrpc":"2.0","id":1,"method":"initialize"}\n', timeout=3)
         assert broker.readiness(1) == "mcp_server_exited"
         assert any(event == "mcp_server_exited" and fields["exit_code"] == 23
@@ -166,14 +165,6 @@ def _crashing_server(tmp_path):
     return script
 
 
-def _relay(broker):
-    return subprocess.Popen(
-        [sys.executable, __import__("cortex_runtime.engine.broker", fromlist=["__file__"]).__file__,
-         "--relay", broker.endpoint, broker.relay_token],
-        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-    )
-
-
 def _await_readiness(broker, expected, seconds=5.0):
     import time
     deadline = time.monotonic() + seconds
@@ -192,9 +183,11 @@ def test_broker_reports_a_ready_server_crash_and_a_fresh_relay_clears_it(tmp_pat
     reported there instead of letting the turn end as if nothing happened.
     """
     events = []
+    # Relays are this test process's children, as an engine's are its own.
     broker = McpBroker(("ch_0123456789ab", "fake-secret-123456", str(tmp_path)),
                        python_executable=sys.executable, server_script=str(_crashing_server(tmp_path)),
-                       observe=lambda event, **fields: events.append((event, fields)))
+                       observe=lambda event, **fields: events.append((event, fields)),
+                       peer_root=os.getpid())
     try:
         first = _relay(broker)
         first.stdin.write(b'{"jsonrpc":"2.0","id":1,"method":"tools/list"}\n')
@@ -225,7 +218,8 @@ def test_broker_ready_server_clean_exit_and_close_are_not_reported_as_a_crash(tm
     """An engine closing its own MCP client (clean EOF, exit 0) and the
     runtime's own release are not server losses."""
     broker = McpBroker(("ch_0123456789ab", "fake-secret-123456", str(tmp_path)),
-                       python_executable=sys.executable, server_script=str(_crashing_server(tmp_path)))
+                       python_executable=sys.executable, server_script=str(_crashing_server(tmp_path)),
+                       peer_root=os.getpid())
     try:
         output, _ = _relay(broker).communicate(b'{"jsonrpc":"2.0","id":1,"method":"tools/list"}\n', timeout=5)
         assert json.loads(output)["id"] == 1
@@ -287,7 +281,7 @@ def _crash_relay(proc, broker):
 def test_replacement_requires_its_own_tools_list(tmp_path, replacement):
     broker = McpBroker(("ch_0123456789ab", "fake-secret-123456", str(tmp_path)),
                        python_executable=sys.executable,
-                       server_script=str(_replacement_server(tmp_path)))
+                       server_script=str(_replacement_server(tmp_path)), peer_root=os.getpid())
     second = None
     try:
         first = _relay(broker)
@@ -412,7 +406,7 @@ def test_malformed_tools_evidence_fails_closed_without_healing(reply):
 def test_fresh_complete_relay_can_recover_an_incomplete_replacement(tmp_path):
     broker = McpBroker(("ch_0123456789ab", "fake-secret-123456", str(tmp_path)),
                        python_executable=sys.executable,
-                       server_script=str(_replacement_server(tmp_path)))
+                       server_script=str(_replacement_server(tmp_path)), peer_root=os.getpid())
     third = None
     try:
         first = _relay(broker)

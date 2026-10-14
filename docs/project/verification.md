@@ -139,8 +139,11 @@ python3 -B scripts/generate_agent_profiles.py check
 python3 -B scripts/generate_agent_profiles.py write
 ```
 
-Source-only checks use `--check` or `--dry-run`. Preserve all 23 profiles (22
-specialists and the consultant) and their shared report protocol.
+`check` is the source-only verification: it fails if the generated worker skills or
+profiles differ from their sources, and it asserts the 23 profiles. `write`
+regenerates the derived files. The script has no `--check` or `--dry-run` flag.
+Preserve all 23 profiles (22 specialists and the consultant) and their shared
+report protocol.
 
 ## Sequencing
 

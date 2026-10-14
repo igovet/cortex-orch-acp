@@ -160,9 +160,13 @@ file is resolved and staged exactly as it would be for an ordinary new-turn
 or unreadable image is refused before
 capture, same as a first prompt. Paseo accepts this only as a `steer` result
 for the turn it expects. Any other result makes it cancel that turn
-(`session/cancel`) and resend the message as a new prompt. Cortex cannot tell
-that cancel from a Stop, so the task pauses and its running workers are
-cancelled. So when the provider cannot queue a message, it fails the send
+(`session/cancel`) and resend the message as a new prompt. A `session/cancel`
+followed by a `session/prompt` on the same session is treated as steering, not
+Stop: the cancelled coordinator turn ends, running workers continue, and the
+prompt is applied as steering. A lone `session/cancel` pauses the task only if no
+such prompt follows within a 5-second grace window (`DEFAULT_HOST_CANCEL_GRACE_SECONDS`).
+This pairing rule applies to Paseo sessions only; other clients' cancel pauses at
+once. So when the provider cannot queue a message, it fails the send
 instead of returning a result. An attachment kind this queue path does not
 carry (a forge/review/GitHub attachment, for instance) and a failed config
 acknowledgment both do this. Paseo 0.9.2 displays a rejected send as a host
@@ -174,9 +178,9 @@ Nothing reaches Cortex. The current turn and its workers keep running, and the
 user can send the message again. This failure is not displayed in the styled
 plugin notice block because Paseo does not expose a safe single-channel outcome
 for it. An explicit Stop
-(`session/cancel`) or `/cortex-stop` remains an interruption: the former
-moves the task to RECOVERING and fences unfinished work; the latter
-permanently cancels it. Worker questions are assignment-local persisted waits.
+(a lone `session/cancel` that is not followed by a prompt, after the grace window) or
+`/cortex-stop` remains an interruption: the former moves the task to RECOVERING and
+fences unfinished work; the latter permanently cancels it. Worker questions are assignment-local persisted waits.
 The worker ends its tool turn without an incomplete result; after a real answer,
 the runtime resumes that same assignment and attempt with the next prompt in the
 same healthy engine session. Sibling work can continue. The worker is not
@@ -195,7 +199,10 @@ a retained session binding.
 
 Workers may also request additional exact project paths needed for their
 assignment. Safe requests are granted only after runtime validation against role,
-owner deny-write policy, path safety and current workspace writer reservations;
+owner deny-write policy, path safety and current workspace writer reservations. An owner
+deny-write rule is created only by an explicit `deny-write: <path>` instruction; wildcard
+or mask characters are rejected, and natural-language phrasing such as "do not modify ..."
+creates no denial;
 a multi-path request is granted all-or-none. A contested request gets bounded
 runtime retries, then a grant or denial through the same healthy-session
 continuation, without a user access question. Policy, path and role refusals
@@ -267,11 +274,14 @@ owner's settings or drafts. While Cortex works:
 - The native queue appears to be in-memory; loss on reload/restart is inferred,
   not qualified. Do not rely on it as durable storage.
 
-Do **not** switch to `sendBehavior: "queue"` for this workflow. In inspected
-Paseo 0.10.2 code, **Send now** in that mode, and sending while a question card
-is pending, select an explicit interrupt. The host sends `session/cancel`;
-Cortex must honor it like Stop, pausing the task and cancelling unfinished
-workers. In default `steer` mode, Send now uses the durable steering path.
+Do **not** switch to `sendBehavior: "queue"` for this workflow. In the installed
+Paseo 0.11.2 bundle, **Send now** in that mode, and sending while a question card
+is pending, replace the active turn: the host sends `session/cancel`, then
+`session/prompt` once the cancelled run settles. Cortex treats that pair as steering
+(see the grace-window rule above), so the running workers are not cancelled. A lone
+cancel still pauses the task after the grace window. In default `steer` mode, Send
+now uses the durable steering path. Re-verify this against the installed Paseo before
+relying on it; the rendered GUI behaviour was not qualified.
 
 Native Edit happens **before Cortex receives anything**: only the replacement
 text is sent/captured when resubmitted; the original native item is gone.

@@ -38,9 +38,10 @@ workers may write only within their assigned scopes. File replacement checks an
 expected hash or absence and rejects private paths, symlinks and hardlinks.
 Direct private/Git/denied-path overlays are not a guarantee against arbitrary host
 code, outside aliases or Docker. A project digest does not cover outside resources.
-Writing-worker commands in fresh-session Development use host-writable mounts
-through the broker; Guarded, explicit Auto and read-only/reviewer commands retain
-restrictive mounts. Command environments filter Cortex/credential variables but
+Writing-worker commands in Development and Auto use host-writable mounts through the
+broker; Guarded keeps them restricted. Read-only and reviewer commands and automatic
+verification use the read-only host profile in every mode. Their project is read-only, except
+that an automatic verification check may write the project's git-ignored directories. Command environments filter Cortex/credential variables but
 use owner toolchains, validated SSH-agent access and shared network. Ordinary
 commands have no default deadline; exceptional outside commands default to 600
 seconds. Declared scope is coordination, not the writing worker's whole-project

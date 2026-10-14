@@ -83,8 +83,9 @@ For this release use semantic version 1.0.0. After any package payload
 edit, regenerate its complete content hash with
 `python3 -B scripts/cortex_package.py stamp` before release-sensitive checks.
 Run package, profile-generation and test checks sequentially in the same
-checkout. Use the smallest meaningful tests first. Source-only checks use
-`--check` or `--dry-run`.
+checkout. Use the smallest meaningful tests first. Source-only profile checks use
+`python3 -B scripts/generate_agent_profiles.py check` (the script takes one
+positional action, `check` or `write`; it has no `--check` or `--dry-run` flag).
 
 ## Live and model-policy rules
 
@@ -142,8 +143,9 @@ that dev home only with python3 -B scripts/cortex_paseo_clone.py while its dev d
 is stopped; the production home is read-only to that utility. Before using an
 isolation flag or environment variable, verify it against the installed Paseo version
 and ACP bridge. Follow [the dev Paseo environment guide](docs/project/dev-environment.md).
-Read-only package/bundle inspection on 2026-09-30 reported installed Paseo 0.10.2;
-CLI/isolation observations for 0.10.0 are historical and do not qualify 0.10.2.
+A read-only `/opt/Paseo/resources/bin/paseo --version` check on 2026-10-14 reported
+installed Paseo 0.11.2; CLI/isolation observations recorded for 0.10.x and 0.9.x are
+historical and do not qualify 0.11.2.
 Recheck the installed CLI/bridge and guarded wrapper before live use. Invoke python3 -B scripts/cortex_paseo_dev.py --
 ...; it defaults to ~/.paseo-dev, rejects ~/.paseo, and blocks command-level endpoint
 overrides. If the installed build cannot be shown to isolate every required state and

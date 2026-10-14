@@ -529,6 +529,7 @@ class EngineSessionManager:
         # comment in create_session).
         note = attached_servers_section(
             servers, self._workspace_root, role=self._mcp_role or "worker",
+            role_id=self._mcp_role_id,
             code_index_project=None,
         )
         return self._engine_instructions.rstrip() + ("\n\n" + note + "\n" if note else "\n")
@@ -821,7 +822,6 @@ class EngineSessionManager:
             params["mcpServers"] = build_mcp_servers(
                 channel_id, secret, project_root,
                 relay_endpoint=broker.endpoint if broker is not None else None,
-                relay_token=broker.relay_token if broker is not None else None,
             )
         else:
             params["mcpServers"] = []
@@ -831,10 +831,16 @@ class EngineSessionManager:
         # refuses one called "cortex").
         # Use the verified connection record's engine identity; model labels
         # and host display provider names are not admission authorities.
+        dropped_servers: list = []
         external_servers = host_mcp_servers(self._host_mcp_servers, role=self._mcp_role, engine=self._record.engine,
-                                    role_id=self._mcp_role_id)
+                                    role_id=self._mcp_role_id, dropped=dropped_servers)
         if external_servers and (self._process is None or self._channel_credentials is None):
             raise _fail('external_mcp_gateway_required','External servers require a trusted runtime gateway.')
+        if dropped_servers and self._process is not None:
+            # C-24: name exactly which grant path is missing instead of
+            # silently advertising a server engine.external_proxy would
+            # have refused to even start.
+            self._process.logs.observe("external_mcp_server_path_missing", servers=dropped_servers)
         params["mcpServers"] = list(params["mcpServers"]) + [
             self._process.broker_external_mcp(self._channel_credentials,server) for server in external_servers]
         if session_new_meta is not None:
@@ -855,6 +861,7 @@ class EngineSessionManager:
 
             params["_meta"] = with_attached_servers(
                 session_new_meta, external_servers, self._workspace_root, role=self._mcp_role,
+                role_id=self._mcp_role_id,
                 code_index_project=None,
                 native_search=self._record.engine != "claude-agent-acp")
         with self._lock:

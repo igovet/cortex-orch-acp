@@ -36,7 +36,10 @@ def sections(markdown: str) -> dict[str, str]:
     if not lines or not lines[0].startswith("# "):
         raise ValueError("specialization must start with one profile title")
     result = {"Profile title": lines[0]}
-    for chunk in re.split(r"(?m)^## ", "\n".join(lines[1:]))[1:]:
+    chunks = re.split(r"(?m)^## ", "\n".join(lines[1:]))
+    if chunks[0].strip():
+        raise ValueError("specialization has text between the title and its first section; move it into a section")
+    for chunk in chunks[1:]:
         heading, separator, body = chunk.partition("\n")
         if not separator or heading in result:
             raise ValueError("invalid or duplicate specialization section")
@@ -90,6 +93,8 @@ def expected_worker_references(plugin: Path = PLUGIN) -> dict[Path, bytes]:
 
 def check(plugin: Path = PLUGIN) -> None:
     skills = expected_skills(plugin)
+    if len(skills) != 23:
+        raise ValueError(f"expected exactly 23 worker profiles, found {len(skills)}")
     if set((plugin / "skills").glob("worker-*/SKILL.md")) != set(skills):
         raise ValueError("generated worker skill set differs from source catalogue")
     expected = dict(skills)

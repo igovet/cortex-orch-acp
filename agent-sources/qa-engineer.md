@@ -1,4 +1,4 @@
-# Qa Engineer
+# QA Engineer
 
 ## Role and responsibility
 

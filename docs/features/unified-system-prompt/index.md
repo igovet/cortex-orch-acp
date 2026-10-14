@@ -50,6 +50,16 @@ consultant aliases resolved separately. Coordinators receive no file-edit or
 worker command-receipt obligations; read-only workers receive only non-mutating
 check guidance; consultants evaluate the packet and retained reports.
 
+The prompt names only the tools each role is offered. The attached-server section for
+a read-only worker lists only the read-only tools that its external proxy will accept,
+so it omits index-writing tools such as `index_repository`. A server whose configured
+grant path is missing is not advertised at all; its absence is logged as an
+`external_mcp_server_path_missing` diagnostic. The base prompt's worked example of the
+`read_skill` convention is chosen per role, and names only a skill that role can load.
+The "ask through the question tool" line is per role: the consultant has no question
+tool, so it records a missing fact in its report as a limitation and asks the user
+nothing.
+
 Native-tool guidance is emitted only when the launch adapter enables those
 tools: Claude's gateway-alternative policy disables native shell/file/search
 and omits that guidance, while Codex and OpenCode retain it (`native_tools=True`
@@ -172,8 +182,8 @@ consultation packet and retained reports, and does not advertise code-index or
 project-source investigation. No external MCP servers are attached to consultant
 sessions; `project_read`, `project_git` and `command_run` are not offered, and
 project-source calls through those gateway routes are refused with
-`gateway_read_denied`. Claude's consultant profile disallows native file/search/edit
-tools. Codex native reads remain available and may run without a permission
+`gateway_read_denied`. The consultant has no `ask_question` or `access_request` route.
+Claude's consultant profile disallows native file/search/edit tools. Codex native reads remain available and may run without a permission
 request inside the read-only engine jail, so this is not a complete native-source
 access boundary.
 

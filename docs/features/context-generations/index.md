@@ -15,11 +15,13 @@ One tier per (engine, version), from static adapter dist evidence only
 `file:line` citations):
 
 - **automatic** — the adapter emits a verifiable compaction signal over
-  ACP. Both pinned adapters qualify: **codex-acp 1.12.0** and
-  **claude-agent-acp** (0.77.0/0.78.0, and any other version by the same
-  wildcard convention `engine.instruction_delivery_registry` already uses
-  for this engine) report their own internal context compaction as a
-  `tool_call`/`tool_call_update` pair carrying `_meta.contextCompaction`
+  ACP. The exact registrations qualify **codex-acp** 1.12.0 and 2.1.1 and
+  **claude-agent-acp** 0.77.0, 0.78.0, 0.87.0 and 0.88.0; other versions of
+  a known engine follow the wildcard convention of `delegation.generations`
+  (`tier_for`), and an unknown version falls to `controlled_boundary`.
+  The adapters report their own internal context compaction as a
+  `tool_call`/`tool_call_update` pair carrying `_meta.contextCompaction` (the 0.87.0
+  registration marks it with `_meta.claudeCode.toolName` set to `compact` instead)
   (`{"version": 1}`), title `"Compact conversation"` — the *legacy*
   presentation both adapters fall back to because Cortex does not
   advertise the `session.compaction` client capability (the
@@ -114,6 +116,15 @@ operations — the model's access to their *current* schemas is the already-
 connected Cortex MCP server's own `tools/list`, never embedded verbatim in
 the prompt). This closes a gap in which instruction
 delivery was qualified but never actually wired into a real prompt).
+
+The inline copy of a worker's assignment is deduplicated. For a worker's first or
+continuation prompt, `recovery.capsule.build_capsule(..., inline_delivery=True)` keeps
+the objective exactly once: `own_assignment.brief` stays verbatim, while the capsule's
+`own_assignment.title` and the worker's own `runtime.nodes[].objective` become
+`status: "referenced"` pointers to it. The literal assignment brief that the prompt carries
+after the capsule is replaced by a short pointer back to the capsule above it. A capsule
+read later through `read_capsule` is not built with this flag and keeps every field
+verbatim, so a recovering worker still has the full objective.
 
 ## What's deferred
 

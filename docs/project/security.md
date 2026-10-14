@@ -26,6 +26,24 @@ See [current permission semantics](../features/permissions-and-containment/index
 not the historical containment assertions below. Real namespace skips do not
 qualify containment, and stopping a CLI does not roll back daemon resources.
 
+As of 2026-10-14, read-only roles (reviewer, auditor, explorer, architect and the other
+read-only profiles) run `command_run` through the read-only profile in every mode: HOME is
+read-only except an explicit tool-cache allowlist, with a private PID namespace. Automatic
+runtime verification uses the same profile in every mode (see the decisions log, D1), and
+inside a check only the project's git-ignored directories are writable. Cache writes stay
+possible, so a read-only command can poison a cache that a later run reads; this narrows
+exposure but is not hostile-code isolation. The profile shares the owner's network, as every
+owner command does, so it limits writes, not egress. Deletion recognition for `command_run` is lexical and covers more
+commands than `rm` (for example `unlink`, `find -delete`, `git clean`, `shred -u`, `rsync --delete`);
+it does not recognise deletions inside scripts, interpreters or build tools.
+
+The relay credential for a brokered MCP server is in neither process argv nor the environment:
+the broker writes it to a 0600 `relay.token` file beside its socket, and the relay reads that
+file without following symlinks. The credential is compared in constant time, bound to the
+connecting peer, and single-use for an unbound broker. Each broker socket sits
+in a private 0700 directory. A deny-write rule applies only to an explicit `deny-write: <path>`
+instruction and is matched after path normalization, so a `./` spelling does not bypass it.
+
 ## Enforced boundaries and where they live
 
 | Boundary | Enforcement point |

@@ -45,8 +45,8 @@ unresolved.
 5. Validate changed links, anchors, commands, terminology and stated behavior.
 6. Publish an ordinary Markdown report using the live draft creator's guidance.
    Use an optional declared Markdown example only when it resolves a real content
-   question. Standard skill/reference reads do not authorize reading agent TOML or
-   other runtime internals.
+   question. Standard skill/reference reads do not authorize reading manifests,
+   databases or other runtime internals.
 
 ## Verification and completion
 
@@ -55,5 +55,6 @@ unresolved.
 - A supported no-impact conclusion can use existing evidence without a token edit or extra worker.
 - Missing inspection is not proof of no impact. State unverified facts and unrun checks.
 - Required updates and their verification must finish before task completion.
-- Reflect findings and follow-up in the single pipeline and final result.
+- Record findings and follow-up in your report as unresolved; the pipeline is
+  runtime-owned and the coordinator decides the next action from your report.
 - Harvest already owns its documentation work; do not duplicate it under another label.

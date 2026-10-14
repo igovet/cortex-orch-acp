@@ -16,16 +16,26 @@ def denied_paths(db, task_id):
     return sorted({path for row in rows for path in json.loads(row[0]).get('deny_write', [])})
 
 
+_DENY_WRITE=re.compile(r'deny-write\s*:\s*(?:"([^"]+)"|\'([^\']+)\'|`([^`]+)`|(\S+))',re.I)
+_WILDCARD=re.compile(r'[*?\[\]]')
+
+
 def parse_denials(text):
-    """Recognize explicit path prohibitions for the next planning boundary."""
+    """Recognize only an explicit 'deny-write: <path>' directive (owner
+    decision D7): no natural-language phrasing, and no wildcard or masked
+    path is ever accepted as a denial. The path may be quoted."""
     from .gateway import _parts
     values=[]
-    pattern=r'(?:deny-write\s*:|do\s+not\s+(?:change|modify|edit)|не\s+(?:меняй|менять|изменяй|изменять|трогай|трогать))\s+[`\"\']?([\w./*-]+)'
-    for match in re.finditer(pattern,text,re.I):
-        value=match.group(1).rstrip('.')
-        if value:
-            _parts(value)
-            values.append(value.rstrip('/'))
+    for match in _DENY_WRITE.finditer(text):
+        value=next(g for g in match.groups() if g is not None).strip().rstrip('.,;')
+        if not value or _WILDCARD.search(value):
+            continue
+        # Store the same normalized path parts the gateway's write-effect
+        # check uses, so './secrets/key.txt' and 'secrets/key.txt' denote
+        # one denial (C-10).
+        parts=_parts(value)
+        if parts:
+            values.append('/'.join(parts))
     return sorted(set(values))
 
 
@@ -136,6 +146,10 @@ def interrupt(store, task_id):
         if task and task['state'] not in {'COMPLETED', 'FAILED', 'CANCELLED'}:
             if task['state'] != 'RECOVERING':
                 transition(db, task_id, 'RECOVERING')
+            # The cancelled workers' open questions end with them; otherwise
+            # the next user message is swallowed as a late answer to one.
+            from .worker_waits import cancel_tx
+            cancel_tx(db, task_id, 'turn_interrupted')
             db.execute(
                 "UPDATE runtime_nodes SET status='cancelled' WHERE task_id=? AND status IN ('pending','running')",
                 (task_id,),

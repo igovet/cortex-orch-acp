@@ -26,11 +26,60 @@ QUESTION_RECEIPT_NEXT = (
 )
 
 
+# The runtime's own stop question (state._ask_about_stop) as stored: the
+# chat shows it rendered in the task language with the same two options.
+STOP_QUESTION_PREFIX = 'The task stopped: '
+STOP_QUESTION_SUFFIX = '. What should happen next?'
+# Finish wording earlier builds stored or rendered (en, ru) for stop
+# questions that may still be open.
+_LEGACY_STOP_OPTIONS = ((), ('Finish: accept the current results and close the task',
+                             'Завершить: принять текущие результаты и закрыть задачу'))
+
+
+def _normalized(value):
+    return value.strip().casefold().rstrip('.!')
+
+
+def is_stop_question(question):
+    """Whether ``question`` is the text of the runtime's own stop question."""
+    return (isinstance(question, str) and question.startswith(STOP_QUESTION_PREFIX)
+            and question.endswith(STOP_QUESTION_SUFFIX))
+
+
+def _stop_option_answers(index):
+    from ..acp import messages
+    from .state import STOP_OPTIONS
+    key = ('stop_option_continue', 'stop_option_finish')[index]
+    texts = {STOP_OPTIONS[index], *_LEGACY_STOP_OPTIONS[index]}
+    texts.update(messages.render(key, language) for language in messages.SUPPORTED_LANGUAGES)
+    # The full option, its label before the colon, or its 1-based number.
+    return {_normalized(text) for text in texts} | {_normalized(text.split(':', 1)[0]) for text in texts} | {
+        str(index + 1)}
+
+
+def stop_choice(value, question):
+    """``'finish'`` or ``'continue'`` when ``value`` picks one of the runtime
+    stop question's own options -- by its stored or rendered (en/ru) text,
+    its label, or its number -- else ``None`` (an answer in the user's own
+    words, or any other question)."""
+    if not isinstance(value, str) or not is_stop_question(question):
+        return None
+    answer = _normalized(value)
+    for index, choice in enumerate(('continue', 'finish')):
+        if answer in _stop_option_answers(index):
+            return choice
+    return None
+
+
 def is_force_finish_answer(value, question=None):
     if not isinstance(value, str):
         return False
-    answer = value.strip().casefold().rstrip('.!')
+    answer = _normalized(value)
     if answer in FORCE_FINISH_ANSWERS:
+        return True
+    if stop_choice(value, question) == 'finish':
+        # The stop question's own Finish closes the task CANCELLED with
+        # USER_FORCE_FINISHED; it never certifies the stopped work.
         return True
     prompt = question.casefold() if isinstance(question, str) else ''
     return answer in {'завершить', 'закрыть', 'finish', 'close'} and (

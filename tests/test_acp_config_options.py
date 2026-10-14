@@ -34,8 +34,10 @@ SCHEMA_PATH = Path(__file__).resolve().parent / "fixtures" / "acp" / "schema-1.4
 
 def _schema_validator(def_name):
     document = json.loads(SCHEMA_PATH.read_text())
-    resolver = jsonschema.RefResolver.from_schema(document)
-    return jsonschema.Draft202012Validator({"$ref": f"#/$defs/{def_name}"}, resolver=resolver)
+    from referencing import Registry, Resource
+    uri = "urn:acp-schema"
+    registry = Registry().with_resource(uri, Resource.from_contents(document))
+    return jsonschema.Draft202012Validator({"$ref": f"{uri}#/$defs/{def_name}"}, registry=registry)
 
 
 def _isolate(tmp_path, monkeypatch):

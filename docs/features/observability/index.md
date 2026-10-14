@@ -325,7 +325,12 @@ basis. Rows written before rank version 4 may also carry count-based
 written. These are decision inputs and outcomes,
 not usage measurements. Unknown quota is retained as unknown, never reported as
 zero usage. The recovery capsule exposes this detail only when the exact
-attempt's audit row is available.
+attempt's audit row is available. Two optional fields are added to that detail. A pinned
+effort that the route's policy does not permit is applied at the nearest permitted step, not
+refused, and `route_decision.pin_effort_clamped` then records `configured` and `applied`.
+A fallback hop's audit detail carries `failure_class`, the classified failure that triggered
+the hop (from its `fallback_failure_class`), so a retry or fallback can be traced to its
+cause.
 
 Route/connection/model/config-revision are **not** duplicated onto every
 usage row: `observability.usage.list_usage`/`usage_summary` join

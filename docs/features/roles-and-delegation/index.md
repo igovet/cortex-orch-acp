@@ -21,7 +21,7 @@ All 23 worker role instructions remain available as canonical skill sources,
 composed from role specializations and the shared report protocol. The redundant
 `agents/*.toml` profile files and generated reference copies have been removed;
 the developer generator renders from canonical `skills/worker-*/SKILL.md`
-sources. Instructions describe intellectual work and evidence; they are not an
+sources. Generated YAML frontmatter and footer comments stay in those files for native skill loaders and are removed from the portable body that engines receive. Instructions describe intellectual work and evidence; they are not an
 authorization mechanism. Workers publish immutable Markdown reports and submit
 structured results through their authenticated channel. They receive explicit
 predecessor report references, not an automatic copy of the parent chat. The
@@ -102,9 +102,14 @@ The senior consultant works from its consultation packet and retained reports,
 not project source or an attached code index. Its Cortex tool offer retains
 report/source-packet reads (`read_report`, `list_reports`, `list_sources`,
 `read_source`, `read_capsule`, `read_large_output`), skill reads, owned report
-draft/publication and result submission, questions and request tools. It is not
-offered `project_read`, `project_git` or `command_run`; attempts to read project
-source through those routes fail with `gateway_read_denied`. No external MCP
+draft/publication and result submission. It is not offered `command_run`, `project_read`,
+`project_git`, `ask_question` or `access_request`, and dispatch refuses the last two; attempts
+to read project source through those routes fail with `gateway_read_denied`. The consultant is
+reached only through `escalation_request`: a plan that names it is refused
+(`consultant_requires_escalation`). The runtime builds its packet from the reports the
+escalation names, then the escalated revision's reports, each with its SHA-256 and recorded
+artifact versions. Missing evidence becomes a limitation in the consultant's report, and the
+consultant asks the user nothing. No external MCP
 servers are attached. This is not a complete native-tool sandbox: Claude's
 consultant profile disallows native file/search/edit tools, and Codex's own
 `shell_tool`/`view_image` features are likewise forced off for every Cortex-

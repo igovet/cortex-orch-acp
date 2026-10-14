@@ -476,11 +476,9 @@ offline suite cannot establish real-client behavior or paid engine behavior;
 those checks remain explicitly unverified until run.
 
 Installing a newer codex-acp package does not make Cortex select it until
-its exact version and bundle patch are supported. The current supported
-newest version is 2.0.1 (Codex CLI 0.159.1, including `gpt-6.1-sol` in its
-offline catalog). New sessions discover it; an existing session keeps its
-already running engine. claude-agent-acp 0.84.0 is already installed and
-selected. See [Codex compatibility](../features/codex-engine/index.md#one-time-adapter-update-2026-09-30).
+its exact version and bundle patch are supported. The supported versions and their
+qualification are listed in [Codex compatibility](../features/codex-engine/index.md). New
+sessions discover a supported version; an existing session keeps its already running engine.
 
 Codex code mode does not show a model the MCP JSON Schema: it renders a
 TypeScript declaration from a reduced schema. Bounds, `pattern`, `not` and
@@ -612,9 +610,12 @@ Final-only text is withheld too when the question was observed or is pending.
 Text received before the commit and text after the answer in a later turn remain
 visible.
 
-A Paseo "cancel" (`session/cancel`) pauses the whole task and cancels every
-running and queued worker (`turn_interrupted`). That is by design, not a
-worker failure. A cancelled queued worker is reported only as cancelled.
+A Paseo "cancel" (`session/cancel`) that is not followed by a prompt on the same
+session pauses the whole task and cancels every running and queued worker
+(`turn_interrupted`) once a 5-second grace window expires. That is by design, not a
+worker failure. A cancelled queued worker is reported only as cancelled. A cancel followed
+by a prompt on the same session is steering: the coordinator turn ends and running workers
+continue (see the steering page).
 
 `opencode models` and a Cortex OpenCode catalog disagreed for two separate
 reasons (observed 2026-09-30 on OpenCode 2.0.20). First, a custom provider

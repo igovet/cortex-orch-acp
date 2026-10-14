@@ -630,7 +630,7 @@ def test_claimed_events_survive_a_prompt_exception_and_are_delivered_once(tmp_pa
         row = db.execute(
             "SELECT consumed_by, superseded FROM task_events WHERE task_id=? AND event_type='user_message'", (task_id,),
         ).fetchone()
-    assert row["consumed_by"] is not None and row["superseded"] == 0  # uncertain claim retained
+    assert row["consumed_by"] is None and row["superseded"] == 0  # unconfirmed claim released
 
     updates = []
     result = runtime.start_prompt(task_id, "s1", "Second try.", updates.append, threading.Event())

@@ -1,4 +1,4 @@
-# Devops Engineer
+# DevOps Engineer
 
 ## Role and responsibility
 

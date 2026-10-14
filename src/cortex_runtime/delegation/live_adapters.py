@@ -513,7 +513,7 @@ class ConfigurationServiceSnapshotSource:
             raise PortableError(
                 category=PortableErrorCategory.VALIDATION,
                 code="no_configuration_revision",
-                remediation="This task has no current configuration revision; select a route (T008 configuration flow) before starting orchestration.",
+                remediation="This task has no current configuration revision; select a route before starting orchestration.",
                 retry_eligible=False,
             )
         engine = current.get("route_engine")
@@ -1717,7 +1717,15 @@ class EngineSessionManagerAdapter:
                          parameters={key: value for key, value in worker_parameters.items()
                                      if key in {"thought_level", "effort", "mode"}},
                          confirmation_evidence_ref=confirmation),
-                    "engine_configuration", assignment_ref=launch.get("assignment_ref"),
+                    # The capsule's recipient carries this worker's own
+                    # idempotency_key as "assignment_ref" (see
+                    # ProvisioningResult.assignment_ref); "launch" never had
+                    # an "assignment_ref" key (it has "assignment_id", the
+                    # unrelated work-graph id), so this event used to be
+                    # stored with assignment_ref=None and recovery.capsule's
+                    # exact-match lookup by the real assignment_ref could
+                    # never find it.
+                    "engine_configuration", assignment_ref=launch.get("idempotency_key"),
                 )
         except Exception as rejected:  # noqa: BLE001 - ConfigurationRejected,
             # EngineConfigurationPartiallyApplied, EngineConfigurationOutcomeUnknown
@@ -2036,6 +2044,7 @@ class EngineSessionManagerAdapter:
         model_reason = route.model_reason if route else None
         previous_engine = route.previous_engine if route else None
         user_request = route.user_request if route else None
+        user_revocation = route.user_revocation if route else None
         provider = None
         review_reason = None
         if role == "worker-code-reviewer" and launch.get('task_id') and launch.get('attempt_id'):
@@ -2048,7 +2057,7 @@ class EngineSessionManagerAdapter:
             role, project_root, self._environ, escalate=escalate, complexity=complexity,
             unavailable=unavailable, preference=provider, model_hint=model_hint,
             model_reason=model_reason, previous_engine=previous_engine, user_request=user_request,
-            eligible_route_ids=eligible_ids,
+            eligible_route_ids=eligible_ids, user_revocation=user_revocation,
         )
         if choice is None:
             if configuration is not None:

@@ -183,9 +183,9 @@
     {
       "name": "senior_consultant",
       "source": "senior-consultant.md",
-      "description": "Bounded senior consultant for coordinator-requested decisions using selected published reports only.",
-      "select_when": "One difficult, ambiguous, or contradictory coordinator decision needs a focused report-only consultation.",
-      "avoid_when": "The question needs fresh project investigation, implementation, verification, acceptance, or plan ownership.",
+      "description": "Escalation-only senior consultant that answers one bounded question from a runtime-built packet of selected published reports.",
+      "select_when": "Only through escalation_request, when a difficult, ambiguous, contradictory, or deeper decision needs a focused second view; the runtime adds this assignment and a plan never names it.",
+      "avoid_when": "Fresh evidence, implementation, verification, acceptance, or pipeline ownership is needed.",
       "report_template": "general",
       "access_class": "consultant"
     },

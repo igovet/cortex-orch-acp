@@ -22,6 +22,11 @@ the exact answer receipt, revision zero, no plan, nodes or worker provisioning,
 and no blocker/cancellation. It cannot certify implementation or tests, replace
 an existing plan, or skip required review. It never schedules a reviewer.
 
+An answer released in the user's own words that closes planned work is certified
+before it completes the task. If review or verification did not pass for that work,
+the task ends `FAILED` with blocker `answer_not_certified:<gap>` and an
+`ANSWER_NOT_CERTIFIED` event. The answer is still shown to the user.
+
 ## Runtime-composed synthesis
 
 On a fully closed first-review path, `orchestration/synthesis.py` composes the
@@ -109,8 +114,10 @@ terminal, and an unexpected prompt exception stops owned work without inventing
 COMPLETED/FAILED/CANCELLED. See
 [terminal cleanup](../failures-and-cancellation/index.md#terminal-resource-cleanup).
 
-An explicit owner force-finish is **not** verified completion. `/cortex-finish`
-or an unambiguous answer to a task-closure question stops task-owned work and
+An explicit owner force-finish is **not** verified completion. `/cortex-finish`,
+the **Finish** option of the runtime's own stop question (by number, label, or its
+stored or rendered English or Russian text), or an unambiguous answer to a
+task-closure question stops task-owned work and
 leaves the task terminal `CANCELLED`, with a `USER_FORCE_FINISHED` event recording
 the captured owner source, prior state, current revision, unfinished nodes, and
 the fact that review, verification, and synthesis were not certified by this

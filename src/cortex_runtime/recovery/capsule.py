@@ -1483,9 +1483,51 @@ _SECTION_BUILDERS = (
 )
 
 
+def _apply_inline_delivery_dedup(sections: dict, recipient: Mapping[str, Any]) -> None:
+    """C-30: the *inline* delivery of this exact capsule (the one prefixed
+    onto a worker's first prompt or a post-compaction continuation -- see
+    ``acp.orchestrating_runtime._begin_generation_delivery``) is always
+    followed, in that same message, by the literal task brief itself
+    (which that same caller strips of its own now-redundant copy of
+    ``own_assignment['brief']`` -- see its own C-30 comment). Within the
+    capsule, a worker's own node ``objective`` and its assignment
+    ``title`` (always a prefix of that very same objective -- see
+    ``orchestration.controller._title_from_objective``) are therefore
+    redundant with ``own_assignment['brief']``, which stays the one place
+    the full objective remains verbatim. Replaced here with an explicit,
+    inspectable reference, never silently dropped.
+
+    A capsule fetched later through the ``read_capsule`` tool
+    (``inline_delivery=False``, the default -- it is not accompanied by
+    any literal brief text in that same response) is never touched here:
+    every field stays exactly as ``_compact_pipeline`` already protects
+    it, so ``test_worker_own_huge_brief_stays_verbatim_never_a_null_tool_
+    reference`` is unaffected.
+    """
+    if recipient.get("role") != "worker":
+        return
+    pipeline = sections.get("pipeline_and_assignments")
+    if not isinstance(pipeline, dict):
+        return
+    reference = dict(
+        status="referenced", trust_label="derived_summary",
+        note="Identical to this same capsule's pipeline_and_assignments.own_assignment.brief; "
+             "kept there once instead of repeated here.",
+        retrieve=dict(tool=None, note=_NO_TOOL_NOTE),
+    )
+    own = pipeline.get("own_assignment")
+    if isinstance(own, dict) and isinstance(own.get("title"), str) and isinstance(own.get("brief"), str):
+        own["title"] = dict(reference)
+    runtime = pipeline.get("runtime")
+    if isinstance(runtime, dict):
+        for node in runtime.get("nodes") or []:
+            if isinstance(node.get("objective"), str):
+                node["objective"] = dict(reference)
+
+
 def build_capsule(
     store, task_id: str, recipient: Mapping[str, Any], at_revision: int | None = None,
-    *, candidate_summary: Any = None,
+    *, candidate_summary: Any = None, inline_delivery: bool = False,
 ) -> dict:
     """Build one deterministic recovery capsule for ``recipient``.
 
@@ -1496,6 +1538,11 @@ def build_capsule(
     current durable state -- a full point-in-time snapshot of every
     section is not implemented; this is a documented limitation, not a
     silent one).
+
+    ``inline_delivery`` (C-30, default ``False``): set only by the one
+    caller that prefixes this exact rendered capsule onto a worker's own
+    delivered prompt text in the same message (never by ``read_capsule``
+    or any other caller) -- see :func:`_apply_inline_delivery_dedup`.
 
     ``candidate_summary`` (T024, optional, default ``None``): a raw
     model-authored semantic-summary candidate (JSON text or an already
@@ -1533,6 +1580,8 @@ def build_capsule(
         sections = {}
         for name, builder in _SECTION_BUILDERS:
             sections[name] = builder(store, db, task_id, normalized, at_revision, watermark)
+    if inline_delivery:
+        _apply_inline_delivery_dedup(sections, normalized)
     if candidate_summary is not None:
         _apply_candidate_summary(sections, normalized, candidate_summary)
     # Top-level key is deliberately ``for_task_id``, not ``task_id`` -- the

@@ -14,7 +14,7 @@
 > kept running untouched. `paseo workspace create --isolation local --path`
 > registers a disposable project without starting an agent.
 
-> On 2026-09-30, read-only package/bundle inspection reported Paseo 0.10.2. The 0.10.0 CLI/isolation observations below are historical, not qualification of 0.10.2. Recheck the installed CLI, bridge and guarded wrapper before a requested live launch; do not infer unchanged capabilities from the version number.
+> On 2026-10-14, a read-only `--version` check of `/opt/Paseo/resources/bin/paseo` reported installed Paseo 0.11.2. The CLI, isolation and version observations below for 0.10.x and 0.9.x are historical and do not qualify 0.11.2. Recheck the installed CLI, bridge and guarded wrapper before a requested live launch; do not infer unchanged capabilities from the version number.
 
 The installed Linux CLI is `/opt/Paseo/resources/bin/paseo`; a read-only `--version` check on 2026-09-29 returned 0.10.0. Do not assume older 0.9.2 command or isolation observations still apply without checking the installed CLI and bridge. The guarded wrapper's current `--check` was run on 2026-09-29: it selected `/home/igovet/.paseo-dev` and reported `/home/igovet/.paseo` as the protected production home (exit 0). This validates wrapper selection only, not daemon endpoint or GUI isolation.
 
@@ -34,7 +34,9 @@ Paseo home, daemon, or cortex-acp plugin. All Paseo and plugin work must use
 `scripts/update-paseo-plugin.sh`: it does not establish a dev-only daemon boundary.
 
 Run Paseo through [scripts/cortex_paseo_dev.py](../../scripts/cortex_paseo_dev.py).
-A read-only `--check` on 2026-09-29 selected `/home/igovet/.paseo-dev`, reported `/home/igovet/.paseo` as the protected production home, and exited 0. The wrapper source defaults to `~/.paseo-dev`, refuses the resolved production home, and blocks forwarded `--home` and `--host` overrides. It sets Cortex XDG config/state below the selected dev home and passes the checkout root for the local plugin; CLI calls also discard inherited `PASEO_AGENT_ID` and `PASEO_AGENT_CWD`. The check validates home selection only; it does not launch Paseo or verify the daemon endpoint, daemon state, Electron profile, or GUI isolation.
+A read-only `--check` on 2026-09-29 selected `/home/igovet/.paseo-dev`, reported `/home/igovet/.paseo` as the protected production home, and exited 0. The wrapper source defaults to `~/.paseo-dev`, refuses the resolved production home, and blocks forwarded `--home` and `--host` overrides. It sets Cortex XDG config/state below the selected dev home and passes the checkout root for the local plugin; CLI calls discard every inherited `PASEO_*` variable and set `PASEO_HOME` to the selected isolated home. The check validates home selection only; it does not launch Paseo or verify the daemon endpoint, daemon state, Electron profile, or GUI isolation.
+
+The plugin connector answers the bridge's `session/close` locally, so Cortex never receives that unsupported method. `paseo run --model` and `--thinking` issue a pre-task `session/set_config_option`, which Cortex persists as the saved coordinator default because it cannot tell that pick from a composer pick. A live check that must keep its defaults should back up and restore the saved default, or omit `--model` and `--thinking`. In Paseo, a `session/cancel` followed by a `session/prompt` on the same session is steering; a lone cancel still pauses after the 5-second grace window (see the steering page).
 
 Until plugin-reload recovery is qualified for the deployed version, apply plugin updates between active tasks. Recovery uses persisted Cortex state and does not automatically repeat actions with an unknown outcome. A host SIGKILL without SIGTERM leaves no disconnect record (a later reader identifies the interrupted worker from its provably gone owning process), and native engine actions have no retained command receipt.
 

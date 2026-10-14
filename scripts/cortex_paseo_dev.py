@@ -38,6 +38,12 @@ def isolated_environment(home: Path) -> dict[str, str]:
     # Inherited opt-in must not activate tracing for an ordinary invocation.
     env.pop("CORTEX_DEV_WIRE_TRACE", None)
     env.pop("CORTEX_DEV_TRACE_HOME", None)
+    # A wrapper started from inside a Paseo process (an agent, its daemon or
+    # Desktop) inherits that installation's PASEO_* overrides, production
+    # PASEO_HOME included. Drop every one: callers set the isolated values
+    # they need explicitly, instead of relying on --home precedence.
+    for key in [key for key in env if key.startswith("PASEO_")]:
+        del env[key]
     env["XDG_CONFIG_HOME"] = str(config_home)
     env["XDG_STATE_HOME"] = str(state_home)
     env["CORTEX_PASEO_SOURCE_ROOT"] = str(Path(__file__).resolve().parent.parent)
@@ -379,9 +385,10 @@ def _run_cli(args) -> int:
         except ValueError as error:
             print(f"cortex_paseo_dev: --wire-trace preflight refused ({error})", file=sys.stderr)
             return 2
-    # A wrapper invoked from an active Paseo agent must not target that agent.
-    env.pop("PASEO_AGENT_ID", None)
-    env.pop("PASEO_AGENT_CWD", None)
+    # A wrapper invoked from an active Paseo agent must not target that agent
+    # (isolated_environment already dropped PASEO_AGENT_ID/PASEO_AGENT_CWD);
+    # the isolated home is explicit in both --home and the environment.
+    env["PASEO_HOME"] = str(home)
     # Paseo bundles server plugins as CJS and does not expose their source path.
     # Pass this worktree root explicitly to the isolated daemon for directory plugins.
     env["CORTEX_PASEO_SOURCE_ROOT"] = str(Path(__file__).resolve().parent.parent)
