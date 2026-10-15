@@ -81,6 +81,16 @@ ahead within the tier, before engine affinity. Rank versions 10 to 12 applied
 this only once some candidate reached 95%. Owner preferences, honoured hints
 and the 95% hot band still come first. `RANK_VERSION` is 13.
 
+### Plan usage stays within the owner's preferred models
+
+The owner decided on 2026-10-16 that usage-based ranking must not override
+models chosen for a kind of work in the settings (`preferred_for`). While
+that preference is honoured, plan usage compares only those models with each
+other. Once they are used up (hot and meaningfully worse, exhausted or
+unavailable), the replacement is chosen by the quota band, retry
+diversification, engine affinity and engine order, not by usage.
+`RANK_VERSION` is 14.
+
 ### Paseo cancel followed by a prompt
 
 In a Paseo session, `session/cancel` followed by `session/prompt` on the same session is

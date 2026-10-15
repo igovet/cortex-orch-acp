@@ -618,7 +618,7 @@ def pick(role_tier: str, entries: Sequence, usage, tier_overrides: Mapping[str, 
 
 
 # Generic rank ordering; historical decision keys remain readable by clients.
-RANK_VERSION = 13
+RANK_VERSION = 14
 # The rank key's parts in order, named for the decision's ``decided_by``.
 # ``quota`` moved from right after ``hint`` to right before ``used_percent``
 # in rank version 6 (a late tie breaker, behind the usage-gap signal,
@@ -629,6 +629,8 @@ RANK_VERSION = 13
 # breaker affinity and diversification could still outrank.
 # Rank version 13 ranks by plan usage whenever every candidate's usage is
 # known again, not only once one reaches HOT_PERCENT (version 10's gate).
+# Rank version 14 confines plan usage to the owner's preferred models for the
+# work kind while they are honoured, and applies none once they are used up.
 RANK_KEYS = ("preference", "purpose", "hint", "quota", "usage", "diversify", "affinity", "used_percent",
              "engine_order")
 
@@ -694,6 +696,13 @@ def rank(role_tier: str, entries: Sequence, usage, tier_overrides: Mapping[str, 
     7. engine affinity (:func:`suitability`), the task's fit;
     8. lower exact used percent, whenever every usage is known;
     9. engine order.
+
+    Steps 5 and 8 compare plan usage within ``decision["usage"]["scope"]``:
+    only the ``purpose`` models while that preference is honoured (usage
+    picks among the owner's chosen models, never against other models);
+    ``none`` when the tier has such models but none is honoured (all hot
+    and meaningfully worse, exhausted or excluded), so the replacement is
+    chosen by the other criteria rather than by usage; ``all`` otherwise.
 
     Affinity-bound work is first restricted to its configured/default engine.
     If a usable preferred route serves an eligible fallback tier and is not
@@ -783,13 +792,6 @@ def rank(role_tier: str, entries: Sequence, usage, tier_overrides: Mapping[str, 
             else:
                 status = "honoured"
         honoured = preference if status == "honoured" else None
-        used_percent_compared = all(usage(e) is not None for e in candidates)
-        usage_active = used_percent_compared
-        least_used = min(usage(e) for e in candidates) if usage_active else None
-
-        def usage_band(e):
-            return int((usage(e) - least_used) // USAGE_MARGIN) if usage_active else None
-
         hint_status = "auto"
         hinted = []
         if model_hint != "auto":
@@ -835,6 +837,30 @@ def rank(role_tier: str, entries: Sequence, usage, tier_overrides: Mapping[str, 
         else:
             purpose_status = "honoured"
 
+        # Plan usage never reaches past the owner's choice of model for this
+        # kind of work: while that choice is honoured it compares only the
+        # chosen models with each other, and once they are used up (hot and
+        # meaningfully worse, exhausted or unavailable) the replacement is
+        # chosen by the remaining criteria, not by usage.
+        purpose_configured = any(purpose(e) for e in entries if serves(e, tier))
+        if purpose_status == "honoured":
+            usage_scope, scope_name = purposed, "preferred"
+        elif purpose_configured:
+            usage_scope, scope_name = [], "none"
+        else:
+            usage_scope, scope_name = candidates, "all"
+        scope_ids = {e.route.id for e in usage_scope}
+        used_percent_compared = bool(usage_scope) and all(usage(e) is not None for e in usage_scope)
+        usage_active = used_percent_compared
+        least_used = min(usage(e) for e in usage_scope) if usage_active else None
+
+        def usage_band(e):
+            return (int((usage(e) - least_used) // USAGE_MARGIN)
+                    if usage_active and e.route.id in scope_ids else None)
+
+        def used_percent(e):
+            return usage(e) if usage_active and e.route.id in scope_ids else 0.0
+
         def key(e):
             # A candidate's own hot/known-quota flag ranks right after
             # preference/purpose/hint -- before the usage-gap band,
@@ -847,7 +873,7 @@ def rank(role_tier: str, entries: Sequence, usage, tier_overrides: Mapping[str, 
                     usage_band(e) or 0,
                     not (escalated and previous_engine and e.route.engine != previous_engine),
                     -suitability(role, e.route.engine, affinity, work_kind_override=work_kind_override),
-                    usage(e) if usage_active else 0.0, order[e.route.id])
+                    used_percent(e), order[e.route.id])
 
         ranked = sorted(candidates, key=key)
         best = ranked[0]
@@ -870,8 +896,9 @@ def rank(role_tier: str, entries: Sequence, usage, tier_overrides: Mapping[str, 
             model_hint=model_hint, model_hint_status=reported_hint_status,
             model_hint_reason=model_reason, diversify_from=previous_engine if escalated else None,
             usage=dict(compared=used_percent_compared, active=usage_active,
-                       status="active" if usage_active else "unavailable",
-                       threshold=HOT_PERCENT, margin=USAGE_MARGIN, least_used_percent=least_used),
+                       status=("active" if usage_active else
+                               "not_applied:owner_preferred_unavailable" if scope_name == "none" else "unavailable"),
+                       scope=scope_name, threshold=HOT_PERCENT, margin=USAGE_MARGIN, least_used_percent=least_used),
             affinity=dict(work_kind=affinity_kind, engine=affinity_engine(role, affinity, work_kind_override=work_kind_override),
                           source=("routing.json" if affinity_kind is not None and affinity
                                   and (affinity_kind in affinity or "*" in affinity

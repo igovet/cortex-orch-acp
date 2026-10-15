@@ -742,7 +742,15 @@ eligible candidates the rank criteria are, first difference wins:
    least-used candidate ranks it one step behind, so work goes to the plan
    with meaningfully more quota left. A smaller gap leaves the choice to the
    steps below. Rank versions 10 to 12 applied this step only once some
-   candidate reached 95%.
+   candidate reached 95%. Since rank version 14 the step never reaches
+   past the owner's preferred models for the work kind (step 2,
+   `preferred_for`): while that preference is honoured, usage compares only
+   those models with each other (`usage.scope` `preferred`). When the tier
+   has such models but none is honoured -- all are hot and meaningfully
+   worse, exhausted or unavailable -- usage ranks nothing (`usage.scope`
+   `none`, status `not_applied:owner_preferred_unavailable`), and the
+   replacement is chosen by the quota band and steps 6, 7 and 9. Without
+   preferred models usage compares every candidate (`usage.scope` `all`).
 6. On escalation, an engine other than the one whose attempt fell short --
    unless step 4 already sent the work to a meaningfully less-used plan,
    diversification does not retry onto a plan with meaningfully less room.
@@ -753,7 +761,7 @@ eligible candidates the rank criteria are, first difference wins:
    `claude-agent-acp`; debugging and testing are neutral. `routing.json`
    `engine_affinity` overrides it per work kind (see
    [configuration](../../configuration.md#routing-rules)).
-8. Exact used percentage, whenever every candidate's usage is known (step 5).
+8. Exact used percentage, within step 5's usage scope.
 9. Stable engine order.
 
 `decided_by` names the first of these keys (`preference`, `purpose`, `hint`, `quota`, `usage`,
@@ -763,8 +771,9 @@ records `pin`. It is never `balance`. The runner-up can be another model on
 the same engine, in which case `engine_order` is the usual answer.
 
 Unknown quota is not inferred to exceed the threshold. The audit's usage
-status is `unavailable` when any candidate has unknown usage, and `active`
-otherwise. Audits from rank versions 10 to 12 may also show `below_threshold`.
+status is `unavailable` when any candidate in the usage scope has unknown
+usage, `not_applied:owner_preferred_unavailable` when the scope is `none`,
+and `active` otherwise. Audits from rank versions 10 to 12 may also show `below_threshold`.
 The audit keeps the `threshold` field (the 95% hot band of step 4), the
 `active` and `compared` fields, and the raw candidate values. Steps 5 and 8
 compare nothing while usage is unavailable. Step 4 applies whatever the usage status: a known-hot route loses to
@@ -817,7 +826,7 @@ built-in defaults, skips supersede on LISTED engines and adds the `purpose`
 key between `diversify` and `affinity` (no decision changes without
 `models`); 9 moves `purpose` just after legacy `preference`, ahead of hints,
 usage and diversification, and adds the hot-and-meaningfully-worse safety
-exception for owner preferences (no selection change without `preferred_for`). Rank version 10 gates usage bands and exact-percentage comparison at observed usage >=95% and prioritizes confirmed user model requests across every tier; 11 moves the hot-quota criterion back to right after `hint`, ahead of usage bands, retry diversification and engine affinity, so a known route at or above 95% always ranks behind any non-hot route, known or unknown. Rank version 13 removes the 95% gate from usage bands and exact-percentage comparison: whenever every candidate's usage is known, a plan at least 10 points less used ranks first.
+exception for owner preferences (no selection change without `preferred_for`). Rank version 10 gates usage bands and exact-percentage comparison at observed usage >=95% and prioritizes confirmed user model requests across every tier; 11 moves the hot-quota criterion back to right after `hint`, ahead of usage bands, retry diversification and engine affinity, so a known route at or above 95% always ranks behind any non-hot route, known or unknown. Rank version 13 removes the 95% gate from usage bands and exact-percentage comparison: whenever every candidate's usage is known, a plan at least 10 points less used ranks first. Rank version 14 confines that comparison to the owner's honoured preferred models for the work kind and applies none once those models are used up.
 Rank version 12 adds affinity-bound frontend-design candidate restriction and
 structured preference preservation across retries and eligible fallback tiers.
 Older rows keep their own fields

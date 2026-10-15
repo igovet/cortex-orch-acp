@@ -157,7 +157,10 @@ Shared bare IDs grant neither engine and the plan preview explains the ambiguity
 see [identity rules](docs/features/routing-and-fallback/index.md#settings-only-routing).
 Usage-based ranking applies whenever every candidate's usage is known: a plan at
 least 10 points less used ranks first. Unknown usage remains unavailable, never
-assumed hot.
+assumed hot. When the settings prefer specific models for a kind of work
+(`preferred_for`), usage only chooses among those models; once they are used up,
+the replacement follows the normal quota, affinity and engine-order rules
+instead of usage.
 
 Initial host model/provider echoes preserve the configured native effort/mode;
 they are not parameter resets. [Bound task inspection](docs/features/observability/index.md#bound-task-inspection)

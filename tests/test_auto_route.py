@@ -376,8 +376,8 @@ def test_plan_usage_decides_between_suitable_engines_before_affinity():
     # Rank version 11: the hot/non-hot quota flag now decides before
     # the usage-gap band even applies; the pick is unchanged.
     assert picked.route.model == "sonnet" and decision["decided_by"] == "quota"
-    assert decision["rank_version"] == 13
-    assert decision["usage"] == dict(compared=True, active=True, status="active", threshold=95.0, margin=10.0, least_used_percent=75)
+    assert decision["rank_version"] == 14
+    assert decision["usage"] == dict(compared=True, active=True, status="active", threshold=95.0, margin=10.0, least_used_percent=75, scope="all")
     assert {c["route"]: c["usage_band"] for c in decision["candidates"]} == {
         "claude-agent-acp/sonnet": 0, "codex-acp/gpt-5.6-sol": 2, "codex-acp/gpt-5.6-terra": 2}
     assert "balance" not in decision
@@ -419,7 +419,7 @@ def test_unknown_quota_is_not_hot_and_never_compared():
     entries = [CLAUDE[2], CODEX[2]]
     picked, decision = auto_route.rank("light", entries, _usage(codex=None, claude=None), models=MODELS)
     assert picked is entries[0] and decision["used_percent_compared"] is False
-    assert decision["usage"] == dict(compared=False, active=False, status="unavailable", threshold=95.0, margin=10.0, least_used_percent=None)
+    assert decision["usage"] == dict(compared=False, active=False, status="unavailable", threshold=95.0, margin=10.0, least_used_percent=None, scope="all")
     picked, decision = auto_route.rank("light", entries, _usage(codex=95, claude=None), models=MODELS)
     assert picked is entries[0] and decision["decided_by"] == "quota"
     # Below the hot band, a known low usage never beats an unknown one.
@@ -1360,7 +1360,7 @@ def test_a_selection_list_makes_exactly_the_listed_models_automatic(tmp_path, mo
     assert {c["route"] for c in choice.decision["candidates"]} == {
         "codex-acp/gpt-5.6-terra", "claude-agent-acp/claude-sonnet-5", f"opencode/{OPENCODE_VARIANT}"}
     assert choice.model == "gpt-5.6-terra" and choice.decision["decided_by"] == "affinity"
-    assert choice.decision["rank_version"] == 13
+    assert choice.decision["rank_version"] == 14
     # An exact hint may now name a route whose id holds '/' and ','.
     hinted = auto_route.choose("worker-backend-dev", project, environ, model_hint=f"opencode/{OPENCODE_VARIANT}",
                                model_reason="The owner selected it.")
