@@ -829,8 +829,12 @@ Every answered worker question, with its question text, the user's verbatim
 answer, ids, timestamps and answering session, is visible to later workers and
 the reviewer through `list_sources`/`read_source` and the recovery capsule's
 constraints (see [input history](../input-history-and-replay/index.md#answered-questions)).
-Lost workers are retried at most twice after confirmed absence, and uncertain
-action receipts prevent replay. A worker whose route itself failed (an
+Lost workers are retried only after their absence is confirmed, and an
+uncertain action receipt prevents replay. A worker failure about the work is
+retried at most twice. A lost worker, or one whose engine crashed or would not
+start, falls under the [transient-failure retry window](../failures-and-cancellation/index.md#transient-engine-failures).
+The delay before each retry grows to at most a minute, and retries stop only
+after failures have kept repeating for 10 minutes. A worker whose route itself failed (an
 engine-reported exhausted plan, rate limit or unavailable model, or an engine
 that would not start or confirm the worker's mode) is instead retried on the
 next available route, possibly another provider. Those retries don't count

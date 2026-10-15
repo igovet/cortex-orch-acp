@@ -108,8 +108,9 @@ A host transport disconnect before the restart (for example a Paseo plugin
 update) leaves task, node and assignment state as persisted rather than
 cancelling it; step 3 then records its interrupted workers as
 `recovery_worker_lost`, and a restarted runtime never re-dispatches the old
-delegation request. Such a worker is retried with the failure class `worker_lost`: the retry still
-counts against the retry limit, but it never raises the model tier. See
+delegation request. Such a worker is retried with the failure class `worker_lost`. The retry
+falls under the transient-failure retry window, not the ordinary retry limit,
+and it never raises the model tier. See
 [failures and disconnects](../failures-and-cancellation/index.md#4-disconnect).
 
 ## Cross-process liveness
@@ -168,4 +169,4 @@ receipt or a duplicate coordinator/worker (see
 
 ## Coordinator launch failure diagnostics
 
-The initial coordinator engine launch can fail after task identity is persisted but before the `runtime_tasks` row is created. That failure records a safe structured diagnostic tagged with `engine_launch`, the task/session/attempt identities that exist, and the running runtime package version; the useful reason is included in the ACP error text because hosts may discard JSON-RPC `data`. Retry uses the existing task identity and recovery path, and initial pipeline publication is idempotent across that retry. `scripts/cortex_diagnose.py` reports the installed runtime package version separately from the checkout version. A diagnostic does not imply a live engine child was started successfully.
+The initial coordinator engine launch can fail after task identity is persisted but before the `runtime_tasks` row is created. That failure records a safe structured diagnostic tagged with `engine_launch`, the task/session/attempt identities that exist, and the running runtime package version; the useful reason is included in the ACP error text because hosts may discard JSON-RPC `data`. A transient launch failure is retried automatically, and each retry is shown in the chat (see [transient engine failures](../failures-and-cancellation/index.md#transient-engine-failures)). The diagnostic and the error are written only once the runtime gives up. Every retry, including a later user resend, reuses the existing task identity and recovery path. Initial pipeline publication is idempotent across those retries. `scripts/cortex_diagnose.py` reports the installed runtime package version separately from the checkout version. A diagnostic does not imply a live engine child was started successfully.

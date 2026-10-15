@@ -19,8 +19,9 @@ from ..portable.errors import PortableError, PortableErrorCategory
 from . import model_policy
 
 ENV_VAR = "CORTEX_ROUTING"
-USAGE_SWITCH_PERCENT = 95.0
-HOT_PERCENT = USAGE_SWITCH_PERCENT
+# A known plan usage at or above this is "hot": such a candidate ranks
+# behind every non-hot one (the quota band, see :func:`rank`).
+HOT_PERCENT = 95.0
 TIERS = model_policy.TIERS
 _FALLBACK_ORDER = {
     "flagship": ("flagship", "deep", "standard", "light"),
@@ -198,9 +199,8 @@ def suitability(role: str | None, engine: str, affinity: Mapping[str, str | None
 # Excluded, unavailable and exhausted (100%) routes are never honoured at
 # all.
 HINT_TOLERANCE = HOT_PERCENT
-# Once observed usage reaches USAGE_SWITCH_PERCENT, plan usage ranks
-# candidates in steps of this many percentage points above
-# the least-used candidate: a smaller difference is not a meaningful
+# Whenever every candidate's usage is known, plan usage ranks candidates in
+# steps of this many percentage points above the least-used candidate: a smaller difference is not a meaningful
 # difference in remaining quota, so the task (engine affinity) decides it.
 USAGE_MARGIN = 10.0
 
@@ -618,7 +618,7 @@ def pick(role_tier: str, entries: Sequence, usage, tier_overrides: Mapping[str, 
 
 
 # Generic rank ordering; historical decision keys remain readable by clients.
-RANK_VERSION = 12
+RANK_VERSION = 13
 # The rank key's parts in order, named for the decision's ``decided_by``.
 # ``quota`` moved from right after ``hint`` to right before ``used_percent``
 # in rank version 6 (a late tie breaker, behind the usage-gap signal,
@@ -627,6 +627,8 @@ RANK_VERSION = 12
 # :data:`HOT_PERCENT` must rank behind every non-hot candidate -- known or
 # unknown usage alike -- never merely a late, easily-ties-with-unknown tie
 # breaker affinity and diversification could still outrank.
+# Rank version 13 ranks by plan usage whenever every candidate's usage is
+# known again, not only once one reaches HOT_PERCENT (version 10's gate).
 RANK_KEYS = ("preference", "purpose", "hint", "quota", "usage", "diversify", "affinity", "used_percent",
              "engine_order")
 
@@ -679,17 +681,18 @@ def rank(role_tier: str, entries: Sequence, usage, tier_overrides: Mapping[str, 
        this outranks the usage-gap signal, diversification and affinity
        below, so a hot known candidate never wins merely by being the
        preferred engine or more suitable for the work;
-    5. subscription plan usage, only if every remaining candidate's usage
-       is known and at least one reaches :data:`USAGE_SWITCH_PERCENT`
-       (95%): each full :data:`USAGE_MARGIN` points above the least-used
-       candidate ranks a candidate one step behind (``usage_band``) --
+    5. subscription plan usage, whenever every remaining candidate's usage
+       is known (at any level, not only near the limit): each full
+       :data:`USAGE_MARGIN` points above the least-used candidate ranks a
+       candidate one step behind (``usage_band``), so work goes to the
+       plan with meaningfully more quota left --
        this usage-gap signal is what usually separates candidates on
        remaining quota once the quota band above has not already decided it;
     6. on escalation, an engine other than the one that fell short (a large
        usage gap above still wins first: diversification does not send a
        retry to a plan that is meaningfully more used);
     7. engine affinity (:func:`suitability`), the task's fit;
-    8. lower exact used percent, only when usage switching is active;
+    8. lower exact used percent, whenever every usage is known;
     9. engine order.
 
     Affinity-bound work is first restricted to its configured/default engine.
@@ -781,7 +784,7 @@ def rank(role_tier: str, entries: Sequence, usage, tier_overrides: Mapping[str, 
                 status = "honoured"
         honoured = preference if status == "honoured" else None
         used_percent_compared = all(usage(e) is not None for e in candidates)
-        usage_active = used_percent_compared and any(_hot(usage(e)) for e in candidates)
+        usage_active = used_percent_compared
         least_used = min(usage(e) for e in candidates) if usage_active else None
 
         def usage_band(e):
@@ -867,8 +870,8 @@ def rank(role_tier: str, entries: Sequence, usage, tier_overrides: Mapping[str, 
             model_hint=model_hint, model_hint_status=reported_hint_status,
             model_hint_reason=model_reason, diversify_from=previous_engine if escalated else None,
             usage=dict(compared=used_percent_compared, active=usage_active,
-                       status="unavailable" if not used_percent_compared else "active" if usage_active else "below_threshold",
-                       threshold=USAGE_SWITCH_PERCENT, margin=USAGE_MARGIN, least_used_percent=least_used),
+                       status="active" if usage_active else "unavailable",
+                       threshold=HOT_PERCENT, margin=USAGE_MARGIN, least_used_percent=least_used),
             affinity=dict(work_kind=affinity_kind, engine=affinity_engine(role, affinity, work_kind_override=work_kind_override),
                           source=("routing.json" if affinity_kind is not None and affinity
                                   and (affinity_kind in affinity or "*" in affinity

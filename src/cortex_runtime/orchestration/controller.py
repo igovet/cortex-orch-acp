@@ -33,6 +33,20 @@ _COORDINATOR_SESSION_DEAD_KINDS = frozenset({
     'transport_eof', 'poisoned', 'process_exit', 'process_crashed', 'nonzero_exit',
 })
 
+
+def _transient_turn_failure(kind, dead):
+    """A coordinator turn failure a resend can cure: its session died, or
+    the engine/transport failed (never a rate limit, an auth loss, a
+    refusal or a cancellation)."""
+    if dead:
+        return True
+    if not kind:
+        return False
+    from ..engine import failure_classification
+    return failure_classification.classify(kind) in {
+        failure_classification.ENGINE_FAILURE, failure_classification.TRANSPORT_FAILURE}
+
+
 # While workers run, the scheduler repeats its full pass (context rebuild,
 # claim_ready, event processing) only when the task's change fingerprint moves,
 # a worker future of this task ends, or a runtime notification arrives -- and
@@ -542,7 +556,7 @@ def _run(runtime, task_id, session_id, channel, session_ref, content, emit_updat
     published_states = set()
     capacity_wait_started = None
     failure_stop_reason = StopReason.END_TURN
-    reopened = False
+    turn_failures = []
     runtime_synthesis_emitted = False
     while True:
         if cancel_event.is_set() or _transport_lost(runtime, task_id):
@@ -780,19 +794,39 @@ def _run(runtime, task_id, session_id, channel, session_ref, content, emit_updat
                     return _stop_turn(runtime, task_id, machine, emit_tool_call, emit_update, language)
                 else:
                     kind = getattr(error, 'kind', None)
-                    if kind in _COORDINATOR_SESSION_DEAD_KINDS:
+                    dead = kind in _COORDINATOR_SESSION_DEAD_KINDS
+                    if dead:
                         # Drop the dead coordinator session so the next user
                         # message reopens a fresh one via recovery, instead of
                         # reusing the corpse and re-raising this forever.
                         runtime._evict_coordinator_session(task_id, kind)
-                        # A session that died idle between turns did nothing
-                        # with this prompt: reopen once and resend it, so the
-                        # user's message simply runs instead of a question.
-                        if (not reopened and not streamed and not tool_seen
-                                and machine.context(task_id)['state'] == state):
-                            reopened = True
+                    # A turn that failed for an engine/transport reason
+                    # before it streamed or called anything did nothing with
+                    # this prompt: resend it (on a reopened session if this
+                    # one died), announced in the chat, with the bounded
+                    # retry window, so the user's message simply runs
+                    # instead of a question.
+                    if (not streamed and not tool_seen and _transient_turn_failure(kind, dead)
+                            and machine.context(task_id)['state'] == state):
+                        from ..engine import retry_policy
+                        turn_failures.append(time.monotonic())
+                        decision = retry_policy.windowed_retry(
+                            turn_failures, time.monotonic(), runtime._engine_retry_window)
+                        if not decision.may_retry:
+                            runtime._emit_retry_notice(
+                                task_id, emit_update, language, 'engine_retry.gave_up', error=kind,
+                                retries=len(turn_failures) - 1,
+                                minutes=max(1, round(decision.elapsed_seconds / 60)))
+                        else:
+                            runtime._emit_retry_notice(
+                                task_id, emit_update, language, 'engine_retry.turn', error=kind,
+                                retry=decision.retry_number, delay=round(decision.delay_seconds))
+                            if cancel_event.wait(decision.delay_seconds):
+                                return _stop_turn(runtime, task_id, machine, emit_tool_call, emit_update, language)
                             try:
-                                channel, session_ref = runtime._ensure_coordinator(task_id)
+                                if dead:
+                                    channel, session_ref = runtime._ensure_coordinator_retrying(
+                                        task_id, emit_update, cancel_event, language)
                             except Exception:
                                 pass
                             else:

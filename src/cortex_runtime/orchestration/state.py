@@ -10,6 +10,8 @@ import hashlib
 import json
 import os
 import re
+import threading
+import time
 from pathlib import Path, PurePosixPath
 from typing import NamedTuple
 
@@ -87,6 +89,20 @@ def now():
 
 def encoded(value):
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(',', ':'))
+
+
+# Retry delays after infrastructure failures (orchestration.recovery
+# .retry_lost), held in this process only: an idle scheduler pass then costs
+# no extra read. The delay is also on the ASSIGNMENT_RETRIED event for the
+# record; a restarted runtime simply retries at once.
+_RETRY_HOLDS = {}
+_RETRY_HOLDS_LOCK = threading.Lock()
+
+
+def hold_retry(task_id, revision, node_id, *, until, retry, reason):
+    with _RETRY_HOLDS_LOCK:
+        _RETRY_HOLDS[(task_id, revision, node_id)] = dict(
+            until=until, info=dict(kind='retry', retry=retry, reason=reason, until=until))
 
 
 def event(db, task_id, kind, payload, actor='runtime'):
@@ -1272,6 +1288,16 @@ class TaskMachine:
             waits.update({n['node_id']: 'dependency' for n in nodes
                           if n['status'] == 'pending' and n['stage'] == stage
                           and n not in ready})
+        if ready:
+            # A node retried after an infrastructure failure waits out its
+            # delay (orchestration.recovery.retry_lost) before it starts again.
+            backoff = TaskMachine._retry_backoff(db, task_id, task['revision'])
+            for candidate in [n for n in ready if n['node_id'] in backoff]:
+                ready.remove(candidate)
+                if waits is not None:
+                    waits[candidate['node_id']] = 'retry_backoff'
+                if details is not None:
+                    details[candidate['node_id']] = dict(backoff[candidate['node_id']], role_waiting=candidate['role'])
         if not ready:
             return task, []
         from .access import holdings, effective_scope, absolute_scope, pending
@@ -1338,6 +1364,17 @@ class TaskMachine:
             details.update({n['node_id']: dict(limit=MAX_WORKERS_PER_SESSION, role_waiting=n['role'])
                             for n in selected[max(0, free):]})
         return task, selected[:max(0, free)]
+
+    @staticmethod
+    def _retry_backoff(db, task_id, revision):
+        """Nodes of ``revision`` still waiting out a retry delay: node id ->
+        what the wait card shows (retry number, cause, until)."""
+        current = time.time()
+        with _RETRY_HOLDS_LOCK:
+            for key in [k for k, hold in _RETRY_HOLDS.items() if hold['until'] <= current]:
+                del _RETRY_HOLDS[key]
+            return {node: dict(hold['info']) for (task, rev, node), hold in _RETRY_HOLDS.items()
+                    if task == task_id and rev == revision}
 
     @staticmethod
     def _session_worker_slots(db, task_id, revision):

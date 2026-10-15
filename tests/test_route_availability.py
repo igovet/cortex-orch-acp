@@ -16,6 +16,7 @@ from cortex_runtime.contracts import StoreError
 from cortex_runtime.delegation import events as delegation_events
 from cortex_runtime.engine.client import EngineProtocolError
 from cortex_runtime.engine import failure_classification
+from cortex_runtime.engine.retry_policy import RetryWindow
 from cortex_runtime.orchestration.recovery import MAX_ATTEMPT_RETRIES, MAX_ROUTE_RETRIES, retry_lost
 from cortex_runtime.orchestration.state import TaskMachine, attempt_routing
 from cortex_runtime.portable.identity import SourceEvent
@@ -164,7 +165,10 @@ def executing(runtime_task):
     machine.submit_plan(channel, _plan(), "p")
     machine.move(task_id, "EXECUTING")
     runtime = SimpleNamespace(_store=store, _engine=SimpleNamespace(
-        lookup_owned=lambda attempt_id: "absent", terminate_owned=lambda attempt_id: None))
+        lookup_owned=lambda attempt_id: "absent", terminate_owned=lambda attempt_id: None),
+        # Infrastructure retries start again at once here; their delay and
+        # window are covered by tests/test_engine_retry_window.py.
+        _engine_retry_window=RetryWindow(first_delay_seconds=0, max_delay_seconds=0))
     return store, machine, channel, runtime
 
 
@@ -290,12 +294,16 @@ def test_a_worker_recovery_wrote_off_is_retried_without_escalation(executing, fa
     assert attempt_routing(store, channel.task_id, "xa_next").escalate is False
 
 
-def test_lost_worker_retries_stay_bounded(executing):
+def test_lost_worker_retries_stay_bounded_by_the_retry_window(executing):
+    """Infrastructure loss is retried past MAX_ATTEMPT_RETRIES, and stops
+    only once the losses have kept repeating for the whole window."""
     store, machine, channel, runtime = executing
-    for index in range(MAX_ATTEMPT_RETRIES):
+    runtime._engine_retry_window = RetryWindow(first_delay_seconds=0, max_delay_seconds=0, window_seconds=0.3)
+    for index in range(MAX_ATTEMPT_RETRIES + 1):
         node = _running_node(machine, channel)
         _provision_only(store, channel.task_id, node, f"xa_{index}")
         retry_lost(runtime, channel.task_id, node)
+        time.sleep(0.12)
     node = _running_node(machine, channel)
     _provision_only(store, channel.task_id, node, "xa_last")
     with pytest.raises(StoreError, match="worker_retry_limit"):

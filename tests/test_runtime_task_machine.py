@@ -804,15 +804,21 @@ def test_scheduler_serializes_overlapping_write_scopes(machine):
 
 
 def test_lost_unprovisioned_reservation_is_retried_bounded(machine):
+    # A lost worker is infrastructure: retried until the losses have kept
+    # repeating for the retry window (shortened here, without a delay).
+    import time
+    from cortex_runtime.engine.retry_policy import RetryWindow
     from cortex_runtime.orchestration.recovery import retry_lost
     state,ch=machine
     state.submit_plan(ch,plan(),'p');state.move(ch.task_id,'EXECUTING')
-    runtime=SimpleNamespace(_store=state.store)
+    runtime=SimpleNamespace(_store=state.store,_engine_retry_window=RetryWindow(0,0,0.3))
     identities=[]
     for attempt in range(3):
         node=state.claim_ready(ch.task_id,ch.channel_id)[0]
         identities.append(node['assignment_ref'])
-        if attempt<2: retry_lost(runtime,ch.task_id,node)
+        if attempt<2:
+            retry_lost(runtime,ch.task_id,node)
+            time.sleep(0.2)
         else:
             with pytest.raises(StoreError,match='worker_retry_limit'):
                 retry_lost(runtime,ch.task_id,node)

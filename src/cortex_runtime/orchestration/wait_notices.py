@@ -19,7 +19,7 @@ import json
 from ..acp import messages
 from ..observability.redact import scrub_display_text
 
-SHOWN = frozenset({'scope_overlap', 'capacity_limit'})
+SHOWN = frozenset({'scope_overlap', 'capacity_limit', 'retry_backoff'})
 _PATH_MAX_CHARS = 160
 
 
@@ -34,6 +34,14 @@ def _since(created_at):
         return datetime.fromisoformat(created_at).astimezone().strftime('%H:%M')
     except (TypeError, ValueError):
         return str(created_at or '?')
+
+
+def _clock(epoch):
+    """A retry's start in the machine's local time, to the second."""
+    try:
+        return datetime.fromtimestamp(float(epoch)).strftime('%H:%M:%S')
+    except (TypeError, ValueError, OverflowError, OSError):
+        return '?'
 
 
 def _holder_session(db, holder_task):
@@ -65,6 +73,11 @@ def render(db, task_id, wait, language):
     if wait['reason'] == 'capacity_limit':
         title = t('scheduler_wait.title.capacity_limit', node=node)
         return title, t('scheduler_wait.capacity_limit', limit=holder.get('limit', '?'), **params)
+    if wait['reason'] == 'retry_backoff':
+        title = t('scheduler_wait.title.retry_backoff', node=node, retry=holder.get('retry') or '?')
+        return title, t('scheduler_wait.retry_backoff', retry=holder.get('retry') or '?',
+                        error=scrub_display_text(str(holder.get('reason') or '?'), max_chars=_PATH_MAX_CHARS),
+                        at=_clock(holder.get('until')), **params)
     params.update(
         held=scrub_display_text(holder.get('held') or '?', max_chars=_PATH_MAX_CHARS),
         requested=scrub_display_text(holder.get('requested') or '?', max_chars=_PATH_MAX_CHARS),

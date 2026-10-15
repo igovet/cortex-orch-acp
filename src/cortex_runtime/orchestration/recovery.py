@@ -1,10 +1,15 @@
 """Reconcile exact retained publication evidence after interrupted result delivery."""
 import hashlib
 import json
+import time
 
 from ..contracts import StoreError
 from .state import TaskMachine, encoded, event
 
+# Retries after a failure about the work itself. Infrastructure failures
+# (an engine that would not start, crashed or was lost) are not counted
+# here: they are retried with the bounded window of
+# engine.retry_policy.windowed_retry, each after a growing delay.
 MAX_ATTEMPT_RETRIES = 2
 # Retries after a failure routing.availability recorded against the route
 # (exhausted account, model unavailable, engine would not start) go to
@@ -139,14 +144,35 @@ def retry_lost(runtime,task_id,node):
             detail=str(payload.get('detail') or '')[:600]
             raise StoreError('worker_failure_not_retryable:'+reason+(': '+detail if detail else ''))
         from ..routing import availability
+        from .state import WORKER_LOST_FAILURE_CLASS, _INFRASTRUCTURE_RETRY_CLASSES
         unavailable=availability.for_attempt(db,task_id,provision['attempt_id']) if provision else None
         attempts=db.execute("SELECT payload_json FROM runtime_events WHERE task_id=? AND type='ASSIGNMENT_RETRIED'",(task_id,)).fetchall()
         retried=[p for p in map(lambda row: json.loads(row[0]),attempts)
                  if p.get('node')==node['node_id'] and p.get('revision')==node['revision']]
-        count=sum(not p.get('route_failure') for p in retried)
+        failure_class=payload.get('failure_class')
+        if not failure_class and (failure is None or reason=='recovery_worker_lost'):
+            # No failure event at all means the worker's process vanished
+            # (host disconnect, runtime restart) before it could report or
+            # fail; recovery's own write-off of such a worker predates its
+            # failure class. Both are infrastructure loss, not a signal
+            # about the work.
+            failure_class=WORKER_LOST_FAILURE_CLASS
+        infrastructure=unavailable is None and failure_class in _INFRASTRUCTURE_RETRY_CLASSES
+        count=sum(not p.get('route_failure') and not p.get('failed_at') for p in retried)
+        backoff=None
         if unavailable is not None:
             if sum(bool(p.get('route_failure')) for p in retried)>=MAX_ROUTE_RETRIES:
                 raise StoreError('worker_retry_limit'+(':'+reason if reason else ''))
+        elif infrastructure:
+            from ..engine import retry_policy
+            failed_at=time.time()
+            decision=retry_policy.windowed_retry(
+                sorted([p['failed_at'] for p in retried if p.get('failed_at')]+[failed_at]), failed_at,
+                getattr(runtime, '_engine_retry_window', None) or retry_policy.default_window())
+            if not decision.may_retry:
+                raise StoreError('worker_retry_limit'+(':'+reason if reason else ''))
+            backoff=dict(failed_at=failed_at, retry_not_before=failed_at+decision.delay_seconds,
+                         infrastructure_retry=decision.retry_number)
         elif count>=MAX_ATTEMPT_RETRIES:
             # Carry the last cause, so the user is asked about what failed.
             raise StoreError('worker_retry_limit'+(':'+reason if reason else ''))
@@ -166,15 +192,10 @@ def retry_lost(runtime,task_id,node):
             raise StoreError('lost_worker_result_changed')
         retry=dict(node=node['node_id'],revision=node['revision'],retry=len(retried)+1,
                    previous_assignment=assignment,observed_session='absent' if provision else 'not_provisioned')
-        failure_class=payload.get('failure_class')
-        if not failure_class and (failure is None or reason=='recovery_worker_lost'):
-            # No failure event at all means the worker's process vanished
-            # (host disconnect, runtime restart) before it could report or
-            # fail; recovery's own write-off of such a worker predates its
-            # failure class. Both are infrastructure loss, not a signal
-            # about the work.
-            from .state import WORKER_LOST_FAILURE_CLASS
-            failure_class=WORKER_LOST_FAILURE_CLASS
+        if backoff:
+            # The scheduler holds the node until retry_not_before
+            # (TaskMachine._ready_nodes) and the chat shows the wait.
+            retry.update(backoff, reason=reason or failure_class)
         if failure_class:
             # Durably carries why this retry happened, so routing
             # (orchestration.state.attempt_routing) can tell an
@@ -185,6 +206,10 @@ def retry_lost(runtime,task_id,node):
             retry.update(route_failure=True,unavailable_route=availability.describe(unavailable))
         event(db,task_id,'ASSIGNMENT_RETRIED',retry)
         db.commit()
+    if backoff:
+        from .state import hold_retry
+        hold_retry(task_id, node['revision'], node['node_id'], until=backoff['retry_not_before'],
+                   retry=backoff['infrastructure_retry'], reason=retry['reason'])
 
 
 def reconcile_results(store, task_id):

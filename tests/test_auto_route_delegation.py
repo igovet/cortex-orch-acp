@@ -173,7 +173,7 @@ def test_deep_work_moves_off_the_account_above_the_threshold(tmp_path):
     assert detail["decision_detail"]["route_basis"] == "auto"
     assert detail["decision_detail"]["effort"] == "high"
     decision = detail["decision_detail"]["route_decision"]
-    assert decision["rank_version"] == 12
+    assert decision["rank_version"] == 13
     assert "balance" not in decision
     assert decision["used_percent_compared"] is False
     assert decision["usage"] == dict(compared=False, active=False, status="unavailable", threshold=95.0, margin=10.0, least_used_percent=None)
@@ -926,7 +926,8 @@ def test_coordinator_only_profile_cannot_silently_replace_user_model(tmp_path, m
     assert _read_log(log_a) == [] and _read_log(log_b) == []
 
 
-@pytest.mark.parametrize("used,expected_engine", [(94.999, "codex-acp"), (95.0, "claude-agent-acp")])
+@pytest.mark.parametrize("used,expected_engine", [(9.999, "codex-acp"), (10.0, "claude-agent-acp"),
+                                                  (95.0, "claude-agent-acp")])
 def test_usage_boundary_reaches_real_dispatch(tmp_path, used, expected_engine):
     store, channel, provisioning, adapter, a, b, log_a, log_b, project, env = _setup(
         tmp_path, model_a="gpt-5.6-terra", model_b="claude-sonnet-5")
@@ -937,7 +938,7 @@ def test_usage_boundary_reaches_real_dispatch(tmp_path, used, expected_engine):
         audit = routing_store.list_audit_for_attempt(store, result.attempt_id)[0]
         assert audit["engine"] == expected_engine
         usage = audit["decision_detail"]["route_decision"]["usage"]
-        assert usage["active"] is (used >= 95.0)
+        assert usage["active"] is True
         assert _read_log(log_a if expected_engine == "claude-agent-acp" else log_b) == []
     finally:
         adapter.terminate_owned(result.attempt_id)

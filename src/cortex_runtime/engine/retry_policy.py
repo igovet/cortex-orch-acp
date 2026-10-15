@@ -96,3 +96,60 @@ def bounded_backoff(*, start: float = DEFAULT_BACKOFF_START_SECONDS,
     while True:
         yield delay
         delay = min(delay * 2, ceiling)
+
+
+# -- transient-failure retry window -----------------------------------------
+# An engine that failed to start, or whose session died before it did
+# anything, is retried without bothering the user: the chat shows each retry
+# as it happens. The wait between retries doubles from the first delay but
+# never exceeds RETRY_MAX_DELAY_SECONDS; the work stops only once the
+# failures have kept repeating for RETRY_WINDOW_SECONDS. A failure more than
+# that long after the previous one starts a new streak.
+RETRY_FIRST_DELAY_SECONDS = 5.0
+RETRY_MAX_DELAY_SECONDS = 60.0
+RETRY_WINDOW_SECONDS = 600.0
+
+
+@dataclass(frozen=True)
+class RetryWindow:
+    first_delay_seconds: float = RETRY_FIRST_DELAY_SECONDS
+    max_delay_seconds: float = RETRY_MAX_DELAY_SECONDS
+    window_seconds: float = RETRY_WINDOW_SECONDS
+
+
+def default_window() -> RetryWindow:
+    """The window the runtime uses, read from the module constants at call
+    time (the test suite shortens them)."""
+    return RetryWindow(RETRY_FIRST_DELAY_SECONDS, RETRY_MAX_DELAY_SECONDS, RETRY_WINDOW_SECONDS)
+
+
+@dataclass(frozen=True)
+class WindowDecision:
+    may_retry: bool
+    retry_number: int        # 1-based: the retry about to be made (or refused)
+    delay_seconds: float     # wait before that retry; 0 when refused
+    elapsed_seconds: float   # since the first failure of the streak
+
+
+def streak_start(failure_times, window: RetryWindow = RetryWindow()) -> int:
+    """Index in the ascending ``failure_times`` where the current streak
+    begins: the earliest failure reached without a gap longer than the
+    window."""
+    start = len(failure_times) - 1
+    while start > 0 and failure_times[start] - failure_times[start - 1] <= window.window_seconds:
+        start -= 1
+    return max(start, 0)
+
+
+def windowed_retry(failure_times, now: float, window: RetryWindow = RetryWindow()) -> WindowDecision:
+    """Whether to retry after the latest of ``failure_times`` (ascending,
+    the latest failure included; any one clock, the same as ``now``)."""
+    if not failure_times:
+        return WindowDecision(True, 1, window.first_delay_seconds, 0.0)
+    streak = failure_times[streak_start(failure_times, window):]
+    retry_number = len(streak)
+    elapsed = max(0.0, now - streak[0])
+    if elapsed >= window.window_seconds:
+        return WindowDecision(False, retry_number, 0.0, elapsed)
+    delay = min(window.first_delay_seconds * 2 ** (retry_number - 1), window.max_delay_seconds)
+    return WindowDecision(True, retry_number, delay, elapsed)

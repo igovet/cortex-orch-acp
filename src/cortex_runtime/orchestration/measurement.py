@@ -46,7 +46,7 @@ def wait_signature(reason, blocked_by=None):
     # once the node is claimed and is not a different holder.
     return (reason, blocked_by.get('kind'), blocked_by.get('task_id'), blocked_by.get('node'),
             blocked_by.get('assignment_ref') if blocked_by.get('kind') == 'access_request' else None,
-            blocked_by.get('held'), blocked_by.get('limit'))
+            blocked_by.get('held'), blocked_by.get('limit'), blocked_by.get('retry'))
 
 
 def wait_reason(db, task_id, identity, reason, **ids):

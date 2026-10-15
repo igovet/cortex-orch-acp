@@ -551,6 +551,9 @@ def test_failed_coordinator_open_without_cached_session_revokes_channel(tmp_path
         observed.append((launch["channel_id"], launch["channel_secret"]))
         raise RuntimeError("partial open")
     monkeypatch.setattr(engine, "open", fail_open)
+    # One failed open, not the transient-failure retries.
+    from cortex_runtime.engine.retry_policy import RetryWindow
+    runtime._engine_retry_window = RetryWindow(window_seconds=0)
     try:
         with pytest.raises(RuntimeError, match="partial open"):
             runtime.start_prompt(task, SESSION, "go", lambda _: True, threading.Event())

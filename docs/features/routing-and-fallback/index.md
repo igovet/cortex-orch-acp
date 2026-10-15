@@ -737,12 +737,12 @@ eligible candidates the rank criteria are, first difference wins:
    is known or unknown. The criterion sits here, ahead of the usage-gap band, diversification
    and affinity, so no affinity or diversification preference moves a hot route ahead of a
    non-hot one. Unknown usage is never treated as hot.
-5. Plan usage, only when every candidate's usage is known
-   and at least one reaches the named USAGE_SWITCH_PERCENT threshold of 95%.
-   Below 95%, usage bands and exact percentages do not affect selection,
-   regardless of the gap; normal preferences, hints, diversification, affinity
-   and stable order apply. Once active, each full 10-point USAGE_MARGIN gap
-   above the least-used candidate ranks it one step behind.
+5. Plan usage, whenever every candidate's usage is known, at any level
+   (rank version 13). Each full 10-point USAGE_MARGIN gap above the
+   least-used candidate ranks it one step behind, so work goes to the plan
+   with meaningfully more quota left. A smaller gap leaves the choice to the
+   steps below. Rank versions 10 to 12 applied this step only once some
+   candidate reached 95%.
 6. On escalation, an engine other than the one whose attempt fell short --
    unless step 4 already sent the work to a meaningfully less-used plan,
    diversification does not retry onto a plan with meaningfully less room.
@@ -753,7 +753,7 @@ eligible candidates the rank criteria are, first difference wins:
    `claude-agent-acp`; debugging and testing are neutral. `routing.json`
    `engine_affinity` overrides it per work kind (see
    [configuration](../../configuration.md#routing-rules)).
-8. Exact used percentage only when usage switching is active (step 5).
+8. Exact used percentage, whenever every candidate's usage is known (step 5).
 9. Stable engine order.
 
 `decided_by` names the first of these keys (`preference`, `purpose`, `hint`, `quota`, `usage`,
@@ -763,10 +763,11 @@ records `pin`. It is never `balance`. The runner-up can be another model on
 the same engine, in which case `engine_order` is the usual answer.
 
 Unknown quota is not inferred to exceed the threshold. The audit's usage
-status is unavailable when any candidate has unknown usage, below_threshold
-when all are known but below 95%, and active otherwise. It retains the threshold,
-active and compared fields and raw candidate values. Steps 5 and 8 compare
-nothing while inactive. Step 4 applies whatever the usage status: a known-hot route loses to
+status is `unavailable` when any candidate has unknown usage, and `active`
+otherwise. Audits from rank versions 10 to 12 may also show `below_threshold`.
+The audit keeps the `threshold` field (the 95% hot band of step 4), the
+`active` and `compared` fields, and the raw candidate values. Steps 5 and 8
+compare nothing while usage is unavailable. Step 4 applies whatever the usage status: a known-hot route loses to
 any non-hot route, including one whose usage is unknown. That does not claim the unknown
 route's percentage was observed.
 
@@ -816,7 +817,7 @@ built-in defaults, skips supersede on LISTED engines and adds the `purpose`
 key between `diversify` and `affinity` (no decision changes without
 `models`); 9 moves `purpose` just after legacy `preference`, ahead of hints,
 usage and diversification, and adds the hot-and-meaningfully-worse safety
-exception for owner preferences (no selection change without `preferred_for`). Rank version 10 gates usage bands and exact-percentage comparison at observed usage >=95% and prioritizes confirmed user model requests across every tier; 11 moves the hot-quota criterion back to right after `hint`, ahead of usage bands, retry diversification and engine affinity, so a known route at or above 95% always ranks behind any non-hot route, known or unknown.
+exception for owner preferences (no selection change without `preferred_for`). Rank version 10 gates usage bands and exact-percentage comparison at observed usage >=95% and prioritizes confirmed user model requests across every tier; 11 moves the hot-quota criterion back to right after `hint`, ahead of usage bands, retry diversification and engine affinity, so a known route at or above 95% always ranks behind any non-hot route, known or unknown. Rank version 13 removes the 95% gate from usage bands and exact-percentage comparison: whenever every candidate's usage is known, a plan at least 10 points less used ranks first.
 Rank version 12 adds affinity-bound frontend-design candidate restriction and
 structured preference preservation across retries and eligible fallback tiers.
 Older rows keep their own fields
@@ -933,6 +934,11 @@ Retries (`orchestration.recovery.retry_lost`):
   - does not escalate the model tier (`orchestration.state.attempt_routing`),
     because no model fell short;
   - is bounded by `MAX_ROUTE_RETRIES` (6).
+- A retry whose failure class is `engine_failure`, `transport_failure` or
+  `worker_lost` and whose attempt has no `ROUTE_UNAVAILABLE` record does not
+  use up `MAX_ATTEMPT_RETRIES`. Such a retry waits a growing delay of at most
+  60 s, and retries stop only after failures have kept repeating for 10
+  minutes (see [transient engine failures](../failures-and-cancellation/index.md#transient-engine-failures)).
 - A retry whose failure class is `engine_failure` or `transport_failure` (a crash,
   EOF or poisoned session) does not raise the model tier either. Only quality
   causes, or retries with no failure class, escalate, as before
@@ -1051,4 +1057,4 @@ The public policy/model-settings-default.json is validated install-only data. Fr
 
 ### Settings-only quota applicability
 
-Model-window associations are optional `quota_windows` settings, never a built-in family/version substring table. Exact per-engine labels map to `models: null` (shared), exact model lists, or an explicit empty exclusion list; duplicate labels are refused. Unmapped windows conservatively apply to every model, including exhausted windows; no numeric evidence remains unknown rather than zero. The same effective first-existing routing file governs route menus, automatic selection and failure reset lookup. Invalid reset policy cannot erase a genuine engine refusal: availability retains its bounded default expiry. Provider time/cache/authentication algorithms are unchanged; ranking now obeys the 95% usage-switch threshold. See [exact field, diagnostics and migration semantics](../../configuration.md#exact-quota-window-associations). The route menu includes `quota_window_policy` with effective rules and its conservative-unmapped decision, while raw status remains provider evidence.
+Model-window associations are optional `quota_windows` settings, never a built-in family/version substring table. Exact per-engine labels map to `models: null` (shared), exact model lists, or an explicit empty exclusion list; duplicate labels are refused. Unmapped windows conservatively apply to every model, including exhausted windows; no numeric evidence remains unknown rather than zero. The same effective first-existing routing file governs route menus, automatic selection and failure reset lookup. Invalid reset policy cannot erase a genuine engine refusal: availability retains its bounded default expiry. Provider time/cache/authentication algorithms are unchanged; ranking compares plan usage whenever every candidate's usage is known. See [exact field, diagnostics and migration semantics](../../configuration.md#exact-quota-window-associations). The route menu includes `quota_window_policy` with effective rules and its conservative-unmapped decision, while raw status remains provider evidence.

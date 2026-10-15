@@ -361,6 +361,24 @@ _CATALOG: dict[str, dict[str, str]] = {
         "en": "Reconnected this task on a newly authorized engine/route ({engine}), with a new session rebuilt from recorded task state (this is a new session, never a native resume of the prior engine).",
         "ru": "Задача переподключена на новом разрешённом движке/маршруте ({engine}) с новой сессией, восстановленной из сохранённого состояния задачи (это новая сессия, а не нативное возобновление прежнего движка).",
     },
+    # Transient engine failures retried by the runtime (see
+    # engine.retry_policy.windowed_retry): every retry is shown as it happens.
+    "engine_retry.launch": {
+        "en": "⟳ The engine did not start ({error}). Retry {retry} in {delay} s…",
+        "ru": "⟳ Движок не запустился ({error}). Повтор {retry} через {delay} с…",
+    },
+    "engine_retry.turn": {
+        "en": "⟳ The coordinator's engine failed before answering ({error}). Retry {retry} in {delay} s…",
+        "ru": "⟳ Движок координатора сбоил, не успев ответить ({error}). Повтор {retry} через {delay} с…",
+    },
+    "engine_retry.recovered": {
+        "en": "✓ The engine started after {retries} retries.",
+        "ru": "✓ Движок запустился (повторов: {retries}).",
+    },
+    "engine_retry.gave_up": {
+        "en": "✗ The engine kept failing for {minutes} min ({error}; {retries} retries). Stopping.",
+        "ru": "✗ Движок сбоил {minutes} мин подряд ({error}; повторов: {retries}). Останавливаюсь.",
+    },
     "assignment_delegation_failed": {
         "en": "Assignment {assignment_ref} was NOT delegated ({error}); this work was refused before reaching a worker. If the coordinator proceeds itself, that is a fallback, not a delegation.",
         "ru": "Назначение {assignment_ref} НЕ было делегировано ({error}); эта работа была отклонена ещё до передачи исполнителю. Если координатор выполнит её сам, это резервный вариант, а не делегирование.",
@@ -431,6 +449,16 @@ _CATALOG: dict[str, dict[str, str]] = {
               "It starts on its own when a worker finishes.",
         "ru": "Шаг {node} ({role}) не запускается: в этом чате уже работает предельное число воркеров одновременно ({limit}). Ждём с {since}. "
               "Шаг запустится сам, когда освободится слот.",
+    },
+    "scheduler_wait.title.retry_backoff": {
+        "en": "Retry {retry}: {node} — the worker's engine failed",
+        "ru": "Повтор {retry}: {node} — сбой движка воркера",
+    },
+    "scheduler_wait.retry_backoff": {
+        "en": "Step {node} ({role}) failed for an infrastructure reason ({error}). Retry {retry} starts at {at}. "
+              "Retries continue on their own, at most a minute apart; the step stops only if failures keep repeating for 10 minutes.",
+        "ru": "Шаг {node} ({role}) сбоил по инфраструктурной причине ({error}). Повтор {retry} начнётся в {at}. "
+              "Повторы идут сами, с паузой не больше минуты; шаг остановится, только если сбои повторяются 10 минут подряд.",
     },
     "scheduler_wait.holder_running": {"en": "working", "ru": "работает"},
     "scheduler_wait.holder_other_chat": {"en": "another chat", "ru": "другой чат"},

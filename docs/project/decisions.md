@@ -73,6 +73,14 @@ The rank key moved the hot flag to position four, and `RANK_VERSION` is 11. Reje
 quota windows without a reset time expire after a bounded TTL, and a CLI window that stops
 being reported is pruned on the next successful refresh.
 
+### Plan usage ranks at any level
+
+The owner restored usage-based ranking on 2026-10-15. Whenever every
+candidate's plan usage is known, a plan at least 10 points less used ranks
+ahead within the tier, before engine affinity. Rank versions 10 to 12 applied
+this only once some candidate reached 95%. Owner preferences, honoured hints
+and the 95% hot band still come first. `RANK_VERSION` is 13.
+
 ### Paseo cancel followed by a prompt
 
 In a Paseo session, `session/cancel` followed by `session/prompt` on the same session is

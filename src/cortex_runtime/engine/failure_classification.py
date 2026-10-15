@@ -65,7 +65,8 @@ NEVER_FALLBACK_ELIGIBLE = frozenset({
 _RATE_LIMIT_MARKERS = ("rate_limit", "rate limit", "too many requests", "429", "quota_exceeded", "quota exceeded",
                        "quota_exhausted")
 _AUTH_LOSS_MARKERS = (
-    "unauthorized", "auth_required", "auth required", "authentication_failed", "authentication failed",
+    "unauthorized", "auth_required", "auth required", "authentication_required", "authentication required",
+    "authentication_failed", "authentication failed",
     "token_expired", "token expired", "invalid_api_key", "invalid api key", "401", "403", "permission_denied_no_binding",
 )
 _PROVIDER_RESTRICTION_MARKERS = (

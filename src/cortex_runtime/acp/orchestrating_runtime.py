@@ -33,6 +33,7 @@ from ..delegation import provisioning as delegation_provisioning
 from ..delegation.provisioning import ProvisioningService
 from ..engine import failure_classification
 from ..engine import reaper as engine_reaper
+from ..engine import retry_policy
 from ..engine.instruction_delivery_registry import delivery_for
 from ..observability.redact import StreamingRedactor, scrub_display_text, scrub_text
 from ..portable.engine_contract import StopReason
@@ -1053,6 +1054,35 @@ def _describe_failure(error: BaseException) -> dict:
     return described
 
 
+# Never cured by starting the engine again: the account, the model, the
+# configuration or the user said no.
+_NOT_TRANSIENT_CLASSES = frozenset({
+    failure_classification.AUTHORIZATION_LOSS, failure_classification.PROVIDER_RESTRICTION,
+    failure_classification.REFUSAL, failure_classification.CANCELLATION,
+})
+
+
+def _transient_launch_failure(error: BaseException) -> bool:
+    """Whether a coordinator engine that failed to start may simply be
+    started again: a crash, a closed transport, a timeout or an engine's
+    bare "Internal error". A refusal about the route (exhausted account,
+    unavailable model), a rejected configuration or a validation/
+    authorization error is not -- a retry would fail identically."""
+    from ..configuration.service import ConfigurationRejected
+    from .runtime import OrchestrationUnavailable
+
+    if isinstance(error, (ConfigurationRejected, OrchestrationUnavailable)):
+        return False
+    if isinstance(error, PortableError):
+        return error.retry_eligible or error.category in (
+            PortableErrorCategory.TRANSPORT, PortableErrorCategory.ENGINE_FAILURE)
+    if failure_classification.route_failure(error) is not None:
+        return False
+    message = getattr(error, "message", None)
+    text = (message if isinstance(message, str) else str(error))[:500]
+    return failure_classification.classify(type(error).__name__, message=text) not in _NOT_TRANSIENT_CLASSES
+
+
 class HostElicitor(Protocol):
     """T020: optional structured-input dependency, injected the same way
     ``SessionRuntime`` is (never required -- every existing caller/test
@@ -1227,6 +1257,9 @@ class OrchestratingRuntime:
         # T020: per-task de-duplication of identical consecutive runtime
         # status lines (never persisted -- see acp.messages.Dedup).
         self._status_dedup = acp_messages.Dedup()
+        # How transient engine failures are retried (see
+        # engine.retry_policy.windowed_retry); tests shorten it.
+        self._engine_retry_window = retry_policy.default_window()
         self._provisioning = ProvisioningService(
             store, workspace_provisioner, session_runtime, config_snapshot_source,
             allow_unqualified_delivery=allow_unqualified_delivery,
@@ -2052,6 +2085,53 @@ class OrchestratingRuntime:
         self._reconcile_configuration(task_id, session_ref)
         return channel, session_ref
 
+    def _ensure_coordinator_retrying(
+        self, task_id: str, emit_update: Callable[[str], bool], cancel_event: threading.Event, language: str,
+    ) -> tuple[ChannelContext, str]:
+        """:meth:`_ensure_coordinator`, started again while the engine fails
+        to start for a transient reason (see :func:`_transient_launch_failure`).
+
+        Each retry is announced in the chat with its cause and delay. The
+        delay doubles up to a minute; once the failures have kept repeating
+        for the retry window, the last failure is raised as before. Starting
+        again is safe: a failed open leaves the provisioned attempt, which
+        the next call fences and replaces through coordinator recovery --
+        the same path a user's own resend takes."""
+        failures: list[float] = []
+        while True:
+            try:
+                opened = self._ensure_coordinator(task_id)
+            except Exception as error:
+                if (getattr(error, "cortex_launch_stage", None) != "engine_launch"
+                        or cancel_event.is_set() or not _transient_launch_failure(error)):
+                    raise
+                failures.append(time.monotonic())
+                decision = retry_policy.windowed_retry(failures, time.monotonic(), self._engine_retry_window)
+                cause = _describe_failure(error)["error"]
+                if not decision.may_retry:
+                    self._emit_retry_notice(
+                        task_id, emit_update, language, "engine_retry.gave_up",
+                        error=cause, retries=len(failures) - 1, minutes=max(1, round(decision.elapsed_seconds / 60)),
+                    )
+                    raise
+                self._emit_retry_notice(
+                    task_id, emit_update, language, "engine_retry.launch",
+                    error=cause, retry=decision.retry_number, delay=round(decision.delay_seconds),
+                )
+                if cancel_event.wait(decision.delay_seconds):
+                    raise
+                continue
+            if failures:
+                self._emit_retry_notice(task_id, emit_update, language, "engine_retry.recovered", retries=len(failures))
+            return opened
+
+    def _emit_retry_notice(self, task_id: str, emit_update: Callable[[str], bool], language: str, key: str,
+                           **params) -> None:
+        """One retry status line in the chat, in its own paragraph, and on
+        the task's record. Never deduplicated: each retry is a new attempt."""
+        emit_update(acp_messages.render(key, language, **params) + "\n\n")
+        self._record_progress(task_id, key, **params)
+
     def _cache_coordinator_session(self, task_id, channel, session_ref) -> None:
         from ..orchestration.gateway import channel_authority
         with self._task_resource_lock(task_id):
@@ -2660,7 +2740,9 @@ class OrchestratingRuntime:
         # prompt on an already-started task -- steering-eligible (see
         # below), as opposed to the task's very first prompt.
         pre_existing = acp_steering.orchestration_exists(self._store, task_id)
-        channel, session_ref = self._ensure_coordinator(task_id)
+        channel, session_ref = self._ensure_coordinator_retrying(
+            task_id, emit_update, cancel_event, self._resolve_language(task_id, content_hint=content),
+        )
         # Runtime-owned record, no model turn spent on it (see
         # pipeline_bootstrap module docstring). Always called -- never
         # gated on ``not pre_existing`` -- because ``task_orchestration``
@@ -2871,8 +2953,8 @@ class OrchestratingRuntime:
                 self._task_tool_call_emitters[task_id] = emit_tool_call
                 self._task_display_emitters[task_id] = emit_display_update
         try:
-            channel, session_ref = self._ensure_coordinator(task_id)
             language = self._resolve_language(task_id, content_hint=text)
+            channel, session_ref = self._ensure_coordinator_retrying(task_id, emit_update, cancel_event, language)
             self._emit_pending_pause_notice(task_id, emit_update, language)
             recovery_notice = self._pending_recovery_notice.pop(task_id, None)
             if recovery_notice is not None:
@@ -5490,10 +5572,15 @@ class OrchestratingRuntime:
                           or getattr(error, "correction", None)
                           or getattr(error, "message", None)
                           or "")
+                failed = dict(error=code, role=payload["role"], detail=_bounded_detail(detail))
+                if not isinstance(error, StoreError) and _transient_launch_failure(error):
+                    # An engine that failed to start (a bare "Internal
+                    # error", a crash): infrastructure, retried with the
+                    # bounded window (orchestration.recovery.retry_lost).
+                    failed["failure_class"] = failure_classification.ENGINE_FAILURE
                 delegation_events.append_event(
                     self._store, task_id, "assignment_failed", f"assignment_failed:{assignment_ref}",
-                    dict(error=code, role=payload["role"], detail=_bounded_detail(detail)),
-                    origin="runtime", assignment_ref=assignment_ref,
+                    failed, origin="runtime", assignment_ref=assignment_ref,
                 )
                 return
         # Stop may have won while the worker session was being opened.  The

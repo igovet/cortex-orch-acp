@@ -180,6 +180,20 @@ def _no_leaked_acp_transport_threads():
 # runner (as tests/test_usage_accounting.py does), exactly like the no-paid
 # default suite must never spawn the real CLI at all.
 @pytest.fixture(autouse=True)
+def _short_engine_retry_window(monkeypatch):
+    """Fake engines fail at once, so the production retry window (delays up
+    to a minute, ten minutes of retries) would only stall the suite. Retries
+    here start again without a delay and stop after half a second of
+    repeated failures; tests/test_engine_retry_window.py covers the real
+    policy and sets its own window."""
+    from cortex_runtime.engine import retry_policy
+
+    monkeypatch.setattr(retry_policy, "RETRY_FIRST_DELAY_SECONDS", 0.0)
+    monkeypatch.setattr(retry_policy, "RETRY_MAX_DELAY_SECONDS", 0.0)
+    monkeypatch.setattr(retry_policy, "RETRY_WINDOW_SECONDS", 0.5)
+
+
+@pytest.fixture(autouse=True)
 def _forbid_real_claude_usage_cli(monkeypatch):
     from cortex_runtime.connections import quota as quota_module
 

@@ -52,15 +52,18 @@ def test_request_cannot_bypass_route_authorization_ceiling(tmp_path, monkeypatch
     assert "authorization ceiling" in caught.value.remediation
 
 
-@pytest.mark.parametrize("used,expected,status", [
-    (0.0, "codex-acp", "below_threshold"),
-    (85.0, "codex-acp", "below_threshold"),
-    (94.999, "codex-acp", "below_threshold"),
-    (95.0, "claude-agent-acp", "active"),
-    (99.999, "claude-agent-acp", "active"),
-    (None, "codex-acp", "unavailable"),
+@pytest.mark.parametrize("used,expected,status,decided_by", [
+    (0.0, "codex-acp", "active", "affinity"),
+    # Within USAGE_MARGIN of the least-used plan: the kind of work decides.
+    (9.999, "codex-acp", "active", "affinity"),
+    # A plan at least 10 points more used ranks behind, at any level.
+    (10.0, "claude-agent-acp", "active", "usage"),
+    (85.0, "claude-agent-acp", "active", "usage"),
+    (95.0, "claude-agent-acp", "active", "quota"),
+    (99.999, "claude-agent-acp", "active", "quota"),
+    (None, "codex-acp", "unavailable", "affinity"),
 ])
-def test_usage_switch_starts_only_at_observed_95_percent(used, expected, status):
+def test_plan_usage_ranks_whenever_every_usage_is_known(used, expected, status, decided_by):
     observed = [entry("codex-acp", "first"), entry("claude-agent-acp", "second")]
     policies = {"codex-acp": {"auto": ["first"], "tiers": {"first": "standard"}},
                 "claude-agent-acp": {"auto": ["second"], "tiers": {"second": "standard"}}}
@@ -69,11 +72,11 @@ def test_usage_switch_starts_only_at_observed_95_percent(used, expected, status)
         role="worker-backend-dev", models=policies)
     assert picked.route.engine == expected
     assert decision["usage"]["status"] == status
-    assert decision["usage"]["threshold"] == auto_route.USAGE_SWITCH_PERCENT == 95.0
+    assert decision["usage"]["threshold"] == auto_route.HOT_PERCENT == 95.0
+    assert decision["decided_by"] == decided_by
     if status != "active":
         assert not decision["usage"]["active"]
         assert all(e["usage_band"] is None for e in decision["candidates"])
-        assert decision["decided_by"] == "affinity"
 
 
 def test_non_flagship_plan_preview_carries_recorded_source(tmp_path, monkeypatch):

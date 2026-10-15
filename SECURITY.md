@@ -248,8 +248,8 @@ ranking for covered exact-route nodes in every tier, including retries/fixes.
 They never waive owner deny/disabled/provider policy, route/profile/recipient
 ceilings, supported effort, engine availability or exhausted quota. Failure
 fallback cannot silently switch that choice to another model identity.
-Usage switching starts only at observed usage >=95%; unknown usage is reported
-unavailable, never inferred above the threshold.
+Plan usage ranks candidates whenever every candidate's usage is known; unknown
+usage is reported unavailable, never inferred above the 95% hot band.
 No source or settings rewrite repairs a refusal.
 
 ACP selection carries the owner/project ceiling into selected and active

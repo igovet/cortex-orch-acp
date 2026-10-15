@@ -101,6 +101,47 @@ write so a concurrently-published result always wins;
 every durable publication. No blanket exactly-once guarantee is made
 anywhere for an external mutation whose fate cannot be observed.
 
+### Transient engine failures
+
+An engine that fails for an infrastructure reason is retried automatically,
+and the chat shows each retry as it happens.
+`engine.retry_policy.windowed_retry` sets the timing. The first retry waits
+5 s, and each later wait doubles, up to 60 s. The work stops only after
+failures have kept repeating for 10 minutes (`RETRY_WINDOW_SECONDS`). A
+failure more than 10 minutes after the previous one starts a new streak.
+
+- **Coordinator launch.** If the coordinator engine fails to start (stage
+  `engine_launch`), `OrchestratingRuntime._ensure_coordinator_retrying`
+  starts it again. The chat shows `⟳ The engine did not start (<cause>).
+  Retry N in X s…`. A later success shows `✓ The engine started after N
+  retries.`, and giving up shows `✗ The engine kept failing for N min …
+  Stopping.` before the usual `engine_launch` error. Each new start goes
+  through coordinator recovery, the same path a user's resend takes. Some
+  failures are never retried, because starting again cannot help:
+  - a structured route refusal (exhausted plan, rate limit, unavailable
+    model);
+  - an authorization loss, provider restriction, refusal or cancellation;
+  - a rejected configuration;
+  - a validation or authorization `PortableError`, such as a missing launch
+    command.
+- **Coordinator turn.** A coordinator turn can fail for an engine or
+  transport reason (a dead session, `engine_error`) before it streams text
+  or calls a tool. The controller then resends the same prompt, after
+  reopening the session if it died, and the chat shows `⟳ The coordinator's
+  engine failed before answering …`. A turn that already streamed or called
+  a tool may have acted, so it is not resent. It blocks as before.
+- **Workers.** In `orchestration.recovery.retry_lost`, an assignment that
+  failed with class `engine_failure`, `transport_failure` or `worker_lost`
+  is retried within the same window. This includes a worker engine that
+  would not start and recorded no route failure. These retries do not use
+  up `MAX_ATTEMPT_RETRIES`. The `ASSIGNMENT_RETRIED` event records
+  `failed_at`, `retry_not_before` and `infrastructure_retry`.
+  `TaskMachine._ready_nodes` holds the node until its delay ends, with the
+  scheduler wait reason `retry_backoff`. The hold lives in the runtime
+  process, so an idle scheduler pass costs no extra read; a restarted
+  runtime retries the node at once. The chat shows that wait as a card
+  titled `Retry N: <node> — the worker's engine failed`.
+
 ## 3. Cancellation (`session/cancel`)
 
 `session/cancel` interrupts the current turn, revokes current worker channels,
@@ -355,6 +396,9 @@ Existing fallback regression tests
 (`tests/test_orchestrating_runtime_routing_fallback.py`) continue to pass
 unchanged, confirming classification did not alter existing fallback
 eligibility for `transport_eof`/`timeout_alive`/`poisoned`.
+`tests/test_engine_retry_window.py` covers the transient-failure retry
+window: the policy itself, coordinator launch and turn retries with their
+chat lines, and the worker retry delay with its wait card.
 
 ## Known limitations
 

@@ -210,9 +210,16 @@ def test_coordinator_engine_failure_blocks_without_silent_end_turn(tmp_path):
         return coordinator_behavior if channel and channel.role == "coordinator" else None
 
     runtime, engine = _make_runtime(store, router)
-    result = runtime.start_prompt(task_id, "s1", "Go.", lambda t: True, threading.Event())
+    chunks = []
+    started = time.monotonic()
+    result = runtime.start_prompt(task_id, "s1", "Go.", lambda t: chunks.append(t) or True, threading.Event())
     assert result == StopReason.END_TURN
-    assert calls["n"] == 2  # one fresh session for a corpse, never a retry loop or a fabricated success
+    # Each death is resent on a fresh session within the bounded retry
+    # window (shortened by tests/conftest.py), never forever and never a
+    # fabricated success; the chat shows every retry and the stop.
+    assert calls["n"] >= 2 and time.monotonic() - started < 10
+    text = "".join(chunks)
+    assert "Retry 1 in" in text and "Stopping." in text
     with store.connection() as db:
         row = db.execute("SELECT state, wait_reason FROM task_orchestration WHERE task_id=?", (task_id,)).fetchone()
         user_message = db.execute(
