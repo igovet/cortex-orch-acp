@@ -61,3 +61,6 @@ const mcpTool = presentTool(event({ tool_kind: "execute", title: "mcp.codebase_m
   raw_input: { server: "codebase_memory", tool: "get_code_snippet", arguments: { qualified_name: "a.b" } },
   raw_output: { error: null, result: { content: [{ type: "text", text: "def b(): pass" }] } } }));
 assert.equal(mcpTool.kind, "generic");
+const claudeBashBlocks = presentTool(event({ tool_kind: "execute", title: "git status", raw_input: { command: "git status" }, raw_output: [{ type: "text", text: "clean" }] }));
+assert.equal(claudeBashBlocks.kind, "shell");
+assert.equal(claudeBashBlocks.output, "clean");

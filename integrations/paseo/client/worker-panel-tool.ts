@@ -29,6 +29,11 @@ function nativeInput(value: unknown): Record<string, unknown> {
 }
 function outputText(value: unknown): string | null {
   if (typeof value === "string") return value;
+  // Claude's Bash result is the tool_result content: text blocks.
+  if (Array.isArray(value)) {
+    const texts = value.map((block) => fields(block).text).filter((text): text is string => typeof text === "string");
+    return texts.length ? texts.join("\n") : null;
+  }
   const output = fields(value);
   const direct = stringField(output, "content", "output", "text", "formatted_output", "stdout");
   if (direct !== null) return direct;

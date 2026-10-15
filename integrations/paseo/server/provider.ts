@@ -2,7 +2,7 @@ import { batchAnswers, batchForm, parseQuestionBatch, type QuestionBatch } from 
 import { ReplayController } from "./replay-connector.ts";
 import { ReplaySpool } from "./replay-spool.mjs";
 import { isHiddenOperation } from "../shared/timeline-visibility.ts";
-import { presentToolSemantics } from "../shared/tool-presentation.ts";
+import { presentToolSemantics, sameCommandText } from "../shared/tool-presentation.ts";
 import { codeModePresentation, gatewayPresentation } from "../shared/gateway-presentation.ts";
 import { shellCommand } from "../shared/shell-command.ts";
 import { execFile } from "node:child_process";
@@ -98,6 +98,41 @@ function firstNumber(value: unknown, keys: readonly string[]): number | undefine
  * native Read or Shell call.  Keep the source values in metadata so this
  * presentation projection never becomes the record of the call.
  */
+/** Claude's Bash result is the tool_result content: an array of text blocks. */
+function textBlocks(value: unknown): string | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const texts = value.flatMap((block) => block && typeof block === "object"
+    && typeof (block as Record<string, unknown>).text === "string" ? [(block as Record<string, unknown>).text as string] : []);
+  return texts.length ? texts.join("\n") : undefined;
+}
+
+type BridgeToolSnapshot = { kind?: string; name?: string; input: unknown };
+
+/**
+ * The installed ACP bridge builds an edit row from camelCase input keys
+ * (`filePath`, `oldString`, `newString`) only, while Claude's Edit/Write
+ * send `file_path`, `old_string`, `new_string` and `content`.  Without
+ * these aliases its edit detail has no diff, and no path at all when the
+ * call carried no locations, so the row cannot be opened.  The snake_case
+ * originals are kept; existing camelCase values win.
+ */
+export function nativeEditSnapshot<T extends BridgeToolSnapshot>(snapshot: T): T {
+  const isEdit = snapshot.kind === "edit" || snapshot.name?.toLowerCase().includes("edit") === true;
+  const input = snapshot.input;
+  if (!isEdit || !input || typeof input !== "object" || Array.isArray(input)) return snapshot;
+  const source = input as Record<string, unknown>;
+  const aliases: Record<string, unknown> = {};
+  const alias = (target: string, ...keys: string[]) => {
+    if (typeof source[target] === "string") return;
+    const key = keys.find((candidate) => typeof source[candidate] === "string");
+    if (key) aliases[target] = source[key];
+  };
+  alias("filePath", "file_path", "path", "absolutePath");
+  alias("oldString", "old_string", "oldText", "old_text");
+  alias("newString", "new_string", "newText", "new_text", "content");
+  return Object.keys(aliases).length ? { ...snapshot, input: { ...source, ...aliases } } : snapshot;
+}
+
 export function nativeToolDetail(event: ProviderEvent): ProviderEvent {
   if (event.type !== "timeline.item" || event.item.type !== "tool_call") return event;
   let item = event.item as ToolCallTimelineItem;
@@ -144,7 +179,8 @@ export function nativeToolDetail(event: ProviderEvent): ProviderEvent {
   const readContent = firstString(output, ["content", "text", "output", "stdout"])
     ?? (typeof output === "string" ? output : undefined);
   const shellOutput = firstString(output, ["stdout", "output", "content", "text"])
-    ?? (typeof output === "string" ? output : undefined);
+    ?? (typeof output === "string" ? output : undefined)
+    ?? textBlocks(output);
 
   let detail: ProviderToolCallDetail | undefined;
   if (filePath && (/^(?:edit|patch|write|replace|modify)\b/.test(name)
@@ -164,7 +200,9 @@ export function nativeToolDetail(event: ProviderEvent): ProviderEvent {
       ...(firstNumber(input, ["offset"]) === undefined ? {} : { offset: firstNumber(input, ["offset"]) }),
       ...(firstNumber(input, ["limit"]) === undefined ? {} : { limit: firstNumber(input, ["limit"]) }),
     };
-  } else if (command && /^(?:shell|bash|terminal|execute|run(?:\s+command)?)\b/.test(name)) {
+  } else if (command && (/^(?:shell|bash|terminal|execute|run(?:\s+command)?)\b/.test(name)
+    // Claude's Bash is named by its own command line.
+    || sameCommandText(item.name, command))) {
     const exitCode = firstNumber(output, ["exitCode", "exit_code", "code"]);
     detail = {
       type: "shell",
@@ -891,7 +929,7 @@ export function createCortexProvider(): ProviderRegistration {
       toolCall(received) {
         // A worker card keeps the status Cortex sent, never the bridge's
         // own turn-end settlement merged into a later update.
-        const snapshot = fence.toolCall(received);
+        const snapshot = nativeEditSnapshot(fence.toolCall(received));
         if (snapshot.status !== "failed" || snapshot.output !== null) {
           return snapshot;
         }

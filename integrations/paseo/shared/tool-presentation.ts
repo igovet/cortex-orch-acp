@@ -126,6 +126,12 @@ function compactTarget(value: string | null): string | null {
   return cleaned.length > 160 ? `${cleaned.slice(0, 157)}…` : cleaned;
 }
 
+/** Whether a title is the call's own command line (whitespace-insensitive). */
+export function sameCommandText(title: string, command: string): boolean {
+  const normalize = (value: string) => value.replace(/\s+/g, " ").trim();
+  return normalize(title).length > 0 && normalize(title) === normalize(command);
+}
+
 function isPlaceholderTarget(value: string): boolean {
   return /^(?:preparing\s+file|editing\s+files?|file|tool\s+call)(?:\s*(?:…|\.\.\.))?$/i.test(value.trim());
 }
@@ -208,7 +214,14 @@ export function presentToolSemantics(input: ToolPresentationInput): ToolPresenta
   }
   const title = String(input.title ?? input.name ?? "").trim();
   const nativeKind = String(input.toolKind ?? "").trim().toLowerCase();
-  const native = title.match(/^(read|view|cat)\b/i) || nativeKind === "read" ? NATIVE_READ
+  // Claude's Bash is titled with its own command line, so `cat a | grep b`
+  // or `cat > notes.md <<EOF` must not be taken for a native Read by its
+  // first word. Only the engine's own read kind makes a command a read.
+  const command = shellCommand(input.rawInput ?? input.input);
+  const commandCall = command !== null && nativeKind !== "read"
+    && (nativeKind === "execute" || nativeKind === "terminal" || sameCommandText(title, command));
+  const native = commandCall ? NATIVE_SHELL
+    : title.match(/^(read|view|cat)\b/i) || nativeKind === "read" ? NATIVE_READ
     : title.match(/^(edit|patch|write|replace|modify)\b/i) ? NATIVE_EDIT
       : nativeKind === "edit" ? NATIVE_EDIT
         : title.match(/^(shell|bash|terminal|execute|run(?:\s+command)?)\b/i) || nativeKind === "execute" || nativeKind === "terminal" ? NATIVE_SHELL
@@ -217,7 +230,7 @@ export function presentToolSemantics(input: ToolPresentationInput): ToolPresenta
             : undefined;
   // A shell call titled with its own command (Claude's Bash: "for f in …")
   // carries that command in its input even when no tool kind came with it.
-  const shellInput = !ACTIONS[name] && !native && shellCommand(input.rawInput ?? input.input) ? NATIVE_SHELL : undefined;
+  const shellInput = !ACTIONS[name] && !native && command ? NATIVE_SHELL : undefined;
   const mapped = ACTIONS[name] ?? native ?? shellInput;
   if (!mapped) {
     const action = humanize(name || title || "tool");

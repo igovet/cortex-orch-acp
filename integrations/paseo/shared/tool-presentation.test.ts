@@ -182,3 +182,17 @@ test("project_edit is an expandable diff and line pages have readable ranges", (
   assert.equal(page.label, "Read: app.py (lines 21–30)");
   assert.equal(page.expandable, false);
 });
+
+test("a shell call titled with its own command is never a native read", () => {
+  const claudeBash = presentToolSemantics({ title: "cat notes.md | grep todo", toolKind: "execute", rawInput: { command: "cat notes.md | grep todo" } });
+  assert.equal(claudeBash.kind, "shell");
+  assert.equal(claudeBash.expandable, true);
+  // The main chat has no tool kind: the title is the command itself.
+  const chat = presentToolSemantics({ name: "cat > notes.md <<'EOF'", rawInput: { command: "cat > notes.md <<'EOF'" } });
+  assert.equal(chat.kind, "shell");
+  assert.equal(chat.label, "Shell: cat > notes.md <<'EOF'");
+  // The engine's own read kind still makes a command a read.
+  const codexRead = presentToolSemantics({ title: "Read notes.md", toolKind: "read", rawInput: { command: "cat notes.md" } });
+  assert.equal(codexRead.kind, "read");
+  assert.equal(codexRead.expandable, false);
+});

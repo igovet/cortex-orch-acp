@@ -70,13 +70,20 @@ _CATALOG: dict[str, dict[str, str]] = {
         # Russian, the coordinator wrote its workers' briefs in Russian
         # too, and a worker's whole world -- brief, acceptance, report --
         # is English by contract. The language chosen here is the language
-        # of this conversation, and of nothing else.
+        # of this conversation, and of nothing else. The Markdown sentence
+        # covers interim chat text, which no tool description reaches.
         "en": "Always write your replies to the user in English, whatever language this prompt is in. "
               "This is about talking to the user only: everything you send to a worker -- title, brief, "
-              "acceptance criteria, clarifications -- stays in English, always.",
+              "acceptance criteria, clarifications -- stays in English, always. "
+              "The chat renders Markdown: format every reply readably -- short paragraphs separated by "
+              "blank lines, headings for distinct parts, lists for several items or steps, `code` for "
+              "paths and commands -- never one unbroken block.",
         "ru": "Всегда пиши свои ответы пользователю по-русски, независимо от того, на каком языке этот запрос. "
               "Это касается только общения с пользователем: всё, что ты отправляешь исполнителю — заголовок, "
-              "бриф, критерии приёмки, уточнения — всегда остаётся на английском.",
+              "бриф, критерии приёмки, уточнения — всегда остаётся на английском. "
+              "Чат отображает Markdown: оформляй каждый ответ читаемо — короткие абзацы через пустую строку, "
+              "заголовки для отдельных частей, списки для нескольких пунктов или шагов, `code` для путей и "
+              "команд — никогда не одним сплошным блоком.",
     },
     "blocked_no_progress": {
         "en": "Blocked: no new worker result, question, or user input arrived after repeated waiting.",
@@ -312,6 +319,15 @@ _CATALOG: dict[str, dict[str, str]] = {
     "unpassed_checks_label": {
         "en": "Unpassed checks",
         "ru": "Непройденные проверки",
+    },
+    # The runtime-rendered disclosure appended to a final answer.
+    "not_verified_heading": {
+        "en": "Not verified",
+        "ru": "Не проверено",
+    },
+    "not_verified_blocker_label": {
+        "en": "blocker",
+        "ru": "причина",
     },
     "new_task_created": {
         "en": "Started a new, separate task ({task_id}); the active task is unaffected.",

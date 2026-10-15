@@ -694,8 +694,12 @@ def synthesis_checks(db, task_id, revision):
     return checks, gaps
 
 
-def disclosed_synthesis(text, not_verified, gaps):
-    """Require and render the same gap disclosure on both final-answer paths."""
+def disclosed_synthesis(text, not_verified, gaps, language='en'):
+    """Require and render the same gap disclosure on both final-answer paths.
+
+    The heading and label are runtime-authored, so they follow the task's
+    selected language; items and blockers are the coordinator's own text.
+    """
     normalized = lambda name: ' '.join(str(name).split()).casefold()
     for index, item in enumerate(not_verified):
         if not item['blocker'].strip():
@@ -708,9 +712,14 @@ def disclosed_synthesis(text, not_verified, gaps):
         raise StoreError('synthesis_gaps_undisclosed', 'arguments.not_verified', ', '.join(missing)[:160],
                          'every retained not_run or unverified check by its exact name, each with its blocker',
                          'A gap with a declared command closes after a verified command_run with exactly matching argv or a complete passing runtime final-verification receipt with identical argv, bound to the gap author\'s observed publication or reviewed digest and the current approved project digest, regardless of execution order; a command-less gap may close by a verified same-name pass in its node or later fix. Plan the missing checks (plan_submit while planning, replan_request while reconciling) if they can be verified; otherwise list each exact name in not_verified with its concrete blocker: ' + '; '.join(missing))
-    return text if not not_verified else (
-        text.rstrip() + '\n\n## Not verified\n\n' +
-        '\n'.join(f"- {item['item']} — blocker: {item['blocker']}" for item in not_verified)
+    if not not_verified:
+        return text
+    from ..acp import messages as localized_messages
+    heading = localized_messages.render('not_verified_heading', language)
+    label = localized_messages.render('not_verified_blocker_label', language)
+    return (
+        text.rstrip() + f'\n\n## {heading}\n\n' +
+        '\n'.join(f"- {item['item']} — {label}: {item['blocker']}" for item in not_verified)
     )
 
 
@@ -1222,7 +1231,7 @@ class TaskMachine:
             db.commit()
         return 'COMPLETED'
 
-    def submit_answer(self, channel, text, request_key, *, not_verified=(), authorization=None):
+    def submit_answer(self, channel, text, request_key, *, not_verified=(), authorization=None, language='en'):
         """Record an informational proposal; only the runtime completes it.
 
         This cannot replace a plan, escape a review or accept a worker result.
@@ -1246,7 +1255,7 @@ class TaskMachine:
             gaps = {}
             if answer_needs_certified_work(db, task):
                 _, gaps = synthesis_checks(db, channel.task_id, task['revision'])
-            stored = disclosed_synthesis(text, not_verified, gaps)
+            stored = disclosed_synthesis(text, not_verified, gaps, language)
             if task['state']=='ANSWER_READY':
                 if task['synthesis']!=stored: raise StoreError('answer_conflict')
             else:
@@ -1680,7 +1689,7 @@ class TaskMachine:
                 transition(db, task_id, 'EXECUTING')
             db.commit()
 
-    def submit_synthesis(self, channel, text, not_verified=(), *, authorization=None):
+    def submit_synthesis(self, channel, text, not_verified=(), *, authorization=None, language='en'):
         with observed_project(self.store, channel.task_id), self.store.connection() as db:
             db.execute('BEGIN IMMEDIATE')
             if authorization: authorization(db)
@@ -1697,7 +1706,7 @@ class TaskMachine:
                     'and let the runtime continue; read task_get_context for the current state.'))
 
             _, gaps = synthesis_checks(db, channel.task_id, task['revision'])
-            stored = disclosed_synthesis(text, not_verified, gaps)
+            stored = disclosed_synthesis(text, not_verified, gaps, language)
             if task['synthesis'] is not None and task['synthesis'] != stored:
                 raise StoreError('synthesis_conflict')
             if task['synthesis'] == stored:

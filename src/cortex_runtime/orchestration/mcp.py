@@ -57,6 +57,13 @@ def _task_get_context(store, channel):
     return compact
 
 
+def _task_language(store, task_id):
+    """The task's turn language, resolved as the coordinator turn resolves it."""
+    from ..acp import messages, steering
+    return messages.select_language(steering.get_language_override(store, task_id),
+                                    steering.recent_user_direct_texts(store, task_id))
+
+
 def dispatch(store, channel, operation, args):
     schema = schemas(channel.role).get(operation)
     if schema is None:
@@ -95,13 +102,15 @@ def dispatch(store, channel, operation, args):
         return _task_get_context(store, channel)
     if operation == 'answer_submit':
         return machine.submit_answer(channel, args['text'], args['request_key'],
-                                     not_verified=args.get('not_verified') or [], authorization=lambda db: _authority(db,channel))
+                                     not_verified=args.get('not_verified') or [], authorization=lambda db: _authority(db,channel),
+                                     language=_task_language(store, channel.task_id))
     if operation == 'plan_submit':
         return machine.submit_plan(channel, args['plan'], args['request_key'], authorization=lambda db: _authority(db,channel))
     if operation == 'verification_submit':
         return machine.submit_verification(channel, args['verification'], args['request_key'], authorization=lambda db: _authority(db,channel))
     if operation == 'synthesis_submit':
-        return machine.submit_synthesis(channel, args['text'], args.get('not_verified') or [], authorization=lambda db: _authority(db,channel))
+        return machine.submit_synthesis(channel, args['text'], args.get('not_verified') or [], authorization=lambda db: _authority(db,channel),
+                                        language=_task_language(store, channel.task_id))
     if operation == 'user_question_request':
         from .questions import request
         return request(store, channel, args)

@@ -147,6 +147,28 @@ def test_synthesis_discloses_retained_gap_with_blocker(machine):
         state.submit_synthesis(channel, 'Done', [dict(item='Live GUI', blocker='Different reason')])
 
 
+def test_synthesis_gap_disclosure_follows_selected_task_language(machine):
+    from cortex_runtime.acp import steering
+    from cortex_runtime.orchestration.mcp import _task_language
+    state, channel = machine
+    assert _task_language(state.store, channel.task_id) == 'en'
+    steering.set_language_override(state.store, channel.task_id, 'ru')
+    assert _task_language(state.store, channel.task_id) == 'ru'
+    state.submit_plan(channel, plan(), 'gap-plan')
+    with state.store.connection() as db:
+        db.execute("UPDATE runtime_tasks SET state='RECONCILING' WHERE task_id=?", (channel.task_id,))
+        db.execute("UPDATE runtime_nodes SET result_json=? WHERE task_id=? AND node_id='N0'",
+                   ('{"checks":[{"name":"Live GUI","outcome":"not_run","blocker":"GUI unavailable"}]}',
+                    channel.task_id))
+        db.commit()
+    items = [dict(item='Live GUI', blocker='GUI недоступен.')]
+    assert state.submit_synthesis(channel, 'Готово', items, language='ru')['recorded']
+    with state.store.connection() as db:
+        stored = db.execute('SELECT synthesis FROM runtime_tasks WHERE task_id=?',
+                            (channel.task_id,)).fetchone()[0]
+    assert stored == 'Готово\n\n## Не проверено\n\n- Live GUI — причина: GUI недоступен.'
+
+
 def test_unrelated_same_name_pass_does_not_resolve_synthesis_gap(tmp_path):
     from cortex_runtime.trusted_channel import resolve_channel
 

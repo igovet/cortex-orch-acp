@@ -84,6 +84,10 @@ the existing ACP assistant-message path and retained pipeline, not a new host AP
 on completion the stored synthesis -- runtime-composed or the coordinator's
 `synthesis_submit` text with its "Not verified" list -- is sent as an assistant
 message before the completion label, so the chat never ends with the bare label.
+The `answer_submit`/`synthesis_submit` `text` descriptions and the coordinator's per-turn
+language directive ask for readable Markdown (a short conclusion first, then paragraphs,
+headings, lists and code spans) rather than one unbroken block; this is model
+guidance, not a runtime-enforced format.
 Automated tests cover emission and recovery, not rendered Desktop qualification.
 
 For declines covered by its fixed vocabulary, `orchestration/synthesis.py`
@@ -163,7 +167,9 @@ execution and untruncated runtime-owned evidence bound to both the gap author's
 runtime-observed publication or review digest and the current reviewed project
 digest, regardless of execution order. Its durable `closed_by` is rederived during recovery and
 synthesis; it never upgrades the worker's original disclosure to a claimed pass.
-The runtime renders that list into the synthesis as "Not verified". Each blocker must name the
+The runtime renders that list into the synthesis as "Not verified" (its heading and
+"blocker" label follow the task's turn language, e.g. "Не проверено"/"причина" for
+Russian; items and blockers stay the coordinator's text). Each blocker must name the
 concrete condition that prevented the check; "not run", "out of scope"
 or "not requested" alone is insufficient. A documented policy requiring an
 explicit owner request can be a concrete blocker when the missing request is

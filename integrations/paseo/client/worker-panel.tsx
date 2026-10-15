@@ -137,7 +137,9 @@ export function TranscriptEvent({ event, expanded, onToggle, onOpenFile, theme }
   const outputText = generic ? toolDetailText(event.raw_output ?? event.output ?? event.content) : null;
   const shellCommand = presentation.kind === "shell" ? presentation.command : null;
   const shownError = error && error !== output ? error : null;
-  const canExpand = semantics.expandable && Boolean(output || error || hasEdit || diffs.length || inputText || outputText);
+  // As in the chat, a shell row always opens to its full command, even when
+  // it printed nothing; the row label shows only a clipped command.
+  const canExpand = semantics.expandable && Boolean(shellCommand || output || error || hasEdit || diffs.length || inputText || outputText);
   const running = event.status === "in_progress" || event.status === "pending" || event.status === "running";
   return <Badge theme={theme} icon={chatToolIcon(event)} label={row.label} summary={row.summary} expanded={expanded && canExpand}
     onToggle={canExpand ? onToggle : undefined} loading={running} failed={failure}

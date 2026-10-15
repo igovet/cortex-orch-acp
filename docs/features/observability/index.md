@@ -240,7 +240,7 @@ Meaningful Cortex MCP, native, external MCP and private-store operations remain
 visible with readable action names. File and skill reads are static target/status
 rows; their result bodies are excluded from new display history, including worker
 activity, and projected out of old replay. The engine still receives the read result.
-Raw data is never displayed. Other calls expand only for readable output or diffs. Thinking and exact protocol
+Raw data is never displayed. Other calls expand only for readable output, diffs or, for a shell call, its command; a shell call titled with its own command line is never treated as a read. Thinking and exact protocol
 bookkeeping operations (including wait) are hidden by a shared presentation policy
 in both the main chat and worker panels, including old replayed history. Other input/output and display updates are retained subject to
 secret redaction. Missing, malformed or unavailable evidence is never converted

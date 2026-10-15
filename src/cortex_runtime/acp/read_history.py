@@ -6,6 +6,20 @@ import re
 from collections.abc import Mapping
 
 
+def shell_command_call(title=None, kind=None, raw_input=None):
+    """Whether a call is a shell command rather than a native read.
+
+    Claude's Bash is titled with its own command line, so ``cat a | grep b``
+    must not be taken for a Read by its first word. Only the engine's own
+    ``read`` kind makes a command a read.
+    """
+    args = raw_input if isinstance(raw_input, Mapping) else {}
+    command = args.get('command', args.get('cmd'))
+    if kind == 'read' or not isinstance(command, str) or not command.strip():
+        return False
+    return kind in {'execute', 'terminal'} or ' '.join(str(title or '').split()) == ' '.join(command.split())
+
+
 def metadata_only_read(title=None, kind=None, raw_input=None):
     args = raw_input if isinstance(raw_input, Mapping) else {}
     name = str(title or '').strip()
@@ -14,6 +28,8 @@ def metadata_only_read(title=None, kind=None, raw_input=None):
     match = re.match(r'^mcp(?:__|\.)([^.]+?)(?:__|\.)([\w-]+)', name, re.I)
     if match:
         return match[1].lower() == 'cortex' and match[2].lower() in {'project_read','read_skill'}
+    if shell_command_call(title, kind, raw_input):
+        return False
     return name.lower() in {'project_read','read_skill'} or bool(re.match(r'^(read|view|cat)(?:\s|$)',name,re.I)) or kind == 'read'
 
 

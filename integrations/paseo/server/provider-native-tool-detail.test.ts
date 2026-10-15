@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { nativeToolDetail, presentTimeline } from "./provider.ts";
+import { nativeEditSnapshot, nativeToolDetail, presentTimeline } from "./provider.ts";
 
 test("maps Claude Read raw input/output to Paseo read detail", () => {
   const event = nativeToolDetail({
@@ -370,4 +370,29 @@ test("raw Code Mode replay has MCP detail/status parity without inventing droppe
   assert.equal(unresolved.item.name, "Shell", "the bridge has not retained kind or code yet");
   const shell: any = presentTimeline(event("execute", { command: "pwd" }, "/project"));
   assert.equal(shell.item.name, "Shell: pwd");
+});
+
+test("maps a Claude Bash row named by its own command to shell detail", () => {
+  const event = nativeToolDetail({
+    type: "timeline.item",
+    sessionId: "s",
+    item: {
+      type: "tool_call", id: "bash-cat", callId: "bash-cat", name: "cat notes.md | grep todo",
+      status: "completed", error: null,
+      detail: { type: "unknown", input: { command: "cat notes.md | grep todo" }, output: [{ type: "text", text: "todo: one" }] },
+    },
+  });
+  if (event.type !== "timeline.item" || event.item.type !== "tool_call") throw new Error("wrong event");
+  assert.deepEqual(event.item.detail, { type: "shell", command: "cat notes.md | grep todo", output: "todo: one" });
+});
+
+test("aliases Claude Edit/Write snake_case input for the bridge edit row", () => {
+  const edit = nativeEditSnapshot({ kind: "edit", input: { file_path: "/p/a.py", old_string: "a", new_string: "b" } });
+  assert.deepEqual(edit.input, { file_path: "/p/a.py", old_string: "a", new_string: "b", filePath: "/p/a.py", oldString: "a", newString: "b" });
+  const write = nativeEditSnapshot({ kind: "edit", input: { file_path: "/p/b.md", content: "# B" } });
+  assert.deepEqual(write.input, { file_path: "/p/b.md", content: "# B", filePath: "/p/b.md", newString: "# B" });
+  const native = { kind: "edit", input: { filePath: "/p/c", newString: "x", new_string: "y" } };
+  assert.equal(nativeEditSnapshot(native), native);
+  const shell = { kind: "execute", input: { command: "ls", content: "x" } };
+  assert.equal(nativeEditSnapshot(shell), shell);
 });
