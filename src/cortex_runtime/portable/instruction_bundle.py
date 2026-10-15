@@ -16,7 +16,11 @@ from datetime import datetime, timezone
 import sqlite3
 from typing import Any, Iterable, Mapping
 
-from .roles import RoleInstructionSet, composed_instructions
+from .errors import PortableError
+from .roles import (
+    RoleInstructionSet, composed_instructions, load_role, read_reference,
+    reference_ids, situational_skill_triggers,
+)
 
 
 def _canonical(value: Any) -> str:
@@ -107,6 +111,12 @@ class InstructionBundle:
     # as if it had been known during routing.
     observed_engine_version: str | None = None
     sent_observed_engine_version: str | None = None
+    # Advisory, non-identity metadata: situational/catalog skill ids this
+    # bundle's role would currently fail to resolve through `read_skill`.
+    # Like `observed_engine_version`, it describes install-time state
+    # rather than the intended instructions, so it is excluded from
+    # `assembled_sha256`/the bundle identity -- see `catalog_resolution_gaps`.
+    unresolved_catalog_entries: tuple[str, ...] = ()
 
     @property
     def source_manifest_sha256(self) -> str:
@@ -175,6 +185,7 @@ class InstructionBundle:
             "session_ref": self.session_ref,
             "observed_engine_version": self.observed_engine_version,
             "sent_observed_engine_version": self.sent_observed_engine_version,
+            "unresolved_catalog_entries": list(self.unresolved_catalog_entries),
         }
 
     def to_json(self, *, include_content: bool = True) -> str:
@@ -195,6 +206,7 @@ class InstructionBundle:
             sent_attempt_id=value.get("sent_attempt_id"), session_ref=value.get("session_ref"),
             observed_engine_version=value.get("observed_engine_version"),
             sent_observed_engine_version=value.get("sent_observed_engine_version"),
+            unresolved_catalog_entries=tuple(value.get("unresolved_catalog_entries") or ()),
         )
         if _digest(bundle.text) != bundle.assembled_sha256:
             raise ValueError("instruction_bundle_assembled_hash_mismatch")
@@ -205,6 +217,36 @@ def _as_source(value: InstructionSource | Mapping[str, Any]) -> InstructionSourc
     if isinstance(value, InstructionSource):
         return value
     return InstructionSource.from_dict(value)
+
+
+def catalog_resolution_gaps(role_kind: str, role_id: str) -> tuple[str, ...]:
+    """Situational/catalog skill ids this role's prompt names for
+    ``read_skill`` that would fail to load right now.
+
+    A situational skill is never loaded eagerly -- a model reads one only
+    once its stated trigger actually arises (see
+    ``roles.composed_instructions``'s docstring) -- so a load failure here
+    never blocks session start; the now-blocking required-inlined-skill
+    guard in ``composed_instructions`` is the separate, blocking
+    counterpart for the always-included skills. This walks the same load
+    path ``delegation.mcp_tools._read_skill_body`` uses for a live
+    ``read_skill`` call (a reference id through ``read_reference``,
+    anything else through ``load_role``), so a reported id would really
+    fail if the model called it with this role's exact authorization.
+    """
+    unresolved: list[str] = []
+    for skill_id, _trigger in situational_skill_triggers(role_kind, role_id):
+        try:
+            if skill_id in reference_ids(role_kind, role_id):
+                text = read_reference(skill_id, role_kind=role_kind, role_id=role_id)
+            else:
+                text = load_role(skill_id).body_portable
+        except PortableError:
+            unresolved.append(skill_id)
+            continue
+        if not text.strip():
+            unresolved.append(skill_id)
+    return tuple(unresolved)
 
 
 def build_instruction_bundle(
@@ -254,6 +296,7 @@ def build_instruction_bundle(
     return InstructionBundle(
         task_id, assignment_ref, attempt_id, role_set.role_id, role_set.kind,
         engine, engine_version, text, sources, assembled, _digest(identity),
+        unresolved_catalog_entries=catalog_resolution_gaps(role_set.kind, role_set.role_id),
     )
 
 
@@ -294,6 +337,7 @@ def capture_instruction_bundle(
         task_id, assignment_ref, attempt_id, role_id, role_kind,
         engine, engine_version, assembled_text, normalized, assembled_sha256,
         _digest(identity), observed_engine_version=observed_engine_version,
+        unresolved_catalog_entries=catalog_resolution_gaps(role_kind, role_id),
     )
 
 

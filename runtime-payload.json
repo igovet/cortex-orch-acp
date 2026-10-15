@@ -68,6 +68,7 @@
     "src/cortex_runtime/delegation/capacity_store.py",
     "src/cortex_runtime/delegation/check_evidence.py",
     "src/cortex_runtime/delegation/check_requests.py",
+    "src/cortex_runtime/delegation/codex_tool_cheat_sheet.py",
     "src/cortex_runtime/delegation/completion.py",
     "src/cortex_runtime/delegation/context_packet.py",
     "src/cortex_runtime/delegation/contracts.py",

@@ -498,6 +498,28 @@ keeps that value-free reason (`error`, `field`, `expected`, `correction`, never
 `received` or the body) in the worker's display history. Whether a live worker
 now reads descriptions first has not been observed yet.
 
+Each `codex-acp` session's role instructions also end with a generated tool
+cheat sheet (`delegation/codex_tool_cheat_sheet.py`). When instruction
+delivery is qualified, `live_adapters._session_new_meta_for` renders it at
+session creation from the live `mcp_tools.tool_definitions()` for that role
+kind, role id and the plan node's latest stage (resolved by task and attempt),
+and appends it to the instructions before
+`build_codex_session_new_meta` turns them into `_meta.systemPrompt`. Claude
+and OpenCode sessions never receive it. For at most six tools (`result_submit`,
+`command_run`, `access_request`, `ask_question`, `project_edit` and
+`read_report` when the role is offered them, then other offered tools in name
+order) it lists the schema's required fields and one TS-style example call,
+`await cortex.<tool>({...})`, with placeholder values for those fields only;
+optional fields and descriptions stay in the advertised schema. The text is
+bounded to 8,000 characters: a tool whose entry would exceed the budget is
+omitted together with the rest, and an explicit note states how many were
+omitted. Because it is rendered from the schemas rather than written by hand,
+it cannot drift from the advertised contract;
+`tests/test_codex_tool_cheat_sheet.py` checks the budget, the codex-only
+delivery, that a schema change changes the rendered text, and that review-stage
+required fields and example calls include `verdict`. Whether live Codex
+workers make fewer invalid first calls with it has not been observed.
+
 What code mode shows of a nested tool is a TypeScript declaration Codex derives
 from the MCP `inputSchema` (Codex 0.159.1 `code-mode-protocol`
 `json_schema_types.rs`), and it loses contract text in two ways; both exist in

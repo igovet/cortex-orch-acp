@@ -18,6 +18,15 @@ for exact paths, artifact-test limits and the next upstream-fix decision.
 
 ## Current ACP boundary (1.0.0)
 
+Always-included shared skills are required instruction components, not optional
+references. A load failure or empty portable body blocks composition with
+`required_skill_unavailable`, naming the skill, receiving role and underlying
+cause. Worker provisioning records the existing failed step/error and reports
+an `assignment_failed` diagnostic before opening an engine session; situational
+catalog entries are still loaded only on demand. This validates instruction
+availability, not model compliance or an additional permission boundary. See
+[instruction delivery](docs/features/roles-and-delegation/index.md#instruction-delivery).
+
 Frontend-design automatic routing is affinity-bound, including retries and review
 fixes. Same-engine fallback, and cross-engine fallback when the affinity engine
 has no eligible route at all, grants no authorization and does not bypass deny,
@@ -314,7 +323,7 @@ Plan verification commands execute as literal argv without a shell. Submission r
 
 Worker briefs preserve the assignment objective, scope and dependency report references. The original task goal and review git evidence are shortened only when needed to fit the provisioning limit, and every shortened field identifies the worker-readable capsule or git-output source. These references use tools already available to the worker and do not change its assignment authority. A recovery capsule whose critical sections exceed their byte budget is compacted deterministically, never refused: each truncated field carries its sha256, size, a fenced preview with its original trust label and the tool that returns the full text (`read_source` for user messages and answers). Each trimmed list names its omitted entries, so recovery never silently loses required context.
 
-A worker `passed` check is accepted only with an exact same-attempt `command_run` or user-confirmed `outside_command` receipt for one completed, nontrivial operation, complete untruncated output and exit code 0. Engine-native shell calls and file reads do not verify checks. Insufficient evidence stays `unverified`; observed nonzero exits stay `failed`. Earlier reports are not rewritten, and older evidence is marked weak when projected under the current rule. Check run history is retained; a failure closes only on a later exact verified rerun that remains the latest result for that command. A supported invocation error in the worker's own standalone Python probe can instead be retracted by a later verified passing correction; the failed receipt stays as `retracted` history, never as a pass. Runtime verification failures are never retracted.\n\nTransport state is distinct from task outcome. A plugin disconnect records available session/task/attempt identities and history completeness; restart recovery reads persisted state and leaves actions with unknown outcomes unresolved. Until reload recovery is qualified for the deployed version, update the plugin between active tasks. A host SIGKILL without SIGTERM cannot be recorded, and native engine actions cannot be represented by the retained command receipt mechanism.
+A worker `passed` check is accepted only with an exact same-attempt `command_run` or user-confirmed `outside_command` receipt for one completed, nontrivial operation, complete untruncated output and exit code 0. Engine-native shell calls and file reads do not verify checks. Insufficient evidence stays `unverified`; observed nonzero exits stay `failed`. Earlier reports are not rewritten, and older evidence is marked weak when projected under the current rule. Check run history is retained; a failure closes only on a later exact verified rerun that remains the latest result for that command. Identical argv/cwd reruns may cross between `command_run` and `outside_command` in either direction, preserving both receipts and their operation/profile provenance. Same-operation profile changes do not match; this comparison never grants execution permission. A supported syntax, regex or statically proven literal-expectation error in the worker's own standalone Python probe can instead be retracted by a later verified passing correction; the failed receipt stays as `retracted` history, never as a pass. Literal-data probes permit only single-assignment literal bindings, equality assertions and a small pure-builtin allowlist, bounded to 8,192 source characters and 256 AST nodes, with no imports, IO, product calls or dynamic execution. Only one expected literal changes; the original false comparison and all corrected true comparisons are established without executing submitted source. Both complete outputs, same operation/cwd/profile, unique correction binding and later-run checks remain mandatory. Project test/lint/build and runtime-verification failures are never retracted.\n\nTransport state is distinct from task outcome. A plugin disconnect records available session/task/attempt identities and history completeness; restart recovery reads persisted state and leaves actions with unknown outcomes unresolved. Until reload recovery is qualified for the deployed version, update the plugin between active tasks. A host SIGKILL without SIGTERM cannot be recorded, and native engine actions cannot be represented by the retained command receipt mechanism.
 
 On stdin EOF, the ACP process joins its reader after EOF is observed and before
 runtime teardown, so disconnect recording and cancellation are not abandoned
@@ -771,7 +780,9 @@ Development starts revalidate policy and authority; observed policy revision/den
 changes or revocation terminate the owned command group with incomplete evidence.
 Switching modes does not remount a process or undo outside writes, detached
 children, Docker builds, containers or volumes. Receipts retain cwd, profile and
-policy provenance; another cwd/profile cannot close a failed check. Neither
+policy provenance; another cwd cannot close a failed check, nor can a profile change within one operation.
+An approved `outside_command` rerun may close a `command_run` failure (and vice versa)
+only at identical argv/cwd, despite their necessarily different profiles. Neither
 no-paid fake-launch tests nor startup smoke establishes real containment or GUI
 behavior. Paid CLI/desktop qualification still requires the owner's explicit
 mode-specific request.

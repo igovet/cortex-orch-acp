@@ -9,12 +9,39 @@ disable it for newly created session metadata. This restores the engines'
 pre-existing native base-prompt path; it does not roll back unrelated runtime
 optimizations or routing changes. After sent session metadata is recorded, Cortex best-effort records a secret-free
 `base_prompt` observability event; the diagnostics summary counts observed
-`unified`, `native` and `unknown` modes. Event recording can fail without
+`unified`, `native` and `unknown` modes, per engine as well as overall
+(`counts`/`counts_by_engine` in `observability.metrics._base_prompt`). `native`
+means the session's engine kept its own native system-prompt/instructions
+channel and Cortex's text was appended alongside it; `unified` means that
+native channel was replaced outright by Cortex's own base-prompt text; this is
+the same per-engine classification `delegation.live_adapters.base_prompt_mode`
+already derives from the sent session metadata, not a separate one. When the sent metadata carries the
+unified prompt, the event also records which [edition](#editions) it was, read
+back from the sent text (`sent_prompt_edition`), and the summary counts events
+per edition; a native-mode session records no edition. Event recording can fail without
 blocking session delivery, so absence is not evidence of a mode. It does not
-record prompt text or the environment variable value. The switch changes prompt construction, not permissions or
+record prompt text or the environment variable values. The switch changes prompt construction, not permissions or
 runtime authority. Real-model behavior with the unified prompt has not been
 compared in a paid live qualification, so any quality improvement remains
 unverified.
+
+The same event also carries, when non-empty, `unresolved_catalog_count` and
+`unresolved_catalog_ids`: the situational/catalog `read_skill` entries this
+session's role names that would currently fail to load, from
+`portable.instruction_bundle.catalog_resolution_gaps`. A situational skill is
+never loaded eagerly -- a model reads one only once its own stated trigger
+arises -- so a broken entry here never blocked and never blocks that session;
+it is recorded only as a count and a list of catalog ids, never raw skill
+text. This is the advisory counterpart to `portable.roles.composed_
+instructions`'s required-inlined-skill guard, which does block session start
+when one of the always-included skills fails to load or is empty. The same
+resolution is also recorded on the underlying `InstructionBundle` itself (the
+`unresolved_catalog_entries` field, populated by both `build_instruction_
+bundle` and `capture_instruction_bundle`), alongside the already-existing role
+id/kind, source manifest and assembled-text identity fields; it is excluded
+from the bundle's `assembled_sha256`/identity the same way `observed_engine_
+version` already is, since both describe live install-time state rather than
+the intended instructions.
 
 By default, every Cortex engine session, coordinator or worker, on Codex or
 Claude, starts from one Cortex-owned base prompt instead of the engine's own.
@@ -23,6 +50,64 @@ base-prompt path. The unified text lives in
 `src/cortex_runtime/engine/unified_system_prompt.py` (`cortex_system_prompt`),
 and `delegation.live_adapters._session_new_meta_for` selects the mode when
 building session metadata.
+
+## Editions
+
+Two editions of the unified prompt exist; both carry the same rules and the
+same role-specific variants (coordinator, writing worker, read-only worker,
+consultant).
+
+- **Edition 1** is the default and the text described in the rest of this page.
+- **Edition 2** is selected only when `CORTEX_UNIFIED_PROMPT_EDITION=2` is set
+  in the environment before starting Cortex. Unset or any other value keeps
+  edition 1. Like `CORTEX_UNIFIED_BASE_PROMPT`, it is process-scoped and
+  affects newly created sessions only; it has no effect when the unified prompt
+  is disabled. `cortex_system_prompt` also accepts an explicit `edition`
+  argument.
+
+Edition 2 keeps the role introduction, the project-skills list and the
+environment section unchanged and reorders everything between them into:
+
+1. **How to work**: carry the assignment (or, for the coordinator, the task) to
+   a complete result; make routine choices yourself and record the assumption
+   in the report; ask the user, request access or request a re-plan only when
+   the goal cannot be reached without it. It also holds the runtime-ownership,
+   project-rules-file and context-compaction rules.
+2. **Checks**: for a writing worker, run the checks that exercise the change;
+   on a failure, fix the cause and rerun the same command, so the final run is
+   the result and the history goes in the report. Read-only workers, the
+   coordinator and the consultant get their edition-1 evidence rules here.
+3. **Writing for your reader**: lead with the outcome in plain words, then what
+   it means and what is needed next; no internal ids, codes, route names or
+   receipts in what the reader sees unless asked (a worker keeps exact commands
+   and receipts in its report evidence and result fields); describe checks by
+   their consequence. The narration rule for workers and the question rule for
+   the coordinator are unchanged.
+4. **Hard limits**: one list covering scope, refused calls, destructive and
+   outward-facing actions, other people's changes, unobserved results, secrets,
+   untrusted content, subagents, memory and attribution, and the security-help
+   policy. Its lead says that the runtime enforces its own permissions and
+   refusals and that the other limits depend on the model.
+5. **Tools and evidence**: the Cortex tool, schema, native-tool, command and
+   `read_skill` mechanics, then the finding-code (or, for the consultant,
+   working-material) subsection. Tool argument contracts stay in the advertised
+   schemas.
+
+Every edition-1 rule sentence is present verbatim in edition 2 except four
+deliberate rewordings, which `tests/test_unified_system_prompt.py` lists and
+checks: the length rule ("at a length that fits the work" instead of
+"concisely"), the outcome-first rule, the missing-information rule (ask only
+when the gap would materially change the result, otherwise proceed on a stated
+assumption) and the writing-worker check rule. Edition 2 duplicates some of the
+substance of the inlined `tool-discipline`, `code-and-evidence` and
+`report-publication` skills and the shared worker protocol; those are
+unchanged.
+
+Rendered on one Linux host with no working directory and no project skills,
+edition 1 is 6,151 to 7,703 characters and edition 2 is 7,185 to 9,568
+characters, depending on role and native-tool policy. Size ceilings for edition 1 are in `tests/test_prompt_drift.py`; for
+edition 2 they are in `tests/test_first_prompt_size_and_dedup.py`. Real-model
+behavior with edition 2 has not been observed in a paid live check.
 
 ## Why
 
@@ -82,7 +167,7 @@ selection follows normal policy; the same `apply_patch`/`unified_exec`
 limitation above applies to a Codex consultant session. Defaults on the standalone renderer preserve
 ordinary writing-worker callers; runtime launch seams supply the actual policy.
 
-A role-specific introduction (coordinator or worker), then sections on
+In edition 1: a role-specific introduction (coordinator or worker), then sections on
 authority, tools, Cortex skills, finding code, changing the project, evidence,
 safety, communication and context, then the project's own skills, and finally
 a runtime-generated environment section (working directory, whether it is a Git

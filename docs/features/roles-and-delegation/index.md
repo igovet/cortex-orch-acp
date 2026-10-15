@@ -88,6 +88,26 @@ must not imitate or rely on it.
 
 ## Instruction delivery
 
+`portable.roles.composed_instructions()` requires every applicable entry in
+`INLINED_SKILLS` to load with a nonempty portable body. It no longer silently
+omits unreadable required skills. Failure raises a non-retryable
+`PortableError` (`required_skill_unavailable`) whose remediation names the
+receiving role, skill id and underlying error code/remediation; the original
+error remains chained. `build_instruction_bundle()` propagates the same error.
+Consultant exclusions remain unchanged. Situational entries are named in the
+catalog, not eagerly loaded, so an unavailable situational source does not
+block composition.
+
+Worker provisioning composes instructions in `_step_engine_session` before
+recording an engine-open intent or calling the opener. Its existing
+`_run_steps`/`_fail` path records failed status and error code, retains the
+engine-session step and clears the pending channel secret. The existing
+`OrchestratingRuntime._provision_and_prompt_inner` handler emits
+`assignment_failed` with the specific diagnostic instead of `assignment_ready`.
+This uses the existing provisioning error/step reporting, with no new lifecycle
+or permissions mechanism. After repairing the source, a failed delegation
+requires a fresh request; the same failed request is not reopened.
+
 Requirements intake and design workflow are coordinator-only situational skills.
 The five design-* skills have stage-specific worker allowlists in
 `portable.roles.DESIGN_SKILL_ROLES`, used for both delivery and read authorization;

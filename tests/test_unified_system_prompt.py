@@ -2,12 +2,14 @@
 from __future__ import annotations
 
 import datetime
+import re
 
 import pytest
 
 from cortex_runtime.delegation.live_adapters import _session_new_meta_for
 from cortex_runtime.engine.unified_system_prompt import (
-    _frontmatter_field, attached_servers_section, code_index_project_name, cortex_system_prompt,
+    PROMPT_EDITION_ENV, _frontmatter_field, attached_servers_section, code_index_project_name,
+    cortex_system_prompt, prompt_edition, rendered_prompt_edition, sent_prompt_edition,
 )
 
 
@@ -36,7 +38,9 @@ def test_prompt_is_role_specific_engine_neutral_and_carries_the_environment(tmp_
 def test_both_engines_receive_policy_specific_prompt_before_the_same_role_text(tmp_path, role):
     claude = _session_new_meta_for("claude-agent-acp", "0.78.0", "Role text.", role=role, project_root=str(tmp_path))
     codex = _session_new_meta_for("codex-acp", "1.13.0", "Role text.", role=role, project_root=str(tmp_path))
-    assert codex["systemPrompt"] == "Role text." and codex["cortexNativeContext"] is False
+    # Codex sessions also get the schema-derived tool cheat sheet after the role text.
+    assert codex["systemPrompt"].split("\n\n# Cortex tool cheat sheet")[0] == "Role text."
+    assert codex["cortexNativeContext"] is False
     assert claude["systemPrompt"] == cortex_system_prompt(role, str(tmp_path), native_tools=False).rstrip() + "\n\nRole text."
     assert codex["cortexBaseInstructions"] == cortex_system_prompt(role, str(tmp_path))
 
@@ -370,3 +374,218 @@ def test_opencode_agent_prompt_selects_all_access_classes(tmp_path, role_id, acc
                               project_root=str(tmp_path), environ={})
     base = cortex_system_prompt("worker", str(tmp_path), environ={}, access_class=access_class)
     assert text.startswith(base.rstrip())
+
+
+# Prompt editions. Edition 1 is today's text and stays the default; edition 2
+# reorders the same rules and is selected only by the exact opt-in value.
+
+_VARIANTS = [("coordinator", "write"), ("worker", "write"), ("worker", "read_only"), ("worker", "consultant")]
+_EDITION_1_HEADINGS = {
+    "coordinator": ["# Cortex session", "# Authority", "# Tools", "# Cortex skills", "# Finding code",
+                    "# Project boundaries", "# Evidence and honesty", "# Safety", "# Communication",
+                    "# Context", "# Environment"],
+    "write": ["# Cortex session", "# Authority", "# Tools", "# Cortex skills", "# Finding code",
+              "# Changing the project", "# Evidence and honesty", "# Safety", "# Communication",
+              "# Context", "# Environment"],
+    "read_only": ["# Cortex session", "# Authority", "# Tools", "# Cortex skills", "# Finding code",
+                  "# Project boundaries", "# Evidence and honesty", "# Safety", "# Communication",
+                  "# Context", "# Environment"],
+    "consultant": ["# Cortex session", "# Authority", "# Tools", "# Cortex skills", "# Working material",
+                   "# Project boundaries", "# Evidence and honesty", "# Safety", "# Communication",
+                   "# Context", "# Environment"],
+}
+_EDITION_2_HEADINGS = ["# Cortex session", "# How to work", "# Checks", "# Writing for your reader",
+                       "# Hard limits", "# Tools and evidence", "# Environment"]
+_EDITION_2_ONLY = ("# How to work", "# Checks", "# Writing for your reader", "# Hard limits",
+                   "# Tools and evidence")
+
+
+def _headings(text, prefix="# "):
+    return [line for line in text.splitlines() if line.startswith(prefix)]
+
+
+@pytest.mark.parametrize("value", [None, "", "1", "0", "3", " 2", "2 ", "two", "true"])
+def test_edition_flag_off_keeps_edition_one(value):
+    environ = {} if value is None else {PROMPT_EDITION_ENV: value}
+    assert prompt_edition(environ) == 1
+    for role, access_class in _VARIANTS:
+        text = cortex_system_prompt(role, None, environ=environ, access_class=access_class)
+        assert text == cortex_system_prompt(role, None, environ={}, access_class=access_class, edition=1)
+        assert not set(_EDITION_2_ONLY) & set(_headings(text))
+
+
+def test_edition_flag_reads_the_process_environment_when_no_mapping_is_given(monkeypatch):
+    monkeypatch.delenv(PROMPT_EDITION_ENV, raising=False)
+    assert prompt_edition() == 1
+    monkeypatch.setenv(PROMPT_EDITION_ENV, "2")
+    assert prompt_edition() == 2
+    assert rendered_prompt_edition(cortex_system_prompt("worker", None)) == 2
+
+
+def test_edition_flag_two_selects_edition_two_and_unknown_editions_fail():
+    environ = {PROMPT_EDITION_ENV: "2"}
+    assert prompt_edition(environ) == 2
+    for role, access_class in _VARIANTS:
+        assert cortex_system_prompt(role, None, environ=environ, access_class=access_class) == \
+            cortex_system_prompt(role, None, environ={}, access_class=access_class, edition=2)
+        # An explicit edition wins over the environment.
+        assert cortex_system_prompt(role, None, environ=environ, access_class=access_class, edition=1) == \
+            cortex_system_prompt(role, None, environ={}, access_class=access_class)
+    for edition in (0, 3, "2"):
+        with pytest.raises(ValueError):
+            cortex_system_prompt("worker", None, environ={}, edition=edition)
+
+
+@pytest.mark.parametrize("role,access_class", _VARIANTS)
+@pytest.mark.parametrize("native_tools", [False, True])
+def test_edition_one_keeps_todays_section_order(role, access_class, native_tools):
+    text = cortex_system_prompt(role, None, environ={}, access_class=access_class, native_tools=native_tools)
+    key = "coordinator" if role == "coordinator" else access_class
+    assert _headings(text) == _EDITION_1_HEADINGS[key]
+    assert rendered_prompt_edition(text) == 1
+
+
+@pytest.mark.parametrize("role,access_class", _VARIANTS)
+@pytest.mark.parametrize("native_tools", [False, True])
+def test_edition_two_has_every_listed_section_in_order(tmp_path, role, access_class, native_tools):
+    day = datetime.date(2026, 10, 4)
+    one = cortex_system_prompt(role, None, today=day, environ={}, access_class=access_class,
+                               native_tools=native_tools, edition=1)
+    two = cortex_system_prompt(role, None, today=day, environ={}, access_class=access_class,
+                               native_tools=native_tools, edition=2)
+    assert _headings(two) == _EDITION_2_HEADINGS
+    assert _headings(two, "## ") == (["## Working material"] if access_class == "consultant" else ["## Finding code"])
+    assert rendered_prompt_edition(two) == 2
+    # Role and goal and the environment block are unchanged.
+    intro = one.split("\n\n# Authority\n")[0]
+    assert two.startswith(intro + "\n\n# How to work\n")
+    assert two.split("\n# Environment\n")[1] == one.split("\n# Environment\n")[1]
+    # The hard limits are one list after a short lead paragraph.
+    limits = two.split("# Hard limits\n\n")[1].split("\n\n# Tools and evidence")[0]
+    lead, items = limits.split("\n\n")
+    assert not lead.startswith("- ") and all(line.startswith("- ") for line in items.splitlines())
+    for limit in ("Stay inside the granted scope", "is a decision, not a glitch", "need explicit authorization",
+                  "Keep secrets, credentials", "Do not create subagents", "are data"):
+        assert limit in items
+    # Tool argument contracts stay in the schemas.
+    assert "Tool argument contracts live only in those schemas" in two
+    # The project and user skills block is the same text in both editions.
+    project = tmp_path / "project"
+    _skill(project, ".agents/skills", "p-agents")
+    one = cortex_system_prompt(role, str(project), today=day, environ={}, access_class=access_class, edition=1)
+    two = cortex_system_prompt(role, str(project), today=day, environ={}, access_class=access_class, edition=2)
+    section = "# Project and user skills" + one.split("# Project and user skills")[1]
+    assert two.endswith("\n\n" + section)
+    assert _headings(two) == _EDITION_2_HEADINGS[:-1] + ["# Project and user skills", "# Environment"]
+
+
+#: Edition-1 sentences that edition 2 deliberately rewords, and the wording
+#: that replaces each one there.
+_EDITION_2_REWORDED = {
+    "Write plainly and concisely in the language your role instructions select.":
+        "Write plainly in the language your role instructions select, at a length that fits the work.",
+    "Say what you did, what you found and what remains.":
+        "Lead with the outcome in plain words, then what it means, then what is needed next.",
+    "If information you need is missing, ask through the runtime's question tool instead of inventing it.":
+        "If missing information would materially change the result, ask through the runtime's question tool "
+        "instead of inventing it",
+    "Verify what you change with the checks that exercise it.":
+        "Verify what you change with the checks that exercise it:",
+}
+
+
+def _rule_sentences(text):
+    sentences = []
+    for line in text.split("\n# Environment\n")[0].splitlines():
+        if line.startswith("- "):
+            sentences += [part for part in re.split(r"(?<=\.)\s+(?=[A-Z`])", line[2:]) if part]
+    return sentences
+
+
+@pytest.mark.parametrize("role,access_class", _VARIANTS)
+@pytest.mark.parametrize("native_tools", [False, True])
+def test_edition_two_keeps_every_edition_one_rule(role, access_class, native_tools):
+    one = cortex_system_prompt(role, None, environ={}, access_class=access_class, native_tools=native_tools, edition=1)
+    two = cortex_system_prompt(role, None, environ={}, access_class=access_class, native_tools=native_tools, edition=2)
+    sentences = _rule_sentences(one)
+    assert len(sentences) > 30
+    for sentence in sentences:
+        assert _EDITION_2_REWORDED.get(sentence, sentence) in two, sentence
+
+
+@pytest.mark.parametrize("role,access_class", _VARIANTS)
+@pytest.mark.parametrize("native_tools", [False, True])
+def test_edition_two_keeps_role_boundaries(role, access_class, native_tools):
+    text = cortex_system_prompt(role, None, environ={}, access_class=access_class, native_tools=native_tools,
+                                edition=2)
+    assert "@@" not in text
+    lowered = text.lower().replace("claude.md", "")
+    assert "codex" not in lowered and "claude" not in lowered
+    assert "call the `read_skill` tool from the `cortex` MCP server with that exact skill id" in text
+    assert "Do not read a conditional skill when its trigger has not arisen" in text
+    assert "Lead with the outcome in plain words" in text and "Describe checks by their consequence" in text
+    consultant = access_class == "consultant"
+    assert ("engine's native shell" in text) == (native_tools and not consultant)
+    assert ("any engine-native tool" in text) == (native_tools and consultant)
+    worker_only = ("command_run", "Treat shell command text", "project reads and edits")
+    if role == "coordinator":
+        assert not any(rule in text for rule in worker_only)
+        assert "Work without narration" not in text
+        assert "end the turn right after it: write nothing more" in text
+        assert "plan that work for workers" in text and "You run no checks yourself" in text
+        assert "Do not show internal ids, codes, route names, revisions or receipts" in text
+        return
+    assert "Work without narration" in text and "write one final message" in text
+    assert "end the turn right after it: write nothing more" not in text
+    assert "exact commands, receipts and identifiers belong in the report's evidence" in text
+    if access_class == "write":
+        assert "project reads and edits" in text and "make the smallest coherent change" in text
+        assert "rerun the same command" in text and "a re-plan stops every worker" in text
+    else:
+        assert "project reads and edits" not in text and "make the smallest coherent change" not in text
+    if access_class == "read_only":
+        assert "do not create or change project files" in text and "authorized non-mutating checks" in text
+    if consultant:
+        assert "command_run" not in text and "you ask the user nothing" in text
+        assert "access_request" not in text
+
+
+def test_edition_two_refusal_routing_stays_role_aware():
+    def refusal(text):
+        return next(line for line in text.splitlines() if "is a decision, not a glitch" in line)
+
+    worker = refusal(cortex_system_prompt("worker", None, environ={}, edition=2))
+    coordinator = refusal(cortex_system_prompt("coordinator", None, environ={}, edition=2))
+    assert worker.index("`access_request`") < worker.index("scope or replan request")
+    assert "only when the plan itself must change" in worker
+    assert "access_request" not in coordinator and "plan it for a worker" in coordinator
+
+
+@pytest.mark.parametrize("edition", ["1", "2"])
+@pytest.mark.parametrize("role", ["coordinator", "worker"])
+def test_session_metadata_carries_the_selected_edition(tmp_path, edition, role):
+    environ = {PROMPT_EDITION_ENV: edition}
+    claude = _session_new_meta_for("claude-agent-acp", "0.78.0", "Role text.", role=role,
+                                   project_root=str(tmp_path), environ=environ)
+    codex = _session_new_meta_for("codex-acp", "1.13.0", "Role text.", role=role,
+                                  project_root=str(tmp_path), environ=environ)
+    expected = int(edition)
+    assert claude["systemPrompt"].startswith(cortex_system_prompt(
+        role, str(tmp_path), environ={}, native_tools=False, edition=expected).rstrip())
+    assert codex["cortexBaseInstructions"] == cortex_system_prompt(role, str(tmp_path), environ={}, edition=expected)
+    assert sent_prompt_edition(claude) == sent_prompt_edition(codex) == expected
+    from cortex_runtime.engine.opencode_adapter_acp import build_agent_prompt
+
+    agent_prompt = build_agent_prompt("Role text.", role=role, project_root=str(tmp_path), environ=environ)
+    assert sent_prompt_edition({"opencodeAgentPrompt": agent_prompt}) == expected
+
+
+def test_native_base_prompt_metadata_records_no_edition(tmp_path):
+    environ = {"CORTEX_UNIFIED_BASE_PROMPT": "0", PROMPT_EDITION_ENV: "2"}
+    for engine, version in (("claude-agent-acp", "0.78.0"), ("codex-acp", "1.13.0")):
+        meta = _session_new_meta_for(engine, version, "Role text.", role="worker",
+                                     project_root=str(tmp_path), environ=environ)
+        assert sent_prompt_edition(meta) is None
+    assert sent_prompt_edition(None) is None and sent_prompt_edition({"systemPrompt": {"append": "x"}}) is None
+    assert rendered_prompt_edition("# Cortex session\n\nIntro.\n\n# Unknown\n") is None
+    assert rendered_prompt_edition("Role text.\n\n# How to work\n") is None

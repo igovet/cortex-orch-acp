@@ -37,9 +37,12 @@ already this cheap in production today.
 """
 from __future__ import annotations
 
+import threading
 import time
 import uuid
 from pathlib import Path
+
+import pytest
 
 from cortex_runtime.bootstrap import bootstrap_task
 from cortex_runtime.catalog import store as catalog_store
@@ -53,7 +56,9 @@ from cortex_runtime.delegation.live_adapters import (
     EngineSessionManagerAdapter,
     SharedProjectRootWorkspaceProvisioner,
 )
-from cortex_runtime.delegation.provisioning import ProvisioningService
+from cortex_runtime.delegation.provisioning import ProvisioningService, _idempotency_key
+from cortex_runtime.portable import roles
+from cortex_runtime.portable.errors import PortableError, PortableErrorCategory
 from cortex_runtime.engine.session_manager import EngineSessionManager
 from cortex_runtime.ownership import current_owner_epoch
 from cortex_runtime.portable.identity import OwnershipEpoch, SourceEvent
@@ -217,3 +222,75 @@ def test_provisioning_stage_breakdown_against_the_fake_engine(tmp_path, monkeypa
     # against (a local step should never rival a real subprocess round-trip).
     local_total = sum(sum(timings.get(s, [])) for s in ("_step_workspace", "_step_channel", "_step_config_snapshot", "_step_context_snapshot"))
     assert local_total < 1.0, f"local provisioning steps took {local_total:.2f}s -- expected near-zero (no I/O beyond SQLite)"
+
+
+@pytest.mark.parametrize("through_runtime", [False, True])
+def test_required_skill_failure_blocks_session_and_reports_diagnostic(tmp_path, monkeypatch, through_runtime):
+    from cortex_runtime.acp.orchestrating_runtime import OrchestratingRuntime
+    from cortex_runtime.delegation import events as delegation_events
+
+    store, channel, service, adapter, timings = _setup(tmp_path, monkeypatch)
+    original = roles.load_role
+    cause = PortableError(
+        category=PortableErrorCategory.VALIDATION,
+        code="role_source_unavailable",
+        remediation="Restore the content-safety skill source.",
+        retry_eligible=False,
+    )
+
+    def fail_required(skill_id):
+        if skill_id == "content-safety":
+            raise cause
+        return original(skill_id)
+
+    monkeypatch.setattr(roles, "load_role", fail_required)
+    assignment_ref = _idempotency_key(channel.task_id, channel.channel_id, "missing-skill")
+    if through_runtime:
+        runtime = OrchestratingRuntime.__new__(OrchestratingRuntime)
+        runtime._store = store
+        runtime._provisioning = service
+        runtime._provision_and_prompt_inner(
+            channel.task_id, channel,
+            dict(assignment_ref=assignment_ref, title="Title", brief="Brief",
+                 role="backend-dev", acceptance="Acceptance", request_key="missing-skill"),
+            threading.Event(),
+        )
+        failures = [event for event in delegation_events.list_since(store, channel.task_id)
+                    if event.event_type == "assignment_failed"]
+        assert len(failures) == 1
+        assert failures[0].assignment_ref == assignment_ref
+        assert failures[0].payload["error"] == "required_skill_unavailable"
+        diagnostic = failures[0].payload["detail"]
+        assert not any(event.event_type == "assignment_ready"
+                       for event in delegation_events.list_since(store, channel.task_id))
+    else:
+        with pytest.raises(PortableError) as excinfo:
+            service.delegate(channel, "Title", "Brief", "backend-dev", "Acceptance", "missing-skill")
+        assert excinfo.value.code == "required_skill_unavailable"
+        assert excinfo.value.retry_eligible is False
+        assert excinfo.value.__cause__ is cause
+        diagnostic = excinfo.value.remediation
+
+    assert "content-safety" in diagnostic
+    assert "worker-backend-dev" in diagnostic
+    assert cause.code in diagnostic and cause.remediation in diagnostic
+    with store.connection() as db:
+        row = db.execute("SELECT * FROM delegation_provisioning WHERE idempotency_key=?",
+                         (assignment_ref,)).fetchone()
+        effects = db.execute(
+            "SELECT * FROM delegation_effects WHERE idempotency_key=? AND step='engine_session'",
+            (assignment_ref,),
+        ).fetchall()
+    assert row["status"] == "failed"
+    assert row["error_code"] == "required_skill_unavailable"
+    assert row["step"] == "claimed:engine_session"
+    assert not effects
+    assert not adapter._managers
+    assert "negotiate" not in timings
+    assert not service._pending_channel_secrets
+
+    # The same failed request cannot reopen, even after restoring the source.
+    monkeypatch.setattr(roles, "load_role", original)
+    with pytest.raises(PortableError, match="required_skill_unavailable"):
+        service.delegate(channel, "Title", "Brief", "backend-dev", "Acceptance", "missing-skill")
+    assert not adapter._managers

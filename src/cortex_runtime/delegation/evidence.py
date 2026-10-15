@@ -613,12 +613,22 @@ def _gateway_assessment(db, task_id: str, attempt_id: str, ref: str, outcome: st
 
 
 def _probe_invocation_error(argv, output, byte_count):
-    """Narrow, source-backed errors in an ad-hoc Python probe, not check failures.
+    """Source-backed mistakes in standalone python/python3 -B/-I/-S -c probes.
 
-    Never execute the submitted source. Require a recorded Python syntax or
-    regex/assertion error in complete observed output; regex corrections must
-    subsequently preserve the entire probe except exactly one pattern literal.
-    Other errors keep the existing exact-rerun/failed-assignment path.
+    Cover syntax errors (nothing executed), one corrected regex literal with
+    every assertion/product call unchanged, and literal-data expectation errors.
+    The latter permits only single-assignment data bindings and equality asserts
+    over literals, earlier bindings and unary len/sorted/sum/min/max/all/any/abs.
+    Exactly one expected literal may change; statically established false/true
+    comparisons plus a recorded <string> AssertionError prove a probe mistake
+    without executing submitted source or weakening a product assertion.
+
+    Project test/lint/build commands are never eligible: no script/module runner,
+    imported project code, IO, subprocess, dynamic execution or arbitrary calls
+    are allowed in the new literal-data shape. Existing regex probes still reject
+    pytest/unittest imports. Runtime-owned verification is excluded by assessment
+    and _invocation_retraction, regardless of probe shape. Other languages and
+    unprovable probes fail closed, rather than treating a claim as evidence.
     """
     import ast
     import re
@@ -630,6 +640,8 @@ def _probe_invocation_error(argv, output, byte_count):
             or any(word not in {"-B", "-I", "-S"} for word in argv[1:argv.index("-c")])):
         return None
     source = argv[-1]
+    if len(source) > 8192:
+        return None
     try:
         tree = ast.parse(source)
     except SyntaxError:
@@ -639,6 +651,11 @@ def _probe_invocation_error(argv, output, byte_count):
            or (isinstance(node, ast.Import) and any(alias.name.split(".")[0] in {"pytest", "unittest"}
                                                    for alias in node.names)) for node in imports):
         return None
+    if ('File "<string>"' in output
+            and re.search(r"(?m)^AssertionError(?::[^\n]*)?\Z", output.rstrip())):
+        expectations = _literal_expectations(tree)
+        if expectations and any(not holds for _, holds in expectations):
+            return "python_expectation"
     if not any(isinstance(node, ast.Import) and any(alias.name == "re" and not alias.asname
                                                    for alias in node.names) for node in imports):
         return None
@@ -646,6 +663,44 @@ def _probe_invocation_error(argv, output, byte_count):
             and re.search(r"(?m)^(?:re\.(?:error|PatternError)|AssertionError):[^\n]*\Z", output.rstrip())):
         return None
     return "python_regex" if _regex_literals(tree) else None
+
+
+def _literal_expectations(tree):
+    """Statically check a bounded, closed literal-data probe; never eval/exec it."""
+    import ast
+
+    if len(list(ast.walk(tree))) > 256:
+        return None
+    functions = dict(len=len, sorted=sorted, sum=sum, min=min, max=max, all=all, any=any, abs=abs)
+    bindings, assertions = {}, []
+
+    def value(node):
+        if isinstance(node, ast.Name) and node.id in bindings:
+            return bindings[node.id]
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                and node.func.id in functions and len(node.args) == 1 and not node.keywords):
+            return functions[node.func.id](value(node.args[0]))
+        return ast.literal_eval(node)
+
+    try:
+        for node in tree.body:
+            if (isinstance(node, ast.Assign) and len(node.targets) == 1
+                    and isinstance(node.targets[0], ast.Name)):
+                name = node.targets[0].id
+                if name in bindings or name in functions:
+                    return None
+                bindings[name] = value(node.value)
+            elif (isinstance(node, ast.Assert) and isinstance(node.test, ast.Compare)
+                    and len(node.test.ops) == 1 and isinstance(node.test.ops[0], ast.Eq)):
+                expected = ast.literal_eval(node.test.comparators[0])
+                if node.msg is not None:
+                    value(node.msg)
+                assertions.append((node, value(node.test.left) == expected))
+            else:
+                return None
+    except (ValueError, TypeError, KeyError, OverflowError, RecursionError):
+        return None
+    return assertions or None
 
 
 def _regex_literals(tree):
@@ -659,10 +714,10 @@ def _regex_literals(tree):
 
 
 def _probe_correction(failed_argv, passed_argv, kind):
-    """Keep every assertion and product call unchanged; only one regex may change."""
+    """Preserve probe structure; change one regex or proven literal expectation."""
     import ast
 
-    if failed_argv[:-1] != passed_argv[:-1]:
+    if failed_argv[:-1] != passed_argv[:-1] or len(passed_argv[-1]) > 8192:
         return False
     try:
         corrected = ast.parse(passed_argv[-1])
@@ -671,6 +726,19 @@ def _probe_correction(failed_argv, passed_argv, kind):
     if kind == "python_syntax":
         return True  # The original script could not execute at all.
     original = ast.parse(failed_argv[-1])
+    if kind == "python_expectation":
+        before, after = _literal_expectations(original), _literal_expectations(corrected)
+        if not before or not after or len(before) != len(after) or not all(holds for _, holds in after):
+            return False
+        changed = [(left, right) for (left, _), (right, _) in zip(before, after)
+                   if ast.dump(left.test.comparators[0]) != ast.dump(right.test.comparators[0])]
+        if len(changed) != 1 or [holds for _, holds in before].count(False) != 1:
+            return False
+        left, right = changed[0]
+        if next(holds for node, holds in before if node is left):
+            return False
+        left.test.comparators[0] = right.test.comparators[0]
+        return ast.dump(original) == ast.dump(corrected)
     before, after = _regex_literals(original), _regex_literals(corrected)
     if len(before) != len(after):
         return False
@@ -689,7 +757,8 @@ def command_identity(operation, receipt) -> tuple | None:
     receipts without cwd are mapped to the task root by gateway assessment;
     they can never close an outside-cwd or Development run. ``None`` when the receipt does not record
     the argv or (for ``outside_command``) the cwd: such a run cannot be
-    matched to any other."""
+    matched to any other. _same_command permits exact argv/cwd closure across
+    the two approved operations without erasing their profile provenance."""
     argv = receipt.get("argv") if isinstance(receipt, dict) else None
     if not isinstance(argv, list) or not argv or not all(isinstance(word, str) for word in argv):
         return None
@@ -699,6 +768,23 @@ def command_identity(operation, receipt) -> tuple | None:
     if operation == "outside_command" and isinstance(cwd, str) and cwd:
         return (operation, tuple(argv), cwd, receipt.get("profile", "outside_confirmed"))
     return None
+
+
+def _same_command(left, right):
+    """Exact argv/cwd across approved command routes; otherwise retain profiles.
+
+    Keep operation/profile provenance in identities and receipts. Switching to or
+    from outside_command necessarily changes the profile (outside_confirmed), so
+    that approved route alone may close the identical argv at the identical cwd.
+    Same-route profile changes and missing cwd never establish this exception.
+    """
+    if left is None or right is None:
+        return False
+    if left == right:
+        return True
+    return (left[0] in COMMAND_OPERATIONS and right[0] in COMMAND_OPERATIONS
+            and left[0] != right[0] and isinstance(left[2], str) and bool(left[2])
+            and left[1:3] == right[1:3])
 
 
 def assess_check(db, task_id: str, attempt_id: str, outcome: str, tool_call_ref) -> dict:
@@ -796,15 +882,17 @@ def current_outcomes(db, task_id: str, attempt_id: str, checks) -> list[dict]:
 
     - A ``passed`` claim is ``passed`` only when :func:`assess_checks`
       verifies it *and* no later run of the same command identity
-      (:func:`command_identity`) in this attempt has a different result: a
+      (:func:`command_identity`, compared by :func:`_same_command`) in this
+      attempt has a different result: a
       later failing run makes it ``failed`` (``later_run_failed``), a later
       run without a known result makes it ``unverified``
       (``later_run_unresolved``). Otherwise an unverifiable pass is
       ``failed`` for a nonzero exit, else ``unverified``, with its gap.
     - A ``failed`` claim stays ``failed`` unless its cited run is a
       verified failure *and* a ``passed`` check of this same result cites a
-      verified, later run of exactly the same identity that is the latest
-      run of that identity in this attempt, with no later command run whose
+      verified, later matching run (exact argv/cwd across command operations,
+      same profile within one operation) that is the latest matching run in
+      this attempt, with no later command run whose
       identity is unrecorded. Only then is it ``passed`` with ``closed_by``
       naming that closing ref. The claim itself is never rewritten: the
       failed check stays in the result as history.
@@ -840,7 +928,7 @@ def current_outcomes(db, task_id: str, attempt_id: str, checks) -> list[dict]:
             continue
         if history is None:
             history = command_history(db, task_id, attempt_id)
-        same = [run for run in history if run["identity"] == assessment["identity"]]
+        same = [run for run in history if _same_command(run["identity"], assessment["identity"])]
         latest = same[-1] if same else None
         if outcome == "passed":
             if latest is None or latest["order"] <= assessment["order"] or latest["status"] == "passed":
@@ -874,6 +962,10 @@ def current_outcomes(db, task_id: str, attempt_id: str, checks) -> list[dict]:
 
 
 def _invocation_retraction(db, task_id, index, checks, assessments, outcomes, history):
+    """Retract only eligible own probes, never project test/lint/build commands
+    or evidence_source == runtime_verification, even with explicit model claims.
+    Preserve unique binding, operation/cwd/profile, output and ordering gates.
+    """
     check, failed = checks[index], assessments[index]
     request = check.get("invocation_error")
     if (check.get("outcome") != "failed" or not isinstance(request, dict)
@@ -911,7 +1003,7 @@ def _invocation_retraction(db, task_id, index, checks, assessments, outcomes, hi
     # away by correcting this particular invocation.
     if any(run["order"] > failed["order"] and (
             run["identity"] is None or
-            (run["identity"] == failed["identity"] and run["status"] != "passed"))
+            (_same_command(run["identity"], failed["identity"]) and run["status"] != "passed"))
            for run in history):
         return None
     return ref
@@ -939,7 +1031,7 @@ def accept_checks(db, task_id: str, attempt_id: str, checks) -> list[dict]:
         if "invocation_error" in check and current["outcome"] != "retracted":
             raise StoreError("invalid_check_retraction", f"arguments.checks[{index}].invocation_error",
                              "not bound to an eligible own invocation error and later observed correction",
-                             "a verified failed standalone Python syntax/regex probe and a later verified passing correction in this attempt (regex: only one pattern literal changes)",
+                             "a verified failed standalone Python syntax/regex/literal-expectation probe and a later verified passing correction (only one regex or proven expected literal changes)",
                              "Retain real failures and use an exact rerun. Retract only your own supported probe invocation error, "
                              "with a nonempty reason and corrected_by naming a passed check of this result with the same name, "
                              "operation, cwd and profile. Claimed, incomplete, foreign and runtime verification checks cannot be retracted.")
@@ -1067,7 +1159,8 @@ def _identity_label(identity) -> str:
             f"cwd {cwd_text}, profile {profile})")
 
 
-_EXACT_RERUN = ("Rerun exactly the same argv (same operation, cwd and profile) with a new request_key, keep this failed "
+_EXACT_RERUN = ("Rerun exactly the same argv and cwd (same profile on the same route; command_run and outside_command "
+                "may close each other) with a new request_key, keep this failed "
                 "check, and add a passed check citing the new receipt.")
 _FAIL_ASSIGNMENT = ('Otherwise send assignment_outcome="failed" with this check retained to submit an intentional '
                     "failed assignment.")
@@ -1089,7 +1182,7 @@ def explain_open_failure(db, task_id: str, attempt_id: str, checks, assessments,
     if check.get("claimed_outcome") == "passed" and gap == "later_run_failed":
         identity = assessment.get("identity")
         later = [run for run in command_history(db, task_id, attempt_id)
-                 if identity is not None and run["identity"] == identity and run["order"] > assessment.get("order", 0)]
+                 if identity is not None and _same_command(run["identity"], identity) and run["order"] > assessment.get("order", 0)]
         failing = next((run["ref"] for run in reversed(later) if run["status"] == "failed"), "a later run")
         return (f"passed claim {ref}: a later run of the same command ({failing}) exited nonzero, and the latest "
                 f"run decides" + (f"; command {_identity_label(identity)}" if identity else ""),
@@ -1116,9 +1209,9 @@ def explain_open_failure(db, task_id: str, attempt_id: str, checks, assessments,
     history = command_history(db, task_id, attempt_id)
     later = [run for run in history if run["order"] > assessment["order"]]
     unrecorded = [run["ref"] for run in later if run["identity"] is None]
-    same = [run for run in later if run["identity"] == identity]
+    same = [run for run in later if _same_command(run["identity"], identity)]
     other = next((other for other, assessed in zip(checks, assessments)
-                  if other.get("outcome") == "passed" and assessed.get("identity") not in (None, identity)
+                  if other.get("outcome") == "passed" and assessed.get("identity") is not None and not _same_command(assessed["identity"], identity)
                   and other.get("name") == check.get("name")), None)
     hint = (f" The passed check {other.get('tool_call_ref')} with the same name runs a different command; a "
             f"different argv never closes this failure.") if other else ""

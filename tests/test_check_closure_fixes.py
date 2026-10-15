@@ -35,6 +35,10 @@ def pair(store, worker, bad=BAD, good=GOOD):
 @pytest.mark.parametrize("bad,good", [
     (BAD, GOOD),
     (["python3", "-B", "-c", "assert ("], ["python3", "-B", "-c", "assert True"]),
+    (["python3", "-B", "-c", "items=['a', 'b']; assert len(items)==3"],
+     ["python3", "-B", "-c", "items=['a', 'b']; assert len(items)==2"]),
+    (["python3", "-I", "-S", "-c", "items=[2, 1]; assert sorted(items)==[2, 1]; assert sum(items)==3"],
+     ["python3", "-I", "-S", "-c", "items=[2, 1]; assert sorted(items)==[1, 2]; assert sum(items)==3"]),
 ])
 def test_self_retraction_is_visible_and_never_a_pass(tmp_path, bad, good):
     from test_reviewer_handoff import reviewer
@@ -311,6 +315,112 @@ def test_synthesis_shows_retracted_failure_without_counting_it_as_passed(tmp_pat
     with store.connection() as db:
         row = db.execute("SELECT * FROM runtime_tasks WHERE task_id=?", (task.task_id,)).fetchone()
         assert synthesis.compose(db, row, "en") is None
+
+
+@pytest.mark.parametrize("first,second", [
+    ("command_run", "outside_command"), ("outside_command", "command_run"),
+])
+@pytest.mark.parametrize("case", ["exact", "different_argv", "different_cwd", "later_failure", "later_unresolved"])
+def test_cross_operation_exact_closure(tmp_path, monkeypatch, first, second, case):
+    from cortex_runtime.orchestration import consent
+    monkeypatch.setattr(consent, "request", lambda *args, **kwargs: True)
+    store, task, worker, assignment = _fixture(tmp_path, "cross-" + case)
+    def run(operation, key, argv=TOGGLE, cwd=None):
+        return mcp_tools.dispatch(store, worker, operation, dict(
+            argv=argv, cwd=cwd or str(tmp_path), request_key=key))
+    failed = run(first, "failure")
+    (tmp_path / "fixed.flag").write_text("fixed")
+    other = tmp_path / "other"
+    other.mkdir()
+    (other / "fixed.flag").write_text("fixed")
+    passed = run(second, "passing", TOGGLE + ["other"] if case == "different_argv" else TOGGLE,
+                 str(other) if case == "different_cwd" else None)
+    assert (failed["exit_code"], passed["exit_code"]) == (1, 0)
+    if case == "later_failure":
+        (tmp_path / "fixed.flag").unlink()
+        assert run(second, "late")["exit_code"] == 1
+    elif case == "later_unresolved":
+        later = run(second, "late")
+        with store.connection() as db:
+            db.execute("UPDATE runtime_requests SET result_json=json_set(result_json, '$.complete', json('false')) "
+                       "WHERE operation=? AND request_key='late'", (second,))
+            db.commit()
+    submitted = [
+        dict(name="exact check", outcome="failed", tool_call_ref=failed["tool_call_ref"]),
+        dict(name="exact check", outcome="passed", tool_call_ref=passed["tool_call_ref"]),
+    ]
+    receipt = _submit(store, worker, submitted,
+                      **({} if case == "exact" else {"assignment_outcome": "failed"}))
+    assert receipt["node_status"] == ("completed" if case == "exact" else "failed")
+    retained = _node(store, task, assignment)["result"]["checks"]
+    assert retained[0]["outcome"] == "failed"
+    assert retained[0].get("closed_by") == (passed["tool_call_ref"] if case == "exact" else None)
+    assert "retracted_by" not in retained[0]
+    with store.connection() as db:
+        current = evidence.current_outcomes(db, task.task_id, worker.attempt_id, retained)
+        assert current[0]["outcome"] == ("passed" if case == "exact" else "failed")
+        history = evidence.command_history(db, task.task_id, worker.attempt_id)
+        assert [(r["ref"], r["status"]) for r in history[:2]] == [
+            (failed["tool_call_ref"], "failed"), (passed["tool_call_ref"], "passed")]
+
+
+@pytest.mark.parametrize("bad,good", [
+    ("items=[1, 2]; assert len(items)==3", "items=[1, 2, 3]; assert len(items)==3"),
+    ("items=[1, 2]; assert len(items)==3", "items=[1, 2]; assert True"),
+    ("items=[1, 2]; assert len(items)==3; assert sum(items)==3",
+     "items=[1, 2]; assert len(items)==2"),
+    ("assert 1==2; assert 2==3", "assert 1==1; assert 2==2"),
+    ("from pathlib import Path; assert len(Path.cwd().name)==999",
+     "from pathlib import Path; assert len(Path.cwd().name)>0"),
+    ("import unittest; assert len([1, 2])==3", "import unittest; assert len([1, 2])==2"),
+    ("import pytest; assert len([1, 2])==3", "import pytest; assert len([1, 2])==2"),
+    ("import subprocess; subprocess.run(['true']); assert len([1, 2])==3",
+     "import subprocess; subprocess.run(['true']); assert len([1, 2])==2"),
+    ("exec('assert False')", "exec('assert True')"),
+])
+def test_expectation_retraction_never_weakens_product_checks(tmp_path, bad, good):
+    store, _, worker, _ = _fixture(tmp_path, "unsafe-expectation")
+    failed, passed = pair(store, worker, ["python3", "-B", "-c", bad], ["python3", "-B", "-c", good])
+    with pytest.raises(StoreError, match="invalid_check_retraction"):
+        mcp_tools.dispatch(store, worker, "result_submit", dict(
+            report="# Result\nObserved.", summary="Observed", checks=checks(failed, passed), request_key="result"))
+
+
+def test_expectation_retraction_requires_source_bound_complete_assertion_output():
+    argv = ["python3", "-B", "-c", "items=[1, 2]; assert len(items)==3"]
+    output = 'Traceback (most recent call last):\n  File "<string>", line 1, in <module>\nAssertionError\n'
+    assert evidence._probe_invocation_error(argv, output, len(output.encode())) == "python_expectation"
+    assert evidence._probe_invocation_error(argv, output, len(output.encode()) + 1) is None
+    for other in ("AssertionError\n", output.replace("AssertionError", "ValueError")):
+        assert evidence._probe_invocation_error(argv, other, len(other.encode())) is None
+    for command in (["python3", "-m", "pytest"], ["ruff", "check", "."], ["make", "check"],
+                    ["python3", "probe.py"], ["python3", "-O", "-c", argv[-1]]):
+        assert evidence._probe_invocation_error(command, output, len(output.encode())) is None
+
+
+def test_command_matching_preserves_same_operation_profile_boundaries():
+    argv = ("python3", "-m", "pytest")
+    restricted = ("command_run", argv, "/project", "restricted")
+    development = ("command_run", argv, "/project", "development")
+    outside = ("outside_command", argv, "/project", "outside_confirmed")
+    assert not evidence._same_command(restricted, development)
+    assert evidence._same_command(restricted, outside)
+    assert evidence._same_command(outside, development)
+    assert not evidence._same_command(None, outside)
+    assert not evidence._same_command(("command_run", argv, None, "restricted"), outside)
+
+
+def test_literal_probe_limits_and_dynamic_shapes_fail_closed():
+    import ast
+    for source in ("items=[1, 2]; items.append(3); assert len(items)==4",
+                   "len=1; assert len==2", "x=1; x=2; assert x==3",
+                   "assert len([1, 2])>2", "assert False", "assert len(1)==2",
+                   "assert sum([1, 'x'])==2",
+                   "items=[" + ",".join("1" for _ in range(300)) + "]; assert len(items)==301"):
+        assert evidence._literal_expectations(ast.parse(source)) is None
+    source = "assert len([1, 2])==3" + " " * 8192
+    output = 'Traceback (most recent call last):\n  File "<string>", line 1, in <module>\nAssertionError\n'
+    assert evidence._probe_invocation_error(["python3", "-c", source], output, len(output.encode())) is None
 
 
 def test_schema_advertises_retraction_but_not_derived_fields():

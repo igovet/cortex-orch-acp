@@ -4,7 +4,7 @@ from __future__ import annotations
 import pytest
 
 from cortex_runtime.portable import roles
-from cortex_runtime.portable.errors import PortableError
+from cortex_runtime.portable.errors import PortableError, PortableErrorCategory
 
 
 def test_reviewer_defaults_to_inline_report_without_weakening_shared_protocol():
@@ -100,6 +100,86 @@ def test_load_role_shared_has_no_critical_rules_by_default():
     # No non-negotiable block was added to shared skills; empty is expected,
     # not an error.
     assert role.critical_rules == ()
+
+
+@pytest.mark.parametrize(("role_id", "skill_id", "reader"), [
+    ("worker-backend-dev", "content-safety", "load_role"),
+    ("worker-backend-dev", "code-and-evidence", "read_reference"),
+    ("orchestrator", "coordinator-communication", "load_role"),
+    ("worker-senior-consultant", "report-publication", "read_reference"),
+])
+@pytest.mark.parametrize("builder", ["composition", "bundle"])
+def test_required_skill_load_failure_blocks_composition(monkeypatch, role_id, skill_id, reader, builder):
+    role = roles.load_role(role_id)
+    original = getattr(roles, reader)
+    cause = PortableError(
+        category=PortableErrorCategory.VALIDATION,
+        code="test_skill_unreadable",
+        remediation="Restore the skill source.",
+        retry_eligible=False,
+        details="test source failure",
+    )
+
+    def fail_selected(selected, *args, **kwargs):
+        if selected == skill_id:
+            raise cause
+        return original(selected, *args, **kwargs)
+
+    monkeypatch.setattr(roles, reader, fail_selected)
+    with pytest.raises(PortableError) as excinfo:
+        if builder == "bundle":
+            from cortex_runtime.portable.instruction_bundle import build_instruction_bundle
+
+            build_instruction_bundle(
+                task_id="task", assignment_ref="assignment", attempt_id="attempt",
+                role_set=role, engine="codex-acp", engine_version="2.1.1",
+            )
+        else:
+            roles.composed_instructions(role)
+    error = excinfo.value
+    assert error.code == "required_skill_unavailable"
+    assert error.retry_eligible is False
+    assert role_id in error.remediation and skill_id in error.remediation
+    assert cause.code in error.remediation and cause.remediation in error.remediation
+    assert error.details == cause.details
+    assert error.__cause__ is cause
+
+
+def test_empty_required_skill_blocks_composition(monkeypatch):
+    role = roles.load_role("worker-backend-dev")
+    original = roles._inlined_skill_text
+    monkeypatch.setattr(
+        roles, "_inlined_skill_text",
+        lambda skill_id, kind: " \n" if skill_id == "content-safety" else original(skill_id, kind),
+    )
+    with pytest.raises(PortableError) as excinfo:
+        roles.composed_instructions(role)
+    assert excinfo.value.code == "required_skill_unavailable"
+    assert "required_skill_empty" in excinfo.value.remediation
+    assert "content-safety" in excinfo.value.remediation
+
+
+def test_missing_situational_skill_is_not_eagerly_loaded(monkeypatch):
+    role = roles.load_role("worker-backend-dev")
+    original = roles.load_role
+    called = []
+
+    def fail_situational(skill_id):
+        called.append(skill_id)
+        if skill_id == "documentation-sync":
+            raise PortableError(
+                category=PortableErrorCategory.VALIDATION,
+                code="test_skill_unreadable",
+                remediation="Restore the situational skill.",
+                retry_eligible=False,
+            )
+        return original(skill_id)
+
+    monkeypatch.setattr(roles, "load_role", fail_situational)
+    text = roles.composed_instructions(role)
+    assert "documentation-sync" not in called
+    assert "`documentation-sync` --" in text
+    assert "### Skill `content-safety`" in text
 
 
 def test_load_all_roles_is_deterministic_and_matches_known_ids():

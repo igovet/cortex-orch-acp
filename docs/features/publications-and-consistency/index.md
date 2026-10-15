@@ -92,7 +92,7 @@ failed, for a cited nonzero exit) with its `evidence_gap`, as described in
 [check evidence](../orchestration/index.md#check-evidence). A failed check stays failed
 in the published result; only an exact later rerun of the same command closes it
 (`closed_by`, see [check history](../orchestration/index.md#check-history-and-current-outcome)),
-and publication and recovery preserve that closure. An eligible own-probe invocation error is kept as `retracted` history with `retracted_by`, never as a pass, and publication and recovery preserve that as well. Before recording a new
+and publication and recovery preserve that closure. Exact argv/cwd reruns may cross between `command_run` and `outside_command` in either direction, without erasing either receipt or granting execution permission; same-operation profile mismatches remain nonmatching. An eligible own-probe syntax, regex or statically proven literal-expectation error is kept as `retracted` history with `retracted_by`, never as a pass, and publication and recovery preserve that as well. Literal-expectation corrections change only one expected literal in a bounded self-contained data probe, never product assertions. Project test/lint/build failures and runtime verification cannot be retracted. Before recording a new
 submission, an open failure returns `open_failed_check` with the check, receipt,
 a bounded command identity (never the argv or script), the relevant rerun and its
 evidence gap, and says when no exact rerun can close it. A failed receipt an

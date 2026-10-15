@@ -147,9 +147,10 @@ one without it. A passed claim the runtime could not verify is recorded unverifi
 with the runtime's blocker and `evidence_gap` (see
 [check evidence](../orchestration/index.md#check-evidence)), so it is a gap here too. A
 failed check fails its node unless an exact later rerun of the same command in
-the same attempt closed it; the failure stays in the result as history with
+the same attempt closed it (exact argv/cwd may cross between `command_run` and
+`outside_command`; same-operation profiles must still match); the failure stays in the result as history with
 `closed_by` (see
-[check history](../orchestration/index.md#check-history-and-current-outcome)). An eligible own-probe invocation error can instead be retracted: the failure remains as history with `retracted_by`, the check is `retracted` rather than passed, and it does not fail the node. Synthesis is refused while a retained not_run or unverified check
+[check history](../orchestration/index.md#check-history-and-current-outcome)). An eligible own-probe syntax, regex or statically proven literal-expectation error can instead be retracted; project test/lint/build and runtime-verification failures cannot. A literal-expectation correction changes only one expected literal in a bounded self-contained data probe, with no product calls or imports. The failure remains as history with `retracted_by`, the check is `retracted` rather than passed, and it does not fail the node. Synthesis is refused while a retained not_run or unverified check
 of the current plan revision is neither closed under the
 [exact-command or command-less compatibility rules](../orchestration/index.md#check-history-and-current-outcome)
 nor listed in synthesis not_verified with its blocker. A worker command receipt

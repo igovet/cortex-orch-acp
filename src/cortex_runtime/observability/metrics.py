@@ -151,15 +151,56 @@ def _duplicate_publications(store, task_id: str) -> dict:
 def _base_prompt(store, task_id: str) -> dict:
     rows = observability_events.list_events(store, task_id, category="base_prompt", limit=500)
     counts: dict[str, int] = {}
+    # Per-engine breakdown of the same ``native``/``unified``/``unknown``
+    # outcome vocabulary: ``native`` means this session's engine kept its
+    # own native system-prompt/instructions channel (Cortex text appended
+    # alongside it, e.g. Claude's ``systemPrompt.append`` or Codex's
+    # ``cortexNativeContext``); ``unified`` means that native channel was
+    # replaced outright by Cortex's own base-prompt text (see
+    # ``delegation.live_adapters.base_prompt_mode``, the existing
+    # classification reused here -- never reinvented).
+    counts_by_engine: dict[str, dict[str, int]] = {}
+    # Recorded only once a session actually carried a numeric
+    # ``prompt_edition`` in its event detail (see ``engine.unified_system_
+    # prompt.PROMPT_EDITION``); older events without it are not counted here.
+    editions: dict[str, int] = {}
+    # Sessions whose bundle named a situational/catalog `read_skill` entry
+    # that would currently fail to load (see
+    # ``portable.instruction_bundle.catalog_resolution_gaps``). Advisory
+    # only: this never blocked that session. Only catalog skill ids are
+    # recorded, never raw skill text or message content.
+    sessions_with_unresolved_catalog_entries = 0
+    unresolved_catalog_entry_ids: set[str] = set()
     for row in rows:
         mode = row["outcome"]
         counts[mode] = counts.get(mode, 0) + 1
+        engine_counts = counts_by_engine.setdefault(row.get("route_engine") or "unknown", {})
+        engine_counts[mode] = engine_counts.get(mode, 0) + 1
+        detail = row.get("detail")
+        if not isinstance(detail, dict):
+            continue
+        edition = detail.get("prompt_edition")
+        if isinstance(edition, int):
+            key = str(edition)
+            editions[key] = editions.get(key, 0) + 1
+        ids = detail.get("unresolved_catalog_ids")
+        if isinstance(ids, list) and ids:
+            sessions_with_unresolved_catalog_entries += 1
+            unresolved_catalog_entry_ids.update(str(skill_id) for skill_id in ids)
     if not rows:
         return dict(
             unit="sessions", availability="unavailable_reason", basis="observed", counts=counts,
+            counts_by_engine=counts_by_engine, editions=editions,
+            sessions_with_unresolved_catalog_entries=sessions_with_unresolved_catalog_entries,
+            unresolved_catalog_entry_ids=sorted(unresolved_catalog_entry_ids),
             reason="no recorded base-prompt mode for this task",
         )
-    return dict(unit="sessions", availability="available", basis="observed", counts=counts)
+    return dict(
+        unit="sessions", availability="available", basis="observed", counts=counts,
+        counts_by_engine=counts_by_engine, editions=editions,
+        sessions_with_unresolved_catalog_entries=sessions_with_unresolved_catalog_entries,
+        unresolved_catalog_entry_ids=sorted(unresolved_catalog_entry_ids),
+    )
 
 
 def _tokens(store, task_id: str) -> dict:

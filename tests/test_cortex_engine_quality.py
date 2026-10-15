@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 import sqlite3
 
+from cortex_runtime.observability import events as observability_events
 from cortex_runtime.store import Store
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -14,7 +15,8 @@ quality = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(quality)
 
 
-def _fixture_store(tmp_path, *, reviewer_model="model-review", coordinator_model="model-coord"):
+def _fixture_store(tmp_path, *, reviewer_model="model-review", coordinator_model="model-coord",
+                    impl2_engine="fake-engine"):
     store = Store(tmp_path / ".cortex", project_root=tmp_path)
     with store.connection() as db:
         db.execute("INSERT INTO tasks(id,project_root,created_at) VALUES(?,?,?)",
@@ -134,7 +136,7 @@ def _fixture_store(tmp_path, *, reviewer_model="model-review", coordinator_model
             "INSERT INTO attempt_route_audit(id,attempt_id,task_id,role,engine,connection_id,model,"
             "params_fingerprint,decision,decision_detail_json,recorded_at) "
             "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-            ("audit-attempt-impl-2", "attempt-impl-2", "task-2", "backend-dev", "fake-engine", "fixture",
+            ("audit-attempt-impl-2", "attempt-impl-2", "task-2", "backend-dev", impl2_engine, "fixture",
              "model-impl", "fixture", "authorized", "{}", "2026-01-02T00:00:00Z"),
         )
         db.execute(
@@ -203,6 +205,19 @@ def test_cli_emits_only_aggregates_and_computes_requested_metrics(tmp_path, caps
     assert data["coordinator_replies"]["model-coord"] == {
         "count": 1, "mean_words": 3.0, "process_word_density": 2 / 3
     }
+    # Every attempt in this fixture (impl, review, coordinator) shares the
+    # same recorded engine, so the engine-keyed split must reproduce the
+    # exact same aggregates as the model-keyed one.
+    assert data["engines"]["fake-engine"] == data["models"]["model-impl"]
+    assert data["review_pairs_by_engine"]["fake-engine -> fake-engine"] == {
+        "reviews": 1, "approved": 1, "approval_rate": 1.0
+    }
+    assert data["coordinator_replies_by_engine"]["fake-engine"] == {
+        "count": 1, "mean_words": 3.0, "process_word_density": 2 / 3
+    }
+    # No base_prompt events were recorded in this fixture.
+    assert data["native_instructions_by_engine"] == {}
+    assert data["sessions_with_unresolved_catalog_entries"] == 0
     assert "PRIVATE_REPLY_SECRET" not in output
     assert "PRIVATE_TOOL_SECRET" not in output
     assert "PRIVATE_COMMAND_SECRET" not in output
@@ -246,3 +261,49 @@ def test_call_rates_exclude_same_model_review_and_coordinator_attempts(tmp_path)
     assert data["review_pairs"]["model-impl -> model-impl"] == {
         "reviews": 1, "approved": 1, "approval_rate": 1.0
     }
+
+
+def test_engine_split_divides_same_models_metrics_by_engine(tmp_path):
+    # Same model ("model-impl") executes once on "fake-engine" (task-1,
+    # failed) and once on "other-engine" (task-2, completed): the model-
+    # keyed totals must still combine both, while the engine-keyed totals
+    # must separate them.
+    _fixture_store(tmp_path, impl2_engine="other-engine")
+    data = quality.read_metrics(tmp_path)
+
+    assert data["models"]["model-impl"]["attempts"] == 2
+    assert data["models"]["model-impl"]["failed"] == 1
+    assert data["models"]["model-impl"]["completed"] == 1
+
+    assert data["engines"]["fake-engine"]["attempts"] == 1
+    assert data["engines"]["fake-engine"]["failed"] == 1
+    assert data["engines"]["fake-engine"]["completed"] == 0
+    assert data["engines"]["other-engine"]["attempts"] == 1
+    assert data["engines"]["other-engine"]["completed"] == 1
+    assert data["engines"]["other-engine"]["failed"] == 0
+
+
+def test_native_instructions_and_unresolved_catalog_breakdown_by_engine(tmp_path, capsys):
+    store = _fixture_store(tmp_path)
+    observability_events.append_event(
+        store, "task-1", "base_prompt", "unified", "observed",
+        attempt_id="attempt-impl", route_engine="codex-acp",
+        detail={"unresolved_catalog_count": 1, "unresolved_catalog_ids": ["PRIVATE_SKILL_SECRET"]},
+    )
+    observability_events.append_event(
+        store, "task-1", "base_prompt", "native", "observed",
+        attempt_id="attempt-review", route_engine="claude-agent-acp",
+    )
+
+    assert quality.main(["--project", str(tmp_path)]) == 0
+    output = capsys.readouterr().out
+    data = json.loads(output)
+
+    # "unified" -> the native base prompt was replaced; "native" -> it was kept.
+    assert data["native_instructions_by_engine"] == {
+        "codex-acp": {"replaced": 1}, "claude-agent-acp": {"kept": 1},
+    }
+    assert data["sessions_with_unresolved_catalog_entries"] == 1
+    # Catalog skill ids are allowlisted aggregate metadata here, but the
+    # analyzer never special-cases their content -- it only counts sessions.
+    assert "PRIVATE_SKILL_SECRET" not in output

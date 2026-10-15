@@ -133,7 +133,59 @@ def test_base_prompt_summary_counts_secret_free_events(tmp_path):
     assert observability_metrics.diagnostics_summary(store, task_id)["base_prompt"] == {
         "unit": "sessions", "availability": "available", "basis": "observed",
         "counts": {"unified": 1, "native": 1},
+        "counts_by_engine": {"codex-acp": {"unified": 1}, "claude-agent-acp": {"native": 1}},
+        "editions": {},
+        "sessions_with_unresolved_catalog_entries": 0,
+        "unresolved_catalog_entry_ids": [],
     }
+
+
+def test_base_prompt_summary_splits_counts_by_recorded_prompt_edition(tmp_path):
+    store, task_id = _task(tmp_path)
+    observability_events.append_event(
+        store, task_id, "base_prompt", "unified", "observed",
+        attempt_id="attempt-1", route_engine="codex-acp", detail={"prompt_edition": 1},
+    )
+    observability_events.append_event(
+        store, task_id, "base_prompt", "unified", "observed",
+        attempt_id="attempt-2", route_engine="claude-agent-acp", detail={"prompt_edition": 2},
+    )
+    # No edition recorded -> excluded from the per-edition breakdown, but
+    # still counted in the existing per-mode ``counts``.
+    observability_events.append_event(
+        store, task_id, "base_prompt", "native", "observed",
+        attempt_id="attempt-3", route_engine="opencode",
+    )
+
+    summary = observability_metrics.diagnostics_summary(store, task_id)["base_prompt"]
+    assert summary["counts"] == {"unified": 2, "native": 1}
+    assert summary["editions"] == {"1": 1, "2": 1}
+    assert summary["counts_by_engine"] == {
+        "codex-acp": {"unified": 1}, "claude-agent-acp": {"unified": 1}, "opencode": {"native": 1},
+    }
+
+
+def test_base_prompt_summary_counts_unresolved_catalog_entries_as_aggregate_ids_only(tmp_path):
+    store, task_id = _task(tmp_path)
+    observability_events.append_event(
+        store, task_id, "base_prompt", "native", "observed",
+        attempt_id="attempt-1", route_engine="codex-acp",
+        detail={"unresolved_catalog_count": 2, "unresolved_catalog_ids": ["index", "skill-authoring"]},
+    )
+    observability_events.append_event(
+        store, task_id, "base_prompt", "unified", "observed",
+        attempt_id="attempt-2", route_engine="claude-agent-acp",
+        detail={"unresolved_catalog_count": 1, "unresolved_catalog_ids": ["index"]},
+    )
+    # A clean session carries no unresolved detail at all.
+    observability_events.append_event(
+        store, task_id, "base_prompt", "unified", "observed",
+        attempt_id="attempt-3", route_engine="claude-agent-acp",
+    )
+
+    summary = observability_metrics.diagnostics_summary(store, task_id)["base_prompt"]
+    assert summary["sessions_with_unresolved_catalog_entries"] == 2
+    assert summary["unresolved_catalog_entry_ids"] == ["index", "skill-authoring"]
 
 
 def test_route_outcome_metrics_group_accepted_results_and_fix_cycles(tmp_path):

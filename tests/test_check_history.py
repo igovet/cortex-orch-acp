@@ -2,8 +2,9 @@
 
 An earlier failed run stays in the result as history. It stops failing the
 assignment only when a passed check of the same result cites an exact,
-strictly verified, later rerun of the same command (operation, argv and, for
-outside_command, cwd) that is still the latest run of that command in the
+strictly verified, later rerun of the same command (exact argv/cwd, including
+across command_run/outside_command; same-operation profiles still match)
+that is still the latest matching run in the
 attempt. Anything weaker or ambiguous keeps the failure open; a later failure
 of a command makes an earlier pass of it a failure.
 """

@@ -20,7 +20,9 @@ variable names.
 from __future__ import annotations
 
 import json
+import sqlite3
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -30,6 +32,8 @@ from cortex_runtime.engine.claude_adapter_acp import claude_option_mapping
 from cortex_runtime.engine.codex_adapter_acp import codex_option_mapping
 from cortex_runtime.portable.identity import ConfigurationRevision, ExecutionRoute
 
+from cortex_runtime.delegation.codex_tool_cheat_sheet import codex_tool_cheat_sheet
+from cortex_runtime.delegation.mcp_tools import assignment_profile
 from engine_fakes import default_scenario, fake_launch_command, isolated_environ, make_connection_record, new_connection_id, write_scenario
 
 CODEX_FIXTURE = Path(__file__).resolve().parent / "fixtures/catalog/codex_acp_config_options.json"
@@ -38,6 +42,105 @@ CLAUDE_FIXTURE = Path(__file__).resolve().parent / "fixtures/catalog/claude_agen
 
 def _config_options(fixture_path):
     return json.loads(fixture_path.read_text(encoding="utf-8"))["configOptions"]
+
+
+def _with_cheat_sheet(role, instructions, role_id=None):
+    # codex-acp sessions always get the schema-derived tool cheat sheet
+    # appended to their role instructions text (codex_tool_cheat_sheet.py).
+    sheet = codex_tool_cheat_sheet(role, role_id=role_id)
+    return instructions if not sheet else instructions + "\n\n" + sheet
+
+
+@pytest.fixture
+def stage_store():
+    # Only the binding tables are needed to exercise the real stage query.
+    db = sqlite3.connect(":memory:")
+    db.row_factory = sqlite3.Row
+    db.executescript("""
+        CREATE TABLE delegation_provisioning (task_id, attempt_id, idempotency_key);
+        CREATE TABLE runtime_nodes (task_id, assignment_ref, revision, role, stage);
+        INSERT INTO delegation_provisioning VALUES ('task-a', 'attempt-a', 'assignment-a');
+        INSERT INTO runtime_nodes VALUES ('task-a', 'assignment-a', 1, 'worker-backend-dev', 'execution');
+        INSERT INTO runtime_nodes VALUES ('task-a', 'assignment-a', 2, 'worker-backend-dev', 'review');
+        INSERT INTO runtime_nodes VALUES ('task-b', 'assignment-a', 3, 'worker-backend-dev', 'execution');
+    """)
+    try:
+        yield SimpleNamespace(connection=lambda: db)
+    finally:
+        db.close()
+
+
+def test_assignment_stage_matches_tools_list_binding(stage_store):
+    adapter = EngineSessionManagerAdapter(lambda _: None, lambda _: ".", store=stage_store)
+    channel = SimpleNamespace(role="worker", task_id="task-a", attempt_id="attempt-a")
+    assert adapter._assignment_stage("task-a", "attempt-a") == assignment_profile(stage_store, channel)[1] == "review"
+    assert adapter._assignment_stage("task-b", "attempt-a") is None
+    assert adapter._assignment_stage("task-a", "missing-attempt") is None
+
+    no_store = EngineSessionManagerAdapter(lambda _: None, lambda _: ".")
+    assert no_store._assignment_stage("task-a", "attempt-a") is None
+
+
+def test_codex_session_open_uses_bound_review_stage(tmp_path, monkeypatch, stage_store):
+    environ = isolated_environ(tmp_path)
+    dump = tmp_path / "session-new.json"
+    scenario = write_scenario(tmp_path, default_scenario(
+        config_options=_config_options(CODEX_FIXTURE),
+        session_new_params_dump_path=str(dump),
+    ))
+    record = make_connection_record(
+        new_connection_id(), launch_command=fake_launch_command(scenario),
+        engine="codex-acp", environ=environ,
+    )
+    adapter = EngineSessionManagerAdapter(
+        lambda _: record, lambda _: str(tmp_path), environ=environ, call_timeout=10.0,
+    )
+    # Use the real DB-backed resolver without enabling unrelated store-backed
+    # capacity/configuration services in this fake-engine protocol test.
+    lookup = EngineSessionManagerAdapter(lambda _: None, lambda _: ".", store=stage_store)
+    monkeypatch.setattr(adapter, "_assignment_stage", lookup._assignment_stage)
+    try:
+        adapter.open("shared_project_root", {
+            "task_id": "task-a", "attempt_id": "attempt-a", "assignment_id": "assignment-a",
+            "role_id": "worker-backend-dev", "stage": "execution",
+        }, "Role instructions")
+        meta = json.loads(dump.read_text(encoding="utf-8"))["_meta"]
+        assert meta["systemPrompt"] == "Role instructions\n\n" + codex_tool_cheat_sheet(
+            "worker", role_id="worker-backend-dev", stage="review",
+        )
+        assert '"verdict":' in meta["systemPrompt"]
+    finally:
+        for manager in adapter._managers.values():
+            manager.shutdown(grace=2.0)
+
+
+def test_generation_metadata_fallback_uses_bound_review_stage(tmp_path, monkeypatch, stage_store):
+    from cortex_runtime.delegation import generations, session_skills
+    from cortex_runtime.observability import events
+    from cortex_runtime.portable import instruction_bundle
+
+    sent = []
+    ledger = SimpleNamespace(
+        save_intended=lambda bundle: None,
+        record_sent=lambda bundle, payload, **kwargs: sent.append(json.loads(payload)),
+    )
+    monkeypatch.setattr(instruction_bundle, "InstructionBundleLedger", lambda store: ledger)
+    monkeypatch.setattr(generations, "ensure_owner", lambda *args, **kwargs: SimpleNamespace(tier="automatic"))
+    monkeypatch.setattr(generations, "open_generation", lambda *args, **kwargs: {"id": "generation-a"})
+    monkeypatch.setattr(session_skills, "record_session_skills", lambda *args, **kwargs: None)
+    monkeypatch.setattr(events, "append_event", lambda *args, **kwargs: None)
+    adapter = EngineSessionManagerAdapter(lambda _: None, lambda _: str(tmp_path), store=stage_store)
+    adapter._open_generation(
+        SimpleNamespace(_workspace_root=str(tmp_path)),
+        SimpleNamespace(engine="codex-acp", id="connection-a"),
+        "session-a", "task-a", "attempt-a",
+        {"assignment_id": "assignment-a", "role_id": "worker-backend-dev"},
+        instructions="Role instructions", cause="session_open",
+    )
+    assert len(sent) == 1
+    assert sent[0]["systemPrompt"] == "Role instructions\n\n" + codex_tool_cheat_sheet(
+        "worker", role_id="worker-backend-dev", stage="review",
+    )
 
 
 def test_option_mapping_for_dispatches_by_engine_name():
@@ -63,7 +166,7 @@ def test_session_new_meta_for_pinned_engines_builds_a_payload():
 
     base = cortex_system_prompt('worker', None)
     assert _session_new_meta_for('codex-acp','1.12.0','Be helpful.') == {
-        'systemPrompt':'Be helpful.','cortexRole':'worker','cortexBaseInstructions':base,'cortexNativeContext':False}
+        'systemPrompt':_with_cheat_sheet('worker','Be helpful.'),'cortexRole':'worker','cortexBaseInstructions':base,'cortexNativeContext':False}
     assert _session_new_meta_for('claude-agent-acp','0.78.0','Be helpful.') == dict(
         systemPrompt=cortex_system_prompt('worker', None, native_tools=False).rstrip()+'\n\nBe helpful.',claudeCode=dict(options=UNIFIED))
     assert _session_new_meta_for('claude-agent-acp','0.11.0','Be helpful.') is None
@@ -76,7 +179,7 @@ def test_session_new_meta_uses_native_prompts_and_skill_catalogs_when_switch_dis
     environ = {"CORTEX_UNIFIED_BASE_PROMPT": "0"}
 
     codex = _session_new_meta_for('codex-acp', '1.12.0', 'Be helpful.', environ=environ)
-    assert codex == {'systemPrompt': 'Be helpful.', 'cortexRole': 'worker'}
+    assert codex == {'systemPrompt': _with_cheat_sheet('worker', 'Be helpful.'), 'cortexRole': 'worker'}
 
     claude = _session_new_meta_for('claude-agent-acp', '0.78.0', 'Be helpful.', environ=environ)
     assert claude == {
@@ -225,14 +328,15 @@ def test_each_pinned_adapter_gets_its_own_session_new_meta(tmp_path):
 
     dumped_codex = json.loads(session_new_dump_codex.read_text(encoding="utf-8"))
     meta_codex = dumped_codex.get("_meta")
-    assert meta_codex["systemPrompt"] == "You are a backend developer." and meta_codex["cortexRole"] == "coordinator"
+    assert (meta_codex["systemPrompt"] == _with_cheat_sheet("coordinator", "You are a backend developer.")
+            and meta_codex["cortexRole"] == "coordinator")
     assert meta_codex["cortexNativeContext"] is False
     assert meta_codex["cortexBaseInstructions"].startswith("# Cortex session\n\nYou are the Cortex coordinator")
-    # Role text is identical; native guidance follows the adapter's tool policy.
+    # Role text is identical (cheat sheet aside, which is codex-acp only); native guidance follows the adapter's tool policy.
     from cortex_runtime.engine.unified_system_prompt import cortex_system_prompt
     assert dumped['_meta']['systemPrompt'] == cortex_system_prompt(
         "coordinator", str(tmp_path), environ=environ, native_tools=False
-    ).rstrip() + "\n\n" + meta_codex["systemPrompt"]
+    ).rstrip() + "\n\n" + "You are a backend developer."
     assert meta_codex["cortexBaseInstructions"] == cortex_system_prompt(
         "coordinator", str(tmp_path), environ=environ_codex, native_tools=True
     )
@@ -260,14 +364,15 @@ def test_codex_2_1_1_preserves_production_instruction_metadata(role, unified):
     environ = {} if unified else {"CORTEX_UNIFIED_BASE_PROMPT": "0"}
     meta = _session_new_meta_for("codex-acp", "2.1.1", "Role instructions",
                                 role=role, environ=environ)
-    assert meta["systemPrompt"] == "Role instructions"
+    expected_system_prompt = _with_cheat_sheet(role, "Role instructions")
+    assert meta["systemPrompt"] == expected_system_prompt
     assert meta["cortexRole"] == role
     assert base_prompt_mode(meta) == ("unified" if unified else "native")
     if unified:
         assert meta["cortexNativeContext"] is False
         assert meta["cortexBaseInstructions"].startswith("# Cortex session")
     else:
-        assert meta == {"systemPrompt": "Role instructions", "cortexRole": role}
+        assert meta == {"systemPrompt": expected_system_prompt, "cortexRole": role}
 
 
 @pytest.mark.parametrize("role", ["worker", "coordinator"])

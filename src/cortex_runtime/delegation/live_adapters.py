@@ -328,6 +328,7 @@ def _effort_within(effort: str | None, offered) -> str | None:
 def _session_new_meta_for(
     engine: str, version: str, instructions: str | None, *, role: str = "worker", project_root: str | None = None,
     effort: str | None = None, environ: dict[str, str] | None = None, role_id: str | None = None,
+    stage: str | None = None,
 ):
     """The ``session/new`` ``_meta`` payload this engine's own qualified
     delivery mechanism builds for ``instructions``, or ``None``.
@@ -401,8 +402,16 @@ def _session_new_meta_for(
             base_instructions = cortex_system_prompt(
                 role, project_root, environ=environ, consultant=consultant,
                 access_class=prompt_access_class(role, role_id), native_tools=True)
+        # Codex's code mode hides each tool's full argument schema behind
+        # exec, showing only name+description; append a small, mechanically
+        # schema-derived cheat sheet of required fields + an example call
+        # for the most-used tools -- codex-acp sessions only.
+        from .codex_tool_cheat_sheet import codex_tool_cheat_sheet
+
+        cheat_sheet = codex_tool_cheat_sheet(role, role_id=role_id, stage=stage)
+        instructions_for_codex = instructions if not cheat_sheet else instructions + "\n\n" + cheat_sheet
         meta = {**meta, **build_codex_session_new_meta(
-            instructions, base_instructions=base_instructions)}
+            instructions_for_codex, base_instructions=base_instructions)}
     if engine == "codex-acp" and meta is not None:
         return {**meta, "cortexRole": role}
     return meta
@@ -928,6 +937,19 @@ class EngineSessionManagerAdapter:
         except install_resolution.InstallUnresolvable:
             return None
 
+    def _assignment_stage(self, task_id: str, attempt_id: str) -> str | None:
+        """Resolve the latest node stage with the same binding as tools/list."""
+        if self._store is None:
+            return None
+        with self._store.connection() as db:
+            row = db.execute(
+                "SELECT n.stage FROM delegation_provisioning p JOIN runtime_nodes n "
+                "ON n.task_id=p.task_id AND n.assignment_ref=p.idempotency_key "
+                "WHERE p.task_id=? AND p.attempt_id=? ORDER BY n.revision DESC LIMIT 1",
+                (task_id, attempt_id),
+            ).fetchone()
+        return row["stage"] if row is not None else None
+
     def open(self, workspace_binding_id: str, launch: Mapping[str, object], instructions: str) -> str:
         from ..engine.session_manager import EngineSessionManager
 
@@ -1162,7 +1184,7 @@ class EngineSessionManagerAdapter:
             session_new_meta = _session_new_meta_for(
                 record.engine, _pinned_version_for(record.engine, record), instructions, role=recipient,
                 project_root=workspace_root, effort=_sdk_effort_for(record, launch), environ=self._environ,
-                role_id=launch.get("role_id"),
+                role_id=launch.get("role_id"), stage=self._assignment_stage(task_id, attempt_id),
             )
             session_id = manager.create_session(
                 task_id, launch.get("assignment_id") or attempt_id, session_new_meta=session_new_meta,
@@ -2369,7 +2391,8 @@ class EngineSessionManagerAdapter:
             meta = _session_new_meta_for(record.engine, version, instructions, role=recipient,
                                          project_root=getattr(manager, "_workspace_root", None),
                                          effort=_sdk_effort_for(record, launch), environ=self._environ,
-                                         role_id=launch.get("role_id"))
+                                         role_id=launch.get("role_id"),
+                                         stage=self._assignment_stage(task_id, attempt_id))
         if meta is not None:
             import json
 
@@ -2377,11 +2400,30 @@ class EngineSessionManagerAdapter:
                                engine=record.engine, engine_version=version,
                                attempt_id=attempt_id, session_ref=session_id)
             try:
+                from ..engine.unified_system_prompt import sent_prompt_edition
                 from ..observability import events as observability_events
 
+                # The edition is read back from the sent text, so a native
+                # (non-unified) session records none.
+                edition = sent_prompt_edition(meta)
+                # Aggregate-only, secret-free: catalog ids this bundle's
+                # role would currently fail to resolve through `read_skill`
+                # (see `instruction_bundle.catalog_resolution_gaps`). Purely
+                # advisory -- it never blocked and never blocks this
+                # session; the required-inlined-skill guard in
+                # `portable.roles.composed_instructions` already handles
+                # the blocking case for the always-included skills.
+                unresolved = bundle.unresolved_catalog_entries
+                detail = {}
+                if edition is not None:
+                    detail["prompt_edition"] = edition
+                if unresolved:
+                    detail["unresolved_catalog_count"] = len(unresolved)
+                    detail["unresolved_catalog_ids"] = sorted(unresolved)
                 observability_events.append_event(
                     self._store, task_id, "base_prompt", base_prompt_mode(meta), "observed",
                     attempt_id=attempt_id, engine_session_ref=session_id, route_engine=record.engine,
+                    detail=detail or None,
                 )
             except Exception:
                 pass

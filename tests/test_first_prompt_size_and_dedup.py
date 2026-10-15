@@ -18,6 +18,7 @@ carry no YAML frontmatter or generated footer comment.
 from __future__ import annotations
 
 import threading
+from datetime import date
 
 import pytest
 
@@ -27,10 +28,12 @@ from cortex_runtime.delegation import mcp_tools
 from cortex_runtime.orchestration.controller import _title_from_objective
 from cortex_runtime.portable.engine_contract import StopReason
 from cortex_runtime.portable.identity import SourceEvent
+from cortex_runtime.engine.unified_system_prompt import cortex_system_prompt, prompt_access_class
 from cortex_runtime.portable.roles import (
     INLINED_SKILLS,
     SHARED_ROLE_IDS,
     composed_instructions,
+    known_role_ids,
     load_role,
 )
 from cortex_runtime.store import Store
@@ -235,3 +238,32 @@ def test_a_capsule_without_the_brief_in_its_message_keeps_the_full_brief():
     assert capsule['sections']['pipeline_and_assignments']['own_assignment']['brief'] == '{"objective": "Do it"}'
     coordinator = dict(_worker_capsule('x'), recipient=dict(role='coordinator'))
     assert reference_brief_delivered_inline(coordinator, 'x') is coordinator
+
+
+# Edition-2 base prompt ceilings, the analogue of the edition-1 ceilings in
+# ``test_prompt_drift.test_s3_rendered_size_ceilings_and_shared_report_ownership``
+# (19,800 coordinator / 17,000 consultant / 25,800 other workers for base +
+# composed role text). Edition 2 adds its new sections without yet removing the
+# skill text they overlap, so its ceilings are higher. Measured on 2026-10-15
+# (base prompt rendered with no project skills and today=2026-10-04):
+# coordinator 20,985 (7,678 base), senior consultant 17,343 (7,318 base),
+# largest other worker 27,658 (worker-qa-engineer, 9,568 base).
+_EDITION_2_TOTAL_BUDGET = {'coordinator': 21_200, 'consultant': 17_600, 'worker': 27_900}
+_EDITION_2_BASE_BUDGET = {'coordinator': 7_900, 'consultant': 7_500, 'worker': 9_800}
+
+
+def test_edition_2_rendered_size_ceilings():
+    role_ids = ('orchestrator', *(role_id for role_id in known_role_ids() if role_id.startswith('worker-')))
+    assert len(role_ids) == 24  # the coordinator and all 23 worker profiles
+    for role_id in role_ids:
+        kind = 'coordinator' if role_id == 'orchestrator' else 'worker'
+        access_class = prompt_access_class(kind, role_id)
+        budget_key = 'coordinator' if kind == 'coordinator' else 'consultant' if access_class == 'consultant' else 'worker'
+        role = composed_instructions(load_role(role_id))
+        for native_tools in (False, True):
+            base = cortex_system_prompt(kind, None, today=date(2026, 10, 4), environ={}, access_class=access_class,
+                                        native_tools=native_tools, edition=2)
+            assert base.splitlines()[4] == '# How to work', role_id
+            assert len(base) <= _EDITION_2_BASE_BUDGET[budget_key], (role_id, native_tools, len(base))
+            assert len(role) + len(base) <= _EDITION_2_TOTAL_BUDGET[budget_key], (
+                role_id, native_tools, len(role) + len(base))

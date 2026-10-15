@@ -807,6 +807,9 @@ class ProvisioningService:
                     remediation="This process no longer holds this delegation's worker channel secret (channel revocation/reissue on retry is not implemented); start a new delegation with a new request_key instead of retrying this one.",
                     retry_eligible=False,
                 )
+            # Compose before recording an open intent: a missing required skill
+            # is a definitive local refusal, not an uncertain engine launch.
+            instructions = composed_instructions(role_set)
             with self._store.connection() as db:
                 db.execute("BEGIN IMMEDIATE")
                 _record_effect(db, idempotency_key, "engine_session", "intent", dict(attempt_id=attempt_id))
@@ -840,7 +843,7 @@ class ProvisioningService:
                 idempotency_key=idempotency_key,
             )
             try:
-                session_ref = self._engine.open(row["workspace_binding_id"], launch, composed_instructions(role_set))
+                session_ref = self._engine.open(row["workspace_binding_id"], launch, instructions)
             except Exception as error:
                 # T017 (fresh review, MEDIUM/starvation): a queued open
                 # that never reserves (cancelled or timed-out capacity -- see

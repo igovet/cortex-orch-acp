@@ -283,3 +283,40 @@ def test_recovery_routes_and_shared_access_wording_do_not_drift():
     assert "project is read-only except your assignment scope" not in discipline
     assert "Use this skill only during selected Cortex work" not in discipline
     assert "Code-mode" not in discipline
+
+
+def test_catalog_resolution_gaps_matches_the_live_read_skill_path():
+    """``instruction_bundle.catalog_resolution_gaps`` is the advisory,
+    non-blocking counterpart of ``composed_instructions``'s required-skill
+    guard: it walks every situational id this role's prompt actually names
+    and must report none unresolved for a healthy, shipped installation,
+    the same ``read_skill`` would itself successfully return for each id."""
+    from cortex_runtime.portable.instruction_bundle import catalog_resolution_gaps
+
+    for role_id, kind in (("orchestrator", "coordinator"), ("worker-backend-dev", "worker"),
+                          ("worker-senior-consultant", "worker")):
+        assert situational_skill_triggers(kind, role_id), (role_id, "fixture assumption: a named catalog")
+        assert catalog_resolution_gaps(kind, role_id) == ()
+        for skill_id, _trigger in situational_skill_triggers(kind, role_id):
+            assert _read(skill_id, kind).strip()
+
+
+def test_catalog_resolution_gaps_reports_an_id_read_skill_itself_would_reject(monkeypatch):
+    """A broken catalog entry is advisory only: it is named, never pasted,
+    so this never raises and never blocks -- it only reports the id."""
+    from cortex_runtime.portable import instruction_bundle as instruction_bundle_module
+    from cortex_runtime.portable.errors import PortableErrorCategory
+
+    real_load_role = instruction_bundle_module.load_role
+
+    def _broken_load_role(role_hint):
+        if role_hint == "documentation-sync":
+            raise PortableError(
+                category=PortableErrorCategory.VALIDATION, code="role_source_unavailable",
+                remediation="fixture-induced failure", retry_eligible=False,
+            )
+        return real_load_role(role_hint)
+
+    monkeypatch.setattr(instruction_bundle_module, "load_role", _broken_load_role)
+    gaps = instruction_bundle_module.catalog_resolution_gaps("worker", "worker-backend-dev")
+    assert gaps == ("documentation-sync",)

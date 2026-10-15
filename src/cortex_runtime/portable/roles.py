@@ -559,14 +559,11 @@ def situational_skill_triggers(role_kind: str, role_id: str | None = None) -> tu
                  if skill_id not in inlined and skill_id in _SKILL_TRIGGERS)
 
 
-def _inlined_skill_text(skill_id: str, role_kind: str) -> str | None:
-    """The same text ``read_skill`` returns for ``skill_id``, or ``None``."""
-    try:
-        if skill_id in WORKER_REFERENCE_IDS or skill_id in COORDINATOR_REFERENCE_IDS:
-            return read_reference(skill_id, role_kind=role_kind)
-        return load_role(skill_id).body_portable
-    except PortableError:
-        return None
+def _inlined_skill_text(skill_id: str, role_kind: str) -> str:
+    """The same required text ``read_skill`` returns; load failures propagate."""
+    if skill_id in WORKER_REFERENCE_IDS or skill_id in COORDINATOR_REFERENCE_IDS:
+        return read_reference(skill_id, role_kind=role_kind)
+    return load_role(skill_id).body_portable
 
 
 def composed_instructions(role_set: RoleInstructionSet) -> str:
@@ -581,10 +578,9 @@ def composed_instructions(role_set: RoleInstructionSet) -> str:
     always apply are handed over with the role, and the situational ones
     are readable by name through this runtime's own tools.
 
-    A shared skill that cannot be read is skipped rather than failing the
-    session: a worker without ``content-safety`` is worse off, but a
-    worker that cannot start at all is worse still, and the omission is
-    visible in what was delivered.
+    Required inlined skills must resolve before a session can start. A load
+    failure names the skill and receiving role through the existing portable
+    error path. Situational skills remain named references, not eager loads.
     """
     loadable = situational_skill_triggers(role_set.kind, role_set.role_id)
     parts = [role_set.body_portable]
@@ -593,9 +589,28 @@ def composed_instructions(role_set: RoleInstructionSet) -> str:
         if (role_set.role_id == CONSULTANT_ROLE_ID
                 and skill_id in CONSULTANT_EXCLUDED_NAMED_SKILLS):
             continue
-        text = _inlined_skill_text(skill_id, role_set.kind)
-        if text and text.strip():
-            inlined.append((skill_id, text.strip()))
+        try:
+            text = _inlined_skill_text(skill_id, role_set.kind)
+            if not text.strip():
+                raise PortableError(
+                    category=PortableErrorCategory.VALIDATION,
+                    code="required_skill_empty",
+                    remediation="Restore the required skill body; it contains no portable instructions.",
+                    retry_eligible=False,
+                )
+        except PortableError as error:
+            raise PortableError(
+                category=PortableErrorCategory.VALIDATION,
+                code="required_skill_unavailable",
+                remediation=(
+                    f"Cannot compose instructions for role '{role_set.role_id}': "
+                    f"required skill '{skill_id}' failed to load "
+                    f"({error.code}). {error.remediation}"
+                ),
+                retry_eligible=False,
+                details=error.details,
+            ) from error
+        inlined.append((skill_id, text.strip()))
     if inlined:
         parts.append(
             "## Skills already included\n\n"
