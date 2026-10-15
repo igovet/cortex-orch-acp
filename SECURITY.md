@@ -902,6 +902,9 @@ tools; multiply hard-linked files stay read-only unless every one of their links
 is itself a writable path of the project (esbuild links its two binaries to each
 other), and a directory with more than 256 read-only ones stays read-only as a
 whole (pnpm `node_modules`, a hardlinked uv `.venv`). `.cortex` stays hidden.
+Finding those links scans the whole project before each sandboxed launch; a slow
+scan is shown in the chat, never skipped or cached, and a sandboxed engine is
+never launched with the home directory or `/` as its project.
 
 ### Sandboxed command umask
 

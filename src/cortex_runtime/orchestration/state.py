@@ -6,6 +6,7 @@ State and events commit together in the project's existing SQLite database.
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from contextlib import contextmanager
 import hashlib
 import json
 import os
@@ -141,6 +142,26 @@ def transition(db, task_id, target, *, blocker=None):
     db.execute('UPDATE runtime_tasks SET state=?,blocker=?,updated_at=? WHERE task_id=?',
                (target, blocker, now(), task_id))
     event(db, task_id, 'TASK_STATE_CHANGED', dict(previous=source, state=target, blocker=blocker))
+
+
+@contextmanager
+def observed_project(store, task_id, needed=True):
+    """Scan the task's project before the caller's write transaction, so a
+    capture inside it reuses that scan instead of holding the store's write
+    lock for its duration (see delegation.revision.observation_snapshot)."""
+    root = None
+    if needed:
+        try:
+            with store.connection() as db:
+                root = task_workspace.task_root(db, task_id)
+        except StoreError:
+            root = None
+    if root is None:
+        yield
+        return
+    from ..delegation.revision import observation_snapshot
+    with observation_snapshot(store, root):
+        yield
 
 
 def _observe_project(db, task_id):
@@ -1165,7 +1186,10 @@ class TaskMachine:
         return []
 
     def move(self, task_id, target, *, blocker=None):
-        with self.store.connection() as db:
+        # Completion checks the project; PLAN_READY -> EXECUTING records its
+        # baseline. Both are observed before the write lock.
+        needed = target == 'COMPLETED' or (target == 'EXECUTING' and self.get_state(task_id) == 'PLAN_READY')
+        with observed_project(self.store, task_id, needed), self.store.connection() as db:
             db.execute('BEGIN IMMEDIATE')
             if target == 'COMPLETED':
                 self._completion_invariants(db, task_id)
@@ -1180,7 +1204,7 @@ class TaskMachine:
         user's honest final answer, but not a certified result: the task ends
         FAILED with the missing gate as its blocker, and no passing review or
         verification is ever inserted for it."""
-        with self.store.connection() as db:
+        with observed_project(self.store, task_id), self.store.connection() as db:
             db.execute('BEGIN IMMEDIATE')
             try:
                 self._completion_invariants(db, task_id)
@@ -1207,7 +1231,7 @@ class TaskMachine:
         if not_verified:
             proposal['not_verified'] = list(not_verified)
         digest=hashlib.sha256(encoded(proposal).encode()).hexdigest()
-        with self.store.connection() as db:
+        with observed_project(self.store, channel.task_id), self.store.connection() as db:
             db.execute('BEGIN IMMEDIATE')
             if authorization: authorization(db)
             previous=db.execute('SELECT * FROM runtime_requests WHERE task_id=? AND actor=? AND request_key=?',
@@ -1440,7 +1464,7 @@ class TaskMachine:
     def check_review_binding(self, task_id, assignment_ref, request_key=None):
         """Refuse a review result whose project changed since its review
         started, before anything of that result is published."""
-        with self.store.connection() as db:
+        with observed_project(self.store, task_id), self.store.connection() as db:
             db.execute('BEGIN IMMEDIATE')
             digest = self._review_binding_tx(db, task_id, assignment_ref, request_key)
             db.commit()
@@ -1492,7 +1516,12 @@ class TaskMachine:
                          'Re-check what changed (project_git diff), then submit your verdict again with a new request_key.' + refreshed)
 
     def record_result(self, task_id, assignment_ref, result, request_key=None):
+        # Only a review result binds to an observed project revision.
         with self.store.connection() as db:
+            node = db.execute('SELECT stage FROM runtime_nodes WHERE task_id=? AND assignment_ref=?',
+                              (task_id, assignment_ref)).fetchone()
+        review = node is not None and node['stage'] == 'review'
+        with observed_project(self.store, task_id, review), self.store.connection() as db:
             db.execute('BEGIN IMMEDIATE')
             self.record_result_tx(db, task_id, assignment_ref, result, request_key)
             db.commit()
@@ -1585,7 +1614,7 @@ class TaskMachine:
         return observed['dirty_digest']
 
     def add_review(self, task_id):
-        with self.store.connection() as db:
+        with observed_project(self.store, task_id), self.store.connection() as db:
             db.execute('BEGIN IMMEDIATE')
             task = db.execute('SELECT * FROM runtime_tasks WHERE task_id=?', (task_id,)).fetchone()
             nodes = db.execute('SELECT * FROM runtime_nodes WHERE task_id=? AND revision=?', (task_id, task['revision'])).fetchall()
@@ -1652,7 +1681,7 @@ class TaskMachine:
             db.commit()
 
     def submit_synthesis(self, channel, text, not_verified=(), *, authorization=None):
-        with self.store.connection() as db:
+        with observed_project(self.store, channel.task_id), self.store.connection() as db:
             db.execute('BEGIN IMMEDIATE')
             if authorization: authorization(db)
             task = db.execute('SELECT state,synthesis,revision FROM runtime_tasks WHERE task_id=?', (channel.task_id,)).fetchone()
@@ -1679,7 +1708,7 @@ class TaskMachine:
         return dict(recorded=True)
 
     def record_verification(self, task_id, checks, revision_digest, *, speculative_binding=None):
-        with self.store.connection() as db:
+        with observed_project(self.store, task_id), self.store.connection() as db:
             db.execute('BEGIN IMMEDIATE')
             task = db.execute('SELECT * FROM runtime_tasks WHERE task_id=?', (task_id,)).fetchone()
             if speculative_binding is not None:

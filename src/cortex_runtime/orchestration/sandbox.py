@@ -11,6 +11,8 @@ import re
 import shutil
 import os
 import stat
+import contextvars
+import time
 from contextlib import contextmanager
 from ..contracts import StoreError
 
@@ -451,6 +453,21 @@ class GitGuard:
         self.sweep()
 
 
+def _report_scan(progress, entries, seconds, done):
+    try:
+        progress(entries, seconds, done)
+    except Exception:  # noqa: BLE001 - a display failure never fails the launch
+        pass
+
+
+# Set by an engine launch (delegation.live_adapters) to show a slow project
+# scan in the chat: called as progress(entries, seconds, done).
+SCAN_PROGRESS = contextvars.ContextVar("cortex_sandbox_scan_progress", default=None)
+# A scan is reported only once it has run this long, then this often.
+SCAN_REPORT_AFTER_SECONDS = 3.0
+SCAN_REPORT_EVERY_SECONDS = 5.0
+
+
 @contextmanager
 def gateway_command(root, scratch, argv, scopes, reveal=frozenset(), system_root=False, readonly=(),
                     git_writable=False, git_guard=None):
@@ -519,8 +536,18 @@ def gateway_command(root, scratch, argv, scopes, reveal=frozenset(), system_root
         # virtualenv) made Path construction and relative_to dominate every
         # sandboxed command at several seconds each.
         root_text=str(root)
+        progress=SCAN_PROGRESS.get()
+        scan_started=time.monotonic()
+        next_report=scan_started+SCAN_REPORT_AFTER_SECONDS
+        reported=False
         for current,dirs,files in os.walk(root_text,followlinks=False):
             visited+=len(dirs)+len(files)
+            if progress is not None and time.monotonic()>=next_report:
+                # A large tree on a cold disk (an HDD) takes minutes here,
+                # before the engine even starts: say so instead of silence.
+                reported=True
+                next_report=time.monotonic()+SCAN_REPORT_EVERY_SECONDS
+                _report_scan(progress,visited,time.monotonic()-scan_started,False)
             over_limit = visited>_TREE_LIMIT  # grants stop; private masking does not
             parent_id=None
             rel_dir=current[len(root_text)+1:]
@@ -555,6 +582,8 @@ def gateway_command(root, scratch, argv, scopes, reveal=frozenset(), system_root
                             link_entries.setdefault(key,{})[(parent_id,name)]=owner
                         linked.append((relative,owner,key))
                     elif owner is None and not stat.S_ISLNK(info.st_mode): candidates.add(relative)
+        if reported:
+            _report_scan(progress,visited,time.monotonic()-scan_started,True)
         def internal(key,excluded=frozenset()):
             # Every link of this file is a writable path of this project
             # (esbuild links its two binaries together): writing through one

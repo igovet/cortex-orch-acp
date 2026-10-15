@@ -60,6 +60,7 @@ documented limitation of the shared-root design, not a bug in this module.
 """
 from __future__ import annotations
 
+import contextvars
 import ctypes
 import fcntl
 import hashlib
@@ -71,6 +72,8 @@ import sys
 import threading
 import time
 from collections import OrderedDict
+from contextlib import contextmanager
+from pathlib import Path
 from datetime import datetime, timezone
 
 _MAX_FILES = 50_000
@@ -741,7 +744,84 @@ def _tree_digest(root) -> tuple[str | None, str | None, list[str] | None]:
     return h.hexdigest(), None, records
 
 
+# Project observations taken just before a write transaction (see
+# observation_snapshot), per thread/context: path -> captured dict.
+_SNAPSHOTS: contextvars.ContextVar = contextvars.ContextVar("cortex_revision_snapshots", default=None)
+# How long a project mutation or observation waits for the other side.
+PROJECT_LOCK_TIMEOUT_SECONDS = 600.0
+
+
+@contextmanager
+def project_mutation_lock(store, *, exclusive: bool):
+    """The project-change lock of ``store``'s project, held across process
+    boundaries (flock). A gateway file effect holds it exclusively; an
+    observation that a write transaction relies on holds it shared from its
+    scan until that transaction ends. Both take it *before* the store's
+    write lock, so the order is always the same and the store is never held
+    during a scan."""
+    path = Path(store.directory) / ".project-mutation.lock"
+    fd = os.open(path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    try:
+        deadline = time.monotonic() + PROJECT_LOCK_TIMEOUT_SECONDS
+        mode = fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
+        while True:
+            try:
+                fcntl.flock(fd, mode | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    from ..contracts import StoreError
+                    raise StoreError("project_mutation_lock_timeout") from None
+                time.sleep(0.05)
+        try:
+            yield
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
+
+
+@contextmanager
+def observation_snapshot(store, workspace_root):
+    """Scan ``workspace_root`` now, before the caller's write transaction,
+    and let every :func:`capture_revision` of that root inside the block
+    return this one observation.
+
+    A full scan can take seconds to minutes; inside ``BEGIN IMMEDIATE`` it
+    held the store's write lock that long and every other writer (another
+    chat's runtime included) failed with "database is locked" after the
+    15 s busy timeout. The shared project-change lock keeps gateway file
+    effects -- which used to be excluded by that write lock -- from landing
+    between this scan and the transaction's decision. Native engine tools
+    were never excluded by either lock. Nested blocks for the same root
+    reuse the outer observation."""
+    key = os.path.realpath(str(workspace_root))
+    current = _SNAPSHOTS.get() or {}
+    if key in current:
+        yield current[key]
+        return
+    with project_mutation_lock(store, exclusive=False):
+        captured = _capture_revision_now(workspace_root)
+        token = _SNAPSHOTS.set({**current, key: captured})
+        try:
+            yield captured
+        finally:
+            _SNAPSHOTS.reset(token)
+
+
 def capture_revision(workspace_root) -> dict:
+    """The current :func:`observation_snapshot` of ``workspace_root`` when
+    one is active in this context, else a fresh observation (see
+    :func:`_capture_revision_now`)."""
+    snapshots = _SNAPSHOTS.get()
+    if snapshots:
+        captured = snapshots.get(os.path.realpath(str(workspace_root)))
+        if captured is not None:
+            return dict(captured)
+    return _capture_revision_now(workspace_root)
+
+
+def _capture_revision_now(workspace_root) -> dict:
     """Read-only observation of ``workspace_root`` (git, sandboxed, only
     lists paths -- see the module docstring). Returns
     ``dict(kind, head, dirty_digest, detail)``: ``kind`` is ``"observed"``

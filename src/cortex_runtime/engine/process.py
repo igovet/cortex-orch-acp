@@ -769,6 +769,14 @@ def _validation_error(code, remediation, *, field=None):
     )
 
 
+def _whole_home_or_root(cwd, environ) -> bool:
+    """Whether ``cwd`` is the filesystem root or the owner's home itself."""
+    env = os.environ if environ is None else environ
+    real = os.path.realpath(cwd)
+    homes = {os.path.realpath(home) for home in (env.get("HOME"), os.path.expanduser("~")) if home}
+    return real == "/" or real in homes
+
+
 class ProcessObservation:
     STARTING = "starting"
     TRANSPORT_EOF = "transport_eof"
@@ -840,6 +848,16 @@ class EngineProcess:
             raise _validation_error(
                 "engine_cwd_required",
                 "An explicit absolute workspace directory is required to launch an engine process.",
+                field="cwd",
+            )
+        if jail is not None and _whole_home_or_root(cwd, environ):
+            # The jail scans its whole project before the engine starts; a
+            # home directory took minutes (a catalog probe of a session
+            # opened there ran 283 s before it was stopped).
+            raise _validation_error(
+                "engine_cwd_is_home",
+                "Open a project directory, not the home directory or /: a sandboxed engine would first "
+                "scan everything below it.",
                 field="cwd",
             )
         opencode = record.engine == opencode_install.ENGINE

@@ -142,6 +142,25 @@ failure more than 10 minutes after the previous one starts a new streak.
   runtime retries the node at once. The chat shows that wait as a card
   titled `Retry N: <node> — the worker's engine failed`.
 
+### Project scans outside the store's write lock
+
+Some write transactions decide on an observed project revision
+(`delegation.revision.capture_revision`): a review result binding, completion
+and answer checks, verification credit, synthesis, the execution baseline and
+the review waiver. Each one used to scan the project inside `BEGIN IMMEDIATE`;
+synthesis scanned at least four times. SQLite's write lock covers the whole
+database, so every other writer, including another chat's runtime on the same
+project, failed with `database is locked` once its 15 s busy timeout ran out.
+`TaskMachine` and `synthesis.complete` now scan once before the transaction
+(`orchestration.state.observed_project`,
+`delegation.revision.observation_snapshot`), and every capture of that root
+inside the transaction returns that observation. The scan holds the
+project-change lock (`.cortex/.project-mutation.lock`, shared) until the
+transaction ends. A gateway file effect (`project_write`, `project_edit`,
+`project_mkdir`, `project_delete`, `project_skill_link`) holds that lock
+exclusively, so such an effect still cannot land between the scan and the
+decision. Native engine tools were never excluded by either lock.
+
 ## 3. Cancellation (`session/cancel`)
 
 `session/cancel` interrupts the current turn, revokes current worker channels,
@@ -399,6 +418,9 @@ eligibility for `transport_eof`/`timeout_alive`/`poisoned`.
 `tests/test_engine_retry_window.py` covers the transient-failure retry
 window: the policy itself, coordinator launch and turn retries with their
 chat lines, and the worker retry delay with its wait card.
+`tests/test_observation_outside_write_lock.py` covers scans outside the write
+lock and the project-change lock; `tests/test_sandbox_scan_visibility.py`
+covers the sandbox scan card and the home-directory refusal.
 
 ## Known limitations
 

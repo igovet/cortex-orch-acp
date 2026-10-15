@@ -517,6 +517,19 @@ more than 256 such read-only files (a pnpm `node_modules`, a hardlinked uv
 `.venv`) is read-only as a whole; reinstall such a tree from the owner's shell or
 with `outside_command`.
 
+Finding these links and the private names takes a full scan of the project (one
+`lstat` per granted file) before every sandboxed launch. On a large tree on a
+cold HDD that scan took minutes, so the engine had not even started while the
+chat showed nothing. A scan that runs longer than 3 s now opens a chat card,
+`Preparing the sandbox (coordinator|worker)`, with the entries scanned and the
+seconds spent, and closes it when the scan ends (`orchestration.sandbox
+.SCAN_PROGRESS`). The scan itself is unchanged: the hard-link check is what
+keeps a write through a link from reaching a file outside the project. A
+sandboxed engine is never launched with the home directory or `/` as its
+project (`engine_cwd_is_home`), because the scan would cover all of it. A
+catalog probe of a session opened in the home directory took 283 s before it
+was stopped.
+
 Every side effect has a durable started receipt before execution. Identical retries
 return the retained result. Conflicting keys fail. An interrupted operation with
 an unknown outcome is never automatically executed again. Complete command bytes

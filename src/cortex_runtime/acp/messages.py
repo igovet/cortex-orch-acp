@@ -379,6 +379,24 @@ _CATALOG: dict[str, dict[str, str]] = {
         "en": "✗ The engine kept failing for {minutes} min ({error}; {retries} retries). Stopping.",
         "ru": "✗ Движок сбоил {minutes} мин подряд ({error}; повторов: {retries}). Останавливаюсь.",
     },
+    # A sandboxed engine scans its whole project before it starts
+    # (orchestration.sandbox.gateway_command); a slow scan gets a card.
+    "sandbox_scan.title": {
+        "en": "Preparing the sandbox ({who})",
+        "ru": "Подготовка песочницы ({who})",
+    },
+    "sandbox_scan.coordinator": {"en": "coordinator", "ru": "координатор"},
+    "sandbox_scan.worker": {"en": "worker", "ru": "воркер"},
+    "sandbox_scan.progress": {
+        "en": "The engine has not started yet: the project is being scanned for the sandbox ({entries} entries, {seconds} s). "
+              "A large project on a slow (HDD) disk can take minutes the first time; this is not a hang.",
+        "ru": "Движок ещё не запущен: проект сканируется для песочницы ({entries} записей, {seconds} с). "
+              "Большой проект на медленном диске (HDD) в первый раз может сканироваться минуты — это не зависание.",
+    },
+    "sandbox_scan.done": {
+        "en": "Project scanned for the sandbox: {entries} entries in {seconds} s. The engine is starting.",
+        "ru": "Проект просканирован для песочницы: {entries} записей за {seconds} с. Движок запускается.",
+    },
     "assignment_delegation_failed": {
         "en": "Assignment {assignment_ref} was NOT delegated ({error}); this work was refused before reaching a worker. If the coordinator proceeds itself, that is a fallback, not a delegation.",
         "ru": "Назначение {assignment_ref} НЕ было делегировано ({error}); эта работа была отклонена ещё до передачи исполнителю. Если координатор выполнит её сам, это резервный вариант, а не делегирование.",

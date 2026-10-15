@@ -2125,6 +2125,36 @@ class OrchestratingRuntime:
                 self._emit_retry_notice(task_id, emit_update, language, "engine_retry.recovered", retries=len(failures))
             return opened
 
+    def _sandbox_scan_progress(self, task_id: str, attempt_id: str, assignment_ref: str | None,
+                               entries: int, seconds: float, done: bool) -> None:
+        """A slow project scan before a sandboxed engine starts, shown as one
+        card per launch (orchestration.sandbox.SCAN_PROGRESS). A large tree on
+        a cold HDD took minutes there while the chat showed nothing."""
+        with self._lock:
+            emit_tool_call = self._task_tool_call_emitters.get(task_id)
+        if emit_tool_call is None:
+            return
+        language = self._resolve_language(task_id)
+        who = acp_messages.render("sandbox_scan.worker" if assignment_ref else "sandbox_scan.coordinator", language)
+        text = acp_messages.render("sandbox_scan.done" if done else "sandbox_scan.progress", language,
+                                   who=who, entries=entries, seconds=round(seconds))
+        card = f"sandbox-scan:{task_id}:{attempt_id}"
+        with self._lock:
+            started = getattr(self, "_sandbox_scan_cards", None)
+            if started is None:
+                started = self._sandbox_scan_cards = set()
+            new = card not in started
+            started.add(card)
+            if done:
+                started.discard(card)
+        update = dict(tool_call_id=card, new=new, status="completed" if done else "in_progress", text=text)
+        if new:
+            update.update(title=acp_messages.render("sandbox_scan.title", language, who=who), kind="other")
+        try:
+            emit_tool_call(update)
+        except Exception:  # noqa: BLE001 - display only
+            pass
+
     def _emit_retry_notice(self, task_id: str, emit_update: Callable[[str], bool], language: str, key: str,
                            **params) -> None:
         """One retry status line in the chat, in its own paragraph, and on

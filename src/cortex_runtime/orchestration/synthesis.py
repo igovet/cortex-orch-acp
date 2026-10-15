@@ -224,7 +224,9 @@ def complete(machine, task_id, language, workers_absent):
     returns and post-compose rollback can leave no event. Existing coordinator
     synthesis is never treated as a decline.
     """
-    with machine.store.connection() as db:
+    from .state import observed_project
+    # The project is scanned several times below: once, before the lock.
+    with observed_project(machine.store, task_id), machine.store.connection() as db:
         db.execute('BEGIN IMMEDIATE')
         task = db.execute('SELECT * FROM runtime_tasks WHERE task_id=?', (task_id,)).fetchone()
         if not task or task['state'] != 'RECONCILING':

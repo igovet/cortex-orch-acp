@@ -4,6 +4,7 @@ Authorization comes from the current durable assignment, never tool arguments.
 File operations use no-follow directory descriptors. Commands get a read-only
 project with only explicitly granted directories/files mounted writable.
 """
+import contextlib
 from contextlib import contextmanager
 import errno
 import fnmatch
@@ -960,67 +961,74 @@ def dispatch(store,channel,operation,args):
                          f" becomes -> {skill_links.link_target(args['name'])}")
                 if not consent.request(store,channel,'project_skill_link',subject,still_allowed=still_allowed):
                     raise StoreError('skill_link_replace_not_confirmed')
-            with store.connection() as db:
-                db.execute('BEGIN IMMEDIATE')
-                scopes,owner=_authority(db,channel)
-                if operation=='project_delete':
-                    observed=_file_sha256(root,args['path'])
-                    if observed!=args['expected_sha256']:
-                        raise StoreError('gateway_write_conflict')
-                    if _parts(args['path']) == ('.gitignore',):
-                        result = _write(root, dict(args, content=''), effects)
-                        result['deleted'] = False
-                        result['gitignore_guard'] = True
-                    else:
-                        with _parent(root,args['path']) as (parent,leaf):
-                            effects['possible']=True
-                            os.unlink(leaf,dir_fd=parent); os.fsync(parent)
-                        result=dict(deleted=True)
-                elif operation=='project_mkdir':
-                    def create_parent(component):
-                        effects['possible']=True
-                    with _parent(root,args['path'],create_parents=create_parent) as (parent,leaf):
-                        try:
-                            info=os.stat(leaf,dir_fd=parent,follow_symlinks=False)
-                        except FileNotFoundError:
-                            effects['possible']=True
-                            os.mkdir(leaf,0o755,dir_fd=parent)
-                            os.fsync(parent)
-                            result=dict(created=True)
+            # A file effect excludes runtime observations a write transaction
+            # relies on (delegation.revision.observation_snapshot): taken
+            # before the store's write lock, as they take theirs.
+            from ..delegation.revision import project_mutation_lock
+            mutation_lock = (project_mutation_lock(store, exclusive=True) if operation != 'draft_write'
+                             else contextlib.nullcontext())
+            with mutation_lock:
+                with store.connection() as db:
+                    db.execute('BEGIN IMMEDIATE')
+                    scopes,owner=_authority(db,channel)
+                    if operation=='project_delete':
+                        observed=_file_sha256(root,args['path'])
+                        if observed!=args['expected_sha256']:
+                            raise StoreError('gateway_write_conflict')
+                        if _parts(args['path']) == ('.gitignore',):
+                            result = _write(root, dict(args, content=''), effects)
+                            result['deleted'] = False
+                            result['gitignore_guard'] = True
                         else:
-                            if not stat.S_ISDIR(info.st_mode):
-                                raise StoreError('gateway_path_exists','path',args['path'],'a directory or a missing path',
-                                                 'A file or symbolic link already occupies this path; nothing was '
-                                                 'created. Choose another directory path.')
-                            # Already a real directory: the requested state holds.
-                            result=dict(created=False)
-                elif operation in {'project_write','project_edit'}:
-                    # Recheck deny-write policy at the effect boundary, not just dispatch.
-                    if not _matches(args['path'],scopes) or write_denied(args['path'],write_denials(db,channel.task_id)):
-                        raise StoreError('gateway_scope_denied')
-                    from .project_files import read_state
-                    state = read_state(db,channel,root,args['path'])
-                    if operation == 'project_write':
-                        result=_write(root,args,effects,read_state=state,require_complete_read=True)
+                            with _parent(root,args['path']) as (parent,leaf):
+                                effects['possible']=True
+                                os.unlink(leaf,dir_fd=parent); os.fsync(parent)
+                            result=dict(deleted=True)
+                    elif operation=='project_mkdir':
+                        def create_parent(component):
+                            effects['possible']=True
+                        with _parent(root,args['path'],create_parents=create_parent) as (parent,leaf):
+                            try:
+                                info=os.stat(leaf,dir_fd=parent,follow_symlinks=False)
+                            except FileNotFoundError:
+                                effects['possible']=True
+                                os.mkdir(leaf,0o755,dir_fd=parent)
+                                os.fsync(parent)
+                                result=dict(created=True)
+                            else:
+                                if not stat.S_ISDIR(info.st_mode):
+                                    raise StoreError('gateway_path_exists','path',args['path'],'a directory or a missing path',
+                                                     'A file or symbolic link already occupies this path; nothing was '
+                                                     'created. Choose another directory path.')
+                                # Already a real directory: the requested state holds.
+                                result=dict(created=False)
+                    elif operation in {'project_write','project_edit'}:
+                        # Recheck deny-write policy at the effect boundary, not just dispatch.
+                        if not _matches(args['path'],scopes) or write_denied(args['path'],write_denials(db,channel.task_id)):
+                            raise StoreError('gateway_scope_denied')
+                        from .project_files import read_state
+                        state = read_state(db,channel,root,args['path'])
+                        if operation == 'project_write':
+                            result=_write(root,args,effects,read_state=state,require_complete_read=True)
+                        else:
+                            result=_edit(root,args,state,effects)
+                        # The channel knows the bytes it just produced: its next
+                        # edit needs no re-read (engines' own edit tools behave so).
+                        # Whole-file knowledge only after a full write, or an edit
+                        # of a completely read file; .gitignore gains protected
+                        # lines the model did not send.
+                        from .project_files import record_own_write
+                        complete = ((operation == 'project_write' or bool(state and state['complete']))
+                                    and _parts(args['path']) != ('.gitignore',))
+                        record_own_write(db,channel,root,args['path'],result['sha256'],
+                                         complete=complete,total_lines=result['new_lines'])
+                        result['read_coverage_complete'] = complete
+                        result['full_content_sha256'] = result['sha256'] if complete else None
+                    elif operation=='project_skill_link':
+                        result=skill_links.apply(root,args,effects)
                     else:
-                        result=_edit(root,args,state,effects)
-                    # The channel knows the bytes it just produced: its next
-                    # edit needs no re-read (engines' own edit tools behave so).
-                    # Whole-file knowledge only after a full write, or an edit
-                    # of a completely read file; .gitignore gains protected
-                    # lines the model did not send.
-                    from .project_files import record_own_write
-                    complete = ((operation == 'project_write' or bool(state and state['complete']))
-                                and _parts(args['path']) != ('.gitignore',))
-                    record_own_write(db,channel,root,args['path'],result['sha256'],
-                                     complete=complete,total_lines=result['new_lines'])
-                    result['read_coverage_complete'] = complete
-                    result['full_content_sha256'] = result['sha256'] if complete else None
-                elif operation=='project_skill_link':
-                    result=skill_links.apply(root,args,effects)
-                else:
-                    result=write_draft(store,db,channel,args['draft_id'],args['content'])
-                db.commit()
+                        result=write_draft(store,db,channel,args['draft_id'],args['content'])
+                    db.commit()
             if operation in {'project_write','project_edit','project_mkdir'}:
                 try:
                     from .skill_gate import required_before_result_submit

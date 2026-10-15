@@ -1177,7 +1177,18 @@ class EngineSessionManagerAdapter:
                 terminal_output_persist=self._persist_terminal_output,
                 **manager_kwargs,
             )
-            manager.negotiate(_requested_capabilities())
+            # negotiate() starts the process; a sandboxed one first scans the
+            # project, which the runtime shows in the chat when it is slow.
+            from ..orchestration.sandbox import SCAN_PROGRESS
+            reporter = getattr(getattr(self, "_runtime", None), "_sandbox_scan_progress", None)
+            scan_token = SCAN_PROGRESS.set(
+                (lambda entries, seconds, done: reporter(task_id, attempt_id, launch.get("assignment_id"),
+                                                          entries, seconds, done))
+                if reporter is not None else None)
+            try:
+                manager.negotiate(_requested_capabilities())
+            finally:
+                SCAN_PROGRESS.reset(scan_token)
             self._check_not_cancelled(attempt_id, task_id)
             # Both pinned adapters now receive their qualified session/new
             # metadata. Codex also receives its tagged generation prompt.
