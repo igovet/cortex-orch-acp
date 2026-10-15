@@ -31,6 +31,8 @@ import { WorkerCardFence } from "./worker-card-fence.ts";
   assert.equal(fence.toolCall({ ...snapshot, id: "native-read" }).status, "failed", "other calls are untouched");
   assert.equal(fence.isSynthesizedTerminal({ type: "tool_call", callId: "worker:a", status: "failed" }), true);
   assert.equal(fence.isSynthesizedTerminal({ type: "tool_call", callId: "worker:a", status: "completed" }), true);
+  // Bridge 0.11.x settles a cancelled turn's open calls as `canceled`.
+  assert.equal(fence.isSynthesizedTerminal({ type: "tool_call", callId: "worker:a", status: "canceled" }), true);
   assert.equal(fence.isSynthesizedTerminal({ type: "tool_call", callId: "worker:a", status: "running" }), false);
   assert.equal(fence.isSynthesizedTerminal({ type: "tool_call", callId: "worker:unknown", status: "failed" }), false);
   assert.equal(fence.isSynthesizedTerminal({ type: "tool_call", callId: "native-read", status: "failed" }), false);

@@ -1236,16 +1236,17 @@ class Agent:
         with self._history_locks_lock:
             return self._history_locks.setdefault(session_id, threading.Lock())
 
-    def _persist_and_enqueue_update(self, session_id, update, cancel_event):
+    def _persist_and_enqueue_update(self, session_id, update, cancel_event, *, outlives_turn=False):
         """Record a real runtime update before offering it to the host.
 
         ``send_notification`` only means that the bounded transport accepted
         the frame; its writer may fail later.  Recording first preserves the
         event for reconnect in that case without claiming host receipt.  A
         persistence failure is fail-closed: no update is enqueued and the
-        prompt is cancelled.
+        prompt is cancelled.  ``outlives_turn`` updates (worker cards) are
+        still sent after that prompt was cancelled.
         """
-        if cancel_event.is_set() or self.transport is None:
+        if (cancel_event.is_set() and not outlives_turn) or self.transport is None:
             return False
         with self._history_lock(session_id):
             from .read_history import ReadHistoryFilter
@@ -1303,11 +1304,16 @@ class Agent:
         assignment when that is), ``tool_call_update`` every time after.
         Never raises (same convention as ``emit_update`` below); ``None``
         transport or an already-cancelled turn is a silent no-op, exactly
-        like a dropped text chunk."""
+        like a dropped text chunk -- except for a worker card: it belongs to
+        the task, not to this turn, and its worker keeps running after the
+        turn is cancelled (Paseo sends ``session/cancel`` before every
+        follow-up prompt, and a lone Stop cancels the worker only after the
+        turn has ended), so its later updates still reach this session."""
         def emit_tool_call(update):
-            if cancel_event.is_set() or self.transport is None:
-                return False
             tool_call_id = update["tool_call_id"]
+            outlives_turn = str(tool_call_id).startswith("worker:")
+            if (cancel_event.is_set() and not outlives_turn) or self.transport is None:
+                return False
             if update.get("new"):
                 # A tool card is a timeline boundary.  Text emitted after a
                 # new tool call must receive a fresh messageId so Paseo never
@@ -1328,7 +1334,9 @@ class Agent:
                     content=update.get("content"), raw_input=update.get("raw_input"),
                     raw_output=update.get("raw_output"),
                 )
-            return self._persist_and_enqueue_update(session_id, notif["params"]["update"], cancel_event)
+            return self._persist_and_enqueue_update(
+                session_id, notif["params"]["update"], cancel_event, outlives_turn=outlives_turn,
+            )
         # The runtime sizes worker cards for the client that renders them
         # (Paseo shows only title, status and result).
         emit_tool_call.client_surface = self.client_info.get("name")

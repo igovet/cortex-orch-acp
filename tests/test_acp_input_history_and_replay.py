@@ -933,6 +933,38 @@ def test_session_load_replays_durable_structured_worker_cards(tmp_path):
     assert loader.runtime.start_prompt_calls == []
 
 
+def test_worker_card_updates_outlive_the_cancelled_turn_that_created_them(tmp_path):
+    """Paseo cancels the turn before every follow-up prompt while its workers
+    keep running. The card a cancelled turn created still receives the
+    worker's real outcome, live and in the replay journal; the turn's own
+    coordinator cards stay silent once it is cancelled."""
+    agent = Agent(_CountingFakeRuntime(), environ=_isolated_environ())
+    transport = _RecordingTransport()
+    agent.bind_transport(transport)
+    agent.initialized = True
+    session_id = agent._session_new(dict(cwd=str(tmp_path), mcpServers=[]))["sessionId"]
+    turn_cancelled = threading.Event()
+    emitter = agent._make_emit_tool_call(session_id, turn_cancelled)
+    assert emitter(dict(tool_call_id="worker:a", new=True, title="Backend worker", kind="other", status="in_progress"))
+    assert emitter(dict(tool_call_id="call:coordinator:x", new=True, title="Read", kind="read", status="in_progress"))
+    turn_cancelled.set()
+    assert emitter(dict(tool_call_id="worker:a", new=False, status="completed", text="Published report"))
+    assert emitter(dict(tool_call_id="call:coordinator:x", new=False, status="completed")) is False
+
+    live = [n["params"]["update"] for n in transport.notifications if n.get("method") == "session/update"]
+    assert [(u["toolCallId"], u.get("status")) for u in live] == [
+        ("worker:a", "in_progress"), ("call:coordinator:x", "in_progress"), ("worker:a", "completed"),
+    ]
+    loader = Agent(_CountingFakeRuntime(), environ=agent.environ)
+    loader_transport = _RecordingTransport()
+    loader.bind_transport(loader_transport)
+    loader.initialized = True
+    loader._session_load(22, dict(sessionId=session_id, cwd=str(tmp_path), mcpServers=[]))
+    replayed = [n["params"]["update"] for n in loader_transport.notifications
+                if n["params"]["update"].get("toolCallId") == "worker:a"]
+    assert replayed[-1]["status"] == "completed"
+
+
 @pytest.mark.parametrize("terminal_status", ["completed", "failed"])
 def test_session_load_replays_terminal_worker_card_statuses(tmp_path, terminal_status):
     """Paseo's worker renderer must receive terminal status after reload.

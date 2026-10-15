@@ -273,21 +273,30 @@ that arbitrary model output can be deterministically language-validated.
 
 A worker's coordinator-timeline card is one ACP tool call (`worker:<assignment>`)
 that outlives the coordinator turn which created it; the runtime keeps sending
-its updates, and its real outcome, in later turns. The Paseo ACP bridge settles
-every tool call that is still `pending` or `in_progress` when a prompt ends:
-`failed` when the turn was cancelled, `completed` when it completed. It does
-this itself (`terminalizeTransientItems` in `@getpaseo/plugin` 0.9.1 installed
-for this plugin, and the same routine in the inspected Paseo 0.11.2 application
-bundle), not from an agent update, and merges later updates that carry no
-status into that settled status. Under cancel-then-prompt steering this showed a
-still-running worker as Failed with `Tool call failed: <title>`, and later
-progress kept that state until the worker's real outcome arrived.
+its updates, and its real outcome, in later turns. The ACP feed of a
+cancelled prompt therefore still carries `worker:` card updates
+(`Agent._make_emit_tool_call`); its other updates stop with the turn. Before
+that, every update to a card created by a turn Paseo cancelled was dropped
+(not sent and not journaled), so a steered worker's outcome and a lone Stop's
+cancellation never reached the card.
+
+The Paseo ACP bridge settles every tool call that is still `pending` or
+`in_progress` when a prompt ends. It does this itself
+(`terminalizeTransientItems`), not from an agent update, and merges later
+updates that carry no status into that settled status. In `@getpaseo/plugin`
+0.9.1 (this plugin's pinned dev dependency) the settled timeline item is
+`failed` for a cancelled turn and `completed` for a completed one; in the
+bridge bundled with the installed Paseo 0.11.4 application, a cancelled turn's
+item is `canceled` (its merged snapshot is still `failed`). Under
+cancel-then-prompt steering this showed a still-running worker as Failed
+(`Tool call failed: <title>`) or, on 0.11.4, Canceled.
 
 The Cortex provider keeps each worker card on the status Cortex last sent
 (`integrations/paseo/server/worker-card-fence.ts`). It reads the raw ACP frames
 before the bridge, restores that status in the bridge's merged snapshot, and
-withholds the bridge's own settlement of a worker card Cortex still reports
-running when the turn was cancelled (steering or Stop) or completed. The card
+withholds the bridge's own settlement (`failed`, `canceled` or `completed`) of
+a worker card Cortex still reports running when the turn was cancelled
+(steering or Stop) or completed. The card
 keeps its identity and stays running until Cortex reports the outcome. Limits:
 
 - A prompt that itself failed (an agent error or a lost transport) keeps the

@@ -410,9 +410,11 @@ constrain individual wire updates and the number of cards and updates per
 task, and avoid retransmitting cumulative content; durable task history and
 work remain proportional to the task.
 
-The Paseo provider withholds only the ACP bridge's own turn-end settlement of a
-worker card that Cortex still reports running, when the turn was cancelled or
-completed. It never withholds or replaces a terminal status Cortex sent (a
+The Paseo provider withholds only the ACP bridge's own turn-end settlement
+(`failed`, `canceled` or `completed`) of a worker card that Cortex still reports
+running, when the turn was cancelled or completed. The runtime keeps journaling
+and sending only `worker:` card updates after their turn is cancelled; every
+other update of a cancelled turn is still dropped. It never withholds or replaces a terminal status Cortex sent (a
 later non-terminal frame for a settled card keeps the settled status), and a
 failed prompt keeps the bridge's failure. This is display integrity only: it does not
 change task state, permissions, results or verification.

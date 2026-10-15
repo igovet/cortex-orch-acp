@@ -6,7 +6,8 @@
  *
  * The installed ACP bridge ends every prompt by settling each tool call it
  * still holds as pending/in_progress (`terminalizeTransientItems`): a
- * cancelled turn makes it `failed`, a completed one `completed`. It does this
+ * cancelled turn makes its timeline item `canceled` (bridge 0.11.x; `failed`
+ * in 0.9.x), a failed one `failed`, a completed one `completed`. It does this
  * itself, without any update from the agent and without running provider
  * transformers, and keeps that synthetic status in its snapshot, so later
  * agent updates that carry no status are merged into it. For a worker card
@@ -76,7 +77,7 @@ export class WorkerCardFence {
    * turn-end settlement can disagree. */
   isSynthesizedTerminal(item: { type: string; callId?: unknown; status?: unknown }): boolean {
     if (item.type !== "tool_call" || !isWorkerCard(item.callId)) return false;
-    if (item.status !== "failed" && item.status !== "completed") return false;
+    if (item.status !== "failed" && item.status !== "completed" && item.status !== "canceled") return false;
     const authoritative = this.statuses.get(item.callId);
     return authoritative === "pending" || authoritative === "in_progress";
   }

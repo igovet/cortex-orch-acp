@@ -2,6 +2,16 @@
 
 ## 1.0.0 (unreleased)
 
+A worker that steering left running no longer ends as Canceled in Paseo while it keeps
+working. Paseo sends `session/cancel` before each follow-up prompt; the cancelled prompt's ACP
+feed silently dropped every later update of the worker cards it had created, so the worker's
+real outcome (and a lone Stop's cancellation) never reached the card and was never journaled.
+`worker:` card updates now outlive their turn's cancellation; the turn's other updates still
+stop with it. The Paseo 0.11.4 bridge settles a cancelled turn's open tool calls as `canceled`
+(0.9.1 used `failed`); the provider's worker-card fence now withholds that settlement too.
+Coverage is no-paid unit/provider tests plus a provider run against the bridge bundled with the
+installed Paseo 0.11.4; no live, paid or rendered Desktop check is claimed.
+
 The built-in default preset (`policy/model-settings-default.json`) is synced again from the
 owner's slightly edited production `routing.json`: `codex-acp/gpt-6-astra`'s `preferred_for`
 is `["design"]` once more (the generic design/architecture work kind), and `claude-agent-acp/opus[1m]`'s

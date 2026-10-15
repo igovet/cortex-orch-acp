@@ -635,10 +635,13 @@ by a prompt on the same session is steering: the coordinator turn ends and runni
 continue (see the steering page).
 
 The Paseo ACP bridge settles every tool call still open when a prompt ends
-(`failed` for a cancelled turn, `completed` for a completed one) without any agent
-update. A Cortex worker card outlives its coordinator turn, so before the provider
-fenced it, steering showed a still-running worker as Failed with
-`Tool call failed: <title>`. A worker card in Paseo is trustworthy only on the status
+(`failed`, or `canceled` in the Paseo 0.11.4 bridge, for a cancelled turn;
+`completed` for a completed one) without any agent update. A Cortex worker card
+outlives its coordinator turn, so before the provider fenced it, steering showed a
+still-running worker as Failed with `Tool call failed: <title>` or as Canceled.
+The plugin's pinned `@getpaseo/plugin` dev dependency (0.9.1) is not the bridge
+Paseo runs: the host supplies its own, so plugin tests alone do not show a
+host-version change in this settlement. A worker card in Paseo is trustworthy only on the status
 Cortex itself sent; see
 [worker cards across steering](../features/steering-and-questions/index.md#worker-cards-across-steering).
 
