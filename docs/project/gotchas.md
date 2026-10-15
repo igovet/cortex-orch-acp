@@ -391,16 +391,29 @@ A background engine auto-update can install a new `claude-agent-acp` adapter ver
 - **Honest failed-check history must not silently end the worker.** An open failure
   now refuses `result_submit` with `open_failed_check` before publishing a report,
   recording a request/result or revoking the channel. The correction names the
-  check/receipt and its observed argv when available. Keep the failed check and
+  check/receipt, a bounded command identity and the actual gap of the relevant
+  rerun. Keep the failed check and
   cite an exact later passing rerun, or intentionally submit
   `assignment_outcome: "failed"`. Correcting the check command itself changes its
   identity and does not close the original failure. A mistyped command line whose
   own output shows the check never started (usage, unknown-option or
-  file-not-found error) is not a failed check, though: cite the corrected
-  command's receipt and describe the mistake in the report. A Codex worker on
-  2026-10-07 instead cited `generate_agent_profiles.py --check` (exit 2) and failed
-  an otherwise verified assignment. Accepted receipts include
+  file-not-found error) is not a failed check, though: do not cite it, cite the
+  corrected command's receipt and describe the mistake in the report. A Codex
+  worker on 2026-10-07 instead cited `generate_agent_profiles.py --check` (exit 2)
+  and failed an otherwise verified assignment. Once cited, it can no longer be
+  dropped (next entry). Accepted receipts include
   `node_status`; this is not task acceptance. No `supersedes` policy was introduced.
+- **A refusal must say when no rerun can close a failure.** On 2026-10-14 a
+  worker's oversized `command_run` result was rejected by its host, so it
+  wrapped checks in `bash -lc '... > /tmp/log 2>&1; code=$?; ...; exit $code'`.
+  Every passing exact rerun of such a script was classified trivial, the
+  refusal only asked for another exact rerun, and the worker was refused nine
+  times before it dropped the failed checks and was accepted. Now the plain
+  status-capture form verifies, every other `exit $VARIABLE` stays
+  `status_variable_unproven`, the refusal says when only
+  `assignment_outcome: "failed"` remains, a presented failure must be cited
+  again (`omitted_failed_check`), and `command_run` inlines at most 64 KiB, as
+  advertised (it previously returned the whole output inline).
 - **Situational skills are still gated at submission.** Successful gateway writes
   and mkdir calls give early `required_before_result_submit` skill/reason hints
   from this attempt's own gateway writes as non-error reminders; only attributable paths
@@ -621,6 +634,14 @@ worker failure. A cancelled queued worker is reported only as cancelled. A cance
 by a prompt on the same session is steering: the coordinator turn ends and running workers
 continue (see the steering page).
 
+The Paseo ACP bridge settles every tool call still open when a prompt ends
+(`failed` for a cancelled turn, `completed` for a completed one) without any agent
+update. A Cortex worker card outlives its coordinator turn, so before the provider
+fenced it, steering showed a still-running worker as Failed with
+`Tool call failed: <title>`. A worker card in Paseo is trustworthy only on the status
+Cortex itself sent; see
+[worker cards across steering](../features/steering-and-questions/index.md#worker-cards-across-steering).
+
 `opencode models` and a Cortex OpenCode catalog disagreed for two separate
 reasons (observed 2026-09-30 on OpenCode 2.0.20). First, a custom provider
 exists only in the owner's `~/.config/opencode`, which the engine jail hides;
@@ -696,9 +717,11 @@ before blaming an engine version, and start daemons with `outside_command`. See
   `evidence: "context only, not a check receipt"`; its `large_output_id` is never
   a command receipt. Put inspected status/diff in the report body. Meaningful
   Git checks must use `command_run` with an exit-status assertion. F3 (2026-10-07):
-  `project_git` now inlines `output` up to 64 KiB (the same bound `command_run`
-  uses), with `output_truncated` marking when the retained bytes go further;
-  only an oversize result needs a `read_large_output` follow-up at all.
+  `project_git` now inlines `output` up to 64 KiB, with `output_truncated`
+  marking when the retained bytes go further; only an oversize result needs a
+  `read_large_output` follow-up at all. `command_run` and `outside_command`
+  enforce the same bound since 2026-10-14 (before, despite this statement, they
+  inlined the whole output).
 - **Honor exact owner-named models.** `Часть 2 на gpt-6-luna:` is a request when
   that exact enabled ID is bare-unique; qualified IDs also work. A request-form
   verb in the same user message governs every exact identity, not labels.

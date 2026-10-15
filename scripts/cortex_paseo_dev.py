@@ -174,7 +174,32 @@ def _refused_inside_cortex_sandbox(label: str) -> bool:
     return True
 
 
+def _run_route_preflight(args) -> int:
+    """Read the dev profile's routing policy only; never start, refresh or write anything."""
+    try:
+        home = resolved(args.home)
+        project = resolved(args.project) if args.project else None
+    except ValueError:
+        print(json.dumps({"ready": False, "refusals": ["invalid_path"]}))
+        return 2
+    if home == (Path.home() / ".paseo").resolve(strict=False):
+        print(json.dumps({"ready": False, "refusals": ["production_home_refused"]}))
+        return 2
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+    from cortex_runtime.routing.stage_preflight import preflight
+    result = preflight(args.route, project, isolated_environment(home))
+    print(json.dumps(result, sort_keys=True))
+    return 0 if result["ready"] else 1
+
+
 def main(argv: list[str]) -> int:
+    if argv and argv[0] == 'route-preflight':
+        parser = argparse.ArgumentParser(
+            description='Read-only: refuse before a paid run when a stage would not use the selected route.')
+        parser.add_argument('--route', required=True, help='exact engine/model[:effort] the owner selected')
+        parser.add_argument('--project', help='absolute disposable project (its .cortex/routing.json, if any, wins)')
+        parser.add_argument('--home', default=str(Path.home() / '.paseo-dev'), help='absolute isolated Paseo home')
+        return _run_route_preflight(parser.parse_args(argv[1:]))
     if argv and argv[0] == 'binding':
         parser = argparse.ArgumentParser(description='Read-only dev qualification binding; never start or mutate an agent.')
         parser.add_argument('--agent', required=True, help='exact full owned UUID, not a prefix or title')

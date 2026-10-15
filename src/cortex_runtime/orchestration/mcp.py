@@ -94,7 +94,8 @@ def dispatch(store, channel, operation, args):
     if operation == 'task_get_context':
         return _task_get_context(store, channel)
     if operation == 'answer_submit':
-        return machine.submit_answer(channel, args['text'], args['request_key'], authorization=lambda db: _authority(db,channel))
+        return machine.submit_answer(channel, args['text'], args['request_key'],
+                                     not_verified=args.get('not_verified') or [], authorization=lambda db: _authority(db,channel))
     if operation == 'plan_submit':
         return machine.submit_plan(channel, args['plan'], args['request_key'], authorization=lambda db: _authority(db,channel))
     if operation == 'verification_submit':
@@ -141,6 +142,15 @@ def dispatch(store, channel, operation, args):
                              'findings omitted outside the review stage',
                              'Only a review-stage worker may send findings; omit them here.')
         if recorded is None:
+            # Every failed command receipt this submission presents is retained
+            # first, in its own transaction, so no later refusal (skill gate,
+            # open failure) lets a resubmission drop it.
+            from ..delegation.evidence import record_presented_failures
+            with store.connection() as db:
+                db.execute('BEGIN IMMEDIATE')
+                _authority(db, channel)
+                record_presented_failures(db, channel.task_id, channel.attempt_id, channel.channel_id, args['checks'])
+                db.commit()
             # Observed changes that match an unread situational skill refuse
             # the result before anything is recorded, so a retry after
             # read_skill (even with this request_key) goes through. A request
@@ -171,7 +181,8 @@ def dispatch(store, channel, operation, args):
                     raise StoreError(closed['error'], **(closed.get('error_detail') or {}))
                 return closed['receipt']
             if previous is None:
-                from ..delegation.evidence import accept_checks, current_outcomes, assess_checks
+                from ..delegation.evidence import (accept_checks, current_outcomes, assess_checks,
+                                                   explain_open_failure, omitted_failures)
                 _authority(db, channel)
                 for index, check in enumerate(args['checks']):
                     gap = check['outcome'] in {'not_run', 'unverified'}
@@ -182,6 +193,20 @@ def dispatch(store, channel, operation, args):
                     if not gap and 'blocker' in check:
                         raise StoreError('check_blocker_unexpected', f'arguments.checks[{index}].blocker', check['outcome'],
                                          'no blocker on a passed or failed check', 'Remove blocker from checks that passed or failed.')
+                omitted = omitted_failures(db, channel.task_id, channel.attempt_id, args['checks'])
+                if omitted:
+                    listed = ', '.join(omitted[:8]) + (f' and {len(omitted) - 8} more' if len(omitted) > 8 else '')
+                    raise StoreError('omitted_failed_check', 'arguments.checks', f'{len(omitted)} omitted: {listed}',
+                                     'every failed command receipt this attempt already presented, cited again '
+                                     'by a passed or failed check',
+                                     f"An earlier result_submit of this attempt presented the failed receipt(s) {listed}; "
+                                     "a presented failure stays part of this attempt and is never dropped. Cite each "
+                                     "again as a failed check with the same tool_call_ref, then close it with a passed "
+                                     "check citing a verified later rerun of exactly the same argv, retract a supported "
+                                     "own Python probe error with invocation_error, or send assignment_outcome=\"failed\". "
+                                     "Relabelling it not_run or unverified, or a different argv, does not count. No "
+                                     "result was recorded or published; your channel remains active and the same "
+                                     "request_key may be reused.")
                 # A pass the runtime cannot verify is kept unverified (or
                 # failed, when its cited command exited nonzero) with the
                 # structured gap; a failure an exact later rerun closed keeps
@@ -193,24 +218,19 @@ def dispatch(store, channel, operation, args):
                     for index,(check,current,assessment) in enumerate(zip(accepted_checks,outcomes,assessments)):
                         if current['outcome'] != 'failed':
                             continue
-                        identity=assessment.get('identity')
-                        command=(f" argv={encoded(list(identity[1]))}"
-                                 + (f" cwd={encoded(identity[2])}" if identity[2] else '')) if identity else ''
+                        diagnosis, correction = explain_open_failure(db, channel.task_id, channel.attempt_id,
+                                                                     accepted_checks, assessments, index)
+                        others = sum(1 for later in outcomes[index + 1:] if later['outcome'] == 'failed')
                         raise StoreError('open_failed_check',f'arguments.checks[{index}]',
-                                         f"{check['name']} ({check.get('tool_call_ref') or 'no receipt'})",
-                                         'a later passed check citing a rerun of exactly this argv, or assignment_outcome="failed"',
-                                         f"This check remains failed.{command} Rerun exactly the receipt's argv "
-                                         "(and outside_command cwd), retain the failed check and cite the later passed "
-                                         "receipt in this result; a different argv does not close it. A supported standalone Python probe "
-                                         "syntax/regex invocation error may instead be explicitly retracted with invocation_error "
-                                         "(corrected_by and reason), retaining both observed receipts. Or explicitly send "
-                                         'assignment_outcome="failed" to submit an intentional failed assignment. '
-                                         "If this run's own output shows the check never started because its command line "
-                                         "was mistyped (usage, unknown-option or file-not-found error for the command "
-                                         "itself), it is not a failed check: remove it from checks, cite the corrected "
-                                         "command's own receipt and describe the mistyped run in the report. "
-                                         "Nothing was recorded or published and your channel remains active; the same "
-                                         "request_key may be reused.")
+                                         f"{check['name'][:80]} ({check.get('tool_call_ref') or 'no receipt'})",
+                                         'a later passed check citing a verified rerun of exactly this argv, a '
+                                         'supported invocation_error retraction, or assignment_outcome="failed"',
+                                         f"This check remains failed: {diagnosis}. {correction}"
+                                         + (f" {others} later check(s) of this result also remain failed." if others else '')
+                                         + " A supported standalone Python probe syntax/regex invocation error may "
+                                         "instead be retracted with invocation_error (corrected_by and reason). No "
+                                         "result was recorded or published; a cited failed receipt stays part of this "
+                                         "attempt, your channel remains active and the same request_key may be reused.")
                 # A supplied argv on a completed check is descriptive, never
                 # evidence. Do not echo it in the retained result as if trusted.
                 for check in accepted_checks:

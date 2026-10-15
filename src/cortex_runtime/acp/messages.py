@@ -267,6 +267,44 @@ _CATALOG: dict[str, dict[str, str]] = {
         "en": "the project changed after review",
         "ru": "проект изменился после ревью",
     },
+    # Interrupted result delivery (orchestration.recovery._reconcile_request):
+    # a saved result_submit request could not be reconciled against the
+    # worker's actual published evidence. Never shown as a bare code -- this
+    # is the plain reason behind it.
+    "stop_reason.result_publication_mismatch": {
+        "en": "the result the runtime had recorded does not match what the worker actually published",
+        "ru": "результат, который записал runtime, не совпадает с тем, что на самом деле опубликовал исполнитель",
+    },
+    "stop_reason.result_provision_missing": {
+        "en": "no assignment record could be found to verify this result against",
+        "ru": "не нашлась запись о назначении, чтобы проверить этот результат",
+    },
+    "stop_reason.ambiguous_result_publication": {
+        "en": "more than one matching publication was found for this result, so which one is genuine could not be decided",
+        "ru": "для этого результата нашлось более одной подходящей публикации, и какая из них настоящая — не удалось определить",
+    },
+    # A lost worker's recovery (orchestration.recovery.retry_lost) could not
+    # be completed cleanly.
+    "stop_reason.lost_worker_result_changed": {
+        "en": "the worker's assignment changed before its loss could be confirmed",
+        "ru": "назначение исполнителя изменилось до того, как удалось подтвердить его потерю",
+    },
+    "stop_reason.lost_worker_termination_unconfirmed": {
+        "en": "a lost worker's process could not be confirmed stopped",
+        "ru": "не удалось подтвердить, что процесс потерянного исполнителя остановлен",
+    },
+    "stop_reason.verification_execution_error": {
+        "en": "the verification run itself could not start ({detail})",
+        "ru": "не удалось запустить сам прогон проверки ({detail})",
+    },
+    "stop_reason.coordinator_prompt_failed": {
+        "en": "the coordinator's turn crashed ({detail})",
+        "ru": "ход координатора завершился сбоем ({detail})",
+    },
+    "stop_reason.workers_still_live_or_unknown": {
+        "en": "some workers could not be confirmed stopped",
+        "ru": "не удалось подтвердить, что все исполнители остановлены",
+    },
     "worker_failed_details": {
         "en": "\n\n{node} ({report_ref}){unpassed}\n\n{summary}",
         "ru": "\n\n{node} ({report_ref}){unpassed}\n\n{summary}",

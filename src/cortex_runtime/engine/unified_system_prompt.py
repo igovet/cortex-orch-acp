@@ -573,7 +573,8 @@ _MISSING_INFORMATION = "If information you need is missing, ask through the runt
 _ROLE_COMMUNICATION = {
     "coordinator": (
         "- When you ask the user a question through the runtime, write the details once before the question "
-        "call and end the turn right after it: write nothing more, not even a shorter or reworded version."
+        "call and end the turn right after it: write nothing more, not even a shorter or reworded version.\n"
+        "- Follow the coordinator-communication reply-order and jargon rules for every reply."
     ),
     "worker": (
         "- Work without narration, including before the first tool and after a tool result. Call tools one after "

@@ -87,7 +87,8 @@ exact surface being checked.
 Electron. Verify that the installed Paseo CLI help supports the commands and flags used here, and check the dev daemon's actual provider/model configuration before use.
 For a later freshly authorized CLI qualification, include startup, exercise,
 waits and cleanup within ten minutes as described below; individual waits must
-not exceed 60 seconds. This recipe does not authorize a paid launch now. The variables below are placeholders for the owner's
+not exceed 60 seconds (see
+[observe and steer within the case budget](#observe-and-steer-within-the-case-budget)). This recipe does not authorize a paid launch now. The variables below are placeholders for the owner's
 explicitly selected supported settings route, not defaults. Start the daemon
 and check the plugin as in the setup section, then, from a
 disposable project directory outside this checkout:
@@ -288,6 +289,130 @@ check runtime delivery, question/steering handling and cancellation in the
 disposable project; it cannot exercise Ctrl/Cmd+Enter or prove native Edit,
 draft replacement, attachment restoration or rendered controls. Desktop was
 not requested for the current work, so those interactions remain unqualified.
+
+## Route preflight before a paid CLI run
+
+An explicit user model request covers planned exact-route nodes, their retries
+and review fixes, but not the runtime-created mandatory review node. That node
+follows owner pins, then automatic ranking. A `*` pin in the dev profile therefore
+decides the reviewer even when every planned node honours the requested route.
+Before each requested paid run, check every stage against the owner-selected
+route:
+
+~~~bash
+python3 -B scripts/cortex_paseo_dev.py route-preflight --route claude-agent-acp/haiku:high
+python3 -B scripts/cortex_paseo_dev.py route-preflight --route codex-acp/gpt-6-luna:high \
+  --project "$PROJECT"
+~~~
+
+The command reads only the routing policy that the dev daemon would load:
+`$PROJECT/.cortex/routing.json`, then `CORTEX_ROUTING`, then
+`~/.paseo-dev/cortex-xdg/config/cortex/routing.json`. It reports that file's kind
+and SHA-256 and refuses `~/.paseo`. It does not start, refresh or write anything.
+
+The exit status is the outcome:
+
+- **0 (`ready`)**: the reviewer is pinned to the exact route.
+- **1 (refusal)**: the JSON names the refused stage and the route that would run
+  instead. Do not launch the paid run.
+
+To make the reviewer follow the selected route, change only the dev profile:
+
+1. Back up `routing.json` and `defaults.json` from
+   `~/.paseo-dev/cortex-xdg/config/cortex/` privately and record both hashes
+   before the run. Selecting a model or thinking level before the first prompt
+   (for example `paseo run --model ... --thinking ...`) persists that choice in
+   `defaults.json` (`Agent._apply_pre_task_selection`), so every run changes it.
+2. Add the role pin `"worker-code-reviewer": "ENGINE/MODEL:EFFORT"` with
+   `cortex_runtime.configuration.management.update_routing`, under the dev XDG
+   variables above. A role pin takes precedence over `*`. A planned node's route
+   in the plan is only a hint: unless the owner's recorded message requests the
+   exact route, a `*` pin wins (`model_hint_status: "ignored:pinned"`). Pin every
+   fixture role the scenario plans (for example `worker-backend-dev`) as well.
+3. Re-run the preflight.
+4. After each run, restore both files byte for byte from that run's own backup
+   and check the hashes. Restore only when the current file still matches what
+   the run left; never take a baseline from an older run.
+
+One pin serves one route, so routes run one after another. The reviewer's
+recorded basis is then `auto:pin` (an owner setting), not `user_request`.
+
+Start the dev daemon for a paid run only through an authorized
+`outside_command`. Observed on 2026-10-15 with
+`kernel.apparmor_restrict_unprivileged_userns=1`: a daemon started from a
+Cortex `command_run` sandbox could not create the nested user namespaces of the
+engine jail (`bwrap: No permissions to create a new namespace`), so every engine
+launch failed at `initialize`.
+
+### Assert the outcome
+
+Take the session from the owned agent's `runtimeInfo` (see
+[read-only dev binding](#read-only-dev-binding)), never from an earlier attempt,
+then assert the outcome on one complete inspection snapshot:
+
+~~~bash
+python3 -B scripts/cortex_qualification_assert.py --project "$PROJECT" \
+  --session "$ACP_SESSION" --task "$TASK" --owner-epoch "$OWNER_EPOCH" \
+  --expect-route worker-backend-dev=claude-agent-acp/haiku:high \
+  --expect-route worker-code-reviewer=claude-agent-acp/haiku:high \
+  --expect-closed-failure --expect-retained-output-bytes 65537
+~~~
+
+It exits 0 only when the task is `COMPLETED` (or the `--expect-state` given) with
+completed nodes, an approved last review, a passing latest verification and a
+recorded final text; each `--expect-route` role has only attempts whose native
+`worker_configuration_confirmed` engine/model/thinking match (dispatch alone does
+not count); `--expect-closed-failure` needs a failed worker check closed by a
+passed exact rerun; `--expect-retained-output-bytes` needs a zero-exit receipt
+with a bound, complete retained output of at least that size. Exit 1 lists every
+unmet expectation; exit 2 is an inspection refusal. It reads through the bound
+task inspector only and changes nothing; its regressions are
+`tests/test_qualification_assert.py`. A pending state such as `WAITING_USER`
+is a failed assertion, not a pass.
+
+### Observe and steer within the case budget
+
+A case supervisor imports `scripts/cortex_qualification_observer.py` instead of
+an inline body. It launches nothing: launch, steering and cleanup are callables
+the supervisor passes in, and its own reads go only through the bound task
+inspector. Its parts:
+
+- `Budget` holds one case to at most 600 monotonic seconds, keeps at least 90 s
+  for cleanup, and caps each wait at 60 s.
+- `observe`/`collect_snapshot` read every page of one snapshot. A busy access
+  lock (the inspector's in-process `BlockingIOError`, `inspection_busy` in the
+  CLIs) is the only condition retried, for the same page, until the deadline;
+  persistent busy ends as `busy_expired`. A stale cursor restarts from the first
+  page at most three times. Any other refusal or exception ends the observation
+  at once with its code or exception class name, never its text. Pages with
+  another binding, digest or offset are refused. The reader's fail-closed
+  checks are unchanged: an uncheckpointed WAL stays a refusal.
+- `select_running_attempt` joins the current revision's running node to the
+  provisioning row whose `idempotency_key` is that node's `assignment_ref`. The
+  provisioning `assignment_id` (`a_...`) is a different identity and is never
+  compared. It also requires the ready attempt and session of the current owner
+  epoch, a `worker_configuration_confirmed` for that same attempt, session and
+  assignment, a reserved worker capacity row, and no terminal worker event. It
+  selects only when exactly one node qualifies.
+- `SteerOnce` sends at most one decision-free steer through the passed-in
+  control seam (for a live case, the wrapper's `send <agent-id> --prompt ...
+  --no-wait`). It records the send before calling it, so an uncertain send is
+  not repeated.
+- `check_continuation` requires the same attempt and session afterwards,
+  either still running or ending in that attempt's `WORKER_COMPLETED`.
+- `wait_absent` reports owned helpers as absent at the first check, absent
+  after the grace period, or still present.
+- `run_case` always runs cleanup, including after an exception, an overrun or
+  an interrupt.
+
+None of these results is acceptance; the outcome assertion above still decides.
+A wait, an idle agent or the absence of `failed` is not a pass. The no-paid
+regressions in `tests/test_qualification_observer.py` use real lock contention
+and a real controller-driven attempt with fake engines. They are not live
+worker-card protocol evidence, and not rendered GUI evidence; the Paseo bridge
+and presentation-input tests are a third, separate surface. The module adds no
+paid entry point, retry route or launch default. A paid case still needs the
+owner's explicit request, mode, route and run allowance.
 
 ## Read-only dev binding
 

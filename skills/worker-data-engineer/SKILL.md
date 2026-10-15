@@ -50,7 +50,8 @@ Follow the inlined tool discipline and code-and-evidence discovery procedures.
 
 If information needed to finish the assignment is missing, use the worker's
 advertised `ask_question` route to the user, never a prose-only question, a
-request to the coordinator, or a native engine question tool. Offer meaningful
+request to the coordinator, or a native engine question tool, nor routine
+approach confirmation. Offer meaningful
 selectable answers, grouped in one request; preserve custom free text. Use the
 live schema for the exact form. The runtime parks only this assignment, then
 delivers a real answer next turn in the same healthy session. End the
@@ -60,7 +61,7 @@ If your evidence shows the assignment or its plan is wrong, obsolete or cannot
 succeed as decomposed, submit the advertised replan request with that evidence
 instead of completing a plan that no longer fits the goal. Use the scope request
 when a new decomposition or replacement assignment scope is needed, not as a
-substitute for a worker's access request.
+substitute for a worker's access request, nor a failed test or found work.
 
 ## Recovery
 
@@ -92,7 +93,8 @@ behavior, rollback state, contradictions, uncertainty, cost and privacy risk.
 
 ## Report class selection
 
-Submit the structured result with a complete immutable report.
+Submit the structured result with a complete immutable report, with a short
+jargon-free `summary`.
 Use the ordinary `implementation` report template where appropriate.
 Examples are content guides, not substitutes for evidence. Include consumed
 predecessor evidence, exact inspected/changed paths, contradictions, uncertainty,

@@ -87,11 +87,18 @@ EVIDENCE_GAPS = {
     "command_unrecorded": "the receipt of the cited command does not record its argv",
     "trivial_command": ("the cited command cannot verify anything (a no-op, print, listing, read or search "
                         "command such as pwd, ls, echo, cat or grep)"),
+    "status_variable_unproven": ("the cited shell script ends with exit $VARIABLE, and the runtime could not prove "
+                                 "that the variable still holds the exit status of a nontrivial command (only "
+                                 "`CHECK...; NAME=$?; <print/read commands>; exit $NAME` in a plain sh/bash/dash -c "
+                                 "script of literal words is recognized: no ${...}, $(...), glob or other expansion "
+                                 "beyond a plain $NAME argument); run the check command directly instead"),
     "later_run_failed": "a later run of the same command in this attempt exited with a nonzero code",
     "later_run_unresolved": "a later run of the same command in this attempt has no established result",
 }
 
 COMMAND_OPERATIONS = frozenset({"command_run", "outside_command"})
+# Gaps of a complete exit-0 run whose command cannot verify a pass.
+TRIVIAL_GAPS = frozenset({"trivial_command", "status_variable_unproven"})
 
 # Programs whose success says nothing about a named check: no-ops, printers,
 # listings, file reads and searches. Matched on the argv[0] basename after
@@ -110,6 +117,25 @@ GIT_DIFF_CHECK_FLAGS = frozenset({"--check", "--exit-code", "--quiet"})
 SHELLS = frozenset({"sh", "bash", "dash", "zsh", "ksh"})
 _SEPARATORS = frozenset({";", "&&", "||", "|", "&", "|&", ";;", "(", ")", "{", "}", "\n"})
 _KEYWORDS = frozenset({"!", "if", "then", "else", "elif", "do", "while", "until", "fi", "done", "esac", "time"})
+# The status-capture idiom (:func:`_status_capture_verifiable`) is proved
+# only for these shells: zsh and ksh have lowercase special parameters (zsh
+# `status` is `$?` itself) that a captured variable name could alias.
+_CAPTURE_SHELLS = frozenset({"sh", "bash", "dash"})
+# Tokens of syntax the idiom proof does not model (grouping, background,
+# compound commands, negation, here-documents, arithmetic and process
+# substitution); any of them keeps the script conservatively trivial.
+_CAPTURE_SYNTAX = frozenset({"(", ")", "{", "}", "&", "|&", ";;", ";&", ";;&", "!", "[[", "]]", "if", "then",
+                             "else", "elif", "fi", "do", "done", "while", "until", "for", "case", "esac",
+                             "select", "time", "function", "coproc"})
+# Builtins that can assign, make read-only, alias, trap or replace the shell,
+# or run code the argv does not show.
+_CAPTURE_STATE_BUILTINS = frozenset({".", "alias", "builtin", "command", "declare", "enable", "eval", "exec",
+                                     "exit", "getopts", "let", "local", "mapfile", "read", "readarray",
+                                     "readonly", "return", "shopt", "source", "trap", "typeset", "unset"})
+# Commands allowed between `NAME=$?` and `exit $NAME`: printers and readers,
+# none of which can change a shell variable. Bash printf can assign via %n
+# or -v (including expanded options/formats), so exclude it entirely.
+_CAPTURE_BETWEEN = TRIVIAL_PROGRAMS - {"cd", "env", "export", "printf", "set", "type"}
 
 
 def _strip_wrappers(argv: list[str]) -> list[str]:
@@ -159,18 +185,12 @@ def _shell_script(words: list[str]) -> tuple[str, str] | None:
     return None
 
 
-def _script_commands(script: str) -> list[tuple[str, list[str]]] | None:
+def _script_commands(script: str, *, preserve_quotes: bool = False) -> list[tuple[str, list[str]]] | None:
     """``[(separator before, words)]`` for each simple command of a script,
     redirections, command substitutions and control keywords removed;
     ``None`` when the script cannot be tokenized."""
-    import shlex
-
-    lexer = shlex.shlex(script.replace("\n", " \n "), posix=True, punctuation_chars=True)
-    lexer.whitespace_split = True
-    lexer.whitespace = " \t\r"
-    try:
-        tokens = list(lexer)
-    except ValueError:
+    tokens = _script_tokens(script, preserve_quotes=preserve_quotes)
+    if tokens is None:
         return None
     commands: list[tuple[str, list[str]]] = []
     separator, current, index = "", [], 0
@@ -204,6 +224,15 @@ def _script_commands(script: str) -> list[tuple[str, list[str]]] | None:
     return commands
 
 
+def _script_flags(options: str, commands) -> tuple[bool, bool]:
+    """``(errexit, pipefail)`` set by the shell options or a ``set`` command."""
+    errexit = "e" in options or any(words[0] == "set" and any(
+        (w.startswith("-") and "e" in w[1:] and not w.startswith("--")) or w == "errexit" for w in words[1:])
+        for _, words in commands)
+    pipefail = any(words[0] == "set" and "pipefail" in words for _, words in commands)
+    return errexit, pipefail
+
+
 def _script_trivial(options: str, script: str, depth: int) -> bool:
     """A script is trivial unless a nontrivial command's exit status can
     reach the script's own exit status. Its last command decides; a trivial
@@ -212,10 +241,10 @@ def _script_trivial(options: str, script: str, depth: int) -> bool:
     commands = _script_commands(script)
     if commands is None:
         return True
-    errexit = "e" in options or any(words[0] == "set" and any(
-        (w.startswith("-") and "e" in w[1:] and not w.startswith("--")) or w == "errexit" for w in words[1:])
-        for _, words in commands)
-    pipefail = any(words[0] == "set" and "pipefail" in words for _, words in commands)
+    return _commands_trivial(commands, *_script_flags(options, commands), depth)
+
+
+def _commands_trivial(commands, errexit: bool, pipefail: bool, depth: int) -> bool:
     propagating = {"&&"} | ({";", "\n"} if errexit else set()) | ({"|"} if pipefail else set())
     commands = [(sep, words) for sep, words in commands if words[0] != "set"] or commands
     for separator, words in reversed(commands):
@@ -232,6 +261,208 @@ def _script_trivial(options: str, script: str, depth: int) -> bool:
     return True
 
 
+def _script_tokens(script: str, *, preserve_quotes: bool = False) -> list[str] | None:
+    import re
+    import shlex
+
+    if preserve_quotes:
+        # Only for the capture proof's restricted grammar. Keep whole words,
+        # including adjacent quoted parts; non-POSIX shlex splits those apart.
+        if any(char in script for char in "\\`#"):
+            return None
+        pattern = re.compile(r"""[ \t\r]+|\n|[();<>|&]+|(?:[^ \t\r\n();<>|&'"]+|'[^']*'|"[^"]*")+""")
+        tokens, at = [], 0
+        while at < len(script):
+            match = pattern.match(script, at)
+            if match is None:
+                return None
+            token = match.group()
+            if token == "\n" or not token.isspace():
+                tokens.append(token)
+            at = match.end()
+        return tokens
+
+    lexer = shlex.shlex(script.replace("\n", " \n "), posix=True, punctuation_chars=True)
+    lexer.whitespace_split = True
+    lexer.whitespace = " \t\r"
+    try:
+        return list(lexer)
+    except ValueError:
+        return None
+
+
+def _status_variable(words) -> str | None:
+    """``NAME`` of a final ``exit $NAME``/``exit ${NAME}``, else ``None``."""
+    import re
+
+    if len(words) != 2 or words[0] != "exit":
+        return None
+    match = re.fullmatch(r"\$(?:([A-Za-z_][A-Za-z0-9_]*)|\{([A-Za-z_][A-Za-z0-9_]*)\})", words[1])
+    return (match.group(1) or match.group(2)) if match else None
+
+
+def _status_capture_verifiable(words: list[str], options: str, script: str, depth: int) -> bool:
+    """Whether a ``-c`` script provably exits with a nontrivial command's status
+    through one captured variable::
+
+        CHECK [> log 2>&1]; NAME=$?; [print/read commands;] exit $NAME
+
+    Everything must hold: a ``sh``/``bash``/``dash`` script of simple commands
+    only (no grouping, background, compound command, negation, here-document,
+    command, arithmetic or process substitution, backslash, backtick or ``#``)
+    whose every word is in the literal grammar of :func:`_capture_words_literal`
+    (no parameter expansion beyond a plain ``$NAME``/``${NAME}`` argument, so no
+    ``${...}`` operator, subscript or offset can assign); no assignment-prefixed
+    command or leading numeric command word
+    (including a file descriptor before a redirection); no builtin that can assign,
+    make read-only, alias, trap or replace the shell (:data:`_CAPTURE_STATE_BUILTINS`);
+    ``set`` only as leading ``-e``/``-u``/``-x``/``-o pipefail`` options and no
+    ``+`` shell option; ``NAME`` a lowercase identifier other than ``_``,
+    assigned exactly once, by the standalone word ``NAME=$?`` or ``NAME="$?"``
+    (identifier and equals sign unquoted) that follows the
+    commands before it after ``;`` or a newline; those commands, as a script
+    of their own, are not trivial (:func:`_commands_trivial`), so ``$?`` is a
+    nontrivial status; only :data:`_CAPTURE_BETWEEN` printers and readers run
+    between the assignment and the final ``exit $NAME``, which follows them
+    after ``;``, a newline or ``&&``. Anything else is not proved.
+    """
+    import re
+
+    # The tokenizer treats `#` inside a word as a comment, unlike a shell.
+    if _basename(words[0]) not in _CAPTURE_SHELLS or any(char in script for char in "\\`#"):
+        return False
+    for word in words[1:]:
+        if word.startswith("+"):
+            return False
+        if word.startswith("-") and not word.startswith("--") and "c" in word[1:]:
+            break
+    tokens = _script_tokens(script)
+    if tokens is None:
+        return False
+    def operator_paren(token):
+        # Unquoted ( and ) are split into operator tokens; inside a quoted
+        # argument (a `python3 -c "..."` program) they are plain text.
+        return set(token) <= set("();<>|&") and ("(" in token or ")" in token)
+
+    if any("$((" in token or "$[" in token for token in tokens):
+        return False  # arithmetic expansion can assign, even inside quotes
+    if any(token in _CAPTURE_SYNTAX or operator_paren(token) or token.startswith("<<") for token in tokens):
+        return False
+    commands = _script_commands(script)
+    if not commands or len(commands) < 3:
+        return False
+    name = _status_variable(commands[-1][1])
+    if name is None or not re.fullmatch(r"[a-z_][a-z0-9_]*", name) or name == "_":
+        return False
+    if commands[-1][0] not in {";", "\n", "&&"}:
+        return False
+    assignments = [i for i, (_, command) in enumerate(commands) if command == [f"{name}=$?"]]
+    if len(assignments) != 1 or assignments[0] == 0 or commands[assignments[0]][0] not in {";", "\n"}:
+        return False
+    at = assignments[0]
+    # Quote removal cannot prove assignment syntax: 'code=$?' is a command,
+    # whereas code="$?" is an assignment. Bind the raw word to this exact
+    # command, not merely to a matching substring elsewhere in the script.
+    raw_commands = _script_commands(script, preserve_quotes=True)
+    if (not raw_commands or len(raw_commands) != len(commands)
+            or [sep for sep, _ in raw_commands] != [sep for sep, _ in commands]
+            or raw_commands[at][1] not in ([f"{name}=$?"], [f'{name}="$?"'])
+            or not _capture_words_literal(script, raw_commands[at][1][0])):
+        return False
+    leading = True
+    for index, (_, command) in enumerate(commands[:-1]):
+        # Prefixes can hide the actual command head: x=1 trap, x+=1 trap,
+        # or 2>log x=1 trap (the tokenizer retains the descriptor as a word).
+        # Fail closed instead of interpreting these stripped shell words.
+        if (len(command) > 1 and "=" in command[0]) or command[0].isdecimal():
+            return False
+        head = _basename(command[0])
+        if head in _CAPTURE_STATE_BUILTINS:
+            return False
+        if head == "set":
+            if not leading or index >= at or not command[1:] or not all(
+                    re.fullmatch(r"-[euxo]+|pipefail|errexit|nounset|xtrace", word) for word in command[1:]):
+                return False
+        else:
+            leading = False
+    prefix = commands[:at]
+    if _commands_trivial(prefix, *_script_flags(options, prefix), depth):
+        return False
+    for _, command in commands[at + 1:-1]:
+        if _basename(command[0]) not in _CAPTURE_BETWEEN:
+            return False
+    return True
+
+
+def _capture_words_literal(script: str, capture: str) -> bool:
+    """Whether every word of a status-capture script is in the proof's literal
+    grammar, checked on the quote-preserving source words:
+
+    - a command head (the first word after a separator) is literal: unquoted
+      letters, digits and ``_./:,+@%=-``, single-quoted text, or double-quoted
+      text without ``$``; the one exception is ``capture`` itself, exactly once;
+    - a redirection target is literal too;
+    - any other argument may also contain a plain ``$NAME`` or ``${NAME}``,
+      unquoted or double-quoted, which expands without assigning anything.
+
+    Everything else fails closed: ``${...}`` with any operator, subscript,
+    offset, default or indirection; ``$1``, ``$@``, ``$$``, ``$'...'`` and
+    ``$"..."``; command, arithmetic and process substitution; unquoted glob,
+    brace and tilde characters; unbalanced quotes; unknown operators. Some
+    harmless forms are rejected too; such a check is run directly instead.
+    """
+    import re
+
+    tokens = _script_tokens(script, preserve_quotes=True)
+    if tokens is None:
+        return False
+    # One alternative per character position (the identifier lookahead keeps
+    # `$name` from being split), so a failed match cannot backtrack heavily.
+    plain = r"[A-Za-z0-9_./:,+@%=-]"
+    simple = r"\$(?:[A-Za-z_][A-Za-z0-9_]*(?![A-Za-z0-9_])|\{[A-Za-z_][A-Za-z0-9_]*\})"
+    literal = re.compile(rf"""(?:{plain}|'[^']*'|"[^"$]*")+""")
+    argument = re.compile(rf"""(?:{plain}|'[^']*'|{simple}|"(?:[^"$]|{simple})*")+""")
+    head, captures, index = True, 0, 0
+    while index < len(tokens):
+        token = tokens[index]
+        if token in {";", "\n", "&&", "||", "|"}:
+            head = True
+        elif set(token) <= set("();<>|&"):
+            # Only a plain redirection, whose target is a literal file name.
+            if (not set(token) <= set("<>&|") or not set(token) & set("<>") or token.startswith("<<")
+                    or index + 1 >= len(tokens) or not literal.fullmatch(tokens[index + 1])):
+                return False
+            index += 1
+        elif head and token == capture:
+            captures, head = captures + 1, False
+        elif (literal if head else argument).fullmatch(token):
+            head = False
+        else:
+            return False
+        index += 1
+    return captures == 1
+
+
+def _basename(word: str) -> str:
+    return word.rsplit("/", 1)[-1]
+
+
+def trivial_reason(argv) -> str | None:
+    """The :data:`EVIDENCE_GAPS` code that keeps a successful ``argv`` from
+    verifying a check: ``status_variable_unproven`` for a shell script that
+    ends with ``exit $VARIABLE`` the runtime could not prove
+    (:func:`_status_capture_verifiable`), ``trivial_command`` for any other
+    trivial command (:func:`trivial_command`), else ``None``."""
+    if not trivial_command(argv):
+        return None
+    words = _strip_wrappers(list(argv))
+    parsed = _shell_script(words) if words and _basename(words[0]) in SHELLS else None
+    commands = _script_commands(parsed[1]) if parsed else None
+    if commands and _status_variable(commands[-1][1]) not in {None, "?"}:
+        return "status_variable_unproven"
+    return "trivial_command"
+
+
 def trivial_command(argv, _depth: int = 0) -> bool:
     """True when ``argv`` cannot verify any named check.
 
@@ -243,9 +474,11 @@ def trivial_command(argv, _depth: int = 0) -> bool:
     subcommand (:data:`TRIVIAL_GIT`, or ``git diff`` without ``--check``,
     ``--exit-code`` or ``--quiet``); or when it is a ``sh``/``bash -c``
     script that is trivial by :func:`_script_trivial` (an unparsable script
-    counts as trivial). Anything else -- a test runner, linter, type
-    checker, build or project script -- may verify a check. Whether it
-    verifies *the named* check is the independent reviewer's judgement.
+    counts as trivial) and not the narrowly proved status-capture idiom of
+    :func:`_status_capture_verifiable`. Anything else -- a test runner,
+    linter, type checker, build or project script -- may verify a check.
+    Whether it verifies *the named* check is the independent reviewer's
+    judgement.
     """
     if not isinstance(argv, (list, tuple)) or not argv or not all(isinstance(w, str) for w in argv):
         return True
@@ -268,7 +501,10 @@ def trivial_command(argv, _depth: int = 0) -> bool:
         parsed = _shell_script(words)
         if parsed is None:
             return False  # a script file: its content is the project's own check
-        return _depth >= 4 or _script_trivial(parsed[0], parsed[1], _depth)
+        if _depth >= 4:
+            return True
+        return (_script_trivial(parsed[0], parsed[1], _depth)
+                and not _status_capture_verifiable(words, parsed[0], parsed[1], _depth))
     return False
 
 
@@ -367,8 +603,9 @@ def _gateway_assessment(db, task_id: str, attempt_id: str, ref: str, outcome: st
     argv = receipt.get("argv")
     if not isinstance(argv, list) or not argv:
         return _gap("command_unrecorded", **detail)
-    if outcome == "passed" and trivial_command(argv):
-        return _gap("trivial_command", **detail)
+    trivial = trivial_reason(argv) if outcome == "passed" else None
+    if trivial:
+        return _gap(trivial, **detail)
     detail["output_id"] = output_id
     if outcome == "failed" and "runtime_verification" not in receipt:
         detail["invocation_error"] = _probe_invocation_error(argv, receipt.get("output"), retained["byte_count"])
@@ -541,7 +778,7 @@ def command_history(db, task_id: str, attempt_id: str) -> list[dict]:
         if payload.get("operation") not in COMMAND_OPERATIONS or not isinstance(ref, str) or ref in rejected:
             continue
         passed = _gateway_assessment(db, task_id, attempt_id, ref, "passed")
-        if passed["strength"] == "verified" or passed["gap"] == "trivial_command":
+        if passed["strength"] == "verified" or passed["gap"] in TRIVIAL_GAPS:
             status = "passed"
         elif passed["gap"] == "nonzero_exit":
             failed = _gateway_assessment(db, task_id, attempt_id, ref, "failed")
@@ -734,6 +971,8 @@ def open_failure(db, task_id: str, attempt_id: str, checks) -> bool:
     receipts, or a ``passed`` check that is not currently verified. ``not_run`` and
     ``unverified`` are disclosures, never failures."""
     checks = [check if isinstance(check, dict) else {} for check in checks or ()]
+    if omitted_failures(db, task_id, attempt_id, checks):
+        return True
     for check, current in zip(checks, current_outcomes(db, task_id, attempt_id, checks)):
         if check.get("outcome") == "failed" and not (
                 (current["closed_by"] and check.get("closed_by") == current["closed_by"])
@@ -742,6 +981,173 @@ def open_failure(db, task_id: str, attempt_id: str, checks) -> bool:
         if check.get("outcome") == "passed" and current["outcome"] != "passed":
             return True
     return False
+
+
+# One runtime event per failed command receipt a result_submit of the attempt
+# presented (accepted or refused), so a later submission cannot drop it.
+PRESENTED_FAILURE_EVENT = "CHECK_FAILURE_PRESENTED"
+
+
+def _attempt_channels(db, task_id: str, attempt_id: str) -> list[str]:
+    return [row["channel_id"] for row in db.execute(
+        "SELECT channel_id FROM trusted_channels WHERE task_id=? AND attempt_id=?", (task_id, attempt_id))]
+
+
+def presented_failures(db, task_id: str, attempt_id: str) -> list[str]:
+    """Every gateway ``tool_call_ref`` a ``result_submit`` of this attempt
+    cited as a passed or failed check while its receipt was a verified
+    failure or not yet complete, in first-presented order."""
+    import json
+
+    channels = _attempt_channels(db, task_id, attempt_id)
+    if not channels:
+        return []
+    marks = ",".join("?" * len(channels))
+    refs: list[str] = []
+    for row in db.execute(
+            f"SELECT payload_json FROM runtime_events WHERE task_id=? AND type=? AND actor IN ({marks}) ORDER BY id",
+            (task_id, PRESENTED_FAILURE_EVENT, *channels)):
+        payload = json.loads(row["payload_json"])
+        ref = payload.get("tool_call_ref")
+        if payload.get("attempt_id") == attempt_id and isinstance(ref, str) and ref not in refs:
+            refs.append(ref)
+    return refs
+
+
+def record_presented_failures(db, task_id: str, attempt_id: str, actor: str, checks) -> list[str]:
+    """Retain, inside the caller's transaction, each gateway receipt that
+    ``checks`` cite with outcome passed or failed and that is a verified
+    failed run of this attempt (complete, nonzero exit, complete retained
+    output) or a run of this attempt without a result yet. Runs never cited
+    as a check (an incidental search that exited 1) are not retained;
+    foreign, unknown and non-command references are not either. Idempotent.
+    Returns the refs newly retained."""
+    from ..orchestration.state import event
+
+    known = set(presented_failures(db, task_id, attempt_id))
+    added = []
+    for check in checks or ():
+        ref = check.get("tool_call_ref") if isinstance(check, dict) else None
+        if (not isinstance(check, dict) or check.get("outcome") not in {"passed", "failed"}
+                or not isinstance(ref, str) or not ref.startswith("gateway:") or ref in known):
+            continue
+        assessed = _gateway_assessment(db, task_id, attempt_id, ref, "failed")
+        if assessed["strength"] == "verified" or assessed["gap"] == "call_incomplete":
+            event(db, task_id, PRESENTED_FAILURE_EVENT, dict(attempt_id=attempt_id, tool_call_ref=ref), actor)
+            known.add(ref)
+            added.append(ref)
+    return added
+
+
+def omitted_failures(db, task_id: str, attempt_id: str, checks) -> list[str]:
+    """Retained presented receipts (:func:`presented_failures`) that are now
+    verified failed runs but that no ``passed`` or ``failed`` check of
+    ``checks`` cites again. A failure, once presented, stays part of the
+    attempt: it must be listed again, closed, retracted or reported in an
+    explicitly failed assignment, never dropped or relabelled."""
+    presented = presented_failures(db, task_id, attempt_id)
+    if not presented:
+        return []
+    cited = {check.get("tool_call_ref") for check in checks or ()
+             if isinstance(check, dict) and check.get("outcome") in {"passed", "failed"}}
+    return [ref for ref in presented if ref not in cited
+            and _gateway_assessment(db, task_id, attempt_id, ref, "failed")["strength"] == "verified"]
+
+
+def _identity_label(identity) -> str:
+    """A bounded description of a command identity that never repeats the
+    argv itself (a shell script can hold anything): program, word count and
+    an argv digest, plus cwd and profile."""
+    import json
+
+    operation, argv, cwd, profile = identity
+    digest = hashlib.sha256(json.dumps(list(argv), ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()
+    cwd_text = cwd if isinstance(cwd, str) and len(cwd) <= 160 else f"{len(cwd or '')} characters"
+    return (f"{operation} {_basename(argv[0])[:40]} ({len(argv)} argv words, argv_sha256 {digest[:16]}, "
+            f"cwd {cwd_text}, profile {profile})")
+
+
+_EXACT_RERUN = ("Rerun exactly the same argv (same operation, cwd and profile) with a new request_key, keep this failed "
+                "check, and add a passed check citing the new receipt.")
+_FAIL_ASSIGNMENT = ('Otherwise send assignment_outcome="failed" with this check retained to submit an intentional '
+                    "failed assignment.")
+_DIRECT = ("Run checks directly as argv (for example the test runner itself), not wrapped in a shell script that "
+           "redirects or captures the status: the gateway retains the complete output whatever its size, a passed "
+           "check is verified from that retained output, and read_large_output pages it.")
+
+
+def explain_open_failure(db, task_id: str, attempt_id: str, checks, assessments, index: int) -> tuple[str, str]:
+    """``(diagnosis, correction)`` for the open failure ``checks[index]`` of
+    an accepted result (:func:`accept_checks`). The diagnosis names the
+    failed receipt, a bounded command identity (:func:`_identity_label`), the
+    relevant later rerun and its actual evidence gap; the correction is one
+    that can close this identity, or explicitly failing the assignment when
+    nothing can. Never the argv, a script or command output."""
+    check, assessment = checks[index], assessments[index]
+    ref = check.get("tool_call_ref") or "no tool_call_ref"
+    gap = check.get("evidence_gap")
+    if check.get("claimed_outcome") == "passed" and gap == "later_run_failed":
+        identity = assessment.get("identity")
+        later = [run for run in command_history(db, task_id, attempt_id)
+                 if identity is not None and run["identity"] == identity and run["order"] > assessment.get("order", 0)]
+        failing = next((run["ref"] for run in reversed(later) if run["status"] == "failed"), "a later run")
+        return (f"passed claim {ref}: a later run of the same command ({failing}) exited nonzero, and the latest "
+                f"run decides" + (f"; command {_identity_label(identity)}" if identity else ""),
+                "Fix the cause, rerun exactly the same argv and cite that passing receipt; keep the failed run as a "
+                "failed check. " + _FAIL_ASSIGNMENT)
+    if assessment["strength"] != "verified":
+        sentence = EVIDENCE_GAPS.get(assessment["gap"], assessment["gap"] or "no evidence")
+        return (f"failed claim {ref} has no verified failing receipt of this attempt "
+                f"({assessment['gap']}: {sentence}), so no rerun can close it",
+                "Cite the command_run receipt of the run that actually failed. " + _FAIL_ASSIGNMENT)
+    identity = assessment.get("identity")
+    prefix = ("passed claim " if check.get("claimed_outcome") == "passed" else "failed check ") + ref
+    if check.get("claimed_outcome") == "passed":
+        prefix += f" exited {assessment.get('exit_code')}: it is a failed run, not a pass"
+    if identity is None:
+        return (f"{prefix}; its receipt records no command identity, so no rerun can match it", _FAIL_ASSIGNMENT)
+    label = _identity_label(identity)
+    reason = trivial_reason(list(identity[1]))
+    if reason:
+        return (f"{prefix}; command {label}. Even an exit-0 run of exactly this argv cannot verify a pass "
+                f"({reason}: {EVIDENCE_GAPS[reason]}), so no exact rerun can close this failure",
+                'Send assignment_outcome="failed" with this check retained; a different argv never closes it. '
+                "For later checks: " + _DIRECT)
+    history = command_history(db, task_id, attempt_id)
+    later = [run for run in history if run["order"] > assessment["order"]]
+    unrecorded = [run["ref"] for run in later if run["identity"] is None]
+    same = [run for run in later if run["identity"] == identity]
+    other = next((other for other, assessed in zip(checks, assessments)
+                  if other.get("outcome") == "passed" and assessed.get("identity") not in (None, identity)
+                  and other.get("name") == check.get("name")), None)
+    hint = (f" The passed check {other.get('tool_call_ref')} with the same name runs a different command; a "
+            f"different argv never closes this failure.") if other else ""
+    if unrecorded:
+        return (f"{prefix}; command {label}. A later command run of this attempt ({unrecorded[0]}) has no "
+                f"recorded argv, so closure is ambiguous and cannot be established", _FAIL_ASSIGNMENT + hint)
+    if not same:
+        return (f"{prefix}; command {label}. No later run of exactly this command exists in this attempt",
+                _EXACT_RERUN + " " + _FAIL_ASSIGNMENT + hint)
+    latest = same[-1]
+    if latest["status"] == "failed":
+        return (f"{prefix}; command {label}. The latest run of exactly this command ({latest['ref']}) failed too",
+                "Fix the cause, then " + _EXACT_RERUN[0].lower() + _EXACT_RERUN[1:] + " " + _FAIL_ASSIGNMENT + hint)
+    if latest["status"] != "passed":
+        latest_gap = _gateway_assessment(db, task_id, attempt_id, latest["ref"], "passed")["gap"]
+        return (f"{prefix}; command {label}. The latest run of exactly this command ({latest['ref']}) has no "
+                f"established result ({latest_gap}: {EVIDENCE_GAPS.get(latest_gap, 'unknown')})",
+                "Wait for or repeat that run until it completes, then cite its passed receipt. " + _FAIL_ASSIGNMENT + hint)
+    citing = [i for i, other in enumerate(checks)
+              if other.get("outcome") == "passed" and other.get("tool_call_ref") == latest["ref"]]
+    if not citing:
+        return (f"{prefix}; command {label}. Its latest run {latest['ref']} passed, but no passed check of this "
+                f"result cites it",
+                f"Keep this failed check and add a passed check citing {latest['ref']}. " + _FAIL_ASSIGNMENT + hint)
+    cited_gap = assessments[citing[0]]["gap"]
+    detail = (f"is not verified ({cited_gap}: {EVIDENCE_GAPS.get(cited_gap, 'unknown')})" if cited_gap
+              else "does not establish a closure")
+    return (f"{prefix}; command {label}. The passed check citing the latest run {latest['ref']} {detail}",
+            "Cite that receipt from exactly one passed check. " + _FAIL_ASSIGNMENT + hint)
 
 
 def annotate_checks(db, task_id: str, attempt_id: str | None, checks) -> list[dict]:

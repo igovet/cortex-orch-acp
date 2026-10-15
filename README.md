@@ -155,7 +155,9 @@ of at least 95%; unknown usage remains unavailable, not assumed below threshold.
 
 Initial host model/provider echoes preserve the configured native effort/mode;
 they are not parameter resets. [Bound task inspection](docs/features/observability/index.md#bound-task-inspection)
-provides paged, read-only lifecycle metadata and native confirmation references.
+provides paged, read-only lifecycle metadata and native confirmation references,
+plus allowlisted outcome metadata: receipt exit codes and completeness, check
+closure refs, route-decision bases, rejection codes and question kinds.
 The [dev binding exporter](docs/project/dev-environment.md#read-only-dev-binding) can observe one explicitly owned host agent and its guarded session/task/current-owner binding; it never starts a daemon or engine. It does not qualify a live run or replace independent review and verification. Failures retain bounded local stage/process diagnostics and complete allowlisted inspector reasons without returning a binding. Missing endpoint metadata, helper startup/output failures and storage refusals remain distinct; earlier generic errors cannot identify their historical cause. Zero child exit alone is not complete binding evidence.
 Targeted tests can use the [fresh-process isolated launcher](docs/project/verification.md#fresh-process-isolated-targeted-launcher) with an explicitly authorized existing dependency path.
 Before Python binding checks or the default suite, run checkout-local
@@ -180,8 +182,28 @@ lowercase forms normalize). A supplied `command` on a passed or failed check is
 descriptive only; it never replaces the same-attempt `tool_call_ref` evidence.
 Open failed checks return `open_failed_check` before publication or channel
 revocation. Keep the failure and cite an exact later passing rerun, or explicitly
-submit `assignment_outcome: "failed"`; changing argv does not close it. Accepted
-receipts include `node_status`, not task acceptance.
+submit `assignment_outcome: "failed"`; changing argv does not close it. The
+correction names the failed receipt, a bounded command identity (never the argv
+or script), the relevant rerun and its evidence gap, and says when no exact
+rerun can close the failure. A failed receipt that any submission of the attempt
+already presented, even a refused one, must be cited again by every later
+submission or it is refused with `omitted_failed_check`. A shell check that ends
+with `exit $VARIABLE` verifies only in the plain `CHECK; code=$?; <print/read>;
+exit $code` form ([trivial-command rule](docs/features/orchestration/index.md#check-evidence));
+the capture identifier and `=` must be unquoted (`rc="$?"` is supported).
+Assignment-prefixed commands (for example `x=1 trap ...`) and leading numeric
+command words (including `2>log CHECK`) are outside this restricted form, and so
+is every expansion beyond a plain `$NAME`/`${NAME}` argument: `${x[...]}`,
+`${x:...}` and other `${...}` forms, `$(...)`, unquoted globs, braces and `~`,
+anywhere in the script (including printer arguments and redirection targets).
+`printf` between capture and exit is also excluded: Bash `%n` and expanded
+`-v` options can overwrite the captured status. Use `echo`/`tail` for supported
+output wrappers, or direct check argv rather than a more complex shell wrapper.
+Other forms stay unverified with `status_variable_unproven`, which no exact
+rerun can close. `command_run`
+inlines at most 64 KiB of output (`output_truncated`, `byte_count`), while
+checks verify from the complete retained output. Accepted receipts include
+`node_status`, not task acceptance.
 The review brief includes a bounded runtime-facts block: verified executor
 receipts, planned verification argv (not results), and changed-path hashes/sizes
 versus the execution baseline. Worker report access, independent review and
@@ -292,6 +314,10 @@ Plan hints alone cannot promote a flagship. Confirmed requests in recorded
 user messages/answers select that exact model first on covered nodes in every
 tier, including retries/fixes, ahead of pins, preferences and usage ranking.
 Hard policy or unavailable routes refuse visibly rather than substitute.
+The runtime-created mandatory reviewer is not a covered node: owner pins, then
+automatic ranking, decide its route. Before a requested paid CLI run, the
+[route preflight](docs/project/dev-environment.md#route-preflight-before-a-paid-cli-run)
+refuses when a stage would not use the selected route.
 Usage switching engages only at observed usage >=95%; below it normal selection
 applies, and unknown usage is unavailable. See the routing guidance above.
 
@@ -446,6 +472,20 @@ A crashed brokered Cortex MCP server is now detected separately from engine comp
 Captured image steering includes a `read_source` reference and hint, including
 an identical retry after source capture committed but before steering was recorded.
 Retries preserve one steering event and requirement revision; they do not edit history.
+
+A message sent while workers, review or verification run takes effect after the
+runtime verification passed and returns the verified work to planning before
+completion. The coordinator then either plans the requested changes (a new
+reviewed and verified revision) or closes the verified work with a final summary;
+the runtime completes that summary only if the work still passes every
+completion gate. Unresolved worker checks must be disclosed with their blockers
+in the final summary, just as in ordinary reconciliation. Before this, such a
+message left the coordinator with refused
+`synthesis_submit` calls until the task asked the user (`structured_proposal_missing`).
+Coverage is no-paid controller tests, not a paid live run. See
+[steering](docs/features/steering-and-questions/index.md).
+
+A worker that steering leaves running keeps a running card in Paseo until Cortex reports its real outcome. The installed Paseo ACP bridge settles every open tool call when a turn ends, which showed such a worker as Failed (`Tool call failed: <title>`); the Cortex provider now withholds that settlement for worker cards Cortex still reports running, unless the prompt itself failed. Genuine worker failures, a Stop's cancellation and a failed prompt keep their status. Coverage is no-paid provider/bundle tests, not rendered Desktop evidence. See [worker cards across steering](docs/features/steering-and-questions/index.md#worker-cards-across-steering).
 
 Owner-uploaded Paseo files referenced by absolute path or file URI are retained
 as task attachments. Workers use `list_sources`/`read_source`, not an

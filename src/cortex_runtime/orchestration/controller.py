@@ -1178,15 +1178,25 @@ def _verification_repair_request(context):
 
 def _direct_answer_request(runtime, task_id):
     """Offer answer_submit only when the runtime will accept it."""
-    from .state import direct_answer_allowed, reopened_after_completion
+    from .state import direct_answer_allowed, reopened_after_completion, steered_after_verification
     with runtime._store.connection() as db:
         task = db.execute('SELECT * FROM runtime_tasks WHERE task_id=?', (task_id,)).fetchone()
         allowed = bool(task) and direct_answer_allowed(db, task)
         reopened = allowed and reopened_after_completion(db, task)
+        steered = allowed and not reopened and steered_after_verification(db, task)
     if not allowed:
         return ('answer_submit is not available now: work planned in this task must finish through the plan, '
-                'independent review, verification and synthesis_submit. Submit a plan or verification repair, '
+                'independent review and runtime verification; synthesis_submit is accepted only after that '
+                'verification, never while planning. Submit a plan or verification repair, '
                 'or ask the user with user_question_request. ')
+    if steered:
+        return ('The planned work of this revision was reviewed and verified, then a new user message (see steering '
+                'and retained events) returned the task to planning before it completed; synthesis_submit is not '
+                'accepted while planning. If the message asks for changes or more work, submit a plan: it becomes '
+                'a new revision with its own review and verification. Otherwise submit answer_submit with the final '
+                'summary grounded in the retained reports and verification, also answering the message; the runtime '
+                'completes the task only if the reviewed and verified work still passes every completion gate. '
+                'If the user must decide something, ask with user_question_request. ')
     return (('This task was completed and the user\'s new message reopened it. ' if reopened else '') +
             'First determine whether the user wants information or changes. For a simple question or project overview, '
             'read only the relevant files yourself and submit a concise direct answer with answer_submit; do not create '

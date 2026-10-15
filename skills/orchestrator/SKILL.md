@@ -78,6 +78,8 @@ Choose exactly one next action:
 - Otherwise, submit synthesis, naming the concrete blocker for every
   not-verified item.
 A model response does not mark the task complete.
+Write synthesis and direct answers for the user, following the
+coordinator-communication reply-order and jargon rules below.
 For a material user question, use the advertised API, never only prose or a
 native engine question tool. Offer meaningful selectable answers and group
 related questions in one request; custom free text remains available. Use live

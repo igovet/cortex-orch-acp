@@ -112,8 +112,9 @@ off mid-way (open receipts whose channel the stop revoked). It is distinct from 
 Paseo steer, which uses a concurrent configuration request and does not call
 `session/cancel`. On a Paseo session, a `session/cancel` followed by a
 `session/prompt` on the same session is steering rather than Stop: the cancelled
-coordinator turn ends at once, running workers continue, and the prompt is applied
-as steering. A lone cancel pauses the task only after a 5-second grace window with no
+coordinator turn ends at once, running workers continue (their cards stay running;
+see [worker cards across steering](../steering-and-questions/index.md#worker-cards-across-steering)),
+and the prompt is applied as steering. A lone cancel pauses the task only after a 5-second grace window with no
 following prompt (`DEFAULT_HOST_CANCEL_GRACE_SECONDS`); other clients pause at once. A deferred
 pause cannot write its `turn_paused` line into the cancelled turn, so the runtime shows a
 `turn_paused_earlier` notice, with the cut-off action count, at the start of the next turn. If the

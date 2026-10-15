@@ -6,7 +6,7 @@
     "typecheck": "tsc --noEmit",
     "test:qualification-binding": "node --experimental-strip-types server/qualification-binding.test.ts",
     "test:activation": "node --experimental-strip-types server/plugin-activation.test.ts",
-    "test:steer": "node --experimental-strip-types server/provider-steer.test.ts && node --experimental-strip-types server/provider-question.test.ts && node --experimental-strip-types server/provider-question-batch.test.ts",
+    "test:steer": "node --experimental-strip-types server/provider-steer.test.ts && node --experimental-strip-types server/provider-worker-steer.test.ts && node --experimental-strip-types server/provider-question.test.ts && node --experimental-strip-types server/provider-question-batch.test.ts",
     "test:installed-questions": "node --experimental-strip-types server/installed-questions.test.ts",
     "test:native-queue": "node --experimental-strip-types server/installed-native-queue.test.ts",
     "test:diff": "node --experimental-strip-types client/worker-panel-diff.test.ts",

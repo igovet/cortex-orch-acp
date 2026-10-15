@@ -189,6 +189,120 @@ def test_overflow_is_refusal_not_truncated_success(bound, monkeypatch):
         read_binding_page(str(project), sid, task, epoch)
 
 
+# Exits 7 until the fix (fixed.flag) exists; its argv and output carry sentinels.
+SENTINEL_CHECK = ['python3', '-B', '-c', 'import pathlib,sys; print("private output sentinel"); '
+                  'sys.exit(0 if pathlib.Path("fixed.flag").exists() else 7)  # private argv sentinel']
+
+
+@pytest.fixture
+def worker_bound(tmp_path):
+    from cortex_runtime.trusted_channel import resolve_channel
+    from runtime_scenarios import provision_fixture
+    project = tmp_path / 'project'
+    project.mkdir()
+    store = Store(project / '.cortex', project_root=project)
+    task = bootstrap_task(store, SourceEvent(origin='fixture', event_id='worker'), 'private goal sentinel', 'fixture-owner')
+    sid = 'acps_' + 'c' * 12
+    sessions.create_session(store, sid, str(project), {'name': 'fixture'}, {}, [])
+    sessions.bind_task(store, sid, task.task_id)
+    coordinator = resolve_channel(store, task.channel_id, task.secret)
+    worker, assignment = provision_fixture(store, coordinator)
+    return project, store, sid, task, worker, assignment
+
+
+def _all_rows(project, sid, task):
+    page = read_binding_page(str(project), sid, task.task_id, task.owner_epoch.epoch, limit=200)
+    rows = page['rows'][:]
+    while page['next_cursor']:
+        page = read_binding_page(str(project), sid, task.task_id, task.owner_epoch.epoch,
+                                 cursor=page['next_cursor'], limit=200)
+        rows.extend(page['rows'])
+    assert page['complete']
+    return rows
+
+
+@pytest.mark.usefixtures('unjailed_gateway_command')
+def test_completed_receipts_and_failure_closure_chain_are_projected(worker_bound):
+    from cortex_runtime.delegation import mcp_tools
+    from runtime_scenarios import publish_fixture_report
+    project, store, sid, task, worker, assignment = worker_bound
+    failed = mcp_tools.dispatch(store, worker, 'command_run', dict(argv=SENTINEL_CHECK, request_key='first'))
+    (project / 'fixed.flag').write_text('fixed')
+    passed = mcp_tools.dispatch(store, worker, 'command_run', dict(argv=SENTINEL_CHECK, request_key='rerun'))
+    assert (failed['exit_code'], passed['exit_code']) == (7, 0)
+    report = publish_fixture_report(store, worker, 'private report body sentinel')
+    receipt = mcp_tools.dispatch(store, worker, 'result_submit', dict(
+        report=report, summary='private summary sentinel', request_key='result', checks=[
+            dict(name='private check name sentinel', outcome='failed', tool_call_ref=failed['tool_call_ref']),
+            dict(name='private check name sentinel', outcome='passed', tool_call_ref=passed['tool_call_ref'])]))
+    assert receipt['node_status'] == 'completed'
+    rows = _all_rows(project, sid, task)
+    commands = {r['tool_call_ref']: r for r in rows
+                if r['section'] == 'action_receipts' and r['operation'] == 'command_run'}
+    for ref, code in ((failed['tool_call_ref'], 7), (passed['tool_call_ref'], 0)):
+        row = commands[ref]
+        assert (row['complete'], row['run_complete'], row['exit_code'], row['failure']) == (True, True, code, None)
+        assert row['channel_attempt_id'] == worker.attempt_id and row['channel_owner_epoch'] == task.owner_epoch.epoch
+        assert row['retained_output']['bound'] and row['retained_output']['truncated'] is False
+        assert row['retained_output']['exit_code'] == code
+    presented = [r for r in rows if r.get('type') == 'CHECK_FAILURE_PRESENTED']
+    assert [(r['attempt_id'], r['tool_call_ref']) for r in presented] == [(worker.attempt_id, failed['tool_call_ref'])]
+    completed = [r for r in rows if r.get('type') == 'WORKER_COMPLETED']
+    assert len(completed) == 1 and completed[0]['attempt_id'] == worker.attempt_id
+    assert [(c['outcome'], c['tool_call_ref'], c['closed_by']) for c in completed[0]['checks']] == [
+        ('failed', failed['tool_call_ref'], passed['tool_call_ref']), ('passed', passed['tool_call_ref'], None)]
+    authorized = [r for r in rows if r.get('type') == 'TOOL_COMPLETED' and r['operation'] == 'command_run']
+    assert {r['tool_call_ref'] for r in authorized} == set(commands)
+    assert all(r['channel_attempt_id'] == worker.attempt_id for r in authorized)
+    assert 'private' not in json.dumps(rows) and 'sentinel' not in json.dumps(rows)
+
+
+def test_rejections_forged_refs_route_and_question_metadata_fail_closed(worker_bound):
+    from cortex_runtime.delegation import mcp_tools
+    from cortex_runtime.orchestration.state import event
+    from cortex_runtime.routing import store as routing_store
+    from runtime_scenarios import publish_fixture_report
+    project, store, sid, task, worker, assignment = worker_bound
+    with pytest.raises(StoreError):
+        mcp_tools.dispatch(store, worker, 'command_run', dict(argv='private rejected argv sentinel', request_key='bad'))
+    routing_store.record_attempt_audit(
+        store, attempt_id=worker.attempt_id, task_id=task.task_id, role='worker-backend-dev', engine='claude-agent-acp',
+        connection_id='fixture-connection', model='haiku', params_fingerprint='fp', config_revision_id=None,
+        decision='authorized', detail=dict(route_basis='auto:user_request', effort='high', effort_source='auto_route',
+                                           route_decision=dict(basis='user_request', decided_by='user_request', tier='light',
+                                                               chosen='claude-agent-acp/haiku', model_hint_reason='private reason sentinel',
+                                                               candidates=[dict(route='private candidate sentinel', used_percent=12)],
+                                                               user_model_request=dict(status='honoured', text='private request sentinel'))))
+    with store.connection() as db:
+        db.execute('BEGIN IMMEDIATE')
+        event(db, task.task_id, 'USER_QUESTION_REQUESTED', dict(
+            question_id='pq_' + 'd' * 12, question='private question sentinel', options=['private a', 'private b'],
+            resume_state='RECOVERING', blocker='review_cycle_limit', revision=1, runtime_stop=True))
+        db.commit()
+    report = publish_fixture_report(store, worker)
+    receipt = mcp_tools.dispatch(store, worker, 'result_submit', dict(
+        report=report, summary='Observed', request_key='forged', checks=[
+            dict(name='private check name sentinel', outcome='passed', tool_call_ref='private forged ref sentinel')]))
+    rows = _all_rows(project, sid, task)
+    rejected = [r for r in rows if r['section'] == 'observability']
+    assert rejected and all(r['attempt_id'] == worker.attempt_id for r in rejected)
+    assert {r['category'] for r in rejected} <= {'validation', 'submission_rejection', 'gateway_refusal'}
+    assert any(r['operation'] == 'command_run' for r in rejected)
+    dispatch = next(r for r in rows if r['section'] == 'dispatch')
+    assert dispatch['route'] == dict(route_basis='auto:user_request', effort='high', effort_source='auto_route',
+                                     basis='user_request', decided_by='user_request', role_tier=None, tier='light',
+                                     preference=None, preference_status=None, model_hint_status=None,
+                                     cross_provider_review=None, chosen='claude-agent-acp/haiku',
+                                     user_model_request_status='honoured', pin_effort_clamped=False)
+    question = next(r for r in rows if r.get('type') == 'USER_QUESTION_REQUESTED')
+    assert (question['question_id'], question['runtime_stop'], question['blocker'], question['options_count']) == (
+        'pq_' + 'd' * 12, True, 'review_cycle_limit', 2)
+    terminal = next(r for r in rows if r.get('type') in ('WORKER_COMPLETED', 'WORKER_FAILED'))
+    assert receipt['node_status'] in ('completed', 'failed')
+    assert [(c['tool_call_ref'], c['claimed_outcome']) for c in terminal['checks']] == [('unrecognized', 'passed')]
+    assert 'private' not in json.dumps(rows) and 'sentinel' not in json.dumps(rows)
+
+
 def test_oversized_evidence_is_refused_before_materializing_history(bound, monkeypatch):
     import cortex_runtime.storage.inspection as inspector
     project, store, sid, task, epoch = bound

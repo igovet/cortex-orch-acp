@@ -626,6 +626,11 @@ exception text or treating a zero child exit as complete binding evidence; see
 A historical generic refusal does not establish busy storage, WAL or any other cause.
 Wait for a checkpointed snapshot through the normal runtime connection lifecycle
 and re-observe; do not stop a completed task to manufacture timestamps.
+In-process, `read_binding_page` and `discover_binding` signal a busy access lock
+by raising `BlockingIOError` (the CLIs print `inspection_busy`); other refusals
+are `StoreError` codes. A qualification supervisor retries only that busy case,
+within its deadline, through
+[the qualification observer](../../project/dev-environment.md#observe-and-steer-within-the-case-budget).
 
 The projection contains configuration revisions (selected/pending/ACTIVE kept
 distinct), dispatch audits, provisioned attempts, plan/review node identities,
@@ -635,6 +640,47 @@ task/runtime event IDs, action-receipt completeness, process-termination
 observations and reservation releases. No report bodies, prompts, raw tool
 arguments/output or private host logs are returned. Event payload hashes retain
 identity without exposing those bodies. Missing records remain missing.
+
+Allowlisted outcome metadata is projected from records the runtime already
+keeps (`src/cortex_runtime/storage/inspection.py`):
+
+- **Action receipts.** A completed receipt keeps its fields in a nested
+  `receipt` object. The reader takes the gateway `tool_call_ref`, `exit_code`,
+  `failure`, `profile` and `large_output_id` from there. It shows both the
+  receipt's `complete` and the command's own `run_complete`, plus the issuing
+  channel's attempt and owner epoch. When a retained-output record exists, its
+  `byte_count`, `truncated`, exit code, signal and failure are shown, and
+  `bound` says whether the record belongs to that receipt. The output body is
+  not read.
+- **Worker results.** `WORKER_COMPLETED`/`WORKER_FAILED` rows carry the attempt,
+  node, verdict and, per check, a name hash plus `outcome`, `claimed_outcome`,
+  `evidence_gap`, `tool_call_ref`, `closed_by` and `retracted_by`.
+  `CHECK_FAILURE_PRESENTED` carries its attempt and receipt.
+- **Tool events.** `TOOL_AUTHORIZED`/`TOOL_COMPLETED`/`TOOL_REJECTED` rows carry
+  the operation, receipt, channel attempt and, for a rejection, its error code.
+- **Dispatch rows.** Each dispatch row carries a `route` object:
+  `route_basis`, effort and its source, basis, `decided_by`, tiers, the
+  provider preference and its status, hint status, `cross_provider_review`,
+  the chosen `engine/model`, the user-request status and whether a pin effort
+  was clamped. Candidates, usage figures and reasons are omitted.
+- **Observability rows.** The `observability` section lists `validation`,
+  `submission_rejection` and `gateway_refusal` rows: category, error code,
+  attempt, operation and bounded field paths.
+- **Questions.** `USER_QUESTION_REQUESTED` exposes the question ID, whether it
+  is a runtime stop, its blocker code, resume state, revision and option count.
+  Its text and options are never exposed.
+- **Steering.** `USER_STEERING`/`STEERING_APPLIED` expose only the actor hash
+  that pairs them.
+
+A check reference that is not an exact gateway receipt is shown as
+`unrecognized`, and a non-code string as `unsafe_value`; neither is echoed.
+Some things never reach the store, so they cannot appear here:
+
+- a client-side schema rejection that never became a dispatched `tools/call`;
+- the worker-card status a host renders, including a status the host bridge
+  synthesizes.
+
+The inspector does not report either one as observed.
 
 Dispatch audit is intent, not engine confirmation. Successful worker/reviewer
 native configuration now appends `worker_configuration_confirmed` with the

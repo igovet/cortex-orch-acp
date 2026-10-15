@@ -23,9 +23,17 @@ and no blocker/cancellation. It cannot certify implementation or tests, replace
 an existing plan, or skip required review. It never schedules a reviewer.
 
 An answer released in the user's own words that closes planned work is certified
-before it completes the task. If review or verification did not pass for that work,
+before it completes the task. The same holds for a final summary the coordinator
+submits after a user message returned a verified revision to planning
+(`RECONCILING → RECOVERING → PLANNING`); `synthesis_submit` is accepted only
+while `RECONCILING`. If review or verification did not pass for that work,
 the task ends `FAILED` with blocker `answer_not_certified:<gap>` and an
 `ANSWER_NOT_CERTIFIED` event. The answer is still shown to the user.
+Before recording a planned-work answer, the runtime applies the same unresolved
+check assessment and disclosure guard as synthesis. An omitted gap or blank
+blocker refuses the proposal without changing state. Accepted disclosures are
+stored and shown in the answer's "Not verified" section; exact retries preserve
+that content.
 
 ## Runtime-composed synthesis
 

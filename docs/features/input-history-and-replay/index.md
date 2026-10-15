@@ -410,6 +410,15 @@ underlying cause, change the runtime result, or turn a failure into success.
 This is a client rendering compatibility path, not a replay reconstruction
 or a runtime fallback attempt.
 
+The ACP bridge also settles open tool calls itself when a prompt ends, without
+an agent update or `rawOutput`, so the same message appeared for a still-running
+worker card after steering. The provider withholds that settlement for worker
+cards Cortex still reports running (see
+[worker cards across steering](../steering-and-questions/index.md#worker-cards-across-steering)).
+Cortex's `host_updates` journal never contained it: the journal records only
+updates Cortex sent, and `session/load` replays those (with the budget and
+interruption reconciliation described on this page).
+
 The Paseo 0.8 production observation retained in the real-client
 record predates this
 transformer and reproduced the failed-history problem. Offline coverage and

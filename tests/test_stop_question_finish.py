@@ -352,8 +352,14 @@ def test_finish_after_verified_work_completes_with_the_coordinators_answer(tmp_p
                         question='Anything else before I close?', options=['Finish', 'Continue'],
                         request_key='closing'))
                 elif context['state'] == 'PLANNING':
-                    mcp_tools.dispatch(store, channel, 'answer_submit', dict(text='Implemented and verified.',
-                                                                          request_key='final'))
+                    # An owner saying Finish to an ordinary closing question does
+                    # not certify the worker's unrun live check: the coordinator's
+                    # closing answer must disclose that retained gap by its exact
+                    # name and blocker, or the runtime refuses it.
+                    mcp_tools.dispatch(store, channel, 'answer_submit', dict(
+                        text='Implemented and verified.',
+                        not_verified=[dict(item='live check', blocker='Missing isolated host')],
+                        request_key='final'))
             else:
                 with store.connection() as db:
                     role = db.execute('SELECT role_id FROM delegation_provisioning WHERE attempt_id=?',
@@ -379,6 +385,98 @@ def test_finish_after_verified_work_completes_with_the_coordinators_answer(tmp_p
         runtime.shutdown()
     context = TaskMachine(store).context(task.task_id)
     assert asked and context['state'] == 'COMPLETED', (context['state'], context['blocker'])
-    assert context['synthesis'] == 'Implemented and verified.'
+    assert context['synthesis'] == ('Implemented and verified.\n\n## Not verified\n\n'
+                                    '- live check — blocker: Missing isolated host')
+    assert not _events(store, task.task_id, 'USER_FORCE_FINISHED')
+    assert not _events(store, task.task_id, 'ANSWER_NOT_CERTIFIED')
+
+
+# Codes raised by orchestration.recovery (an interrupted result delivery
+# that could not be reconciled against the worker's actual publication, or a
+# lost-worker recovery that could not finish cleanly) and by the
+# controller's own coordinator/verification crash paths. Before messages.py
+# carried a stop_reason.<code> entry for each of these, the catalog lookup
+# in _stop_question raised KeyError and fell back to showing the bare code
+# as the entire reason -- exactly the raw-code leak this is fixed to avoid.
+_PREVIOUSLY_UNCOVERED_STOP_CODES = [
+    'result_publication_mismatch',
+    'result_provision_missing',
+    'ambiguous_result_publication',
+    'lost_worker_result_changed',
+    'lost_worker_termination_unconfirmed',
+    'verification_execution_error:RuntimeError',
+    'coordinator_prompt_failed:RuntimeError',
+    'workers_still_live_or_unknown',
+]
+
+
+@pytest.mark.parametrize('blocker', _PREVIOUSLY_UNCOVERED_STOP_CODES)
+@pytest.mark.parametrize('language', ['en', 'ru'])
+def test_a_previously_uncovered_stop_code_renders_plain_language_not_a_bare_code(blocker, language):
+    from cortex_runtime.orchestration.controller import _stop_question
+    question = _stop_question(dict(blocker=blocker, question_id='q'), dict(nodes=[]), language)['question']
+    code = blocker.split(':', 1)[0]
+    # The code stays visible in brackets for diagnosis, next to the plain
+    # reason -- never as the whole message a KeyError fallback would show.
+    assert f'[{blocker}]' in question
+    assert f'stopped: {code}.' not in question
+    assert f'остановилась: {code}.' not in question
+
+
+def test_finish_with_an_undisclosed_gap_in_the_closing_answer_cannot_complete(tmp_path):
+    """The identical legitimate path, but the coordinator's closing answer
+    omits the worker's retained not_run check: the runtime refuses the answer
+    with synthesis_gaps_undisclosed and the task never reaches COMPLETED. An
+    owner saying Finish to an ordinary closing question does not certify an
+    unrun check."""
+    from test_runtime_composed_synthesis import ARGV, submit
+    store = Store(tmp_path / '.cortex', project_root=tmp_path)
+    task = bootstrap_task(store, SourceEvent(origin='after-verification', event_id='two'), 'Implement', 'owner')
+    asked = []
+
+    def router(store, channel, session_ref, launch, instructions):
+        def behavior(store, channel, ref, message, call_index):
+            context = TaskMachine(store).context(task.task_id)
+            if channel.role == 'coordinator':
+                if context['state'] == 'PLANNING' and context['revision'] == 0:
+                    mcp_tools.dispatch(store, channel, 'plan_submit', dict(plan=dict(
+                        tasks=[dict(id='implement', role='backend-dev', objective='Implement', dependencies=[],
+                                    scope=['.'], model='auto')], verification=[ARGV]), request_key='plan'))
+                elif context['state'] == 'RECONCILING' and not asked:
+                    asked.append(True)
+                    mcp_tools.dispatch(store, channel, 'user_question_request', dict(
+                        question='Anything else before I close?', options=['Finish', 'Continue'],
+                        request_key='closing'))
+                elif context['state'] == 'PLANNING':
+                    # Deliberately omits the worker's retained 'live check' gap.
+                    mcp_tools.dispatch(store, channel, 'answer_submit', dict(text='Implemented and verified.',
+                                                                          request_key='final'))
+            else:
+                with store.connection() as db:
+                    role = db.execute('SELECT role_id FROM delegation_provisioning WHERE attempt_id=?',
+                                      (channel.attempt_id,)).fetchone()[0]
+                if role != 'worker-code-reviewer':
+                    (tmp_path / 'feature.py').write_text('new\n')
+                    submit(store, channel, checks=[dict(name='live check', outcome='not_run',
+                                                        blocker='Missing isolated host')])
+                else:
+                    submit(store, channel, verdict='APPROVE')
+            return PromptOutcome(StopReason.END_TURN, '')
+        return behavior
+
+    engine = FakeSessionRuntime(store, router, connection_id='cn_after_verification_gap', capacity_limit=4)
+    runtime = OrchestratingRuntime(store, engine, FakeWorkspace(), FakeConfigSnapshotSource(),
+                                   allow_unqualified_delivery=True)
+    output = []
+    try:
+        runtime.start_prompt(task.task_id, 'incoming', 'Implement', output.append, threading.Event(),
+                             emit_tool_call=lambda update: True,
+                             host_elicitor=ScriptedElicitor(['Finish']))
+    finally:
+        runtime.shutdown()
+    context = TaskMachine(store).context(task.task_id)
+    assert asked and context['state'] == 'WAITING_USER'
+    assert context['blocker'] == 'synthesis_gaps_undisclosed'
+    assert context.get('synthesis') != 'Implemented and verified.'
     assert not _events(store, task.task_id, 'USER_FORCE_FINISHED')
     assert not _events(store, task.task_id, 'ANSWER_NOT_CERTIFIED')

@@ -324,8 +324,12 @@ async function loadClient(platformOs: "android" | "ios" | "web") {
   const commands: Record<string, { title: string; context: string; onSelect: (capabilities: { openSettings: (id: string) => void }) => void }> = {};
   let pill: { button: { behavior: { kind: string; Content?: (props: Record<string, unknown>) => unknown } } } | undefined;
   const registration = { remove() {} };
+  const transformers: Record<string, { transform(input: { item: Record<string, unknown> }): unknown }> = {};
   const client = {
-    addTimelineTransformer: () => registration,
+    addTimelineTransformer: (transformer: { id: string; transform(input: { item: Record<string, unknown> }): unknown }) => {
+      transformers[transformer.id] = transformer;
+      return registration;
+    },
     addTimelineRenderer: (renderer: { kind: string; Component: (props: Record<string, unknown>) => unknown }) => { captured[renderer.kind] = renderer; return registration; },
     addWorkspacePanel: (panel: { id: string; Component: (props: Record<string, unknown>) => unknown }) => { captured[panel.id] = panel; return registration; },
     addSettingsScreen: (screen: { id: string; Component: (props: Record<string, unknown>) => unknown }) => { captured[screen.id] = screen; return registration; },
@@ -339,8 +343,40 @@ async function loadClient(platformOs: "android" | "ios" | "web") {
   };
   const cleanup = exports.default(client);
   for (let tick = 0; tick < 5 && !pill; tick += 1) await new Promise((done) => setTimeout(done, 0));
-  return { runtime, captured, commands, pill: () => pill, cleanup };
+  return { runtime, captured, commands, transformers, pill: () => pill, cleanup };
 }
+
+// The coordinator timeline card's props, from the worker items the provider
+// emits (server/provider-worker-steer.test.ts drives the real bridge): a
+// steered worker stays one running row, then shows its real outcome; a
+// genuine failure keeps its reason. Inputs only, not rendered pixels.
+test("worker card props follow the provider's worker items across steering", async () => {
+  const { transformers, cleanup } = await loadClient("web");
+  try {
+    const row = transformers["worker-tool-call-row"];
+    assert.ok(row, "worker row transformer registered");
+    const title = "Worker: debugger · claude · Opus · high — Fix the check submission";
+    const card = (item: Record<string, unknown>) => (row.transform({ item: {
+      type: "tool_call", id: "worker:w1", callId: "worker:w1", name: title, detail: { type: "plan", text: title }, ...item,
+    } }) as { items: Array<{ id: string; kind: string; data: Record<string, unknown> }> }).items[0];
+    const running = card({ status: "running", error: null });
+    assert.equal(running.id, "worker-row:worker:w1");
+    assert.equal(running.kind, "worker-row");
+    assert.equal(running.data.status, "running");
+    assert.equal(running.data.assignmentRef, "w1");
+    assert.ok(!("failureReason" in running.data), "a running card shows no failure line");
+    const done = card({ status: "completed", error: null, metadata: { cortexWorkerResult: { summary: "Fixed.", checks: [] } } });
+    assert.equal(done.id, running.id, "the outcome updates the same row");
+    assert.equal(done.data.status, "completed");
+    assert.deepEqual(done.data.result, { summary: "Fixed.", checks: [] });
+    assert.ok(!("failureReason" in done.data));
+    const crashed = card({ status: "failed", error: "Worker crashed: engine exited 1" });
+    assert.equal(crashed.data.status, "failed");
+    assert.equal(crashed.data.failureReason, "Worker crashed: engine exited 1");
+  } finally {
+    cleanup();
+  }
+});
 
 test("Cortex settings registers a native screen and a global command that opens it", async () => {
   const { captured, commands, cleanup } = await loadClient("web");

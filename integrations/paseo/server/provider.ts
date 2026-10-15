@@ -22,6 +22,7 @@ import {
   isCortexQuestionRequest,
 } from "../shared/question-marker.ts";
 import { parseWorkerResult } from "../shared/worker-timeline-result.ts";
+import { WorkerCardFence } from "./worker-card-fence.ts";
 
 type CommandArgv = [string, ...string[]];
 
@@ -856,7 +857,7 @@ export function withAccessModeVisuals<T extends { modes: ReadonlyArray<{ id: str
 
 export function createCortexProvider(): ProviderRegistration {
   const command = cortexCommand();
-  const makeBase = (replay: ReplayController) => runAcpProvider({
+  const makeBase = (replay: ReplayController, fence: WorkerCardFence) => runAcpProvider({
     // Register the native provider under `cortex` for new chats. The setup
     // command removes only the exact owned generic registration; old generic
     // chats may therefore become inaccessible. The plugin manifest remains
@@ -887,7 +888,10 @@ export function createCortexProvider(): ProviderRegistration {
           return withAccessModeVisuals(catalog);
         }
       },
-      toolCall(snapshot) {
+      toolCall(received) {
+        // A worker card keeps the status Cortex sent, never the bridge's
+        // own turn-end settlement merged into a later update.
+        const snapshot = fence.toolCall(received);
         if (snapshot.status !== "failed" || snapshot.output !== null) {
           return snapshot;
         }
@@ -899,12 +903,13 @@ export function createCortexProvider(): ProviderRegistration {
     }],
   });
 
-  const base = makeBase(new ReplayController(command));
+  const base = makeBase(new ReplayController(command), new WorkerCardFence());
   return {
     ...base,
     async connect(request) {
-      const replay = new ReplayController(command);
-      return wrapCortexConnection(replay.wrap(await makeBase(replay).connect(request)), request.capabilities);
+      const fence = new WorkerCardFence();
+      const replay = new ReplayController(command, (frame) => fence.observe(frame));
+      return wrapCortexConnection(replay.wrap(await makeBase(replay, fence).connect(request)), request.capabilities, fence);
     },
   };
 }
@@ -915,6 +920,7 @@ type ProviderConnection = Awaited<ReturnType<ProviderRegistration["connect"]>>;
 export function wrapCortexConnection(
   connection: ProviderConnection,
   offered: readonly string[],
+  workerCards?: WorkerCardFence,
 ): ProviderConnection {
   // The installed ACP bridge lacks prompt.steer. Carry the message (text,
   // and any image/uploaded-file content) through its concurrent config
@@ -1065,6 +1071,18 @@ export function wrapCortexConnection(
   const bufferedTimeline = new Map<string, ReplaySpool>();
   const listeners = new Set<(event: ProviderEvent) => void>();
   let unsubscribe: (() => void) | undefined;
+  // The bridge settles a turn's open tool calls itself, then reports the
+  // turn's end in the same synchronous step (see worker-card-fence.ts). A
+  // worker card it settles while Cortex still reports the worker running is
+  // held until that turn event: withheld when the turn was only cancelled
+  // (steering, Stop) or completed, released when the prompt itself failed.
+  // Anything still held after the step is released unchanged.
+  const heldWorkerCards = new Map<string, ProviderEvent[]>();
+  const releaseHeldWorkerCards = (sessionId: string, deliver: (event: ProviderEvent) => void) => {
+    const held = heldWorkerCards.get(sessionId);
+    heldWorkerCards.delete(sessionId);
+    for (const event of held ?? []) deliver(event);
+  };
   return {
     ...connection,
     capabilities,
@@ -1213,6 +1231,7 @@ export function wrapCortexConnection(
       lastTurns.clear();
       explainedNativeQueue.clear();
       openedSessions.clear();
+      heldWorkerCards.clear();
       for (const spool of bufferedTimeline.values()) spool.close();
       bufferedTimeline.clear();
       listeners.clear();
@@ -1222,7 +1241,7 @@ export function wrapCortexConnection(
     onEvent(subscriber) {
       listeners.add(subscriber);
       const listener = (event: ProviderEvent) => listeners.forEach(callback => callback(event));
-      unsubscribe ??= connection.onEvent((event) => {
+      const handle = (event: ProviderEvent) => {
         if (!visibleTimeline(event)) return;
         if ((event.type === "request.completed" || event.type === "request.failed")
           && (event.requestId.startsWith(ANSWER_REQUEST_PREFIX) || event.requestId.startsWith(QUEUE_REQUEST_PREFIX))) return;
@@ -1385,6 +1404,22 @@ export function wrapCortexConnection(
           return;
         }
         listener(presentTimeline(event));
+      };
+      unsubscribe ??= connection.onEvent((event) => {
+        if (workerCards && event.type === "timeline.item" && workerCards.isSynthesizedTerminal(event.item)) {
+          const held = heldWorkerCards.get(event.sessionId);
+          if (held) held.push(event);
+          else {
+            heldWorkerCards.set(event.sessionId, [event]);
+            queueMicrotask(() => releaseHeldWorkerCards(event.sessionId, handle));
+          }
+          return;
+        }
+        if (event.type === "session.turn" && event.state !== "started") {
+          if (event.state === "failed") releaseHeldWorkerCards(event.sessionId, handle);
+          else heldWorkerCards.delete(event.sessionId);
+        }
+        handle(event);
       });
       return () => {
         listeners.delete(subscriber);

@@ -265,7 +265,10 @@ def test_open_failed_check_refuses_before_recording_or_intentionally_fails(tmp_p
         error=caught.value
         assert error.field == 'arguments.checks[0]'
         assert failed in error.received and 'unit tests' in error.received
-        assert json.dumps(TOGGLE,ensure_ascii=False,separators=(',',':')) in error.correction
+        # A bounded identity, never the argv or its script text.
+        assert 'argv_sha256' in error.correction and TOGGLE[-1] not in error.correction
+        assert 'No later run of exactly this command' in error.correction
+        assert 'different argv never closes' in error.correction and other in error.correction
         assert 'assignment_outcome="failed"' in error.correction
         with store.connection() as db:
             assert db.execute("SELECT COUNT(*) FROM runtime_requests WHERE operation='result_submit'").fetchone()[0] == 0
@@ -304,26 +307,41 @@ CORRECTED = ['python3', '-B', '-c',
 
 
 def test_a_mistyped_invocation_is_never_closed_by_a_different_argv_and_need_not_be_cited(tmp_path):
-    from cortex_runtime.contracts import StoreError
     from cortex_runtime.delegation.evidence import command_history
     store, task, worker, assignment = _fixture(tmp_path, 'mistyped')
     mistyped = _run(store, worker, 'mistyped', MISTYPED)
     corrected = _run(store, worker, 'corrected', CORRECTED)
     assert (mistyped['exit_code'], corrected['exit_code']) == (2, 0)
-    cited = [dict(name='profile check', outcome='failed', tool_call_ref=mistyped['tool_call_ref']),
-             dict(name='profile check', outcome='passed', tool_call_ref=corrected['tool_call_ref'])]
-    # Exact identity binding is unchanged: a different argv closes nothing.
-    with pytest.raises(StoreError, match='open_failed_check') as caught:
-        _submit(store, worker, cited)
-    assert 'a different argv does not close it' in caught.value.correction
-    assert 'mistyped' in caught.value.correction and 'remove it from checks' in caught.value.correction
     # The advertised path: a command line that never started the check is not
-    # a check of the work. The corrected command stands on its own receipt;
-    # the mistyped run stays in the runtime's own history, never closed.
-    receipt = _submit(store, worker, cited[1:])
+    # a check of the work and is never cited. The corrected command stands on
+    # its own receipt; the mistyped run stays in the runtime's own history,
+    # never closed.
+    receipt = _submit(store, worker, [dict(name='profile check', outcome='passed',
+                                           tool_call_ref=corrected['tool_call_ref'])])
     assert receipt['checks'] == [dict(name='profile check', outcome='passed')]
     assert receipt['node_status'] == _node(store, task, assignment)['status'] == 'completed'
     with store.connection() as db:
         history = command_history(db, task.task_id, worker.attempt_id)
     assert [(run['ref'], run['status']) for run in history] == [
         (mistyped['tool_call_ref'], 'failed'), (corrected['tool_call_ref'], 'passed')]
+
+
+def test_a_presented_mistyped_failure_is_never_closed_by_a_different_argv_or_dropped(tmp_path):
+    from cortex_runtime.contracts import StoreError
+    store, task, worker, assignment = _fixture(tmp_path, 'mistyped-presented')
+    mistyped = _run(store, worker, 'mistyped', MISTYPED)
+    corrected = _run(store, worker, 'corrected', CORRECTED)
+    cited = [dict(name='profile check', outcome='failed', tool_call_ref=mistyped['tool_call_ref']),
+             dict(name='profile check', outcome='passed', tool_call_ref=corrected['tool_call_ref'])]
+    # Exact identity binding is unchanged: a different argv closes nothing.
+    with pytest.raises(StoreError, match='open_failed_check') as caught:
+        _submit(store, worker, cited)
+    assert 'different argv never closes' in caught.value.correction
+    assert 'remove it from checks' not in caught.value.correction
+    # Once presented, the failure cannot be dropped afterwards.
+    with pytest.raises(StoreError, match='omitted_failed_check') as caught:
+        _submit(store, worker, cited[1:])
+    assert mistyped['tool_call_ref'] in caught.value.received
+    receipt = _submit(store, worker, cited, assignment_outcome='failed')
+    assert receipt['checks'][0] == dict(name='profile check', outcome='failed')
+    assert receipt['node_status'] == _node(store, task, assignment)['status'] == 'failed'

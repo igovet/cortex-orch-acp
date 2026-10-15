@@ -1,6 +1,6 @@
 # Synthesis Report
 
-<!-- Opening decision brief: conclusion, observed evidence, checks, contradictions, limits, next action. Keep the opening, including title and marker, within the first bounded report page. Put detailed evidence below. -->
+<!-- Opening decision brief, written for the user: what was done, what it means for them, what is needed from them -- before report ids, codes or route names. Then conclusion, observed evidence, checks, contradictions, limits, next action. Keep the opening, including title and marker, within the first bounded report page. Put detailed evidence below. -->
 
 ## Requirements and delivered results
 

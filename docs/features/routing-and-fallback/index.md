@@ -19,6 +19,29 @@ and bounded by the configured per-model policy. `list_route_options` is a
 read-only snapshot for coordinators; dispatch validates current eligibility
 again.
 
+The runtime-created mandatory review node is not a covered exact-route node.
+It has no plan hint, so a user model request never applies to it
+(`orchestration.state.attempt_routing`). Its route comes from:
+
+1. an owner pin for `worker-code-reviewer`, its alias, or `*`;
+2. failing that, automatic ranking with the cross-provider review preference.
+
+To run an entire workload on one selected route, the owner pins the reviewer
+role to it. Review fixes inherit the planned node's hint, so they stay covered.
+Before a run, `python3 -B scripts/cortex_paseo_dev.py route-preflight --route
+ENGINE/MODEL[:EFFORT]` reads only the dev profile's routing policy and exits 1
+with a visible refusal in three cases:
+
+- `review_route_not_pinned`: no pin applies to the reviewer;
+- `review_route_pin_mismatch` or `review_effort_mismatch`: the applicable pin
+  names another route or effort;
+- `route_denied_by_owner_policy`, `route_provider_not_allowed` or
+  `route_policy_missing`: owner policy would refuse the route.
+
+It never refreshes quota or connection data, never grants consent and never
+writes. Availability, quota and a task's ceiling are checked again at dispatch
+(`src/cortex_runtime/routing/stage_preflight.py`).
+
 Critical roles require qualified instruction delivery for the exact engine
 version. Dispatch excludes unregistered Claude versions before engine launch.
 A non-retryable `instruction_delivery_unqualified` failure is retained as route

@@ -639,7 +639,17 @@ def _command(store,channel,root,scopes,args,ref,owner,effects):
                          HOST_WRITABLE_COMMAND_PROFILE if development else GUARDED_COMMAND_PROFILE),
                 access_policy=policy,
                 exit_code=code,complete=failure is None,failure=failure,
-                output=data.decode('utf-8',errors='replace'),large_output_id=retained['id'])
+                **_inline_output(data),large_output_id=retained['id'])
+
+
+def _inline_output(data):
+    """The advertised inline part of a command's output: at most 64 KiB (the
+    project_git bound), with ``output_truncated`` and the full ``byte_count``.
+    The complete bytes stay in the retained output, which is what check
+    evidence uses; read_large_output pages them."""
+    from .artifacts import _INLINE_OUTPUT_BOUND
+    return dict(output=data[:_INLINE_OUTPUT_BOUND].decode('utf-8',errors='replace'),
+                output_truncated=len(data) > _INLINE_OUTPUT_BOUND, byte_count=len(data))
 
 
 def _protected_outside(root, path):
@@ -736,7 +746,7 @@ def _outside(store,channel,root,operation,args,ref,owner,effects):
                             source_ref=ref,data=data,exit_code=code,failure=failure)
     # cwd completes the command's identity (delegation.evidence.command_identity).
     return dict(tool_call_ref=ref,argv=list(args['argv']),cwd=str(resolved),exit_code=code,complete=failure is None,
-                failure=failure,profile='outside_confirmed',output=data.decode('utf-8',errors='replace'),large_output_id=retained['id'])
+                failure=failure,profile='outside_confirmed',**_inline_output(data),large_output_id=retained['id'])
 
 
 def _record_gateway_refusal(store, channel, operation, error):

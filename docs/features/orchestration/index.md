@@ -388,7 +388,10 @@ gateway receipt that is:
    code of 0;
 3. backed by a complete retained output: the receipt's `large_output_id` names a
    `large_outputs` row of the same task, bound to the same ref and attempt, not
-   truncated, with the same exit code and no failure;
+   truncated, with the same exit code and no failure. The receipt itself inlines
+   at most 64 KiB of `output`, with `output_truncated` and the full `byte_count`;
+   that inline cut never affects verification, and `read_large_output` pages the
+   complete retained bytes;
 4. recorded with its `argv`, and that command is not a trivial stand-in (below);
 5. cited by no earlier check of the same result (one command, one check).
 
@@ -408,7 +411,53 @@ or `-e`, and `|` under `set -o pipefail`); `exit`, `exit $?` and `|| exit N`
 (N nonzero) pass the previous status through, `exit 0` masks it; an unparsable
 script is trivial. So `pytest || true`, `pytest; echo done` and
 `pytest | tail -5` are trivial, while `cd web && npm test` and
-`set -o pipefail; pytest | tee log` are not. Anything else (a test runner, linter,
+`set -o pipefail; pytest | tee log` are not.
+
+One status-capture form is proved and is not trivial:
+`CHECK > log 2>&1; code=$?; tail -n 40 log; exit $code`. Every condition must
+hold: an `sh`, `bash` or `dash` `-c` script (not `zsh` or `ksh`, and no `+`
+shell option) of simple commands only, with no grouping, background job,
+compound command, `!`, here-document, command, arithmetic or process
+substitution, backslash, backtick or `#`; every word, checked with its quotes,
+in a deliberately small literal grammar: command heads and redirection targets
+are unquoted letters, digits and `_./:,+@%=-`, single-quoted text or
+double-quoted text without `$`, and other arguments may add only a plain `$NAME`
+or `${NAME}` (unquoted or double-quoted). Any other expansion is outside the
+proof, wherever it appears (before or after the capture, in a printer argument
+or a redirection target): every other `${...}` form (an array subscript such as
+`${x[code=0]}` or a substring offset such as `${x:code=0}` evaluates arithmetic
+that assigns the captured variable in Bash), `$1`, `$@`,
+`$$`, `$'...'`, `$"..."`, `$(...)`, unquoted glob, brace and tilde
+characters, and unbalanced quotes. Some harmless forms (such as `echo "$(date)"`
+or `tail ~/log`) are rejected with them; single-quoted text stays literal and is
+accepted. No assignment-prefixed commands (including `x=1 trap ...`, Bash
+`x+=1 trap ...` or `X=value CHECK`; use direct argv instead), only standalone
+assignments; no leading numeric command words (including a file descriptor
+before a redirection, such as `2>log CHECK`); no `eval`, `source`, `.`, `exec`, `trap`, `alias`, `shopt`,
+`readonly`, `declare`, `typeset`, `local`, `unset`, `read`, `let`, `mapfile`,
+`getopts`, `builtin`, `command`, `enable` or `return`, and `exit` only as the
+final command; `set` only as leading `-e`/`-u`/`-x`/`-o pipefail` options; a
+lowercase variable other than `_`, assigned exactly once by the standalone word
+`NAME=$?` or `NAME="$?"` after `;` or a newline, with the identifier and equals
+sign unquoted (quoted whole words and quoted identifiers are not assignments);
+the commands before it, taken as a script of
+their own, are not trivial; only printing and reading commands from the trivial
+list (except `cd`, `env`, `export`, `printf`, `set` and `type`) run
+between the assignment and the final `exit $NAME`, which follows them after
+`;`, a newline or `&&`. All intervening `printf` forms are excluded, including
+harmless literal formats: Bash `%n` writes a character count to a shell variable,
+and `-v` assigns a variable even when the option comes from a plain `$NAME`
+argument. Literal-word checks alone cannot prove these commands read-only;
+use `echo`/`tail` wrappers or direct check argv instead. Any other script that ends with `exit $VARIABLE` stays
+unverified with `evidence_gap: "status_variable_unproven"`, for example a
+reassigned or conditionally assigned variable, `|| true` or a pipeline without
+`pipefail` before the capture, a non-printing command (such as `cp`) between
+capture and exit, an expansion outside the literal grammar, or a trivial
+captured command. No exact rerun of such an argv can verify; run the check
+command directly as argv (for example `["python3", "-m", "pytest", "-q"]`)
+instead. This is a bounded recognizer, not a shell parser or a shell security
+boundary; direct argv is always the simpler route, because the gateway retains
+the complete output anyway. Anything else (a test runner, linter,
 type checker, build or project script) may verify a check. The rule does not prove
 that a nontrivial command tests *the named* check (for example an inline
 `python3 -c` program); that correspondence is the independent reviewer's
@@ -430,7 +479,18 @@ check is always kept as `failed`. A new submission containing an open failure
 is refused with `open_failed_check` before anything is recorded or published,
 unless the worker explicitly sends `assignment_outcome: "failed"` to submit an
 intentional failed assignment. The refusal leaves the channel active and its
-request key reusable. The result receipt returned to the worker includes `node_status` and lists
+request key reusable. Its correction
+(`delegation.evidence.explain_open_failure`) names the failed receipt, a
+bounded command identity (program, argv word count, argv SHA-256 prefix, cwd and
+profile, never the argv, script or output), the relevant later run and its
+actual gap, and distinguishes: no later run of the same identity; a later run
+that failed too or has no established result; a passing latest run no check
+cites, or cites without verification; a same-name pass of a different argv
+(which never closes the failure); a failed claim without a verified failing
+receipt; an unrecorded later run; and an argv whose exit-0 run can never verify
+(`trivial_command` or `status_variable_unproven`). It recommends an exact rerun
+only when one can close the failure; otherwise only the explicit failed
+assignment remains. The result receipt returned to the worker includes `node_status` and lists
 every check's recorded `outcome` with its `claimed_outcome`/`evidence_gap`, and
 `closed_by` for a closed failure (below).
 `evidence_gap` codes: `tool_call_ref_missing`, `tool_call_ref_unknown`,
@@ -438,7 +498,7 @@ every check's recorded `outcome` with its `claimed_outcome`/`evidence_gap`, and
 `engine_command_unverifiable`, `receipt_missing`, `ambiguous_ref`,
 `call_incomplete`, `nonzero_exit`, `zero_exit` (a failed claim citing exit 0),
 `result_missing`, `result_truncated`, `command_unrecorded`, `trivial_command`,
-`later_run_failed`, `later_run_unresolved` (below).
+`status_variable_unproven`, `later_run_failed`, `later_run_unresolved` (below).
 
 ### Speculative verification during review
 
@@ -519,8 +579,24 @@ matches nothing. A run the gateway rejected before executing it
   and describes the mistyped run in the report. The run stays in the attempt's
   command history; nothing closes it or infers a pass from it, and a test, lint,
   type check or build that ran and reported failures is always a real failed
-  check. The advertised `checks[].outcome` description and the
-  `open_failed_check` correction say so.
+  check. The advertised `checks[].outcome` description says so. Once a
+  submission has cited the run as a failed check, the next rule applies.
+- **A presented failure cannot be dropped.** After schema validation and
+  before the situational-skill, `.gitignore` and check gates, every new
+  `result_submit` retains, in its own transaction, each gateway receipt it
+  cites as a passed or failed check that is a verified failed run of the
+  attempt or a run of the attempt without a result yet (a
+  `CHECK_FAILURE_PRESENTED` runtime event; `delegation.evidence.record_presented_failures`).
+  Refused submissions count. A later submission must cite each retained
+  receipt that is now a verified failure again with outcome `passed` or
+  `failed`, also with `assignment_outcome: "failed"`; otherwise it is refused
+  with `omitted_failed_check` before anything is recorded or published, and the
+  channel stays active. Omitting it, relabelling it `not_run` or `unverified`,
+  or citing an unrelated passing argv does not count. The retained failure is
+  then closed as below, retracted, or reported in an explicitly failed
+  assignment. Commands never cited as checks (an incidental search that exited 1),
+  and foreign, unknown or non-command references, are not retained.
+  `open_failure` also re-derives the omission when a result is recorded.
 - **An own-probe invocation error can be retracted.** A standalone `python` or `python3 -c` probe that the worker wrote, with only `-B`, `-I` or `-S` flags, may fail with a Python syntax error, or with a regex or assertion error from a literal `re` pattern. Its complete retained output must show that error, and the probe must not import `pytest` or `unittest`. Such a failed check may carry `invocation_error: {corrected_by, reason}`. `corrected_by` must name a `passed` check of the same result with the same name, a verified receipt of the same attempt, the same operation, cwd and profile, a different argv, and a later order than the failure. No later run may be unrecorded, or be of the failed identity and not pass, and each correction is cited by exactly one check. A syntax correction may change the probe freely if it still parses. A regex correction may change exactly one pattern literal; every other assertion and product call must stay the same. The submitted outcome stays `failed` as history, the receipt carries the runtime-derived `retracted_by`, and the current outcome is `retracted`, never `passed`. A retracted check does not fail the node, and both receipts stay in the command history. The reason is an attributed claim for independent review; the runtime does not judge whether the product is correct. Test, lint, build and other project-command failures, and runtime verification, cannot be retracted. A submission whose `invocation_error` is not eligible is refused with `invalid_check_retraction` before anything is recorded.
 - **Ambiguity keeps it open.** A rerun with a different `argv` or `cwd`, a
   weak or uncited pass, a failure without its own verified receipt, a later
@@ -622,14 +698,20 @@ the pipeline is one newest-first Markdown file and other reports remain immutabl
 For a simple informational question, the coordinator reads relevant files and
 submits an answer without a plan or workers. The runtime transitions through
 ANSWER_READY and validates the exact answer receipt before completion. Any plan
-revision, node or worker provisioning disallows this path. There are two
+revision, node or worker provisioning disallows this path. There are three
 exceptions. First, the user answered a runtime stop question, or a question
 asked after verification, by choosing to finish. Second, a new user message
 reopened a task that had reached `COMPLETED`, and since that `TASK_REOPENED`
 event no plan was accepted, no assignment or replan was created, no node is
 pending or running, and no worker was provisioned outside an earlier
-assignment. The runtime derives both from its own committed events, never from
-the coordinator's text. `COMPLETED` is reached only through the runtime's
+assignment. Third, a user message was applied after the current revision's
+latest verification passed, returning it to planning before completion, and
+since that verification no plan, assignment, replan or verification repair was
+accepted, no node is pending or running and no worker was provisioned outside an
+earlier assignment; that answer completes only if the revision still passes
+every completion gate (see
+[steering after verification](../steering-and-questions/index.md)). The runtime
+derives all three from its own committed events, never from the coordinator's text. `COMPLETED` is reached only through the runtime's
 completion checks. So a follow-up question about finished work gets a direct
 answer; before this, it ended blocked with
 `structured_proposal_missing`. Once a reopened task accepts a new plan, that

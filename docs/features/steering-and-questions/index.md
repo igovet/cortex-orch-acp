@@ -114,6 +114,15 @@ stored or rendered English or Russian text, or label) ends the task `CANCELLED` 
 in the user's own words releases the question. See
 [the decisions log](../../project/decisions.md#runtime-stop-question-finish-and-continue).
 
+The question text itself (`acp.messages`'s `stop_question`/`stop_reason.<code>` catalog
+entries) never shows a bare internal code as the whole reason. Each recognised stop
+code (worker failure, verification failure, review limits, an interrupted result
+delivery the runtime could not reconcile against the worker's actual publication,
+a lost worker whose recovery could not finish cleanly, and so on) renders as a short
+plain-language sentence in English or Russian; the raw code still follows it in
+brackets (for example `... [result_publication_mismatch]`) so it stays available for
+diagnosis next to the readable reason, never instead of it.
+
 User steering is durably queued by message identity and requirement revision. It
 does not cancel the coordinator turn, change an executing plan, revoke worker
 channels, or classify a worker interruption as an engine failure. The controller
@@ -126,6 +135,31 @@ worker evidence in its next planning turn. The execution scheduler leaves
 queued `user_message` events unclaimed for that coordinator turn rather than
 consuming their text as a worker-card update. Repeated delivery of the same
 message identity does not create another requirement revision.
+
+A message that arrives while workers, review or verification run is therefore
+applied only after the runtime verification passed: it returns a reviewed and
+verified revision to planning before completion (`RECONCILING → RECOVERING →
+PLANNING`) and clears any synthesis not yet completed. `synthesis_submit` stays
+refused while planning; its `synthesis_not_expected` refusal now carries the
+current state and the choices valid there. The planning prompt tells the
+coordinator that the work was verified and offers two outcomes: a plan for
+requested changes, which becomes a new revision with its own review and
+verification, or `answer_submit` with the final summary. That answer must disclose
+unresolved worker checks with concrete blockers, using the same assessment and
+"Not verified" rendering as synthesis; omitting a gap refuses the proposal without
+changing the task state. A gap closed by exact verified evidence needs no disclosure.
+The runtime completes
+such an answer only after re-checking the revision's completion gates (completed
+nodes, unchanged report digests, approved review, passing verification on the
+unchanged project); a project changed since verification ends the task `FAILED`
+with `answer_not_certified:completion_project_revision_changed`. A later failed
+verification, an accepted plan, assignment, replan or verification repair, or a
+newly provisioned worker removes the answer option. Previously such a message,
+even one that needed no decision, left the coordinator only refused synthesis
+attempts until `structured_proposal_missing` asked the user. The runtime still
+does not judge a message harmless: the coordinator decides, and a model can still
+choose wrongly. The no-paid controller regressions are
+`tests/test_steering_after_verification.py`.
 
 When the queued message carries an image or uploaded-file attachment (its
 bytes/base64 never forwarded to the already-running turn), the retained
@@ -187,7 +221,9 @@ plugin notice block because Paseo does not expose a safe single-channel outcome
 for it. An explicit Stop
 (a lone `session/cancel` that is not followed by a prompt, after the grace window) or
 `/cortex-stop` remains an interruption: the former moves the task to RECOVERING and
-fences unfinished work; the latter permanently cancels it. Worker questions are assignment-local persisted waits.
+fences unfinished work; the latter permanently cancels it. A worker that steering
+leaves running keeps a running card (see
+[worker cards across steering](#worker-cards-across-steering)). Worker questions are assignment-local persisted waits.
 The worker ends its tool turn without an incomplete result; after a real answer,
 the runtime resumes that same assignment and attempt with the next prompt in the
 same healthy engine session. Sibling work can continue. The worker is not
@@ -232,6 +268,49 @@ tool; missing project access goes to runtime `access_request`, and unavailable
 evidence is reported as a limitation. Exact quotes and explicitly requested
 project-artifact languages are preserved. This is model instruction, not automatic translation or a claim
 that arbitrary model output can be deterministically language-validated.
+
+## Worker cards across steering
+
+A worker's coordinator-timeline card is one ACP tool call (`worker:<assignment>`)
+that outlives the coordinator turn which created it; the runtime keeps sending
+its updates, and its real outcome, in later turns. The Paseo ACP bridge settles
+every tool call that is still `pending` or `in_progress` when a prompt ends:
+`failed` when the turn was cancelled, `completed` when it completed. It does
+this itself (`terminalizeTransientItems` in `@getpaseo/plugin` 0.9.1 installed
+for this plugin, and the same routine in the inspected Paseo 0.11.2 application
+bundle), not from an agent update, and merges later updates that carry no
+status into that settled status. Under cancel-then-prompt steering this showed a
+still-running worker as Failed with `Tool call failed: <title>`, and later
+progress kept that state until the worker's real outcome arrived.
+
+The Cortex provider keeps each worker card on the status Cortex last sent
+(`integrations/paseo/server/worker-card-fence.ts`). It reads the raw ACP frames
+before the bridge, restores that status in the bridge's merged snapshot, and
+withholds the bridge's own settlement of a worker card Cortex still reports
+running when the turn was cancelled (steering or Stop) or completed. The card
+keeps its identity and stays running until Cortex reports the outcome. Limits:
+
+- A prompt that itself failed (an agent error or a lost transport) keeps the
+  bridge's failure: nothing then shows the worker survived.
+- Cortex's own updates always pass. A real worker failure keeps its reason, and
+  a lone Stop shows the runtime's `Cancelled: turn_interrupted` card update once
+  the grace window pauses the task.
+- A terminal status Cortex sent is final for that card: a late, duplicated or
+  out-of-order frame does not reopen it.
+- Other tool calls, and cards Cortex never reported in this connection, keep the
+  bridge's behavior.
+
+The runtime half is covered by `tests/test_cancel_prompt_pairing.py` (the
+runtime never settles the steered worker's card; the same card later reports
+its result). `integrations/paseo/server/provider-worker-steer.test.ts` (in
+`npm --prefix integrations/paseo run test:steer`) drives the real installed
+bridge through the assembled provider with a scripted agent: durable steer,
+repeated cancel-then-prompt steering, a turn that completes while the worker
+runs, the real outcome, a stale late frame, genuine failures, a lone Stop, a
+failed prompt and history reload. `integrations/paseo/client/client-bundle.test.ts` checks the
+resulting card props. These establish provider and presentation inputs, not
+rendered Paseo Desktop behavior. Timeline records Paseo already stored from an
+earlier plugin version are not rewritten.
 
 ## Native composer queue versus captured steering
 

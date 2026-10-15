@@ -339,6 +339,35 @@ A new result with an open failure is refused with `open_failed_check` before
 publication, request recording or channel revocation. Only an explicit
 `assignment_outcome: "failed"` intentionally submits that failed assignment;
 there is no changed-command supersession or waiver of review/verification.
+The refusal names receipts, evidence gaps and a bounded command identity (program,
+argv word count and argv SHA-256 prefix, cwd, profile); it never echoes the argv,
+a shell script or command output. Every failed (or still pending) gateway
+receipt a submission cites is retained as a runtime event before the other
+gates, refused submissions included, so a later result that omits or relabels
+it is refused with `omitted_failed_check` and `open_failure` re-derives the
+omission on recording; only runs actually cited as checks are retained. The
+status-capture recognizer for `... ; code=$?; ...; exit $code` scripts proves
+only a narrow simple-command form, requiring an unquoted capture identifier and
+`=`; quoted whole assignment words or identifiers are commands, not captures.
+Double quotes around the value alone (`rc="$?"`) are supported. Assignment-prefixed
+commands are rejected rather than treating the assignment as the command head;
+otherwise a hidden `trap` could override the captured failure at shell exit.
+This also excludes Bash append-assignment prefixes and leading numeric words,
+including file descriptors before redirections, which can hide the same builtin.
+Every word must also fit a small literal grammar checked with its quotes:
+literal command heads and redirection targets, and only plain `$NAME`/`${NAME}`
+expansions in other arguments. Bash parameter expansions such as `${x[code=0]}`
+or `${x:code=0}` evaluate arithmetic that can reassign the captured variable
+inside an innocuous printer argument, so every other `${...}` form, `$(...)`,
+unquoted glob/brace/tilde characters and unbalanced quotes fail closed,
+including some harmless forms; a direct-argv check is the supported alternative.
+`printf` is excluded between capture and exit, even with a harmless literal format:
+Bash `%n` and `-v` can assign the captured variable, and plain variable arguments
+can supply those formats/options without using forbidden expansion syntax.
+Safe `echo`/`tail` wrappers remain supported.
+Other variable exits stay unverified (`status_variable_unproven`); it is a bounded classifier, not a shell
+parser or sandbox. Command receipts inline at most 64 KiB of output; evidence
+always uses the complete retained output.
 Accepted receipts disclose `node_status`, not task acceptance.
 
 Missing permitted project reads return `sha256: "absent"` for the existing CAS
@@ -371,6 +400,13 @@ and user questions are separate host requests and are never folded. These limits
 constrain individual wire updates and the number of cards and updates per
 task, and avoid retransmitting cumulative content; durable task history and
 work remain proportional to the task.
+
+The Paseo provider withholds only the ACP bridge's own turn-end settlement of a
+worker card that Cortex still reports running, when the turn was cancelled or
+completed. It never withholds or replaces a terminal status Cortex sent (a
+later non-terminal frame for a settled card keeps the settled status), and a
+failed prompt keeps the bridge's failure. This is display integrity only: it does not
+change task state, permissions, results or verification.
 
 The Paseo client wraps its rendered panels, composer popover, and timeline card in per-surface error boundaries. If reading or coercing a thrown value fails while formatting the fallback, it uses `unknown error`. This is a UI recovery boundary, not an execution sandbox or a root-cause diagnosis.
 
@@ -978,6 +1014,19 @@ descriptors only from the same task and exact captured source revision. The cont
 checksum guard still runs first; recovery neither trusts replay staging metadata
 nor rewrites an existing steering event. Image bodies remain behind `read_source`.
 
+Steering that returns a verified revision to planning does not let the
+coordinator skip gates: `synthesis_submit` stays refused outside `RECONCILING`,
+and the coordinator's `answer_submit` there completes the task only after the
+runtime re-checks completed nodes, report digests, the approved review, the
+latest passing verification and the unchanged project digest; otherwise the task
+ends `FAILED` (`answer_not_certified:<gap>`). Eligibility comes from runtime
+events only and ends with any later plan, assignment, replan, verification
+repair or worker provisioning. Planned-work answers share synthesis's unresolved
+check assessment and disclosure guard: omitted `not_run` or `unverified` checks
+are refused, and disclosed blockers are retained and rendered in the final answer.
+An unrelated passing verification cannot silently close those gaps. See
+[steering](docs/features/steering-and-questions/index.md).
+
 ## Dev qualification binding boundary
 
 `scripts/cortex_paseo_dev.py binding` is an internal read-only dev CLI helper,
@@ -1006,6 +1055,35 @@ copying the output. Unknown exception codes are redacted, not accepted by prefix
 Zero exit requires a complete canonical exact-identity/digest binding envelope;
 missing evidence or extra fields never become success. Diagnostics never return a binding or authorize another read, retry,
 checkpoint or migra
+## Inspection projection and route preflight
+
+The bound task inspector projects runtime-created outcome metadata and nothing
+else:
+
+- receipt refs, exit codes and completeness;
+- retained-output size and truncation flags, without reading the body;
+- check outcomes with their `closed_by`/`retracted_by` refs;
+- allowlisted route-decision fields;
+- rejection codes with bounded field paths;
+- question kinds and blockers.
+
+Check names, question text and options, argv, output, candidates and reasons
+stay hidden or hashed. A model-authored reference that is not an exact gateway
+receipt is shown as `unrecognized`. Bindings, cursors, refusals and the
+no-initialize boundary are unchanged.
+
+`scripts/cortex_qualification_assert.py` evaluates expectations over the same
+bound, complete inspection snapshot. It adds no reader, binding route or write;
+an inspection refusal exits 2 with a safe code, and an unmet expectation exits 1.
+A zero exit is an assertion over metadata, not acceptance, rendered-GUI evidence
+or proof that native processes ended.
+
+`cortex_paseo_dev.py route-preflight` reads one owner routing policy file and
+reports its hash. It refuses the production Paseo home. It never reads
+credentials, refreshes quota, writes settings or grants model consent. A ready
+result is not an authorization: dispatch still enforces every owner policy and
+availability check.
+
 ## Deferred-check retained evidence
 
 Deferred-check closure verifies the retained task-private output body, not just

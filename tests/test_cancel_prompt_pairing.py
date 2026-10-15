@@ -77,9 +77,10 @@ class _Scenario:
         self.outcomes = []
         self.threads = []
 
-    def prompt(self, session_id, text, cancel_event, surface="Paseo", emit=None):
+    def prompt(self, session_id, text, cancel_event, surface="Paseo", emit=None, emit_tool_call=None):
         thread = threading.Thread(target=lambda: self.outcomes.append(self.runtime.start_prompt(
             self.task_id, session_id, text, emit or (lambda _text: True), cancel_event, client_surface=surface,
+            emit_tool_call=emit_tool_call,
         )))
         thread.start()
         self.threads.append(thread)
@@ -157,6 +158,50 @@ def test_cancel_followed_by_prompt_on_same_session_is_steering(tmp_path):
         assert "TURN_INTERRUPTED" not in scenario.runtime_events()
         # The steering reached the next planning turn.
         assert any("also check the title" in message for message in scenario.planning[1:])
+    finally:
+        scenario.close()
+
+
+def test_steering_keeps_the_running_worker_card_open_until_its_real_outcome(tmp_path):
+    """The runtime half of a steered worker card: across cancel -> prompt
+    the runtime never settles the still-running worker's card, and that same
+    card later carries the worker's real result. Paseo's ACP bridge settles
+    open tool calls itself when a turn ends; the plugin fences that in
+    integrations/paseo/server/worker-card-fence.ts."""
+    scenario = _Scenario(tmp_path, grace=5.0)
+    cards = []
+
+    def emit_card(payload):
+        cards.append(dict(payload))
+        return True
+
+    def worker_cards():
+        return [card for card in list(cards) if str(card.get("tool_call_id", "")).startswith("worker:")]
+
+    try:
+        first = threading.Event()
+        turn = scenario.prompt("s1", "Inspect", first, emit_tool_call=emit_card)
+        assert scenario.entered.wait(5)
+        assert scenario.wait_for(lambda: any(card.get("status") == "in_progress" for card in worker_cards()))
+        scenario.host_cancel("s1", first)
+        turn.join(10)
+        assert scenario.outcomes == [StopReason.CANCELLED]
+        [card_id] = {card["tool_call_id"] for card in worker_cards()}
+        second = scenario.prompt("s1", "Steering: also check the title", threading.Event(), emit_tool_call=emit_card)
+        assert scenario.wait_for(lambda: "host_cancel_followed_by_prompt" in scenario.progress_kinds())
+        assert all(card.get("status") not in {"completed", "failed"} for card in worker_cards())
+        assert not scenario.worker_cancel[0].is_set()
+        scenario.release.set()
+        second.join(20)
+        assert not second.is_alive()
+        assert scenario.outcomes == [StopReason.CANCELLED, StopReason.END_TURN]
+        # The same card settles once with the real result; a settled card may
+        # be refined (outcome label, result) but never changes its status.
+        # (The applied steering's own planning turn may delegate new work,
+        # which gets new cards.)
+        settled = {card["status"] for card in worker_cards()
+                   if card["tool_call_id"] == card_id and card.get("status") in {"completed", "failed"}}
+        assert settled == {"completed"}
     finally:
         scenario.close()
 

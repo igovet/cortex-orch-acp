@@ -96,6 +96,93 @@ def _native(parameters):
     return result
 
 
+_CODE = re.compile(r'[A-Za-z_][A-Za-z0-9_.:-]{0,127}')
+_RECEIPT_REF = re.compile(r'gateway:[0-9a-f]{32}')
+_CHECK_OUTCOMES = {'passed', 'failed', 'not_run', 'unverified', 'retracted'}
+
+
+def _code(value):
+    """A runtime code or enum value; any other string is reported, not shown."""
+    if value is None or isinstance(value, bool):
+        return value
+    return value if isinstance(value, str) and _CODE.fullmatch(value) else 'unsafe_value'
+
+
+def _ref(value):
+    # Model-authored check fields can hold arbitrary text: only an exact
+    # gateway receipt shape is shown, anything else is marked unrecognized.
+    if value is None:
+        return None
+    return value if isinstance(value, str) and _RECEIPT_REF.fullmatch(value) else 'unrecognized'
+
+
+def _int(value):
+    return value if type(value) is int else None
+
+
+def _enum(value, allowed=_CHECK_OUTCOMES):
+    if value is None:
+        return None
+    return value if isinstance(value, str) and value in allowed else 'unsafe_value'
+
+
+def _route_decision(detail):
+    """Allowlisted route-decision metadata; never candidates, usage or reasons."""
+    if not isinstance(detail, dict):
+        return {}
+    decision = detail.get('route_decision') if isinstance(detail.get('route_decision'), dict) else {}
+    request = decision.get('user_model_request') if isinstance(decision.get('user_model_request'), dict) else {}
+    projected = dict(route_basis=_code(detail.get('route_basis')), effort=_code(detail.get('effort')),
+                     effort_source=_code(detail.get('effort_source')))
+    for key in ('basis', 'decided_by', 'role_tier', 'tier', 'preference', 'preference_status',
+                'model_hint_status', 'cross_provider_review'):
+        projected[key] = _code(decision.get(key))
+    projected['chosen'] = decision.get('chosen') if isinstance(decision.get('chosen'), str) and re.fullmatch(
+        r'[a-z0-9-]{1,64}/[A-Za-z0-9_.\[\]-]{1,128}', decision.get('chosen')) else _code(decision.get('chosen'))
+    projected['user_model_request_status'] = _code(request.get('status'))
+    projected['pin_effort_clamped'] = isinstance(decision.get('pin_effort_clamped'), dict)
+    return projected
+
+
+def _event_detail(kind, payload, channels, actor):
+    """Runtime-created identity/outcome fields of one runtime event."""
+    item = {}
+    if kind in ('TOOL_AUTHORIZED', 'TOOL_COMPLETED', 'TOOL_REJECTED', 'CHECK_FAILURE_PRESENTED'):
+        attempt, epoch = channels.get(actor, (None, None))
+        item.update(operation=_code(payload.get('operation')), tool_call_ref=_ref(payload.get('tool_call_ref')),
+                    channel_attempt_id=attempt, channel_owner_epoch=epoch)
+        if kind == 'TOOL_REJECTED':
+            item['error'] = _code(payload.get('error'))
+        if kind == 'CHECK_FAILURE_PRESENTED':
+            item['attempt_id'] = _code(payload.get('attempt_id'))
+    elif kind in ('WORKER_COMPLETED', 'WORKER_FAILED'):
+        result = payload.get('result') if isinstance(payload.get('result'), dict) else {}
+        checks = result.get('checks') if isinstance(result.get('checks'), list) else []
+        item.update(attempt_id=_code(payload.get('attempt_id')), node=_code(payload.get('node')),
+                    verdict=_enum(result.get('verdict'), {'APPROVE', 'REQUEST_CHANGES', 'BLOCK'}),
+                    assignment_outcome=_enum(result.get('assignment_outcome'), {'failed'}),
+                    checks=[dict(name_sha256=_digest(c.get('name')),
+                                 outcome=_enum(c.get('outcome')), claimed_outcome=_enum(c.get('claimed_outcome')),
+                                 evidence_gap=_code(c.get('evidence_gap')), tool_call_ref=_ref(c.get('tool_call_ref')),
+                                 closed_by=_ref(c.get('closed_by')), retracted_by=_ref(c.get('retracted_by')))
+                            for c in checks if isinstance(c, dict)],
+                    checks_count=len(checks))
+    elif kind == 'USER_QUESTION_REQUESTED':
+        # Which kind of question and where it resumes; never its text/options.
+        options = payload.get('options')
+        questions = payload.get('questions')
+        item.update(question_id=_code(payload.get('question_id')), batch_id=_code(payload.get('batch_id')),
+                    runtime_stop=payload.get('runtime_stop') is True, after_verification=payload.get('after_verification') is True,
+                    resume_state=_code(payload.get('resume_state')), revision=_int(payload.get('revision')),
+                    blocker=_code(payload.get('blocker')),
+                    options_count=len(options) if isinstance(options, list) else None,
+                    questions_count=len(questions) if isinstance(questions, list) else None)
+    elif kind in ('USER_STEERING', 'STEERING_APPLIED'):
+        # The runtime pairs these by actor; expose only the pairing identity.
+        item['actor_sha256'] = _digest(actor)
+    return item
+
+
 def discover_binding(project, session_id):
     """Discover only exact session/task/current durable ownership metadata.
 
@@ -151,7 +238,8 @@ def read_binding_page(project, session_id, task_id, owner_epoch, *, cursor=None,
         # Oversized underlying evidence is a refusal, never a clipped digest.
         for table, column in (('configuration_revisions', 'parameters'), ('runtime_tasks', 'synthesis'),
                               ('task_events', 'payload_json'), ('runtime_events', 'payload_json'),
-                              ('runtime_requests', 'result_json')):
+                              ('runtime_requests', 'result_json'), ('attempt_route_audit', 'decision_detail_json'),
+                              ('observability_events', 'detail_json')):
             count, size = db.execute(f'SELECT COUNT(*),COALESCE(SUM(LENGTH(CAST({column} AS BLOB))),0) FROM {table} WHERE task_id=?', (task_id,)).fetchone()
             if count > MAX_ROWS or size > MAX_SOURCE_BYTES:
                 raise StoreError('inspection_evidence_overflow')
@@ -181,7 +269,15 @@ def read_binding_page(project, session_id, task_id, owner_epoch, *, cursor=None,
             rows.append(dict(section='synthesis', text_sha256=_digest(runtime['synthesis'])))
         select('nodes', 'SELECT revision,node_id,role,stage,status,assignment_ref FROM runtime_nodes WHERE task_id=? ORDER BY revision,rowid')
         select('attempts', 'SELECT idempotency_key,attempt_id,assignment_id,role_id,status,step,owner_epoch,config_revision,engine_session_ref,error_code FROM delegation_provisioning WHERE task_id=? ORDER BY created_at,idempotency_key')
-        select('dispatch', 'SELECT id,attempt_id,role,engine,connection_id,model,config_revision_id,decision,params_fingerprint FROM attempt_route_audit WHERE task_id=? ORDER BY rowid')
+        dispatch = db.execute('SELECT id,attempt_id,role,engine,connection_id,model,config_revision_id,decision,params_fingerprint,'
+                              'decision_detail_json FROM attempt_route_audit WHERE task_id=? ORDER BY rowid LIMIT ?',
+                              (task_id, MAX_ROWS + 1)).fetchall()
+        if len(dispatch) > MAX_ROWS:
+            raise StoreError('inspection_evidence_overflow')
+        for audit in dispatch:
+            values = dict(audit)
+            detail = json.loads(values.pop('decision_detail_json') or '{}')
+            rows.append(dict(section='dispatch', **values, route=_route_decision(detail)))
         select('process_observations', 'SELECT attempt_id,role,engine_session_ref,connection_id,recorded_at,terminated_at FROM attempt_process_registry WHERE task_id=? ORDER BY recorded_at,attempt_id')
         select('capacity', 'SELECT reservation_id,attempt_id,assignment_ref,kind,state,release_observation FROM capacity_reservations WHERE task_id=? ORDER BY reserved_at,reservation_id')
         select('reports', 'SELECT r.id,r.kind,e.sequence,e.digest,e.size_bytes FROM reports r JOIN editions e ON e.report_id=r.id WHERE r.task_id=? ORDER BY e.sequence')
@@ -191,6 +287,11 @@ def read_binding_page(project, session_id, task_id, owner_epoch, *, cursor=None,
         for source in inputs:
             rows.append(dict(section='inputs', identity_sha256=_digest([source['origin'], source['event_id']]),
                              captured_at=source['captured_at'], ledger_state=source['ledger_state']))
+        channel_rows = db.execute('SELECT channel_id,attempt_id,owner_epoch FROM trusted_channels WHERE task_id=? LIMIT ?',
+                                  (task_id, MAX_ROWS + 1)).fetchall()
+        if len(channel_rows) > MAX_ROWS:
+            raise StoreError('inspection_evidence_overflow')
+        channels = {c['channel_id']: (c['attempt_id'], c['owner_epoch']) for c in channel_rows}
         for table, type_key in (('task_events', 'event_type'), ('runtime_events', 'type')):
             values = db.execute(f'SELECT * FROM {table} WHERE task_id=? ORDER BY id LIMIT ?', (task_id, MAX_ROWS + 1)).fetchall()
             if len(values) > MAX_ROWS:
@@ -215,6 +316,8 @@ def read_binding_page(project, session_id, task_id, owner_epoch, *, cursor=None,
                     item['history'] = payload.get('history')
                     item['unknown_actions_count'] = len(payload.get('unknown_outcome_actions', []))
                     item['interrupted_workers_count'] = len(payload.get('interrupted_workers', []))
+                if table == 'runtime_events':
+                    item.update(_event_detail(row[type_key], payload, channels, row['actor']))
                 if row[type_key] in ('VERIFICATION_PASSED', 'VERIFICATION_FAILED'):
                     item['verification'] = row[type_key]
                     item['checks'] = [dict(exit_code=c.get('exit_code'), complete=c.get('complete'),
@@ -225,14 +328,47 @@ def read_binding_page(project, session_id, task_id, owner_epoch, *, cursor=None,
         receipts = db.execute('SELECT actor,request_key,operation,result_json FROM runtime_requests WHERE task_id=? ORDER BY rowid LIMIT ?', (task_id, MAX_ROWS + 1)).fetchall()
         if len(receipts) > MAX_ROWS:
             raise StoreError('inspection_evidence_overflow')
+        outputs = {o['id']: o for o in db.execute(
+            'SELECT id,source_ref,byte_count,truncated,exit_code,signal,failure FROM large_outputs WHERE task_id=? LIMIT ?',
+            (task_id, MAX_ROWS + 1)).fetchall()}
+        if len(outputs) > MAX_ROWS:
+            raise StoreError('inspection_evidence_overflow')
         for receipt in receipts:
             result = json.loads(receipt['result_json'])
             if receipt['operation'] in {'command_run', 'outside_command', 'outside_write', 'project_write', 'project_edit',
                                         'project_mkdir', 'project_delete', 'project_skill_link', 'draft_write', 'external_call'}:
-                rows.append(dict(section='action_receipts', identity_sha256=_digest([receipt['actor'], receipt['request_key']]),
-                                 operation=receipt['operation'], tool_call_ref=result.get('tool_call_ref'),
-                                 complete=result.get('complete'), exit_code=result.get('exit_code'),
-                                 result_sha256=_digest(result)))
+                # A completed gateway receipt is stored as {complete, receipt};
+                # a pending one carries its fields at the top level.
+                inner = result.get('receipt') if isinstance(result.get('receipt'), dict) else result
+                attempt, epoch = channels.get(receipt['actor'], (None, None))
+                item = dict(section='action_receipts', identity_sha256=_digest([receipt['actor'], receipt['request_key']]),
+                            operation=receipt['operation'], channel_attempt_id=attempt, channel_owner_epoch=epoch,
+                            tool_call_ref=_ref(inner.get('tool_call_ref')),
+                            complete=result.get('complete'), exit_code=_int(inner.get('exit_code')),
+                            run_complete=inner.get('complete') if 'receipt' in result else None,
+                            failure=_code(inner.get('failure')), error=_code(result.get('error')),
+                            profile=_code(inner.get('profile')), large_output_id=_code(inner.get('large_output_id')),
+                            result_sha256=_digest(result))
+                retained = outputs.get(inner.get('large_output_id'))
+                if retained is not None:
+                    # Metadata of the retained output; its body is not read here.
+                    item['retained_output'] = dict(
+                        bound=retained['source_ref'] == inner.get('tool_call_ref'), byte_count=_int(retained['byte_count']),
+                        truncated=bool(retained['truncated']), exit_code=_int(retained['exit_code']),
+                        signal=_code(retained['signal']), failure=_code(retained['failure']))
+                rows.append(item)
+        observed = db.execute("SELECT id,category,outcome,attempt_id,created_at,detail_json FROM observability_events "
+                              "WHERE task_id=? AND category IN ('validation','submission_rejection','gateway_refusal') "
+                              "ORDER BY created_at,id LIMIT ?", (task_id, MAX_ROWS + 1)).fetchall()
+        if len(observed) > MAX_ROWS:
+            raise StoreError('inspection_evidence_overflow')
+        for row in observed:
+            detail = json.loads(row['detail_json'] or '{}')
+            fields = detail.get('fields') if isinstance(detail.get('fields'), list) else []
+            rows.append(dict(section='observability', id=row['id'], category=row['category'], outcome=_code(row['outcome']),
+                             attempt_id=row['attempt_id'], created_at=row['created_at'],
+                             operation=_code(detail.get('operation')), field=_code(detail.get('field')),
+                             fields=[_code(f) for f in fields[:20]]))
         if len(rows) > MAX_ROWS or len(_encode(rows).encode()) > MAX_METADATA_BYTES:
             raise StoreError('inspection_evidence_overflow')
         binding = dict(project_root=str(root), session_id=session_id, task_id=task_id, owner_epoch=owner_epoch)
@@ -253,4 +389,7 @@ def read_binding_page(project, session_id, task_id, owner_epoch, *, cursor=None,
                             'dispatch is not native confirmation; require ACTIVE or worker_configuration_confirmed',
                             'closed_at is not disconnect; require retained host_disconnected event',
                             'native resource/process liveness and SIGKILL are not probed',
-                            'metadata hashes do not verify report body bytes or acceptance'])
+                            'metadata hashes do not verify report body bytes or acceptance',
+                            'retained-output rows are metadata; output body bytes are not read or verified',
+                            'client-side schema rejections before a dispatched tools/call never reach the store',
+                            'host-rendered worker-card status is not stored; it is unavailable here'])

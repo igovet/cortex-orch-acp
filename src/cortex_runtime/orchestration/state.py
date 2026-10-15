@@ -334,6 +334,42 @@ def reopened_after_completion(db, task):
         "AND json_extract(e.payload_json,'$.assignment_ref')=p.idempotency_key)", (task_id, reopened)).fetchone()
 
 
+def steered_after_verification(db, task):
+    """A user message returned the verified revision to planning before it
+    completed, and nothing was planned since.
+
+    Steering waits for a boundary, so a message sent while workers, review or
+    verification ran is applied once the runtime verification passed
+    (RECONCILING -> RECOVERING -> PLANNING, synthesis cleared). The
+    coordinator then decides what the message asks for: a plan for changes,
+    or a direct answer closing the reviewed and verified work. Derived only
+    from runtime events: the latest verification passed for this revision, a
+    steering was applied after it, and since then no plan, assignment, replan
+    or verification repair was accepted and no worker was provisioned. Such an
+    answer completes only certified work (answer_needs_certified_work)."""
+    task_id = task['task_id']
+    verified = db.execute("SELECT id,type,payload_json FROM runtime_events WHERE task_id=? "
+                          "AND type IN ('VERIFICATION_PASSED','VERIFICATION_FAILED') ORDER BY id DESC LIMIT 1",
+                          (task_id,)).fetchone()
+    if (not verified or verified['type'] != 'VERIFICATION_PASSED'
+            or json.loads(verified['payload_json']).get('revision') != task['revision']):
+        return False
+    if not db.execute("SELECT 1 FROM runtime_events WHERE task_id=? AND id>? AND type='STEERING_APPLIED'",
+                      (task_id, verified['id'])).fetchone():
+        return False
+    if db.execute("SELECT 1 FROM runtime_events WHERE task_id=? AND id>? AND type IN "
+                  "('PLAN_ACCEPTED','ASSIGNMENT_CREATED','REPLAN_REQUEST_ACCEPTED','VERIFICATION_REVISED')",
+                  (task_id, verified['id'])).fetchone():
+        return False
+    if db.execute("SELECT 1 FROM runtime_nodes WHERE task_id=? AND status IN ('pending','running')",
+                  (task_id,)).fetchone():
+        return False
+    return not db.execute(
+        "SELECT 1 FROM delegation_provisioning p WHERE p.task_id=? AND p.role_id!='orchestrator' AND NOT EXISTS ("
+        "SELECT 1 FROM runtime_events e WHERE e.task_id=p.task_id AND e.type='ASSIGNMENT_CREATED' AND e.id<? "
+        "AND json_extract(e.payload_json,'$.assignment_ref')=p.idempotency_key)", (task_id, verified['id'])).fetchone()
+
+
 def _informational(db, task):
     """No plan, node or worker has ever existed for this task."""
     return (task['revision'] == 0 and task['plan_json'] is None
@@ -344,9 +380,11 @@ def _informational(db, task):
 
 def direct_answer_allowed(db, task):
     """Whether answer_submit may close the task: before any plan or worker
-    exists, after the user released a stopped or verified revision, or for a
-    follow-up on a completed task with no work planned since it reopened."""
-    return released_by_user(db, task) or reopened_after_completion(db, task) or _informational(db, task)
+    exists, after the user released a stopped or verified revision, for a
+    follow-up on a completed task with no work planned since it reopened, or
+    after a user message returned the verified revision to planning."""
+    return (released_by_user(db, task) or reopened_after_completion(db, task)
+            or steered_after_verification(db, task) or _informational(db, task))
 
 
 def answer_needs_certified_work(db, task):
@@ -617,6 +655,26 @@ def synthesis_checks(db, task_id, revision):
             gaps[name] = check['name']
 
     return checks, gaps
+
+
+def disclosed_synthesis(text, not_verified, gaps):
+    """Require and render the same gap disclosure on both final-answer paths."""
+    normalized = lambda name: ' '.join(str(name).split()).casefold()
+    for index, item in enumerate(not_verified):
+        if not item['blocker'].strip():
+            raise StoreError('synthesis_blocker_required', f'arguments.not_verified[{index}].blocker',
+                             'blank', 'a concrete blocker that made verification impossible',
+                             'Verify this item or state the concrete blocker.')
+    listed = {normalized(item['item']) for item in not_verified}
+    missing = [name for key, name in gaps.items() if key not in listed]
+    if missing:
+        raise StoreError('synthesis_gaps_undisclosed', 'arguments.not_verified', ', '.join(missing)[:160],
+                         'every retained not_run or unverified check by its exact name, each with its blocker',
+                         'A gap with a declared command closes after a verified command_run with exactly matching argv or a complete passing runtime final-verification receipt with identical argv, bound to the gap author\'s observed publication or reviewed digest and the current approved project digest, regardless of execution order; a command-less gap may close by a verified same-name pass in its node or later fix. Plan the missing checks (plan_submit while planning, replan_request while reconciling) if they can be verified; otherwise list each exact name in not_verified with its concrete blocker: ' + '; '.join(missing))
+    return text if not not_verified else (
+        text.rstrip() + '\n\n## Not verified\n\n' +
+        '\n'.join(f"- {item['item']} — blocker: {item['blocker']}" for item in not_verified)
+    )
 
 
 def validate_scope(scope):
@@ -1124,12 +1182,15 @@ class TaskMachine:
             db.commit()
         return 'COMPLETED'
 
-    def submit_answer(self, channel, text, request_key, *, authorization=None):
+    def submit_answer(self, channel, text, request_key, *, not_verified=(), authorization=None):
         """Record an informational proposal; only the runtime completes it.
 
         This cannot replace a plan, escape a review or accept a worker result.
         """
-        digest=hashlib.sha256(encoded(dict(text=text)).encode()).hexdigest()
+        proposal = dict(text=text)
+        if not_verified:
+            proposal['not_verified'] = list(not_verified)
+        digest=hashlib.sha256(encoded(proposal).encode()).hexdigest()
         with self.store.connection() as db:
             db.execute('BEGIN IMMEDIATE')
             if authorization: authorization(db)
@@ -1142,11 +1203,16 @@ class TaskMachine:
             task=db.execute('SELECT * FROM runtime_tasks WHERE task_id=?',(channel.task_id,)).fetchone()
             if not task or task['state'] not in {'PLANNING','ANSWER_READY'} or not direct_answer_allowed(db, task):
                 raise StoreError('direct_answer_not_available')
+            gaps = {}
+            if answer_needs_certified_work(db, task):
+                _, gaps = synthesis_checks(db, channel.task_id, task['revision'])
+            stored = disclosed_synthesis(text, not_verified, gaps)
             if task['state']=='ANSWER_READY':
-                if task['synthesis']!=text: raise StoreError('answer_conflict')
+                if task['synthesis']!=stored: raise StoreError('answer_conflict')
             else:
-                db.execute('UPDATE runtime_tasks SET synthesis=? WHERE task_id=?',(text,channel.task_id))
-                event(db,channel.task_id,'ANSWER_SUBMITTED',dict(text=text,request_key=request_key),channel.channel_id)
+                db.execute('UPDATE runtime_tasks SET synthesis=? WHERE task_id=?',(stored,channel.task_id))
+                event(db,channel.task_id,'ANSWER_SUBMITTED',
+                      dict(text=stored,not_verified=list(not_verified),request_key=request_key),channel.channel_id)
                 transition(db,channel.task_id,'ANSWER_READY')
             receipt=dict(recorded=True,state='ANSWER_READY')
             db.execute('INSERT INTO runtime_requests VALUES(?,?,?,?,?,?)',
@@ -1554,25 +1620,18 @@ class TaskMachine:
             if authorization: authorization(db)
             task = db.execute('SELECT state,synthesis,revision FROM runtime_tasks WHERE task_id=?', (channel.task_id,)).fetchone()
             if not task or task['state'] != 'RECONCILING':
-                raise StoreError('synthesis_not_expected')
+                state = task['state'] if task else 'missing'
+                raise StoreError('synthesis_not_expected', 'state', state, 'RECONCILING', (
+                    'The task is planning: synthesis_submit is never accepted there. A user message after the '
+                    'verification, a failed verification or a returned worker sent it back. Submit plan_submit '
+                    'for requested changes, verification_submit to repair a failed verification, answer_submit '
+                    'when the planning prompt offers it, or user_question_request for a decision.'
+                    if state == 'PLANNING' else
+                    'The runtime has not reached reconciliation (or the task already finished). End this turn '
+                    'and let the runtime continue; read task_get_context for the current state.'))
 
-            checks, gaps = synthesis_checks(db, channel.task_id, task['revision'])
-            normalized = lambda name: ' '.join(str(name).split()).casefold()
-            for index, item in enumerate(not_verified):
-                if not item['blocker'].strip():
-                    raise StoreError('synthesis_blocker_required', f'arguments.not_verified[{index}].blocker',
-                                     'blank', 'a concrete blocker that made verification impossible',
-                                     'Verify this item or state the concrete blocker.')
-            listed = {normalized(item['item']) for item in not_verified}
-            missing = [name for key, name in gaps.items() if key not in listed]
-            if missing:
-                raise StoreError('synthesis_gaps_undisclosed', 'arguments.not_verified', ', '.join(missing)[:160],
-                                 'every retained not_run or unverified check by its exact name, each with its blocker',
-                                 'A gap with a declared command closes after a verified command_run with exactly matching argv or a complete passing runtime final-verification receipt with identical argv, bound to the gap author\'s observed publication or reviewed digest and the current approved project digest, regardless of execution order; a command-less gap may close by a verified same-name pass in its node or later fix. Close these gaps with replan_request if they can be verified; otherwise list each exact name in not_verified with its concrete blocker: ' + '; '.join(missing))
-            stored = text if not not_verified else (
-                text.rstrip() + '\n\n## Not verified\n\n' +
-                '\n'.join(f"- {item['item']} — blocker: {item['blocker']}" for item in not_verified)
-            )
+            _, gaps = synthesis_checks(db, channel.task_id, task['revision'])
+            stored = disclosed_synthesis(text, not_verified, gaps)
             if task['synthesis'] is not None and task['synthesis'] != stored:
                 raise StoreError('synthesis_conflict')
             if task['synthesis'] == stored:

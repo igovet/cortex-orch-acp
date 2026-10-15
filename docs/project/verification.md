@@ -29,7 +29,11 @@ A speculative run is eligible only after authoritative credit on the approved
 digest; its `CHECK_EXECUTION_STARTED` marker alone is diagnostic and never closes
 a gap. Discarded candidates remain ineligible.
 
-A worker's failed check is closed only by an exact later passing rerun of the same command identity. The one exception is a supported error in the worker's own standalone Python probe, which a later verified correction may retract; the failure stays as `retracted` history and is never a pass. Runtime verification failures are never retracted (see [check history](../features/orchestration/index.md#check-history-and-current-outcome)). Tests for these rules: `tests/test_check_closure_fixes.py`.
+A worker's failed check is closed only by an exact later passing rerun of the same command identity. The one exception is a supported error in the worker's own standalone Python probe, which a later verified correction may retract; the failure stays as `retracted` history and is never a pass. Runtime verification failures are never retracted (see [check history](../features/orchestration/index.md#check-history-and-current-outcome)). Tests for these rules: `tests/test_check_closure_fixes.py`. The status-capture recognizer, explanatory `open_failed_check` corrections, `omitted_failed_check` retention of presented failures and the 64 KiB inline command-output bound are covered by `tests/test_check_submission_loop.py` (with `tests/test_check_history.py` and `tests/test_delegation_evidence.py`).
+Executable Bash regressions in `tests/test_check_submission_loop.py` cover `%n`
+and variable-expanded `printf -v` overwriting a captured failure: their exit-0
+`command_run` receipts remain unverified on `result_submit`, while safe
+`echo`/`tail` wrappers retain status propagation and exact-rerun coverage.
 See [check closure](../features/orchestration/index.md#check-history-and-current-outcome)
 and `tests/test_deferred_check_closure.py`.
 
@@ -216,6 +220,22 @@ The default automated suite remains no-paid. A `cli` check establishes runtime
 and protocol behavior only; a probe or GUI observation supports only the exact
 surface it exercises.
 
+Before a requested `cli` run, the
+[route preflight](dev-environment.md#route-preflight-before-a-paid-cli-run) must
+exit 0 for each selected route. A refusal means some stage, usually the mandatory
+reviewer, would run on another route, so the run does not start. Its no-paid
+regressions are `tests/test_stage_route_preflight.py`. After the run, read the
+receipts, check outcomes, route bases and question kinds with
+[bound task inspection](../features/observability/index.md#bound-task-inspection);
+its regressions are in `tests/test_task_inspection.py`. Assert the expected
+outcome with `scripts/cortex_qualification_assert.py` (exit 0 only when every
+expectation holds; see [assert the outcome](dev-environment.md#assert-the-outcome));
+its regressions are in `tests/test_qualification_assert.py`. A case supervisor
+observes, selects the running attempt, steers once and cleans up through
+`scripts/cortex_qualification_observer.py`
+([observe and steer within the case budget](dev-environment.md#observe-and-steer-within-the-case-budget));
+its no-paid regressions are in `tests/test_qualification_observer.py`.
+
 `scripts/cortex_acp_smoke.py` is the no-paid startup smoke harness
 (schema-validated launch/protocol surface only, not GUI evidence).
 Run both documented fixture forms from the checkout root after source/package checks:
@@ -234,6 +254,7 @@ focused runtime checks before package/profile checks:
 
 ```
 PYTHONDONTWRITEBYTECODE=1 python3 -B -m pytest -q tests/test_question_recovery_continuation.py
+PYTHONDONTWRITEBYTECODE=1 python3 -B -m pytest -q tests/test_steering_after_verification.py
 PYTHONDONTWRITEBYTECODE=1 python3 -B -m pytest -q tests/test_delegation_mcp_wire.py tests/test_delegation_mcp_tools.py tests/test_delegation_evidence.py
 ```
 
@@ -286,7 +307,7 @@ npm --prefix integrations/paseo run typecheck
 
 ```
 npm --prefix integrations/paseo run test:activation # server/plugin-activation.test.ts
-npm --prefix integrations/paseo run test:steer      # steer and scalar/batch question transport regressions
+npm --prefix integrations/paseo run test:steer      # steer, steered worker cards through the real installed ACP bridge, and scalar/batch question transport regressions
 npm --prefix integrations/paseo run test:installed-questions -- /absolute/path/to/installed/Metro/index.js # installed question helper/component structure and state (no pixel rendering)
 npm --prefix integrations/paseo run test:diff      # client/worker-panel-diff.test.ts
 npm --prefix integrations/paseo run test:status    # client/worker-panel-status.test.ts

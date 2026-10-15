@@ -22,7 +22,11 @@ export class ReplayController {
   private children = new Set<ReturnType<typeof spawn>>();
   private emit: (event: ProviderEvent) => void = () => {};
   private command: readonly [string, ...string[]];
-  constructor(command: readonly [string, ...string[]]) { this.command = command; }
+  // Sees every frame Cortex sends, before the ACP bridge reduces it.
+  private observe: (frame: unknown) => void;
+  constructor(command: readonly [string, ...string[]], observe: (frame: unknown) => void = () => {}) {
+    this.command = command; this.observe = observe;
+  }
 
   private fail(load: Load, message = "Incomplete history: replay did not complete") {
     if (!this.loads.delete(load.sessionId)) return;
@@ -149,6 +153,7 @@ export class ReplayController {
                   throw new Error("Incomplete history: replay exceeds manifest");
               }
             }
+            this.observe(frame);
             controller.enqueue(frame);
           } catch {
             if (load) this.fail(load, "Incomplete history: replay stream failed validation");

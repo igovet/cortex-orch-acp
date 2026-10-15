@@ -59,6 +59,12 @@ It also checks staging count/byte boundaries and UTF-8 fragmentation. This is
 transport/bridge evidence, not GUI evidence. Actual Paseo GUI reopening is
 **NOT RUN** by this implementation worker.
 
+The connector also hands every Cortex frame, unchanged, to the provider's
+worker-card fence (`server/worker-card-fence.ts`) before the bridge reduces it,
+so a worker card keeps the status Cortex sent instead of the bridge's own
+turn-end settlement. `server/provider-worker-steer.test.ts` (in `test:steer`)
+includes a reload of saved running and settled worker cards.
+
 ## Structured related questions
 
 The provider maps runtime-marked question batches into the installed Paseo
