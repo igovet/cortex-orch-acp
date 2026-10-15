@@ -205,6 +205,7 @@
     "src/cortex_runtime/storage/inspection.py",
     "src/cortex_runtime/store.py",
     "src/cortex_runtime/task_workspace.py",
+    "src/cortex_runtime/tempdirs.py",
     "src/cortex_runtime/trusted_channel.py",
     "src/cortex_split.py"
   ]

@@ -16,9 +16,14 @@ a hidden provider/native fallback -- see
 import os
 import sys
 
-from cortex_runtime.acp.agent import main
-from cortex_runtime.acp.production_runtime import ProductionOrchestratingRuntime
-from cortex_runtime.packaging.pinned import PinnedManifestError, load_manifest, verify_launch_critical
+from cortex_runtime.tempdirs import prefer_disk_tmp
+
+# Before anything creates a temporary file: /var/tmp, not a RAM-backed /tmp.
+prefer_disk_tmp()
+
+from cortex_runtime.acp.agent import main  # noqa: E402
+from cortex_runtime.acp.production_runtime import ProductionOrchestratingRuntime  # noqa: E402
+from cortex_runtime.packaging.pinned import PinnedManifestError, load_manifest, verify_launch_critical  # noqa: E402
 
 
 def _fail_closed_on_pinned_mismatch():

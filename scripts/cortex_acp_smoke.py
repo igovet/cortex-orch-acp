@@ -52,6 +52,7 @@ import json
 import os
 import platform
 import queue
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -145,6 +146,8 @@ def _minimal_env(home, config_home, state_home):
         "XDG_STATE_HOME": str(state_home),
         "LANG": os.environ.get("LANG") or "C.UTF-8",
         "PYTHONDONTWRITEBYTECODE": "1",
+        # No engine download into this disposable HOME (engine_update).
+        "CORTEX_ENGINE_UPDATE": "off",
     }
     return env
 
@@ -315,10 +318,39 @@ def _count_tasks(project_dir):
         conn.close()
 
 
-def run_smoke(*, fixture_connection, report):
+def _remove_tree(path):
+    """Delete one of this run's own temporary directories, including the
+    read-only directories a store creates inside it."""
+    def writable_then_retry(function, failed, _error):
+        try:
+            os.chmod(os.path.dirname(failed) or failed, 0o700)
+            os.chmod(failed, 0o700)
+        except OSError:
+            pass
+        function(failed)
+    shutil.rmtree(path, onerror=writable_then_retry)
+
+
+def run_smoke(*, fixture_connection, report, keep_temp=False):
     tmp_base = _safe_tmp_base()
     project_dir = Path(tempfile.mkdtemp(prefix="cortex-acp-smoke-project-", dir=tmp_base)).resolve()
     home_dir = Path(tempfile.mkdtemp(prefix="cortex-acp-smoke-home-", dir=tmp_base)).resolve()
+    try:
+        return _run_smoke(project_dir, home_dir, fixture_connection=fixture_connection, report=report)
+    finally:
+        # Every run used to leave both directories behind (561 pairs,
+        # 16.6 GB under /var/tmp by 2026-10-15).
+        if keep_temp:
+            sys.stderr.write(f"cortex_acp_smoke: kept {project_dir} and {home_dir}\n")
+        else:
+            for path in (project_dir, home_dir):
+                try:
+                    _remove_tree(path)
+                except OSError as error:
+                    sys.stderr.write(f"cortex_acp_smoke: could not remove {path}: {error}\n")
+
+
+def _run_smoke(project_dir, home_dir, *, fixture_connection, report):
     assert REPO_ROOT not in project_dir.parents and project_dir != REPO_ROOT, (
         "refusing to use the repository checkout as an ACP project root")
     config_home = home_dir / "config"
@@ -453,13 +485,16 @@ def main(argv=None):
                               "temporary XDG directories (never a real engine/provider).")
     parser.add_argument("--report", type=Path, default=None,
                          help="Write the JSON summary report here instead of stderr.")
+    parser.add_argument("--keep-temp", action="store_true",
+                         help="Keep the temporary project and HOME directories for inspection "
+                              "(they are deleted after the run otherwise).")
     args = parser.parse_args(argv)
 
     report = Report()
     versions = dict(python_version=platform.python_version(), cortex_version=_cortex_version(),
                      protocol_version=None)
     try:
-        versions = run_smoke(fixture_connection=args.fixture_connection, report=report)
+        versions = run_smoke(fixture_connection=args.fixture_connection, report=report, keep_temp=args.keep_temp)
     except SmokeFailure as exc:
         report.record("harness:fatal", False, detail=str(exc))
     except Exception as exc:  # unexpected: still emit a report before exiting non-zero
@@ -488,4 +523,6 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
+    from _cortex_tmp import prefer_disk_tmp
+    prefer_disk_tmp()  # /var/tmp, not a RAM-backed /tmp
     raise SystemExit(main())

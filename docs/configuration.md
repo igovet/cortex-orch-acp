@@ -383,6 +383,25 @@ ssh in a worker's native shell and in `command_run` behaves as it does in your t
 
 For prompts the agent cannot answer (a key passphrase, a password, a new host-key confirmation), `{"enabled": true}` in `$XDG_CONFIG_HOME/cortex/ssh-askpass.json` shows ssh's own prompt in a desktop dialog. See [SECURITY.md](../SECURITY.md#owners-ssh-agent) and `orchestration.ssh_askpass`. Both apply to engine processes started after the change, so open a new session.
 
+## Temporary files and engine updates
+
+Cortex keeps its temporary files in `/var/tmp`, which is on disk
+(`cortex_runtime.tempdirs`). On many hosts `/tmp` is a tmpfs, which lives in
+RAM and swap. Every entry point (`cortex_acp.py`, `cortex.py` and the
+`scripts/`) points `TMPDIR` at `/var/tmp` when it is unset or is `/tmp`
+itself. An explicit `TMPDIR` is kept: a sandbox's own scratch, an isolated
+test run, or your own choice. Child processes inherit it.
+
+At every start Cortex updates its own engine copies in the background through
+npm. `CORTEX_ENGINE_UPDATE=off` skips that update, which suits an offline
+machine. The no-paid smoke harness and the test suite set it, so their
+disposable HOME never gets an npm download (about 625 MB per launch). The smoke
+harness deletes its temporary project and HOME after each run; pass
+`--keep-temp` to keep them. Each test process works in its own `/tmp/cxpt-*`
+directory and deletes it when it ends. Tests stay under `/tmp` because the
+sandbox tests rely on the shared, writable `/tmp`, while a sandbox's
+`/var/tmp` is private.
+
 ## Verify configuration
 
 Check the current user registry and engine discovery without printing secret values:

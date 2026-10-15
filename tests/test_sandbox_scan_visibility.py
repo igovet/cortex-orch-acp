@@ -80,3 +80,25 @@ def test_the_scan_card_opens_updates_and_closes():
     assert "1000 entries, 3 s" in cards[0]["text"] and "not a hang" in cards[0]["text"]
     assert cards[-1]["status"] == "completed" and "9000 entries in 12 s" in cards[-1]["text"]
     assert len({card["tool_call_id"] for card in cards}) == 1
+
+
+def test_temporary_files_go_to_var_tmp_unless_tmpdir_is_explicit(tmp_path):
+    from cortex_runtime.tempdirs import DISK_TMP, prefer_disk_tmp
+    environ = {}
+    assert prefer_disk_tmp(environ) == DISK_TMP and environ["TMPDIR"] == DISK_TMP
+    environ = {"TMPDIR": "/tmp"}
+    assert prefer_disk_tmp(environ) == DISK_TMP
+    elsewhere = tmp_path / "scratch"
+    elsewhere.mkdir()
+    environ = {"TMPDIR": str(elsewhere)}
+    assert prefer_disk_tmp(environ) == str(elsewhere)
+
+
+def test_engine_update_can_be_switched_off(monkeypatch):
+    from cortex_runtime.connections import engine_update
+    called = []
+    monkeypatch.setattr(engine_update, "update_all", lambda **kwargs: called.append(kwargs))
+    assert engine_update.start_background_update(environ={"CORTEX_ENGINE_UPDATE": "off"}) is None
+    thread = engine_update.start_background_update(environ={})
+    thread.join(5)
+    assert called == [{"environ": {}}]

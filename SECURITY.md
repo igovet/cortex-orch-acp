@@ -482,7 +482,12 @@ jail), while `/var/tmp` -- which has no such
 interop use, and can be a read-only mount or absent entirely once the whole
 host is bound read-only -- is instead a private, writable, per-run directory
 backed by the process's own scratch, never the host's shared one; `HOME` and
-`TMPDIR`/`TMP`/`TEMP` are that same private scratch. The project mount follows
+`TMPDIR`/`TMP`/`TEMP` are that same private scratch. Cortex creates that scratch
+and its other temporary files under the host's `/var/tmp`
+(`cortex_runtime.tempdirs`) rather than a RAM-backed `/tmp`. The private
+`/var/tmp` is mounted before the scratch, so a sandbox sees its own scratch but
+not the other Cortex scratch directories there, which previously sat in the
+shared `/tmp`. The project mount follows
 the engine's existing launch-time jail grant: writing workers can have the
 whole project writable even when their runtime-declared assignment work area is
 narrower. That declared area coordinates parallel writers; it is not a gateway

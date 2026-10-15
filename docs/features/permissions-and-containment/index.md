@@ -18,6 +18,10 @@ explicitly writable for owner/process interoperability. `/run/user` remains
 visible inside the engine jail, including user-session sockets; it is not an
 isolation boundary. `/var/tmp` is instead a private, writable, per-run
 directory. `TMPDIR`/`TMP`/`TEMP` use private per-process scratch;
+Cortex keeps that scratch and its other temporary files under the host's
+`/var/tmp` (`cortex_runtime.tempdirs`), not in a RAM-backed `/tmp`. The private
+`/var/tmp` is mounted before the scratch, so the scratch stays visible inside the
+sandbox while the other Cortex scratch directories there stay hidden;
 HOME is the owner's real read-only home with selected writable caches. See
 [SECURITY.md](../../../SECURITY.md#tool-access-and-containment). The project is
 read-only for the coordinator, reviewers and read-only roles. Writing workers

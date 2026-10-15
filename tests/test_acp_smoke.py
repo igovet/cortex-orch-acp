@@ -147,7 +147,7 @@ def test_smoke_failure_prints_reason_to_stderr_without_polluting_stdout(tmp_path
     import importlib
     importlib.reload(smoke_module)
 
-    def _fake_run_smoke(*, fixture_connection, report):
+    def _fake_run_smoke(*, fixture_connection, report, keep_temp=False):
         report.record("session/new:has_session_id", False)
         raise smoke_module.SmokeFailure("scripted failure: no stdout line arrived in time")
 
@@ -160,3 +160,16 @@ def test_smoke_failure_prints_reason_to_stderr_without_polluting_stdout(tmp_path
     assert "session/new:has_session_id" in captured.err or "harness:fatal" in captured.err
     assert "scripted failure" in captured.err
     assert report_path.exists()
+
+
+def test_smoke_removes_its_temporary_directories(tmp_path):
+    """Every run used to leave its project and HOME directories behind
+    (561 pairs, 16.6 GB under /var/tmp by 2026-10-15)."""
+    import os
+    root = Path(os.environ["TMPDIR"])
+    proc, report = _run_smoke(tmp_path)
+    assert proc.returncode == 0
+    assert not [entry for entry in os.listdir(root) if entry.startswith("cortex-acp-smoke-")]
+    proc, report = _run_smoke(tmp_path, "--keep-temp")
+    kept = [entry for entry in os.listdir(root) if entry.startswith("cortex-acp-smoke-")]
+    assert len(kept) == 2 and "kept" in proc.stderr

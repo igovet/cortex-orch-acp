@@ -118,7 +118,17 @@ def update_all(*, environ: dict[str, str] | None = None) -> dict[str, str]:
     return updated
 
 
-def start_background_update(*, environ: dict[str, str] | None = None) -> threading.Thread:
+# CORTEX_ENGINE_UPDATE=off skips the startup update: an offline machine, and
+# disposable runs (the no-paid smoke harness, the test suite) whose fake HOME
+# would otherwise get a full npm download (~625 MB) on every launch, written
+# by an npm that outlives the agent.
+UPDATE_SWITCH = "CORTEX_ENGINE_UPDATE"
+
+
+def start_background_update(*, environ: dict[str, str] | None = None) -> threading.Thread | None:
+    env = os.environ if environ is None else environ
+    if env.get(UPDATE_SWITCH, "").strip().lower() in {"off", "0", "false", "no"}:
+        return None
     thread = threading.Thread(target=update_all, kwargs={"environ": environ},
                               name="cortex-engine-update", daemon=True)
     thread.start()

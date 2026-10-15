@@ -82,14 +82,20 @@ def verification_command(root, scratch, argv, system_root=False, *, mask_private
     # it (some tools do) still needs a real, writable, per-run-private
     # directory there, so it gets its own scratch-backed subdirectory rather
     # than the host's actual (possibly read-only, always shared) /var/tmp.
+    # Cortex's own scratch directories live under the host's /var/tmp
+    # (cortex_runtime.tempdirs): each one a sandbox needs is bound explicitly
+    # after this private /var/tmp, and the others stay hidden.
     var_tmp = Path(scratch) / 'var-tmp'
     var_tmp.mkdir(mode=0o700, exist_ok=True)
     # With the whole host visible, its real devices too (a USB phone for
     # adb, a GPU); /run/user stays visible (session bus, audio, display,
     # keyring): everything that works on the host works here.
     command += ['--proc', '/proc', *(['--dev-bind', '/dev', '/dev'] if system_root else ['--dev', '/dev']),
-                '--bind', '/tmp', '/tmp', '--bind', str(scratch), str(scratch),
-                '--bind', str(var_tmp), '/var/tmp',
+                # The private /var/tmp before the scratch: the scratch itself
+                # lives under the host's /var/tmp (cortex_runtime.tempdirs),
+                # and a later bind over /var/tmp would hide it.
+                '--bind', '/tmp', '/tmp', '--bind', str(var_tmp), '/var/tmp',
+                '--bind', str(scratch), str(scratch),
                 '--ro-bind', str(root), str(root)]
     from .gateway import PRIVATE
     for current, dirs, files in os.walk(str(root),followlinks=False) if mask_private else ():
@@ -750,8 +756,10 @@ def development_command(root, scratch, argv, scopes, *, environ, readonly=(), gi
         if command[at:at+3] != ['--ro-bind', '/', '/']:
             raise StoreError('command_protection_unavailable')
         command[at] = '--bind'
-        at = command.index('/var/tmp')
-        del command[at-2:at+1]
+        # The whole host is writable here, its /var/tmp included.
+        at = next(i for i in range(len(command) - 2)
+                  if command[i] == '--bind' and command[i + 2] == '/var/tmp')
+        del command[at:at+3]
         as_owner(command, environ, writable_home=True)
         overlays = []
         for path in protected_host_paths(root, environ):

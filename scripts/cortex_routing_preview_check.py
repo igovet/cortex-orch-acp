@@ -114,4 +114,6 @@ def main():
 
 
 if __name__ == "__main__":
+    from _cortex_tmp import prefer_disk_tmp
+    prefer_disk_tmp()  # /var/tmp, not a RAM-backed /tmp
     raise SystemExit(main())

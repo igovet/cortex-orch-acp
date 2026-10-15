@@ -3,10 +3,54 @@ import sys
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'src'))
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'scripts'))
 
+import os
+import shutil
+import tempfile
 import threading
 import time
 
 import pytest
+
+# --- Temporary files removed after the run --------------------------------
+#
+# A few full runs left 13 of the 16 GB RAM-backed /tmp on the development
+# host full (helpers' mkdtemp HOME fixtures are ~625 MB each and were never
+# removed) and the next run failed with "disk I/O error". Every test process
+# now works in its own directory -- tmp_path, tempfile and every subprocess --
+# and removes it when it ends. Each directory sits directly under /tmp (an
+# xdist worker's is not nested in its controller's), which keeps unix socket
+# paths below their 108-byte limit. Unlike the runtime (cortex_runtime.tempdirs), tests stay
+# under /tmp: the sandbox tests rely on a host path in the shared, writable
+# /tmp, while a sandbox's /var/tmp is private.
+# A caller's own isolated TMPDIR (scripts/cortex_test_isolated.py) is used
+# as it is and left to that caller.
+_INHERITED_TMP = os.environ.get("TMPDIR", "")
+if (_INHERITED_TMP and os.path.realpath(_INHERITED_TMP) not in {"/tmp", "/var/tmp"}
+        and not os.path.basename(_INHERITED_TMP).startswith("cxpt-")):
+    _TEST_TMP_ROOT = None
+else:
+    _TEST_TMP_ROOT = tempfile.mkdtemp(prefix="cxpt-", dir="/tmp")
+    os.environ["TMPDIR"] = _TEST_TMP_ROOT
+    tempfile.tempdir = _TEST_TMP_ROOT
+# A spawned agent never downloads engines into a test's fake HOME
+# (connections.engine_update).
+os.environ["CORTEX_ENGINE_UPDATE"] = "off"
+
+
+def _remove_test_tmp_root():
+    def writable_then_retry(function, failed, _error):
+        try:
+            os.chmod(os.path.dirname(failed) or failed, 0o700)
+            os.chmod(failed, 0o700)
+            function(failed)
+        except OSError:
+            pass
+    shutil.rmtree(_TEST_TMP_ROOT, onerror=writable_then_retry)
+
+
+def pytest_unconfigure(config):
+    if _TEST_TMP_ROOT is not None:
+        _remove_test_tmp_root()
 
 # --- T009 incident guard -----------------------------------------------
 #
