@@ -152,6 +152,7 @@ and ACP bridge. Follow [the dev Paseo environment guide](docs/project/dev-enviro
 A read-only `/opt/Paseo/resources/bin/paseo --version` check on 2026-10-14 reported
 installed Paseo 0.11.2; CLI/isolation observations recorded for 0.10.x and 0.9.x are
 historical and do not qualify 0.11.2.
+A read-only `--version` check on 2026-10-16 reported installed Paseo 0.11.4, and its guarded CLI help matched the `run`, `send`, `wait` and `inspect` options recorded in the dated note of docs/project/dev-environment.md. This does not requalify 0.11.2 or the historical 0.10.x and 0.9.x observations.
 Recheck the installed CLI/bridge and guarded wrapper before live use. Invoke python3 -B scripts/cortex_paseo_dev.py --
 ...; it defaults to ~/.paseo-dev, rejects ~/.paseo, and blocks command-level endpoint
 overrides. If the installed build cannot be shown to isolate every required state and

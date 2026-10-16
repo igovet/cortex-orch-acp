@@ -41,8 +41,8 @@ _INLINE_OUTPUT_BOUND = 65536
 
 
 def _project_git_command(root, scratch, argv, metadata):
-    from .sandbox import verification_command
-    command = verification_command(root, scratch, argv)
+    from .sandbox import verification_command, with_git_lfs_storage
+    command = verification_command(root, scratch, with_git_lfs_storage(argv, scratch))
     index = command.index('--chdir')
     command[index:index] = [*(arg for directory in metadata for arg in ('--ro-bind', directory, directory)),
                            '--setenv', 'GIT_DIR', metadata[0], '--setenv', 'GIT_WORK_TREE', str(root),

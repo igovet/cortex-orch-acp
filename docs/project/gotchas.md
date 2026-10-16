@@ -1,5 +1,28 @@
 # Gotchas
 
+## Shared-cache hardlinks in tool environments
+
+Development/Auto writing-worker commands detach granted external hardlinks before
+granting writes, so tools can replace a uv `.venv` or pnpm `node_modules` without
+writing through project aliases to shared-cache files. Guarded and engine launches
+retain the old read-only demotion; changing command preparation does not remount
+an already-running engine. No owner's other project is rewritten.
+
+The first writer command may copy up to 2 GiB of logical alias bytes and has a
+60 s cooperative deadline (blocking filesystem calls can take longer). Reflinks
+avoid full data copies when supported. Limits, source changes or I/O failures
+stop preparation without launching the command. Atomic per-file replacements
+preserve complete package contents and file metadata; interruption can leave
+mixed inode identities, not half-written package files, and the next scan resumes.
+This is not whole-tree rollback. Normal failures remove the temporary; a crash
+can leave a hidden `.cortex-unlink-*` file beside an intact original. Log records
+contain counts, bytes and elapsed time only. Persistent preparation is fenced by
+the command's started receipt: failure after it starts cannot replay under the
+same request key; resuming needs a fresh authorized command. Large environments may require
+owner-managed independent copies; do not bypass a refusal or modify shared caches.
+See [contained execution](../features/permissions-and-containment/index.md#git-and-tool-state).
+
+
 ## Partial reads must never authorize a whole-file overwrite (2026-10-08)
 
 - **The incident.** Production session b91db2c4 (another project, 2026-10-08)
@@ -716,6 +739,23 @@ before blaming an engine version, and start daemons with `outside_command`. See
   for them. Unattributed or overlapping native work may yield only an advisory
   hint. Read-only/review scopes are not writers; prior plan revisions do not
   claim this revision's paths.
+- **LFS clean filters write even during a read-only diff.** Modified LFS files
+  need temporary files and object storage. Read-only git observations and
+  command/engine sandboxes redirect `lfs.storage` to disposable scratch without
+  disabling filters or writing local config. The redirect itself grants no
+  metadata writes. This is diff/status support, not a persistent LFS cache
+  for smudge, text conversion or downloads; whole-project writing grants keep
+  their existing persistent storage in engine/Guarded sandboxes. Development/Auto
+  commands use scratch only without a whole-repository write grant; whole-project
+  writers keep persistent LFS objects so a successful commit cannot lose them
+  when scratch ends. Development/Auto writing commands with
+  `.`, `**` or `**/*` grants can now stage/commit and update repository data in
+  ordinary repositories, linked worktrees and existing submodules. Narrower
+  grants never open metadata, even when all existing files match. Config, hooks,
+  info and pointer protections follow the writable grants. Submodule commands run
+  from the superproject: standalone submodule logical roots remain unsupported.
+  See
+  [Git and tool state](../features/permissions-and-containment/index.md#git-and-tool-state).
 - **Git observations are context, not checks.** `project_git` explicitly returns
   `evidence: "context only, not a check receipt"`; its `large_output_id` is never
   a command receipt. Put inspected status/diff in the report body. Meaningful

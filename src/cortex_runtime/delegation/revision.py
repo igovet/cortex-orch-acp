@@ -654,14 +654,14 @@ def sandboxed_git(root: str, args: list[str], timeout: float = 20, ok_codes: tup
     not a usable git checkout or git exited outside ``ok_codes``."""
     import subprocess
     import tempfile
-    from ..orchestration.sandbox import verification_command
+    from ..orchestration.sandbox import verification_command, with_git_lfs_storage
     metadata = git_metadata_dirs(root)
     if metadata is None:
         return None
     argv = ["/usr/bin/git", "--no-optional-locks", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", *args]
     try:
         with tempfile.TemporaryDirectory(prefix="cortex-git-") as scratch:
-            command = verification_command(root, scratch, argv)
+            command = verification_command(root, scratch, with_git_lfs_storage(argv, scratch))
             index = command.index("--chdir")
             binds = [arg for directory in metadata for arg in ("--ro-bind", directory, directory)]
             # Explicit: the sandbox masks .git itself (a worktree's pointer file).

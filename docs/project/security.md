@@ -26,6 +26,23 @@ See [current permission semantics](../features/permissions-and-containment/index
 not the historical containment assertions below. Real namespace skips do not
 qualify containment, and stopping a CLI does not roll back daemon resources.
 
+Development/Auto writing-worker commands with a whole-project grant (`.`,
+`**`, `**/*`) allow repository-data writes, including index, objects, refs,
+logs and merge/rebase/stash state, for ordinary repositories, linked worktrees
+and existing submodules under the superproject. Narrow scopes do not grant Git
+metadata writes. Config, config.worktree, hooks, info (attributes, excludes and
+sparse-checkout), commondir/gitdir pointers and legacy remote definitions stay
+protected; sibling worktrees and modules containers stay read-only. Existing
+submodule data is reopened with its own configuration guards. Standalone
+submodule logical roots remain unsupported. Development commands default hooks
+to /dev/null and fsmonitor to false through inherited command configuration;
+explicit Git command-line overrides are not blocked. Existing protected files
+are read-only bind mounts (including against lockfile+rename); absent entries
+retain the half-second GitGuard cleanup and its race/detached-process limitation.
+The .cortex store, other control-plane paths, read-only roles, verification and
+runtime-owned Git observations keep their existing protections. Namespace-skipped
+execution tests do not establish mount or rename enforcement.
+
 As of 2026-10-14, read-only roles (reviewer, auditor, explorer, architect and the other
 read-only profiles) run `command_run` through the read-only profile in every mode: HOME is
 read-only except an explicit tool-cache allowlist, with a private PID namespace. The profile is

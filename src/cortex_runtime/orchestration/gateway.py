@@ -516,7 +516,8 @@ def _run_command_process(store, channel, launch, fds, output, effects, limit, *,
                                         pass_fds=actual_fds, env=env or {'PATH':'/usr/bin:/bin'},
                                         cwd=cwd, start_new_session=True)
             except OSError:
-                effects['possible'] = False
+                # A failed spawn cannot erase persistent launch preparation.
+                effects['possible'] = effects.get('preparation', False)
                 raise
             finally:
                 for extra in set(actual_fds) - set(fds):
@@ -583,12 +584,26 @@ def _command(store,channel,root,scopes,args,ref,owner,effects):
         # Git sees the project's repository: read-only, or with a writing
         # grant updatable except its configuration and hooks (see sandbox).
         planted=[]
+        def before_materialize():
+            # This command already has its durable started receipt. Recheck
+            # authority/policy before persistent preparation, and retain that
+            # fence even if copying or the later process launch fails.
+            with store.connection() as db:
+                db.execute('BEGIN IMMEDIATE')
+                _authority(db, channel)
+                if _command_policy(db, channel.task_id) != policy:
+                    raise StoreError('execution_policy_changed')
+                if write_denials(db, channel.task_id) != denied:
+                    raise StoreError('execution_policy_changed')
+                effects['possible'] = effects['preparation'] = True
+                db.commit()
         if read_only:
             mount = readonly_command(root, scratch, with_umask(args['argv']), environ=os.environ,
                                      readonly=denied, git_guard=planted)
         elif development:
             mount = development_command(root, scratch, with_umask(args['argv']), scopes,
-                                        environ=os.environ, readonly=denied, git_guard=planted)
+                                        environ=os.environ, readonly=denied, git_guard=planted,
+                                        before_materialize=before_materialize)
         else:
             mount = gateway_command(root, scratch, with_umask(args['argv']), scopes,
                                     system_root=True, readonly=denied, reveal=frozenset({'.git'}),

@@ -131,7 +131,8 @@ def test_verification_launch_is_the_read_only_profile(tmp_path, home, project, m
         addopts = command[len(command) - command[::-1].index('PYTEST_ADDOPTS')]
         assert addopts.endswith(f'cache_dir={scratch}/pytest-cache')
         assert command[command.index('TMPDIR') + 1] == str(scratch)
-        assert command[command.index('--') + 1:] == sandbox.with_umask(['python3', '-c', 'pass'])
+        assert command[command.index('--') + 1:] == sandbox.with_git_lfs_storage(
+            sandbox.with_umask(['python3', '-c', 'pass']), scratch)
         assert fds
 
 

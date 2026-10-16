@@ -483,15 +483,29 @@ merge and other operations that change only repository data work (the tests
 cover commit, switch, stash and merge; fetch/push additionally need the owner's
 network credentials and are not covered). This applies only when the project root
 is itself a checkout (a `.git` directory, or a linked worktree's `.git` file) and
-the whole project is granted:
+the whole project is granted (`.`, `**` or `**/*`, not `*` or a collection of
+narrow file/directory grants). Development/Auto writing-worker `command_run`
+now permits these repository-data writes consistently for ordinary repositories
+and linked worktrees. Existing submodule repositories beneath `modules/` also
+receive data grants; their containers and configuration remain protected.
+A standalone submodule is not a supported logical project root; run its Git
+commands from the superproject. Narrow grants, read-only roles, reviewers,
+runtime verification and runtime-owned Git observations retain read-only metadata.
+
+The table describes whole-project writing grants. Development/Auto additionally
+protects `info/` (attributes, excludes and sparse-checkout affect later commands)
+and supplies `core.hooksPath=/dev/null` and `core.fsmonitor=false` through inherited
+Git command configuration. These are defaults, not protection against arbitrary
+owner code or an explicit command-line override. Engine/Guarded behavior is unchanged:
 
 | Path | `command_run` / native shell (writing worker) | `project_read` / `project_write` / `project_edit` / `project_delete` |
 | --- | --- | --- |
-| `.git` data: objects, refs, logs, index, HEAD, packed-refs, locks, merge/rebase/stash state, `info/` | writable | denied |
+| `.git` data: objects, refs, logs, index, HEAD, packed-refs, locks, merge/rebase/stash state | writable | denied |
+| `info/` | read-only in Development/Auto; writable in engine/Guarded writing grants | denied |
 | A linked worktree's own `<common>/worktrees/<name>/` and its common directory (even outside the project) | writable | denied |
 | `config`, `config.worktree`, `hooks/`, `commondir`, a worktree's `gitdir`, `remotes/`, `branches/` in those directories | read-only | denied |
 | `core.hooksPath` when it names a directory inside the project (e.g. husky) | read-only | ordinary project file rules |
-| Other linked worktrees' metadata, `modules/` (submodule repositories) | read-only | denied |
+| Other linked worktrees' metadata; `modules/` containers | read-only; existing submodule data writable only in Development/Auto | denied |
 | The project's `.git` for reviewers and read-only roles | read-only | denied |
 | `.cortex` | hidden | denied |
 | The project's `.codex`, `.claude` | writable | allowed (ordinary project files; see also [Project skill links](#project-skill-links)) |
@@ -508,7 +522,28 @@ detaches from a `command_run` and outlives it is no longer swept (see
 [SECURITY.md](../../../SECURITY.md#git-and-tool-state-in-the-project)). Changing git
 configuration, installing hooks or adding worktrees/submodules is done by the
 owner, or with `outside_command`, which the owner confirms. The read-only
-`project_git` status/diff observation is unchanged.
+`project_git` status/diff observation remains read-only.
+
+Read-only git observations (`sandboxed_git` and `project_git`) and command/engine
+sandboxes that expose git metadata without a repository write grant, plus
+Development/Auto commands without a whole-repository write grant, redirect
+`lfs.storage` to `<scratch>/lfs` through inherited Git command configuration.
+Git LFS clean/process filters remain enabled: modified LFS files are compared
+as valid LFS pointers, not as pointer-versus-binary content. Temporary files and
+new LFS objects stay in disposable command/session scratch, never the real
+`.git/lfs` by default; linked worktrees use the same redirect. The redirect
+does not grant metadata writes and does not change local Git configuration.
+Development/Auto repository writes described above are a separate permission decision.
+
+This redirect is not a write permission or an enforcement boundary: explicit
+`git -c` options can override it, but cannot change metadata mount permissions.
+The scratch is not a persistent LFS cache and does not contain the repository's
+existing objects; smudge/checkout, text conversion or downloads needing those
+objects are not promised by this read-only observation support. Whole-project
+engine/Guarded writing grants retain their existing repository-data behavior and persistent
+LFS storage; protected config and hooks remain protected. Whole-project
+Development/Auto writers also retain persistent repository LFS storage: staging
+must not leave committed pointers whose objects disappear with command scratch.
 
 Tool state needs no list: a writing worker's grant is the whole project, and only
 the private names above are withheld. A regular file with more than one hard link
@@ -516,10 +551,48 @@ stays read-only (its other link may be outside the project), unless every one of
 its links was found as a granted, non-deny-write path inside the project: esbuild
 links its two binaries to each other, and pinning them made every `npm ci` fail
 with `EBUSY`. Links are counted as distinct directory entries, so a tree seen
-twice through a bind mount never makes up a missing outside link. A directory with
-more than 256 such read-only files (a pnpm `node_modules`, a hardlinked uv
-`.venv`) is read-only as a whole; reinstall such a tree from the owner's shell or
-with `outside_command`.
+twice through a bind mount never makes up a missing outside link. Guarded and
+engine launches retain directory-wide read-only demotion above 256 such files.
+
+Development/Auto writing-worker commands instead detach granted external hardlinks
+before granting writes. A uv `.venv` or pnpm `node_modules` can then be updated,
+unlinked or recreated without writing through its project aliases into the shared
+cache. Internal-only writable hardlinks stay linked; denied/private paths and
+private symlink targets are not detached. Symlinks themselves are unchanged.
+Each affected regular file gets an independent inode using a Linux reflink when
+available, otherwise a bounded streaming copy. Ownership, modes (including
+executability), timestamps and extended attributes are retained. This is persistent
+project-local preparation, not a change to the cache, tool configuration or other
+projects. Read-only roles, verification and engines never opt into it.
+
+Preparation preflights at most **2 GiB of logical file bytes per command** (counting
+each alias separately, even for reflinks), with a **60 s cooperative copy deadline**.
+Blocking filesystem calls can exceed that deadline. An INFO log records file count,
+published bytes and elapsed seconds, without paths or content. Unsupported
+reflinks fall back to copying; size/time limits, I/O/metadata errors and observed
+concurrent source changes stop preparation before any command is launched, never
+relax the shared-inode protection. Large environments may need owner-managed
+independent copies; no automatic escalation is performed.
+
+A complete copy is fsynced before each atomic file replacement, then the parent is
+fsynced. No environment directory is removed or swapped. All original package paths
+always contain complete files, even if interruption leaves some inodes detached and
+others still shared; the next preparation rescans and resumes. This is **not a
+whole-tree transaction** or rollback of inode identity. Normal errors remove the
+current temporary file; a process/host crash can leave a hidden `.cortex-unlink-*`
+temporary beside the unchanged original, never a half-written package file.
+The gateway rechecks authority/policy before persistent preparation and fences it
+with the command's durable started receipt. Copying or spawn failure after that
+point retains an uncertain-effect receipt; an identical request key cannot replay
+it. Resumption requires a fresh authorized command, not automatic retry.
+Source checks detect observed concurrent updates but do not exclude a hostile
+same-user process racing the final check/rename. Direct host aliases, Docker and
+the already host-writable Development profile remain outside this project-alias
+protection; this does not claim the shared cache is globally read-only.
+
+Coverage: `tests/test_hardlink_materialization.py` exercises copying, metadata,
+protected paths, bounded/error/interrupted preparation and shared-inode integrity;
+its real-bubblewrap recreate case requires working user namespaces.
 
 Finding these links and the private names takes a full scan of the project (one
 `lstat` per granted file) before every sandboxed launch. On a large tree on a

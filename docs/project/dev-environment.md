@@ -14,6 +14,12 @@
 > kept running untouched. `paseo workspace create --isolation local --path`
 > registers a disposable project without starting an agent.
 
+> On 2026-10-16, a read-only `/opt/Paseo/resources/bin/paseo --version`
+> check reported installed Paseo **0.11.4**. Its guarded CLI help supports
+> `run --provider/--cwd/--background/--mode`, `permit`, `send --no-wait`,
+> `wait --timeout` and `inspect --json`. These observations supersede the
+> historical version numbers below, not the per-run isolation and route preflights.
+
 > On 2026-10-14, a read-only `--version` check of `/opt/Paseo/resources/bin/paseo` reported installed Paseo 0.11.2. The CLI, isolation and version observations below for 0.10.x and 0.9.x are historical and do not qualify 0.11.2. Recheck the installed CLI, bridge and guarded wrapper before a requested live launch; do not infer unchanged capabilities from the version number.
 
 The installed Linux CLI is `/opt/Paseo/resources/bin/paseo`; a read-only `--version` check on 2026-09-29 returned 0.10.0. Do not assume older 0.9.2 command or isolation observations still apply without checking the installed CLI and bridge. The guarded wrapper's current `--check` was run on 2026-09-29: it selected `/home/igovet/.paseo-dev` and reported `/home/igovet/.paseo` as the protected production home (exit 0). This validates wrapper selection only, not daemon endpoint or GUI isolation.

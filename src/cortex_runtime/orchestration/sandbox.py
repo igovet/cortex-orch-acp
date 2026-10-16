@@ -12,6 +12,9 @@ import shutil
 import os
 import stat
 import contextvars
+import errno
+import logging
+import secrets
 import time
 from contextlib import contextmanager
 from ..contracts import StoreError
@@ -22,6 +25,9 @@ from ..contracts import StoreError
 _TREE_LIMIT = 2_000_000
 # Hardlinks in one granted directory past which it stays read-only.
 _HARDLINK_DIR_LIMIT = 256
+# Logical bytes (even on reflink-capable filesystems), per writer launch.
+_MATERIALIZE_BYTES_LIMIT = 2 * 1024 ** 3
+_MATERIALIZE_SECONDS_LIMIT = 60.0
 
 
 def _dev_index(command) -> int:
@@ -311,7 +317,8 @@ def as_owner(command, environ, *, writable_home=False, home_dirs=None):
     # HOME is read-only except the tool caches mounted above.
     scratch = command[command.index('TMPDIR', command.index('--clearenv')) + 1]
     env += ['--setenv', 'HOME', home if has_home else scratch]
-    env += project_toolchain_env(command[command.index('--chdir') + 1], environ.get('PATH', ''), scratch)
+    env += project_toolchain_env(command[command.index('--chdir') + 1],
+                                 environ.get('PATH', '/usr/local/bin:/usr/bin:/bin'), scratch)
     if not has_home:
         env += ['--setenv', 'XDG_CACHE_HOME', f'{scratch}/.cache']
     at = command.index('--chdir')
@@ -337,6 +344,35 @@ def as_owner(command, environ, *, writable_home=False, home_dirs=None):
 COMMAND_UMASK = 0o022
 
 
+def with_git_lfs_storage(argv, scratch, *, safe=False):
+    """Keep LFS clean-filter writes out of read-only repository metadata.
+
+    Git's environment config reaches git launched by a shell or an engine as
+    well as its filter subprocesses. ``safe`` also disables hooks and fsmonitor
+    for Development/Auto commands; explicit git -c options still take precedence.
+    Append rather than replace inherited parameters; the scratch follows the
+    command (or engine session) lifetime. This is convenience, not enforcement.
+    """
+    values = ['lfs.storage=' + str(Path(scratch) / 'lfs')]
+    if safe:
+        values += ['core.hooksPath=/dev/null', 'core.fsmonitor=false']
+    return _with_git_config(argv, values)
+
+
+def with_git_safety(argv):
+    """Disable automatic hooks/fsmonitor without moving writable LFS objects."""
+    return _with_git_config(argv, ['core.hooksPath=/dev/null', 'core.fsmonitor=false'])
+
+
+def _with_git_config(argv, values):
+    # Git's sq_dequote accepts backslash-escaped single quotes, not the
+    # double-quote sequences emitted by shell-oriented shlex.quote.
+    parameter = ' '.join("'" + value.replace("'", "'\\''") + "'" for value in values)
+    return ['/bin/sh', '-c',
+            'export GIT_CONFIG_PARAMETERS="${GIT_CONFIG_PARAMETERS:+$GIT_CONFIG_PARAMETERS }$1"; '
+            'shift; exec "$@"', 'sh', parameter, *argv]
+
+
 def with_umask(argv, mode=COMMAND_UMASK):
     """Wrap ``argv`` to run under an explicit umask inside the sandbox."""
     return ['/bin/sh', '-c', f'umask {mode:04o}; exec "$@"', 'sh', *argv]
@@ -355,7 +391,7 @@ GIT_GUARDED_COMMON = ('worktrees', 'modules')
 _GIT_SWEEP_SECONDS = 0.5
 
 
-def git_metadata_mounts(root: Path):
+def git_metadata_mounts(root: Path, *, development=False):
     """How a sandboxed git in ``root`` may update its repository, or ``None``
     when ``root`` itself is not a git checkout (a repository above the
     project stays read-only like the rest of the host).
@@ -366,7 +402,9 @@ def git_metadata_mounts(root: Path):
     GIT_GUARDED entry and the effective hooks directory when it lies in the
     project (``core.hooksPath``, e.g. husky); ``watched`` the absent
     GIT_GUARDED paths, which a mount cannot cover without creating them, so
-    GitGuard removes any that appear."""
+    GitGuard removes any that appear. Development also guards info/ (attributes,
+    exclude and sparse-checkout affect later commands) and reopens existing
+    submodule data beneath read-only modules containers, not new repositories."""
     from ..delegation.revision import git_metadata_dirs
     dirs = git_metadata_dirs(str(root))
     if dirs is None:
@@ -374,18 +412,42 @@ def git_metadata_mounts(root: Path):
     writable = [Path(directory) for directory in dirs]
     gitdir, common = writable[0], writable[-1]
     readonly, watched = [], []
-    for name in GIT_GUARDED_COMMON:
-        path = common / name
-        if path.is_dir() and not path.is_symlink() and path != gitdir and path not in gitdir.parents:
-            readonly.append(path)
-        elif path.is_dir() and not path.is_symlink():
-            # A linked worktree: its own gitdir (below) stays writable, its
-            # siblings do not.
-            readonly += [child for child in path.iterdir() if child != gitdir]
+    if development:
+        # Existing submodules belong to the granted project too. Keep the
+        # modules containers read-only, then reopen just their repository
+        # directories, with the same configuration guards as the main repo.
+        pending = [directory / 'modules' for directory in reversed(writable)]
+        while pending:
+            container = pending.pop()
+            if not container.is_dir() or container.is_symlink():
+                continue
+            for current, children, files in os.walk(container, followlinks=False):
+                children[:] = [name for name in children if not Path(current, name).is_symlink()]
+                directory = Path(current)
+                if 'HEAD' in files and 'config' in files:
+                    if directory not in writable:
+                        writable.append(directory)
+                        pending.append(directory / 'modules')
+                    children[:] = []
+    for parent in writable if development else [common]:
+        for name in GIT_GUARDED_COMMON:
+            path = parent / name
+            if path.is_dir() and not path.is_symlink() and path != gitdir and path not in gitdir.parents:
+                readonly.append(path)
+            elif path.is_dir() and not path.is_symlink():
+                # Development reopens only the current gitdir beneath this
+                # read-only container; no future sibling configuration can
+                # be planted. Keep the engine/Guarded assembly unchanged.
+                if development:
+                    readonly.append(path)
+                else:
+                    readonly += [child for child in path.iterdir() if child != gitdir]
+            elif development:
+                (readonly if path.exists() or path.is_symlink() else watched).append(path)
     for directory in writable:
-        for name in GIT_GUARDED:
+        for name in (*GIT_GUARDED, 'info') if development else GIT_GUARDED:
             path = directory / name
-            if name == 'gitdir' and directory == common:
+            if name == 'gitdir' and directory == common and not development:
                 continue  # only a linked worktree's gitdir holds this pointer
             (readonly if path.exists() or path.is_symlink() else watched).append(path)
     hooks = _configured_hooks_dir(root)
@@ -474,9 +536,118 @@ SCAN_REPORT_AFTER_SECONDS = 3.0
 SCAN_REPORT_EVERY_SECONDS = 5.0
 
 
+def _materialize_hardlinks(root, relatives, before_write=None):
+    """Detach project aliases, never write the shared inode.
+
+    Each rename publishes a complete identical file, not a partially copied
+    environment. Interruption can leave a mix of shared and detached inodes,
+    but every original path/content remains usable; a fresh scan resumes safely.
+    No directory is renamed, and symlinks are not followed or replaced.
+    """
+    from .gateway import _parent
+    import fcntl
+
+    started = time.monotonic()
+    planned = []
+    total = 0
+    for relative in relatives:
+        try:
+            with _parent(root, relative) as (parent, leaf):
+                info = os.stat(leaf, dir_fd=parent, follow_symlinks=False)
+        except OSError as error:
+            raise StoreError('command_hardlink_materialization_failed') from error
+        if not stat.S_ISREG(info.st_mode):
+            raise StoreError('command_hardlink_changed')
+        total += info.st_size
+        if total > _MATERIALIZE_BYTES_LIMIT:
+            raise StoreError('command_hardlink_materialization_limit')
+        planned.append((relative, info))
+
+    def version(info):
+        return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns,
+                info.st_ctime_ns, info.st_mode, info.st_uid, info.st_gid)
+
+    def deadline():
+        if time.monotonic() - started > _MATERIALIZE_SECONDS_LIMIT:
+            raise StoreError('command_hardlink_materialization_timeout')
+
+    copied = 0
+    versions = {}
+    if planned and before_write is not None:
+        before_write()
+    try:
+        for relative, expected in planned:
+            deadline()
+            with _parent(root, relative) as (parent, leaf):
+                source = os.open(leaf, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
+                temporary = None
+                target = None
+                try:
+                    before = os.fstat(source)
+                    key = (expected.st_dev, expected.st_ino)
+                    if version(before) != versions.get(key, version(expected)):
+                        raise StoreError('command_hardlink_changed')
+                    name = '.cortex-unlink-' + secrets.token_hex(16)
+                    target = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                                     0o600, dir_fd=parent)
+                    temporary = name
+                    try:
+                        # Linux FICLONE: independent inode, copy-on-write extents.
+                        fcntl.ioctl(target, 0x40049409, source)
+                    except OSError as error:
+                        if error.errno not in {errno.EXDEV, errno.EOPNOTSUPP, errno.ENOTTY, errno.EINVAL}:
+                            raise
+                        remaining = before.st_size
+                        while remaining:
+                            deadline()
+                            block = os.read(source, min(1024 * 1024, remaining))
+                            if not block:
+                                raise StoreError('command_hardlink_changed')
+                            view = memoryview(block)
+                            while view:
+                                written = os.write(target, view)
+                                if not written:
+                                    raise OSError(errno.EIO, 'short materialization write')
+                                view = view[written:]
+                            remaining -= len(block)
+                    # Preserve ownership, executable bits, timestamps and xattrs.
+                    after = os.fstat(target)
+                    if (after.st_uid, after.st_gid) != (before.st_uid, before.st_gid):
+                        os.fchown(target, before.st_uid, before.st_gid)
+                    for name in os.listxattr(source):
+                        os.setxattr(target, name, os.getxattr(source, name))
+                    os.fchmod(target, stat.S_IMODE(before.st_mode))
+                    os.utime(target, ns=(before.st_atime_ns, before.st_mtime_ns))
+                    os.fsync(target)
+                    deadline()
+                    current = os.stat(leaf, dir_fd=parent, follow_symlinks=False)
+                    if (version(os.fstat(source)) != version(before)
+                            or version(current) != version(before)):
+                        raise StoreError('command_hardlink_changed')
+                    os.replace(temporary, leaf, src_dir_fd=parent, dst_dir_fd=parent)
+                    temporary = None
+                    os.fsync(parent)
+                    versions[key] = version(os.fstat(source))
+                    copied += before.st_size
+                finally:
+                    if target is not None:
+                        os.close(target)
+                    os.close(source)
+                    if temporary is not None:
+                        os.unlink(temporary, dir_fd=parent)
+    except OSError as error:
+        raise StoreError('command_hardlink_materialization_failed') from error
+    finally:
+        if planned:
+            logging.getLogger(__name__).info(
+                'Project hardlink materialization: files=%d bytes=%d seconds=%.3f',
+                len(planned), copied, time.monotonic() - started)
+
+
 @contextmanager
 def gateway_command(root, scratch, argv, scopes, reveal=frozenset(), system_root=False, readonly=(),
-                    git_writable=False, git_guard=None):
+                    git_writable=False, git_guard=None, git_lfs_scratch=False, git_safe=False,
+                    materialize_hardlinks=False, before_materialize=None):
     """Pin mount sources to no-follow descriptors, then constrain writes.
 
     ``.`` (or ``**``) grants the whole project, new top-level files included.
@@ -487,13 +658,18 @@ def gateway_command(root, scratch, argv, scopes, reveal=frozenset(), system_root
     ``git_writable`` with a whole-project grant lets git update the project's
     own repository (``git_metadata_mounts``); without that grant the root
     ``.git`` follows ``reveal``. ``git_guard`` (a list) receives the planted
-    git configuration paths removed when the command ends.
+    git configuration paths removed when the command ends. ``git_lfs_scratch``
+    also redirects LFS when a caller adds stricter metadata overlays later.
+    ``git_safe`` selects Development's extra info/submodule guards and disables
+    hooks/fsmonitor through the same inherited command configuration.
+    ``materialize_hardlinks`` detaches granted external aliases before writes;
+    only Development/Auto writer commands select this persistent preparation.
     """
     from .gateway import PRIVATE, _parts, _parent, _matches
     root = Path(root).resolve(strict=True)
     git = None
     if git_writable and any(scope in {'.', '**', '**/*'} for scope in scopes):
-        git = git_metadata_mounts(root)
+        git = git_metadata_mounts(root, development=git_safe)
     command = verification_command(root, scratch, argv, system_root, mask_private=False)
     # Replace project bind and build scoped grants before masking private data.
     start = command.index('--ro-bind', _dev_index(command) + 1)
@@ -598,6 +774,28 @@ def gateway_command(root, scratch, argv, scopes, reveal=frozenset(), system_root
             entries=link_entries.get(key,{})
             return (link_counts.get(key) is not None and len(entries)==link_counts[key]
                     and not any(owner in excluded for owner in entries.values()))
+        if materialize_hardlinks:
+            # Only Development/Auto writers opt in. A denied alias is never
+            # detached, even when its parent has a whole-project grant.
+            private_targets = [target for path in private_paths
+                               if (target := _private_target(path, root)) is not None]
+            detach = [relative for relative, _, key in linked
+                      if not internal(key) and not (readonly and _matches(relative, readonly))
+                      and not any(target == root / relative or target in (root / relative).parents
+                                  for target in private_targets)]
+            try:
+                _materialize_hardlinks(root, detach, before_materialize)
+            except OSError as error:
+                raise StoreError('command_hardlink_materialization_failed') from error
+            detached = set(detach)
+            candidates |= {relative for relative, owner, _ in linked
+                           if relative in detached and owner is None}
+            detached_keys = {key for relative, _, key in linked if relative in detached}
+            linked = [entry for entry in linked if entry[0] not in detached]
+            # Removing aliases changes link counts, so keep remaining links
+            # conservatively read-only rather than trusting the old counts.
+            for key in detached_keys:
+                link_counts[key] = None
         # A directory made of hardlinks (pnpm's node_modules points into a
         # store shared by every project) stays read-only as a whole: writing
         # there corrupts other projects, and a bind per link hits the
@@ -651,12 +849,23 @@ def gateway_command(root, scratch, argv, scopes, reveal=frozenset(), system_root
             command+=['--ro-bind',f'/proc/self/fd/{pinned}',str(root/relative)]
         if git is not None:
             writable_git, readonly_git, _ = git
-            for directory in writable_git:
+            containers = {path for path in readonly_git
+                          if any(path in directory.parents for directory in writable_git)}
+            mounted = set()
+            ordered_git = sorted(writable_git, key=lambda p: len(p.parts)) if git_safe else writable_git
+            for directory in ordered_git:
+                # A modules/worktrees container is protected after its parent's grant
+                # but before reopening an existing submodule beneath it.
+                for path in sorted(containers - mounted):
+                    if path in directory.parents:
+                        command += ['--ro-bind', str(path), str(path)]
+                        mounted.add(path)
                 pinned=os.open(directory,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
                 fds.append(pinned)
                 command+=['--bind',f'/proc/self/fd/{pinned}',str(directory)]
             # Guarded entries after the writable binds, so these win.
-            command+=[arg for path in readonly_git for arg in ('--ro-bind',str(path),str(path))]
+            command+=[arg for path in readonly_git if path not in mounted
+                      for arg in ('--ro-bind',str(path),str(path))]
         if git is None and '.git' in reveal:
             # Also pin a linked worktree's common metadata read-only, including
             # when it lives in the host's shared writable /tmp.
@@ -681,6 +890,11 @@ def gateway_command(root, scratch, argv, scopes, reveal=frozenset(), system_root
                 command+=['--tmpfs',str(path)]
             if path.is_dir() and original.name not in reveal:
                 command += ['--remount-ro', str(path)]
+        if (git is None or git_lfs_scratch) and '.git' in reveal:
+            argv = with_git_lfs_storage(argv, scratch, safe=git_safe)
+        elif git_safe:
+            # A writer's staged LFS objects must survive this command's scratch.
+            argv = with_git_safety(argv)
         yield command+['--chdir',str(root),'--',*argv],tuple(fds)
     finally:
         for fd in fds: os.close(fd)
@@ -741,17 +955,22 @@ def protected_host_paths(root, environ):
 
 
 @contextmanager
-def development_command(root, scratch, argv, scopes, *, environ, readonly=(), git_guard=None):
+def development_command(root, scratch, argv, scopes, *, environ, readonly=(), git_guard=None,
+                        before_materialize=None):
     """Host-writable commands of a Development or Auto task; the engine jail is unchanged.
 
     Only a writing worker's ``command_run`` uses it: the mode decides the
     host (writable outside the protected control plane); ``scopes`` still
     decide the project. Read-only roles and runtime verification checks use
-    ``readonly_command`` in every mode. Docker, outside aliases and
-    same-user programs can bypass direct masks.
+    ``readonly_command`` in every mode. Only whole-project scope spellings
+    (., **, **/*) grant repository data writes; narrower grants never do.
+    Config/hooks/info/pointers stay guarded, including existing submodules.
+    Docker, outside aliases and same-user programs can bypass direct masks.
     """
     with gateway_command(root, scratch, argv, scopes, system_root=True, readonly=readonly,
-                         reveal=frozenset({'.git'}), git_writable=True, git_guard=git_guard) as (command, fds):
+                         reveal=frozenset({'.git'}), git_writable=True, git_guard=git_guard,
+                         git_safe=True, materialize_hardlinks=True,
+                         before_materialize=before_materialize) as (command, fds):
         at = command.index('--ro-bind')
         if command[at:at+3] != ['--ro-bind', '/', '/']:
             raise StoreError('command_protection_unavailable')
@@ -770,8 +989,16 @@ def development_command(root, scratch, argv, scopes, *, environ, readonly=(), gi
         # beneath a protected installation remains its own writable task tree.
         at = command.index('--ro-bind', _dev_index(command) + 1)
         command[at:at] = overlays
+        # Gateway grants only the project's own metadata for a whole-project
+        # scope. Do not undo those grants with the whole-directory control
+        # plane overlay; its config/hooks/pointers remain guarded separately.
+        from ..delegation.revision import git_metadata_dirs
+        metadata = {Path(path) for path in git_metadata_dirs(str(root)) or ()}
+        whole = any(scope in {'.', '**', '**/*'} for scope in scopes)
         overlays = []
         for path in protected_host_paths(root, environ):
+            if whole and path in metadata:
+                continue
             if Path(root).resolve() in path.parents:
                 overlays += (['--tmpfs', str(path), '--remount-ro', str(path)]
                              if path.name == '.cortex' and path.is_dir()

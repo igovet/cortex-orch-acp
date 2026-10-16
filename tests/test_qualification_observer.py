@@ -30,7 +30,7 @@ _spec.loader.exec_module(observer)
 HOLDER = '''
 import fcntl, os, sys, time
 fd = os.open(os.path.join(sys.argv[1], '.cortex', '.access.lock'), os.O_RDWR | os.O_NOFOLLOW)
-fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+fcntl.flock(fd, getattr(fcntl, sys.argv[3]) | fcntl.LOCK_NB)
 print('held', flush=True)
 time.sleep(float(sys.argv[2]))
 fcntl.flock(fd, fcntl.LOCK_UN)
@@ -57,9 +57,10 @@ def _binding(project, sid, task, epoch):
     return discover_binding(str(project), sid)['binding'] | dict(task_id=task, owner_epoch=epoch)
 
 
-def _hold_lock(project, seconds):
-    """A separate process holding the store's real shared access lock."""
-    process = subprocess.Popen([sys.executable, '-B', '-c', HOLDER, str(project), str(seconds)],
+def _hold_lock(project, seconds, mode='LOCK_SH'):
+    """A separate process holding the store's real access lock (shared, or
+    exclusive like the bound-task inspector's page snapshot)."""
+    process = subprocess.Popen([sys.executable, '-B', '-c', HOLDER, str(project), str(seconds), mode],
                                stdout=subprocess.PIPE, text=True)
     ready, _, _ = select.select([process.stdout], [], [], 20)
     assert ready and process.stdout.readline().strip() == 'held'
@@ -90,6 +91,33 @@ def test_real_cross_process_busy_lock_is_classified_and_retried_until_graceful_r
     assert result['counts']['restarts'] == 0 and result['total'] == len(result['rows'])
     assert holder.returncode == 0
     assert files(project) == before
+
+
+def test_live_store_connection_waits_out_a_short_inspection_lock_but_not_a_long_one(bound):
+    """An observer's exclusive snapshot of a running store must not fail the
+    runtime's next ordinary connection (it raised storage_busy at once)."""
+    from cortex_runtime import store as store_module
+    project, store, sid, task, epoch = bound
+    holder = _hold_lock(project, 0.5, 'LOCK_EX')
+    try:
+        with store.connection() as db:
+            assert db.execute('SELECT 1').fetchone()[0] == 1
+    finally:
+        _stop(holder)
+    assert holder.returncode == 0
+    holder = _hold_lock(project, 60, 'LOCK_EX')
+    try:
+        # Exclusive maintenance access stays fail-fast.
+        with pytest.raises(StoreError, match='storage_busy'):
+            with store.connection(exclusive=True):
+                pytest.fail('exclusive access must not wait')
+        started = time.monotonic()
+        with pytest.raises(StoreError, match='storage_busy'):
+            with store.connection():
+                pytest.fail('a persistent exclusive holder must still refuse')
+        assert time.monotonic() - started >= store_module.SHARED_ACCESS_WAIT_SECONDS
+    finally:
+        _stop(holder)
 
 
 def test_persistent_busy_ends_at_the_deadline_with_a_bounded_number_of_reads(bound):

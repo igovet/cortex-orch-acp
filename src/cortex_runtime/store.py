@@ -52,6 +52,9 @@ from .contracts import StoreError, validate
 from .governance import governance_snapshot
 
 APPLICATION_ID = 1129467218
+# How long a shared Store.connection() waits for a transient exclusive holder
+# of .access.lock (for example a metadata inspection page) before storage_busy.
+SHARED_ACCESS_WAIT_SECONDS = 2.0
 SCHEMA = '''
 CREATE TABLE IF NOT EXISTS tasks (
  id TEXT PRIMARY KEY, project_root TEXT NOT NULL, created_at TEXT NOT NULL
@@ -610,7 +613,18 @@ class Store:
         lock_path=self.directory/".access.lock"
         lock_fd=os.open(lock_path,os.O_CREAT|os.O_RDWR|os.O_NOFOLLOW,0o600)
         try:
-            regular(lock_path); fcntl.flock(lock_fd,(fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)|fcntl.LOCK_NB)
+            regular(lock_path)
+            # Exclusive maintenance stays fail-fast. A shared connection waits
+            # a bounded time: a short exclusive holder (the bound-task
+            # inspector freezes the store for one page) must not fail a live
+            # runtime operation; a long one still ends in storage_busy.
+            deadline=time.monotonic()+(0 if exclusive else SHARED_ACCESS_WAIT_SECONDS)
+            while True:
+                try:
+                    fcntl.flock(lock_fd,(fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)|fcntl.LOCK_NB); break
+                except BlockingIOError:
+                    if time.monotonic()>=deadline:raise
+                    time.sleep(0.02)
         except BaseException:
             os.close(lock_fd); raise StoreError("storage_busy") from None
         db=None

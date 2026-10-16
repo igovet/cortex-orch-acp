@@ -673,8 +673,9 @@ session sockets remain visible. Read-only mounts
 alone do not prevent mutating Docker socket requests; there is no implicit privilege escalation. External MCP
 servers get no HOME, network or inherited environment unless explicitly granted;
 automatic verification runs with the same owner environment and the command
-profile of the task's access mode. External hardlinks in the task tree are mounted
-read-only where identified; this is not a host-wide alias guarantee. Draft writes require the exact owned unpublished draft ID.
+profile of the task's access mode. Identified external hardlinks in the task tree
+are mounted read-only, except Development/Auto writer commands first replace
+granted aliases with independent copies; this is not a host-wide alias guarantee. Draft writes require the exact owned unpublished draft ID.
 File actions and command starts recheck authority at the transaction boundary; running
 commands and external servers are terminated on observed revocation.
 Missing continuation-session metadata on a recovered channel does not revoke its
@@ -873,8 +874,13 @@ logs, index, HEAD, packed-refs, locks, merge/rebase/stash state, `info/`) is
 writable. What configures or redirects git runs the owner makes later, outside
 any sandbox, stays read-only in each of those directories: `config`,
 `config.worktree`, `hooks/`, `commondir`, a worktree's `gitdir`, legacy
-`remotes/` and `branches/`, plus other worktrees' metadata, `modules/`
-(submodule repositories) and a `core.hooksPath` directory inside the project.
+`remotes/` and `branches/`, plus other worktrees' metadata and a
+`core.hooksPath` directory inside the project. Development/Auto writing-worker
+commands additionally protect `info/` (attributes, excludes, sparse-checkout)
+and allow data writes in existing submodule repositories beneath read-only
+`modules/` containers, with the same configuration/hook/pointer protections.
+Engine/Guarded commands keep submodule metadata read-only. Standalone submodules
+remain unsupported as logical project roots; use the superproject.
 Such an entry that does not exist yet cannot be mounted over without creating it
 in the owner's repository; instead a guard checks every half second while the
 sandbox lives and once more when it ends, and removes any that appeared
@@ -886,6 +892,30 @@ A writing worker can also leave an interactive rebase or cherry-pick in progress
 git shows that state and runs its todo list only when the owner continues it.
 Reviewers, read-only roles and automatic verification see `.git` read-only. `project_read`/`project_write`/`project_edit`/`project_delete` still refuse every
 path through `.git` or `.cortex`, and plan scopes cannot name them.
+
+For read-only git observations and command/engine sandboxes without a repository
+write grant (including narrow Development/Auto commands), Git command configuration
+redirects `lfs.storage` to disposable
+`<scratch>/lfs`. LFS clean/process filters stay enabled; their temporary files
+and new objects default to scratch rather than real git metadata, including a linked
+worktree's common directory. The redirect itself grants no real `.git` writes.
+Inherited Git configuration is preserved; explicit `git -c` can override the
+redirect but cannot change mount permissions. Scratch is not a persistent LFS
+cache: smudge, text conversion and downloads needing existing objects are
+outside this read-only diff/status support. Separately, Development/Auto writers
+with a whole-project grant (`.`, `**`, `**/*`) may update index, objects, refs,
+logs and merge/rebase/stash data in ordinary repositories and linked worktrees.
+Narrower grants (even `*`) leave metadata read-only. Configuration/hook/info
+overlays follow data grants; binding an existing config file read-only also
+prevents Git's lockfile+rename replacement. The real-bubblewrap regression checks
+both direct writes and rename-over, but namespace skips do not verify enforcement.
+Development/Auto commands default to `core.hooksPath=/dev/null` and
+`core.fsmonitor=false` without replacing inherited Git settings. Explicit
+command-line configuration and arbitrary owner code are not prevented by these defaults.
+Whole-project engine/Guarded writing grants keep the repository-data permissions
+and persistent LFS storage described above. Whole-project Development/Auto
+writers also use persistent LFS storage, so staging/committing cannot discard new
+LFS objects with disposable command scratch.
 
 The project's own `.claude` and `.codex` are ordinary project paths: a writing
 worker may read, write and delete them with the file tools and commands like any
@@ -915,10 +945,22 @@ different existing link only after the user confirms (see
 `/skill-management <request>` is the explicit coordinator command for creating, revising, or importing project skills. Imported files are untrusted input; source URL, exact revision, and license information are recorded, and the runtime retains independent review. Skill instructions do not expand assignment scopes. Repeated work may be proposed to the user through a durable question (`user_question_request` with `skill_proposal`). The runtime requires 2 to 5 retained reports as evidence, refuses duplicate proposals, and accepts only explicit, action-matched English or Russian approval/decline option pairs before persistence. A stored pair is checked again when an answer is interpreted, including after restart; reversed, misleading or unknown labels cannot approve even through text option `1`. A decline or unclear answer changes nothing in the project. Skills are never installed automatically or activated merely because files exist. Once present in the supported project layout, a skill is listed by name, description and path in the [unified system prompt](docs/features/unified-system-prompt/index.md) of every Cortex engine session, which replaces the engines' own skill catalogs with the union of the project and owner skill directories either engine reads; Cortex does not guarantee selection or use. Skill text is model input and grants no additional tool access, filesystem scope, or permission. Cortex's conditional `read_skill` trigger catalogue is role-scoped guidance in the prompt and advertised tool schema; it likewise grants no access and does not cause runtime-side skill loading. Tool state inside the project (`.venv`, `node_modules/.cache`,
 `.pytest_cache`, `__pycache__`, `.mypy_cache`, `target/`, build caches) is
 writable because a writing worker's grant is the whole project, with no list of
-tools; multiply hard-linked files stay read-only unless every one of their links
-is itself a writable path of the project (esbuild links its two binaries to each
-other), and a directory with more than 256 read-only ones stays read-only as a
-whole (pnpm `node_modules`, a hardlinked uv `.venv`). `.cortex` stays hidden.
+tools. Internal-only writable hardlinks remain linked. Guarded/engine launches
+keep external aliases read-only and demote a directory above 256 such files.
+Development/Auto writer commands instead materialize independent copies of granted
+external aliases before granting writes, so uv/pnpm environments can be recreated
+without project-alias writes changing shared-cache inodes. Denied/private paths
+remain excluded; symlinks are unchanged. Reflinks or streaming copies preserve
+ownership, modes, timestamps and extended attributes. A 2 GiB logical-byte
+preflight and 60 s cooperative deadline fail closed; blocking filesystem calls
+can exceed that deadline. Complete files are fsynced, atomically replaced and
+their parent fsynced, never removing the environment directory. An interruption
+may leave mixed inode identities but no partially overwritten package files;
+a fresh scan resumes safely. This is not a whole-tree transaction; a crash can
+leave a hidden temporary file. The inherited host-writable profile still permits
+direct host aliases; this protects project aliases, not arbitrary same-user code.
+See [hardlink preparation](docs/features/permissions-and-containment/index.md#git-and-tool-state)
+for cost and error details. `.cortex` stays hidden.
 Finding those links scans the whole project before each sandboxed launch; a slow
 scan is shown in the chat, never skipped or cached, and a sandboxed engine is
 never launched with the home directory or `/` as its project.

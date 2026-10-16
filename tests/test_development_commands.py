@@ -415,8 +415,10 @@ def test_real_read_only_role_writes_caches_not_host_or_project(development, monk
     activity = home / ".docker/buildx/activity"
     activity.mkdir(parents=True)
     refused = [home / ".bashrc", home / ".profile", home / ".nvm/node", home / "sdk-state",
-               sibling / "planted", root / "reviewer-wrote"]
-    allowed = [home / ".cache/tool/entry", home / ".npm/_cacache/entry", activity / "default"]
+               root / "reviewer-wrote"]
+    # The host /tmp is deliberately writable, including this sibling fixture.
+    allowed = [home / ".cache/tool/entry", home / ".npm/_cacache/entry", activity / "default",
+               sibling / "planted"]
     script = (
         "import os, tempfile\nfrom pathlib import Path\n"
         f"for name in {[str(p) for p in refused]!r}:\n"
@@ -426,8 +428,9 @@ def test_real_read_only_role_writes_caches_not_host_or_project(development, monk
         f"for name in {[str(p) for p in allowed]!r}:\n"
         "    Path(name).parent.mkdir(parents=True, exist_ok=True); Path(name).write_text('ok')\n"
         "with tempfile.NamedTemporaryFile() as handle: handle.write(b'ok')\n"
-        # Its own PID namespace: the host's processes (this test) are not visible.
-        f"assert not Path('/proc/{os.getpid()}').exists(), 'host processes visible'\n"
+        # Namespace identity avoids a host PID colliding with an unrelated local PID.
+        f"assert os.readlink('/proc/self/ns/pid') != {os.readlink('/proc/self/ns/pid')!r}, 'host PID namespace'\n"
+        "assert os.readlink('/proc/1/ns/pid') == os.readlink('/proc/self/ns/pid'), 'host proc mount'\n"
         "print('read-only host')\n")
     result = gateway.dispatch(store, worker, "command_run", dict(argv=[sys.executable, "-B", "-c", script], request_key="ro"))
     assert result["exit_code"] == 0 and result["complete"] and result["profile"] == "read_only", result
@@ -435,6 +438,31 @@ def test_real_read_only_role_writes_caches_not_host_or_project(development, monk
     assert (home / ".bashrc").read_text() == "# owner\n"
     assert not any(path.exists() for path in refused[1:])
     assert all(path.read_text() == "ok" for path in allowed)
+
+
+@pytest.mark.parametrize("path", [None, "", "/fixture/bin"])
+def test_owner_path_defaults_only_when_unset(tmp_path, path):
+    root = tmp_path / "project"
+    root.mkdir()
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    home = tmp_path / "home"
+    home.mkdir()
+    (root / ".venv/bin").mkdir(parents=True)
+    environ = {"HOME": str(home)}
+    if path is not None:
+        environ["PATH"] = path
+    with sandbox.development_command(root, scratch, ["/bin/sh"], ["."],
+                                     environ=environ) as (command, _):
+        paths = [command[i + 2] for i in range(len(command) - 2)
+                 if command[i:i + 2] == ["--setenv", "PATH"]]
+        entries = paths[-1].split(":")
+        assert entries[0] == str(root / ".venv/bin")
+        expected = "/usr/local/bin:/usr/bin:/bin" if path is None else path
+        if expected:
+            assert entries[1:1 + len(expected.split(":"))] == expected.split(":")
+        else:
+            assert len(entries) == 1
 
 
 @pytest.mark.requires_bwrap

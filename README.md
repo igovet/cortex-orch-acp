@@ -67,6 +67,14 @@ message language. Existing owner settings are never replaced. Account/connection
 identities and machine-specific MCP definitions/paths are not cloned; see
 [the install snapshot boundary](docs/configuration.md#fresh-install-owner-default-snapshot).
 
+Development/Auto writer commands can update hardlinked uv/pnpm environments:
+Cortex first makes granted project aliases independent of shared-cache inodes.
+Preparation preserves complete files and metadata, uses reflinks when available,
+and fails closed above 2 GiB of logical alias bytes or its cooperative 60 s
+deadline. Guarded/engine and read-only behavior is unchanged. See
+[hardlink preparation](docs/features/permissions-and-containment/index.md#git-and-tool-state)
+for persistence, cost and interruption limits.
+
 ## Clear old project tasks from chat
 
 Preview `/cortex-clear before 2026-10-01`, then use the displayed command ending
@@ -261,6 +269,16 @@ receipt-producing command gateway without routine approval cards. Roles still
 decide the project: read-only roles never write it, and verification writes only
 git-ignored directories. Engine jails, channel/revocation gates, owner denials,
 independent review and runtime completion remain in place.
+
+Read-only Git diff/status supports modified Git LFS files without opening
+`.git` for writes: LFS filters use disposable command/session scratch storage.
+Development/Auto writing workers with a whole-project grant can stage, commit,
+switch branches, stash, merge and rebase in ordinary repositories, linked
+worktrees and existing submodules. Config, hooks, info and repository pointers
+stay protected; narrower grants, reviewers and verification keep metadata
+read-only. Engine/Guarded writing grants are unchanged. See
+[Git and tool state](docs/features/permissions-and-containment/index.md#git-and-tool-state)
+for the boundary and LFS cache limitations.
 
 This is trusted local development, **not hostile-code OS isolation**. Direct
 filesystem masks cannot stop arbitrary owner code or a Docker daemon from
