@@ -196,3 +196,37 @@ test("a shell call titled with its own command is never a native read", () => {
   assert.equal(codexRead.kind, "read");
   assert.equal(codexRead.expandable, false);
 });
+
+test("split shell input is expandable before input and after status-only updates", () => {
+  for (const toolKind of ["execute", "terminal"]) {
+    const initial = { title: "cat a | grep b", toolKind };
+    for (const snapshot of [
+      initial,
+      { ...initial, rawInput: { command: "cat a | grep b" } },
+      { ...initial, rawOutput: "result" },
+      { ...initial, rawOutput: undefined },
+    ]) {
+      const row = presentToolSemantics(snapshot);
+      assert.equal(row.kind, "shell");
+      assert.equal(row.expandable, true);
+    }
+  }
+  // A provisional title-only inference changes once real command evidence arrives.
+  const provisional = { title: "cat a | grep b" };
+  assert.equal(presentToolSemantics(provisional).kind, "read");
+  assert.equal(presentToolSemantics({ ...provisional, toolKind: "execute" }).kind, "shell");
+});
+
+test("explicit native and Cortex reads outrank command-shaped input", () => {
+  for (const input of [
+    { title: "cat a | grep b", toolKind: "read" },
+    { title: "mcp.cortex.project_read", toolKind: "execute" },
+    { title: "mcp__cortex__read_skill", toolKind: "terminal" },
+  ]) {
+    for (const detail of [{}, { rawInput: { command: "cat a | grep b" }, rawOutput: "read body" }]) {
+      const row = presentToolSemantics({ ...input, ...detail });
+      assert.ok(row.kind === "read" || row.kind === "skill");
+      assert.equal(row.expandable, false);
+    }
+  }
+});

@@ -54,3 +54,20 @@ def test_without_preferred_models_usage_ranks_every_candidate():
     picked, decision = _rank([A, B, C, D], {"pref-a": 60.0, "pref-b": 60.0, "other-c": 60.0, "other-d": 5.0},
                              preferred=())
     assert picked is D and decision["decided_by"] == "usage" and decision["usage"]["scope"] == "all"
+
+
+def test_preferred_models_absent_from_the_live_catalog_still_suppress_usage():
+    """F4 regression: the owner's preference is configured in routing.json
+    ``models`` for pref-a/pref-b, but neither reaches ``rank`` at all (not
+    connected, dropped by eligibility filtering, or otherwise absent from
+    the live catalog). Usage ranking must not fall back to comparing every
+    remaining candidate (``scope=all``) merely because no *surviving*
+    candidate carries the preference -- it must behave exactly like the
+    exhausted-but-present case: scope=none, decided by the other criteria
+    (here, engine affinity for a review work kind picks the Claude model)."""
+    picked, decision = _rank([C, D], {"other-c": 5.0, "other-d": 60.0})
+    assert decision["purpose"]["status"] == "none"
+    assert decision["usage"] == dict(decision["usage"], scope="none", active=False,
+                                     status="not_applied:owner_preferred_unavailable")
+    assert decision["decided_by"] not in ("usage", "used_percent")
+    assert picked is D

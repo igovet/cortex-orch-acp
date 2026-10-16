@@ -183,12 +183,15 @@ def _snapshot(**changes):
             dict(section='capacity', attempt_id='xa_000000000001', kind='worker', state='reserved')]
     for index, update in changes.items():
         rows[int(index[1:])] = dict(rows[int(index[1:])], **update)
-    return dict(status='complete', binding=dict(owner_epoch=1), snapshot_sha256='1' * 64, rows=rows)
+    return dict(status='complete', binding=dict(project_root='/fixture', task_id='t_' + '1' * 12,
+                                                session_id='acps_' + '1' * 12, owner_epoch=1),
+                snapshot_sha256='1' * 64, rows=rows)
 
 
 def test_selector_joins_node_ref_to_the_provisioning_key_never_the_work_graph_id():
     selected = observer.select_running_attempt(_snapshot())
-    assert selected == dict(status='selected', snapshot_sha256='1' * 64, node_id='fix_check', revision=2,
+    assert selected == dict(status='selected', snapshot_sha256='1' * 64, binding=_snapshot()['binding'],
+                            event_high_watermark=0, node_id='fix_check', revision=2,
                             assignment_ref=REF, attempt_id='xa_000000000001',
                             engine_session_ref='es_000000000001', role_id='worker-qa-engineer')
     # An opaque-ID equality guess must not select a row bound to another node.
@@ -251,20 +254,154 @@ def test_steer_is_sent_at_most_once_and_never_replayed_after_an_uncertain_send()
     assert len(sent) == 2
 
 
-def test_continuation_requires_the_same_attempt_and_session():
-    selected = observer.select_running_attempt(_snapshot())
-    assert observer.check_continuation(selected, _snapshot())['reason'] == 'running_same_attempt'
-    done = _snapshot(r1=dict(status='completed'))
-    done['rows'].append(dict(section='runtime_events', type='WORKER_COMPLETED', attempt_id='xa_000000000001'))
-    assert observer.check_continuation(selected, done) == dict(status='continued', reason='completed_same_attempt')
-    for changes, reason in ((dict(r2=dict(attempt_id='xa_000000000009')), 'attempt_replaced'),
-                            (dict(r2=dict(engine_session_ref='es_000000000009')), 'attempt_replaced'),
-                            (dict(r3=dict(engine_session_ref='es_000000000009')), 'session_changed'),
-                            (dict(r1=dict(status='cancelled')), 'continuation_not_observed')):
-        assert observer.check_continuation(selected, _snapshot(**changes)) == dict(status='failed', reason=reason)
-    failed = _snapshot()
-    failed['rows'].append(dict(section='runtime_events', type='WORKER_FAILED', attempt_id='xa_000000000001'))
-    assert observer.check_continuation(selected, failed)['reason'] == 'attempt_failed'
+def _sent(selection=None):
+    selection = selection or observer.select_running_attempt(_snapshot())
+    steer = observer.SteerOnce(lambda text: dict(acknowledged=True))
+    steer(selection, origin='acp:test', event_id='exact-steer')
+    return selection, steer.sent
+
+
+def _captured(sent, **changes):
+    snapshot = _snapshot(**changes)
+    snapshot['snapshot_sha256'] = '2' * 64
+    snapshot['rows'].append(dict(section='runtime_events', id=10, type='USER_STEERING',
+                                 actor_sha256=sent['actor_sha256']))
+    return snapshot
+
+
+def _worker_event(kind='TOOL_COMPLETED'):
+    return dict(section='runtime_events', id=11, type=kind, attempt_id='xa_000000000001',
+                channel_attempt_id='xa_000000000001', channel_owner_epoch=1)
+
+
+def test_continuation_rejects_unchanged_presteer_and_capture_without_progress():
+    selected, sent = _sent()
+    assert observer.check_continuation(selected, _snapshot()) == dict(
+        status='unverified', reason='steering_identity_unavailable')
+    assert observer.check_continuation(selected, _snapshot(), steering=sent) == dict(
+        status='pending', reason='steering_capture_not_observed')
+    assert observer.check_continuation(selected, _captured(sent), steering=sent) == dict(
+        status='pending', reason='continuation_not_observed')
+    missing_identity = observer.SteerOnce(lambda text: True)
+    missing_identity(selected)
+    assert observer.check_continuation(selected, _captured(sent), steering=missing_identity.sent)['status'] == 'unverified'
+
+
+@pytest.mark.parametrize('case, reason', [
+    ('incomplete', 'snapshot_incomplete'), ('no_binding', 'baseline_binding_unavailable'),
+    ('no_watermark', 'baseline_events_unavailable'), ('wrong_send', 'steering_identity_unavailable'),
+])
+def test_continuation_keeps_missing_observability_unverified(case, reason):
+    selected, sent = _sent()
+    snapshot = _captured(sent)
+    if case == 'incomplete':
+        snapshot['status'] = 'busy_expired'
+    elif case == 'no_binding':
+        selected.pop('binding')
+    elif case == 'no_watermark':
+        selected.pop('event_high_watermark')
+    else:
+        sent['selection']['attempt_id'] = 'xa_other'
+    assert observer.check_continuation(selected, snapshot, steering=sent) == dict(status='unverified', reason=reason)
+
+
+def test_selector_refuses_ambiguous_baseline_events():
+    snapshot = _snapshot()
+    snapshot['rows'] += [dict(section='runtime_events', type='USER_STEERING', id=1)] * 2
+    assert observer.select_running_attempt(snapshot) == dict(status='refused', reason='ambiguous_runtime_events')
+
+
+def test_continuation_requires_progress_after_exact_capture_not_after_application():
+    selected, sent = _sent()
+    progressed = _captured(sent)
+    progressed['rows'].append(_worker_event())
+    assert observer.check_continuation(selected, progressed, steering=sent) == dict(
+        status='continued', reason='progressed_same_attempt')
+    done = _captured(sent, r1=dict(status='completed'))
+    done['rows'] += [_worker_event('WORKER_COMPLETED'),
+                     dict(section='runtime_events', id=12, type='STEERING_APPLIED', actor_sha256=sent['actor_sha256'])]
+    assert observer.check_continuation(selected, done, steering=sent) == dict(
+        status='continued', reason='completed_same_attempt')
+
+
+@pytest.mark.parametrize('changes, reason', [
+    (dict(r2=dict(attempt_id='xa_000000000009')), 'attempt_replaced'),
+    (dict(r2=dict(engine_session_ref='es_000000000009')), 'attempt_replaced'),
+    (dict(r3=dict(engine_session_ref='es_000000000009')), 'native_confirmation_mismatch'),
+    (dict(r3=dict(assignment_ref=None)), 'native_confirmation_mismatch'),
+    (dict(r2=dict(owner_epoch=2)), 'owner_changed'),
+])
+def test_continuation_rejects_replacement_and_identity_mismatch(changes, reason):
+    selected, sent = _sent()
+    assert observer.check_continuation(selected, _captured(sent, **changes), steering=sent) == dict(
+        status='failed', reason=reason)
+
+
+@pytest.mark.parametrize('change', [dict(task_id='t_other'), dict(owner_epoch=2), dict(session_id='acps_other')])
+def test_continuation_rejects_wrong_task_owner_or_acp_session(change):
+    selected, sent = _sent()
+    snapshot = _captured(sent)
+    snapshot['binding'] = dict(snapshot['binding'], **change)
+    assert observer.check_continuation(selected, snapshot, steering=sent) == dict(status='failed', reason='binding_changed')
+
+
+@pytest.mark.parametrize('case', ['wrong_actor', 'pre_capture_progress', 'other_attempt', 'other_owner', 'old_terminal'])
+def test_unrelated_or_pre_capture_events_are_not_continuation(case):
+    selected, sent = _sent()
+    snapshot = _captured(sent)
+    progress = _worker_event()
+    if case == 'wrong_actor':
+        snapshot['rows'][-1]['actor_sha256'] = 'wrong'
+    elif case == 'pre_capture_progress':
+        progress['id'] = 9
+    elif case == 'other_attempt':
+        progress['channel_attempt_id'] = 'xa_other'
+    elif case == 'other_owner':
+        progress['channel_owner_epoch'] = 2
+    elif case == 'old_terminal':
+        progress.update(type='WORKER_COMPLETED', id=9)
+    snapshot['rows'].append(progress)
+    assert observer.check_continuation(selected, snapshot, steering=sent)['status'] == 'pending'
+
+
+@pytest.mark.parametrize('case, reason', [
+    ('provisioning', 'attempt_replaced'), ('confirmation', 'native_confirmation_mismatch'),
+    ('capture', 'steering_replayed_or_ambiguous'), ('event_id', 'ambiguous_runtime_events'),
+    ('session_confirmation', 'native_confirmation_mismatch'), ('terminal', 'ambiguous_terminal_result'),
+])
+def test_continuation_refuses_ambiguous_records(case, reason):
+    selected, sent = _sent()
+    snapshot = _captured(sent)
+    if case == 'provisioning':
+        snapshot['rows'].append(dict(snapshot['rows'][2]))
+    elif case == 'confirmation':
+        snapshot['rows'].append(dict(snapshot['rows'][3]))
+    elif case == 'session_confirmation':
+        snapshot['rows'].append(dict(snapshot['rows'][3], attempt_id='xa_other'))
+    elif case == 'capture':
+        snapshot['rows'].append(dict(snapshot['rows'][-1], id=12))
+    elif case == 'event_id':
+        event = _worker_event()
+        event['id'] = 10
+        snapshot['rows'].append(event)
+    else:
+        snapshot['rows'] += [_worker_event('WORKER_COMPLETED'), dict(_worker_event('WORKER_COMPLETED'), id=12)]
+    assert observer.check_continuation(selected, snapshot, steering=sent) == dict(status='failed', reason=reason)
+
+
+def test_baseline_watermark_prevents_replayed_steering_and_old_completion():
+    baseline = _snapshot()
+    baseline['rows'].append(dict(section='runtime_events', id=20, type='USER_STEERING', actor_sha256='old'))
+    selected, sent = _sent(observer.select_running_attempt(baseline))
+    assert selected['event_high_watermark'] == 20
+    assert observer.check_continuation(selected, _captured(sent), steering=sent) == dict(
+        status='failed', reason='steering_replayed_or_ambiguous')
+    failed = _captured(sent)
+    failed['rows'].append(_worker_event('WORKER_FAILED'))
+    assert observer.check_continuation(selected, failed, steering=sent)['reason'] == 'attempt_failed'
+    unsuccessful = _captured(sent)
+    unsuccessful['rows'].append(dict(_worker_event('WORKER_COMPLETED'), assignment_outcome='failed'))
+    assert observer.check_continuation(selected, unsuccessful, steering=sent)['reason'] == 'attempt_failed'
 
 
 @pytest.mark.usefixtures('unjailed_gateway_command')
@@ -322,9 +459,9 @@ def test_real_controller_running_worker_is_selected_steered_once_and_continues(t
                 seen['selection'] = observer.select_running_attempt(live)
                 seen['expected'] = (provision['idempotency_key'], channel.attempt_id, ref)
                 if seen['selection']['status'] == 'selected':
-                    steer(seen['selection'])
+                    steer(seen['selection'], origin='acp:test', event_id='observer-steer')
                     seen['continued'] = observer.check_continuation(
-                        seen['selection'], observer.observe(binding, deadline=deadline))
+                        seen['selection'], observer.observe(binding, deadline=deadline), steering=steer.sent)
             if not reviewer:
                 (tmp_path / 'src' / 'part0').mkdir(parents=True, exist_ok=True)
                 (tmp_path / 'src' / 'part0' / f'{channel.attempt_id}.txt').write_text('implemented')
@@ -358,9 +495,10 @@ def test_real_controller_running_worker_is_selected_steered_once_and_continues(t
     assert seen['provision']['assignment_id'].startswith('a_')
     assert seen['provision']['assignment_id'] != selection['assignment_ref']
     assert sends == [observer.DECISION_FREE_STEER]
-    assert seen['continued'] == dict(status='continued', reason='running_same_attempt')
+    assert seen['continued'] == dict(status='pending', reason='continuation_not_observed')
     final = observer.observe(binding, deadline=time.monotonic() + 30)
-    assert observer.check_continuation(selection, final) == dict(status='continued', reason='completed_same_attempt')
+    assert observer.check_continuation(selection, final, steering=steer.sent) == dict(
+        status='continued', reason='completed_same_attempt')
     assert not any(row['section'] == 'attempts' and row['attempt_id'] != selection['attempt_id']
                    and row['idempotency_key'] == selection['assignment_ref'] for row in final['rows'])
 

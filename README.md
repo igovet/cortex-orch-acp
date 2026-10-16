@@ -103,6 +103,17 @@ The owner already had it installed; checkout discovery now selects it instead
 of 2.0.1. No-paid bundle and CLI/jail checks passed; the production Paseo plugin
 was not refreshed. See [Codex support and limits](docs/features/codex-engine/index.md#current-support-211-2026-10-07).
 
+## Paseo tool-history display
+
+Paseo keeps shell-command output with the shell call, including when command input
+and output arrive in separate updates. An explicit native `read` remains
+metadata-only, as do Cortex `project_read` and `read_skill` bodies. Native
+Edit/Write field aliases only shape the displayed edit row and diff; they do not
+perform another edit or grant filesystem authority. These are
+history/presentation behaviors: no-paid tests do not establish a live model
+result or rendered Desktop behavior, and neither is claimed without the
+explicitly requested check.
+
 ## Requirements and UI/UX design
 
 Explicit frontend-design implementation preserves its structured preferred route

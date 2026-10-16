@@ -304,8 +304,9 @@ keeps its identity and stays running until Cortex reports the outcome. Limits:
 - Cortex's own updates always pass. A real worker failure keeps its reason, and
   a lone Stop shows the runtime's `Cancelled: turn_interrupted` card update once
   the grace window pauses the task.
-- A terminal status Cortex sent is final for that card: a late, duplicated or
-  out-of-order frame does not reopen it.
+- The first terminal status Cortex sent is final for that card: a late,
+  duplicated, out-of-order or contradictory terminal frame cannot replace its
+  projected status or reopen it.
 - Other tool calls, and cards Cortex never reported in this connection, keep the
   bridge's behavior.
 

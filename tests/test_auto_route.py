@@ -1939,3 +1939,82 @@ def test_design_cross_engine_pin_is_refused_not_substituted(monkeypatch):
     _design_choose(monkeypatch, entries, routing)
     with pytest.raises(PortableError, match="pinned_route_unavailable"):
         auto_route.choose("worker-frontend-dev", work_kind_override="implementation_frontend_design")
+
+
+# --- F4 regression: a configured preference is never settled by whether a
+# preferred route happens to survive the live catalog or eligibility (see
+# ``auto_route.rank``'s ``_preference_configured_for_tier``). -------------
+
+def _preference_routing(*, preferred=("pref-a", "pref-b")):
+    """Review work: pref-a (codex) and pref-b (claude) are the owner's
+    ``preferred_for`` choice when named in ``preferred``; other-c/other-d
+    never are."""
+    def policy(model):
+        return {"preferred_for": ["review"]} if model in preferred else {}
+    models = {
+        "codex-acp": {"auto": ["pref-a", "other-c"], "tiers": {"pref-a": "deep", "other-c": "deep"},
+                      "policy": {"pref-a": policy("pref-a"), "other-c": policy("other-c")}},
+        "claude-agent-acp": {"auto": ["pref-b", "other-d"], "tiers": {"pref-b": "deep", "other-d": "deep"},
+                             "policy": {"pref-b": policy("pref-b"), "other-d": policy("other-d")}},
+    }
+    return {"model_policy_version": 2, "enabled": {e: list(c["tiers"]) for e, c in models.items()}, "models": models}
+
+
+def _preference_usage(monkeypatch, usages):
+    monkeypatch.setattr(quota, "used_percent",
+                        lambda _conn, model, *_a, **_kw: usages.get(model))
+
+
+def test_choose_catalog_disappearance_of_preferred_models_still_suppresses_usage(monkeypatch):
+    """F4: neither preferred model (pref-a, pref-b) is connected at all --
+    the catalog never offers them. Usage ranking must not widen to every
+    remaining candidate merely because none of them carries the owner's
+    preference; it must stay suppressed (scope=none), exactly like an
+    exhausted-but-present preference, and the review work kind's engine
+    affinity (Claude) decides instead of plan usage."""
+    other_c, other_d = _entry("codex-other", "other-c"), _entry("claude-other", "other-d")
+    entries = [other_c, other_d]
+    routing = _preference_routing()
+    _design_choose(monkeypatch, entries, routing)
+    _preference_usage(monkeypatch, {"other-c": 5.0, "other-d": 60.0})
+    choice = auto_route.choose("worker-security-auditor")
+    assert choice.decision["purpose"]["status"] == "none"
+    assert choice.decision["usage"]["scope"] == "none"
+    assert choice.decision["decided_by"] not in ("usage", "used_percent")
+    assert choice.model == "other-d"
+
+
+def test_choose_hard_policy_filtering_of_preferred_routes_still_suppresses_usage(monkeypatch):
+    """F4: both preferred routes are connected and otherwise usable, but
+    this task's authorization ceiling (``eligible_route_ids``) removes them
+    before ranking -- the same outcome as a configured-but-unreachable
+    preference, never a silent widening to usage ranking across the
+    remaining (non-preferred, lower-authorization) candidates."""
+    pref_a, pref_b = _entry("codex-pref", "pref-a"), _entry("claude-pref", "pref-b")
+    other_c, other_d = _entry("codex-other", "other-c"), _entry("claude-other", "other-d")
+    entries = [pref_a, pref_b, other_c, other_d]
+    routing = _preference_routing()
+    _design_choose(monkeypatch, entries, routing)
+    _preference_usage(monkeypatch, {"pref-a": 0.0, "pref-b": 0.0, "other-c": 5.0, "other-d": 60.0})
+    choice = auto_route.choose("worker-security-auditor",
+                               eligible_route_ids=frozenset({other_c.route.id, other_d.route.id}))
+    assert choice.decision["purpose"]["status"] == "none"
+    assert choice.decision["usage"]["scope"] == "none"
+    assert choice.decision["decided_by"] not in ("usage", "used_percent")
+    assert choice.model == "other-d"
+
+
+def test_choose_genuine_absence_of_preference_still_ranks_by_usage(monkeypatch):
+    """Regression: with no configured ``preferred_for`` for this work kind
+    at all, plan usage still ranks every candidate (scope=all), unchanged
+    by the F4 fix above."""
+    other_c, other_d = _entry("codex-other", "other-c"), _entry("claude-other", "other-d")
+    entries = [other_c, other_d]
+    routing = _preference_routing(preferred=())
+    _design_choose(monkeypatch, entries, routing)
+    _preference_usage(monkeypatch, {"other-c": 5.0, "other-d": 60.0})
+    choice = auto_route.choose("worker-security-auditor")
+    assert choice.decision["purpose"]["status"] == "none"
+    assert choice.decision["usage"]["scope"] == "all"
+    assert choice.decision["decided_by"] == "usage"
+    assert choice.model == "other-c"

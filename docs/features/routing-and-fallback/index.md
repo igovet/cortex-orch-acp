@@ -750,7 +750,14 @@ eligible candidates the rank criteria are, first difference wins:
    worse, exhausted or unavailable -- usage ranks nothing (`usage.scope`
    `none`, status `not_applied:owner_preferred_unavailable`), and the
    replacement is chosen by the quota band and steps 6, 7 and 9. Without
-   preferred models usage compares every candidate (`usage.scope` `all`).
+   preferred models usage compares every candidate (`usage.scope` `all`). If
+   applicable owner preferences remain configured but their preferred routes
+   disappear from the observed catalog or are filtered out by hard eligibility,
+   usage still ranks nothing (`usage.scope` `none`); fallback uses the normal
+   quota, usage-gap, diversification, affinity and engine-order keys. This does
+   not make an unavailable or ineligible preferred route executable. If no
+   applicable preference is configured, usage ranking across candidates remains
+   available.
 6. On escalation, an engine other than the one whose attempt fell short --
    unless step 4 already sent the work to a meaningfully less-used plan,
    diversification does not retry onto a plan with meaningfully less room.

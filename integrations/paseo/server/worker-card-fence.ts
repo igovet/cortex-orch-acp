@@ -35,6 +35,7 @@ function isWorkerCard(id: unknown): id is string {
 
 export class WorkerCardFence {
   private statuses = new Map<string, AcpToolStatus>();
+  private outcomes = new Map<string, { id: string; status: string }>();
 
   /** Record the status Cortex itself sent for a worker card. ACP omits the
    * status of an update that does not change it. A terminal status is final:
@@ -61,13 +62,23 @@ export class WorkerCardFence {
   }
 
   /** Bridge `toolCall` transformer: a worker snapshot whose status disagrees
-   * with Cortex's (terminal versus not) carries the bridge's own turn-end
+   * with Cortex's carries the bridge's own turn-end
    * status merged into a later update, or a stale frame after the real
    * outcome. Either way, Cortex's status wins. */
   toolCall<T extends { id: string; status: string }>(snapshot: T): T {
     if (!isWorkerCard(snapshot.id)) return snapshot;
     const authoritative = this.statuses.get(snapshot.id);
-    if (authoritative === undefined || TERMINAL.has(authoritative) === TERMINAL.has(snapshot.status)) return snapshot;
+    if (authoritative === undefined) return snapshot;
+    if (TERMINAL.has(authoritative)) {
+      const retained = this.outcomes.get(snapshot.id);
+      // Keep the outcome payload too: changing only the status would attach
+      // a stale success result to a failure (or a stale error to a success).
+      if (snapshot.status !== authoritative && retained) return { ...retained } as T;
+      const outcome = { ...snapshot, status: authoritative };
+      this.outcomes.set(snapshot.id, outcome);
+      return outcome;
+    }
+    if (!TERMINAL.has(snapshot.status)) return snapshot;
     return { ...snapshot, status: authoritative };
   }
 

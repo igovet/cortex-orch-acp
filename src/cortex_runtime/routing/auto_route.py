@@ -745,6 +745,34 @@ def rank(role_tier: str, entries: Sequence, usage, tier_overrides: Mapping[str, 
         # Affinity-bound work above uses structured preferences instead.
         return (not escalated and model_hint == _route_label(e)
                 and (not policy.preferred_for or kind in policy.preferred_for))
+
+    def _preference_configured_for_tier(serving_tier: str) -> bool:
+        """Whether routing.json's ``models`` policy names a model preferred
+        for ``kind`` whose configured tier(s) include ``serving_tier`` --
+        derived from the owner's settings alone, never from ``entries``, so
+        a preferred identity missing from the live catalog, disconnected,
+        or removed by eligibility filtering still counts as configured
+        (mirrors :func:`purpose`'s own-preference semantics without
+        requiring a catalog entry)."""
+        if kind is None:
+            return False
+        configured_overrides = {"models": models or {}}
+        for engine, config in (models or {}).items():
+            if not isinstance(config, Mapping):
+                continue
+            names = set(config.get("tiers") or {}) | set(config.get("policy") or {})
+            for name in names:
+                model_policy_entry = model_policy.policy_for(engine, name, configured_overrides)
+                if serving_tier not in model_policy_entry.tiers:
+                    continue
+                if model_policy_entry.preferred_when is None or affinity_bound:
+                    if kind in model_policy_entry.preferred_for:
+                        return True
+                elif (not escalated and model_hint == f"{engine}/{name}"
+                      and (not model_policy_entry.preferred_for or kind in model_policy_entry.preferred_for)):
+                    return True
+        return False
+
     usable_all = [e for e in entries if e.route.id not in excluded and (usage(e) or 0.0) < 100.0]
     order = {e.route.id: index for index, e in enumerate(entries)}
 
@@ -841,8 +869,16 @@ def rank(role_tier: str, entries: Sequence, usage, tier_overrides: Mapping[str, 
         # kind of work: while that choice is honoured it compares only the
         # chosen models with each other, and once they are used up (hot and
         # meaningfully worse, exhausted or unavailable) the replacement is
-        # chosen by the remaining criteria, not by usage.
-        purpose_configured = any(purpose(e) for e in entries if serves(e, tier))
+        # chosen by the remaining criteria, not by usage. Whether a
+        # preference is configured at all comes from the owner's settings,
+        # never from which candidates happen to survive the live catalog or
+        # eligibility filtering -- a preferred model absent from the
+        # connected catalog, disconnected, or outside this task's
+        # authorization ceiling must still suppress usage ranking (``none``),
+        # exactly as an exhausted-but-present one does; only the genuine
+        # absence of any configured preference opens usage ranking to every
+        # candidate (``all``).
+        purpose_configured = _preference_configured_for_tier(tier)
         if purpose_status == "honoured":
             usage_scope, scope_name = purposed, "preferred"
         elif purpose_configured:

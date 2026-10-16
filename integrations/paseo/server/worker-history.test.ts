@@ -371,4 +371,51 @@ function makeHostLossFixture(): { root: string; cleanup: () => void } {
   }
 }
 
+// Split native shell events must not be scrubbed merely for a "cat" title.
+// Read counterexamples stay metadata-only even with shell-shaped input.
+{
+  const { root, cleanup } = makeFixture();
+  const dbPath = join(root, ".cortex", "cortex.sqlite3");
+  try {
+    const payloads = [
+      ...["execute", "terminal"].flatMap((tool_kind) => [
+        { activity_ref: tool_kind, title: "cat a | grep b", tool_kind, status: "in_progress" },
+        { activity_ref: tool_kind, title: "cat a | grep b", tool_kind, raw_input: { command: "cat a | grep b" } },
+        { activity_ref: tool_kind, title: "cat a | grep b", tool_kind, output: "shell result", raw_output: "shell result" },
+        { activity_ref: tool_kind, title: "cat a | grep b", tool_kind, status: "completed" },
+      ]),
+      ...[
+        { title: "cat a | grep b", tool_kind: "read" },
+        { title: "mcp.cortex.project_read", tool_kind: "execute" },
+        { title: "mcp__cortex__read_skill", tool_kind: "terminal" },
+        { title: "project_read", tool_kind: "execute" },
+        { title: "mcp.external.read_file", tool_kind: "read" },
+      ].flatMap((read) => [
+        { activity_ref: read.title, ...read, status: "in_progress" },
+        { activity_ref: read.title, ...read, raw_input: { command: "cat a | grep b" },
+          raw_output: "native read body", output: "native read body", content: ["native read body"], error: "native read body" },
+        { activity_ref: read.title, ...read, status: "completed" },
+      ]),
+    ];
+    execSqlite(dbPath, payloads.map((payload) =>
+      `insert into task_events (task_id,event_type,assignment_ref,payload_json,created_at) values ${sqlValues([
+        TASK_ID, "worker_activity", "xa_1", JSON.stringify(payload), "now",
+      ])};`).join("\n"));
+    const history = await getWorkerHistory({ workspaceId: WORKSPACE_ID, agentId: AGENT_ID },
+      mockContext(WORKSPACE_ID, AGENT_ID, root, SESSION_ID));
+    assert.equal(history.available, true);
+    const events = history.assignments[0].attempts[0].events;
+    for (const kind of ["execute", "terminal"]) {
+      const shell = events.filter((event) => event.activity_ref === kind);
+      assert.equal(shell.length, 4);
+      assert.equal(shell[2].raw_output, "shell result", "commandless shell output is retained");
+      assert.equal(shell[2].output, "shell result");
+      assert.equal(shell[3].status, "completed", "status-only terminal frame is retained");
+    }
+    assert.doesNotMatch(JSON.stringify(events), /native read body/);
+  } finally {
+    cleanup();
+  }
+}
+
 console.log("worker-history: ok");

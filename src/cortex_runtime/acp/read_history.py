@@ -14,13 +14,29 @@ def shell_command_call(title=None, kind=None, raw_input=None):
     ``read`` kind makes a command a read.
     """
     args = raw_input if isinstance(raw_input, Mapping) else {}
-    command = args.get('command', args.get('cmd'))
-    if kind == 'read' or not isinstance(command, str) or not command.strip():
+    if kind == 'read':
         return False
-    return kind in {'execute', 'terminal'} or ' '.join(str(title or '').split()) == ' '.join(command.split())
+    if kind in {'execute', 'terminal'}:
+        return True
+    command = args.get('command', args.get('cmd'))
+    return isinstance(command, str) and bool(command.strip()) and ' '.join(str(title or '').split()) == ' '.join(command.split())
+
+
+def explicit_read(title=None, kind=None, raw_input=None):
+    """Authoritative read evidence, unlike a provisional title prefix."""
+    if kind == 'read':
+        return True
+    args = raw_input if isinstance(raw_input, Mapping) else {}
+    name = str(title or '').strip()
+    if args.get('server') == 'cortex' and isinstance(args.get('tool'), str):
+        name = 'mcp.cortex.' + args['tool']
+    match = re.match(r'^mcp(?:__|\.)([^.]+?)(?:__|\.)([\w-]+)', name, re.I)
+    return (match[1].lower() == 'cortex' and match[2].lower() in {'project_read', 'read_skill'}) if match else name.lower() in {'project_read', 'read_skill'}
 
 
 def metadata_only_read(title=None, kind=None, raw_input=None):
+    if explicit_read(title, kind, raw_input):
+        return True
     args = raw_input if isinstance(raw_input, Mapping) else {}
     name = str(title or '').strip()
     if args.get('server') == 'cortex' and isinstance(args.get('tool'), str):
@@ -96,11 +112,22 @@ def failed_read_output(*outputs):
 class ReadHistoryFilter:
     def __init__(self):
         self.reads = set()
+        self.explicit_reads = set()
+        self.shells = set()
 
     def project(self, update):
         ref = update.get('toolCallId') or update.get('tool_call_id')
         if not ref or str(ref).startswith('worker:'):
             return update
-        if metadata_only_read(update.get('title'),update.get('kind'),update.get('rawInput',update.get('raw_input'))):
+        evidence = (update.get('title'), update.get('kind'), update.get('rawInput', update.get('raw_input')))
+        if explicit_read(*evidence):
+            self.explicit_reads.add(ref)
+            self.reads.add(ref)
+        elif ref not in self.explicit_reads and shell_command_call(*evidence):
+            # Discard only provisional inference, never an observed native or
+            # Cortex read. Remember shells across later status-only frames.
+            self.reads.discard(ref)
+            self.shells.add(ref)
+        elif ref not in self.shells and metadata_only_read(*evidence):
             self.reads.add(ref)
         return compact_read(update) if ref in self.reads else update

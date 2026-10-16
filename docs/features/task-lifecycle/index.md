@@ -175,6 +175,16 @@ or "not requested" alone is insufficient. A documented policy requiring an
 explicit owner request can be a concrete blocker when the missing request is
 named (for example, "paid live check not requested by the owner").
 
+For coordinator-submitted synthesis and planned-work answers, the runtime owns
+this disclosure section. Before appending the structured list, it removes any
+coordinator-authored Markdown section whose heading matches the localized
+"Not verified" heading in English or Russian, regardless of the task language;
+that section ends at the next Markdown heading or the end of the text. The
+runtime then renders every retained item and blocker from the structured list
+once. Other coordinator prose and the structured disclosure are not removed.
+Runtime-composed synthesis is a separate path and only runs after all verification
+gaps are closed.
+
 The final gate checks the current plan, completed nodes, the final approving review
 (or the revision's `REVIEW_NOT_REQUIRED` record), a latest verification event
 that passed (a later failure supersedes an earlier pass) with its exact

@@ -18,6 +18,16 @@ for exact paths, artifact-test limits and the next upstream-fix decision.
 
 ## Current ACP boundary (1.0.0)
 
+Paseo's history boundary distinguishes command output from native reads:
+shell calls retain their output in the shell row, including split
+execute/input/output updates, while native `read` and Cortex `project_read`/
+`read_skill` bodies are metadata-only in display history. Edit/Write aliases map
+native field names for the displayed edit row only; they do not perform a file
+operation or add authority. This is presentation behavior, not model
+enforcement. No-paid checks do not establish live model behavior or rendered
+Desktop evidence; those claims require the separately authorized
+surface-specific check.
+
 Always-included shared skills are required instruction components, not optional
 references. A load failure or empty portable body blocks composition with
 `required_skill_unavailable`, naming the skill, receiving role and underlying

@@ -31,7 +31,88 @@ def _rows(args):
     return page['binding'], snapshot, rows
 
 
-def evaluate(rows, args):
+def _nonempty(value):
+    return isinstance(value, str) and bool(value.strip())
+
+
+def _route_observation(attempt, rows, binding):
+    """Join identities inside the inspector's already task-bound snapshot."""
+    section = lambda name: [r for r in rows if r['section'] == name]
+    ref, aid, session = (attempt.get(k) for k in ('idempotency_key', 'attempt_id', 'engine_session_ref'))
+    if (not all(_nonempty(v) for v in (ref, aid, session))
+            or attempt.get('owner_epoch') != binding['owner_epoch']):
+        return None
+    if any(len([a for a in section('attempts') if a.get(key) == value]) != 1
+           for key, value in (('idempotency_key', ref), ('attempt_id', aid), ('engine_session_ref', session))):
+        return None
+    nodes = [n for n in section('nodes') if n.get('assignment_ref') == ref]
+    if len(nodes) != 1 or nodes[0].get('role') != attempt['role_id']:
+        return None
+    confirmations = [e for e in section('task_events') if e.get('kind') == 'worker_configuration_confirmed']
+    matches = [e for e in confirmations if e.get('attempt_id') == aid
+               or e.get('engine_session_ref') == session or e.get('assignment_ref') == ref]
+    if len(matches) != 1:
+        return None
+    [confirmed] = matches
+    evidence = confirmed.get('confirmation_evidence_ref')
+    if (confirmed.get('attempt_id') != aid or confirmed.get('engine_session_ref') != session
+            or confirmed.get('assignment_ref') != ref or not _nonempty(evidence)
+            or confirmed.get('superseded') is True
+            or type(confirmed.get('id')) is not int or confirmed['id'] < 1
+            or sum(e.get('id') == confirmed['id'] for e in section('task_events')) != 1
+            or sum(e.get('confirmation_evidence_ref') == evidence for e in confirmations) != 1):
+        return None
+    # Compare only identities the projection actually exposes. Coordinator
+    # configuration parameters are NOT this worker's native parameters.
+    config = attempt.get('config_revision')
+    if config is not None and confirmed.get('config_revision_id') != config:
+        return None
+    configurations = section('configuration')
+    native_config = confirmed.get('config_revision_id')
+    if native_config is not None and configurations:
+        if len([c for c in configurations if c.get('id') == native_config]) != 1:
+            return None
+    dispatch = [d for d in section('dispatch') if d.get('attempt_id') == aid]
+    if dispatch:
+        if len(dispatch) != 1 or dispatch[0].get('decision') not in ('authorized', 'fallback'):
+            return None
+        for key, native_key in (('role', None), ('engine', 'engine'), ('model', 'model'),
+                                ('connection_id', 'connection_id'), ('config_revision_id', 'config_revision_id')):
+            value = dispatch[0].get(key)
+            if value is not None and value != (attempt['role_id'] if native_key is None else confirmed.get(native_key)):
+                return None
+    parameters = confirmed.get('parameters') or {}
+    if parameters.get('thought_level') and parameters.get('effort') and parameters['thought_level'] != parameters['effort']:
+        return None
+    return (confirmed.get('engine'), confirmed.get('model'), parameters.get('thought_level') or parameters.get('effort'))
+
+
+def _retained_sizes(receipts):
+    """Complete execution/output METADATA only; never verify body bytes."""
+    sizes = []
+    for receipt in receipts:
+        retained = receipt.get('retained_output') or {}
+        ref, identity, output = (receipt.get(k) for k in ('tool_call_ref', 'identity_sha256', 'large_output_id'))
+        if (not isinstance(ref, str) or not re.fullmatch(r'gateway:[0-9a-f]{32}', ref)
+                or not isinstance(identity, str) or not re.fullmatch(r'[0-9a-f]{64}', identity)
+                or not isinstance(output, str) or not re.fullmatch(r'lo_[0-9a-f]{12}', output)):
+            continue
+        if any(sum(r.get(key) == value for r in receipts) != 1 for key, value in
+               (('tool_call_ref', ref), ('identity_sha256', identity), ('large_output_id', output))):
+            continue
+        size = retained.get('byte_count')
+        if (receipt.get('operation') in ('command_run', 'outside_command')
+                and receipt.get('complete') is True and receipt.get('run_complete') is True
+                and type(receipt.get('exit_code')) is int and receipt['exit_code'] == 0
+                and retained.get('bound') is True and retained.get('truncated') is False
+                and type(retained.get('exit_code')) is int and retained['exit_code'] == 0
+                and all(receipt.get(k) is None and retained.get(k) is None for k in ('failure', 'error', 'signal'))
+                and type(size) is int and size >= 0):
+            sizes.append(size)
+    return sizes
+
+
+def evaluate(rows, args, *, binding=None):
     failures = []
     section = lambda name: [r for r in rows if r['section'] == name]
     events = section('runtime_events')
@@ -55,11 +136,11 @@ def evaluate(rows, args):
                                  observed=verification[-1]['type'] if verification else None))
         if not section('synthesis'):
             failures.append(dict(expectation='final_text_recorded', observed=None))
-    confirmed = {e['attempt_id']: e for e in section('task_events') if e.get('kind') == 'worker_configuration_confirmed'}
     for role, engine, model, effort in args.expect_route:
-        attempts = [a['attempt_id'] for a in section('attempts') if a['role_id'] == role]
-        observed = [(confirmed[a]['engine'], confirmed[a]['model'], (confirmed[a].get('parameters') or {}).get('thought_level'))
-                    if a in confirmed else None for a in attempts]
+        attempts = [a for a in section('attempts') if a['role_id'] == role]
+        bound = (binding is not None and binding.get('task_id') == args.task
+                 and binding.get('owner_epoch') == args.owner_epoch)
+        observed = [_route_observation(a, rows, binding) if bound else None for a in attempts]
         if not attempts or any(o != (engine, model, effort) for o in observed):
             failures.append(dict(expectation='route', role=role, expected=f'{engine}/{model}:{effort}',
                                  observed=[o and f'{o[0]}/{o[1]}:{o[2]}' for o in observed]))
@@ -69,13 +150,9 @@ def evaluate(rows, args):
         if not any(c['outcome'] == 'failed' and c.get('closed_by') in passed for c in checks):
             failures.append(dict(expectation='failed_check_closed_by_exact_rerun', observed=len(checks)))
     if args.expect_retained_output_bytes is not None:
-        # Beyond the inline bound the result is cut inline; the retained body
-        # must still be complete (not truncated) and bound to its receipt.
-        sizes = [r['retained_output']['byte_count'] for r in section('action_receipts')
-                 if r.get('retained_output') and r['retained_output'].get('bound')
-                 and not r['retained_output'].get('truncated') and r.get('exit_code') == 0]
+        sizes = _retained_sizes(section('action_receipts'))
         if not any(size >= args.expect_retained_output_bytes for size in sizes):
-            failures.append(dict(expectation='complete_retained_output', expected=args.expect_retained_output_bytes,
+            failures.append(dict(expectation='complete_retained_output_metadata', expected=args.expect_retained_output_bytes,
                                  observed=max(sizes, default=None)))
     return failures
 
@@ -92,7 +169,7 @@ def main():
     parser.add_argument('--expect-closed-failure', action='store_true',
                         help='a failed worker check is closed by a passed exact rerun')
     parser.add_argument('--expect-retained-output-bytes', type=int, metavar='BYTES',
-                        help='a zero-exit action retained a bound, complete output of at least BYTES bytes')
+                        help='complete zero-exit command/output metadata records at least BYTES bytes (body not verified)')
     args = parser.parse_args()
     routes = []
     for value in args.expect_route:
@@ -110,7 +187,7 @@ def main():
         print(json.dumps(dict(passed=False, error=code if isinstance(code, str) and code.startswith(
             ('inspection_', 'unsafe_storage', 'legacy_storage', 'unsupported_storage')) else 'inspection_refused')))
         return 2
-    failures = evaluate(rows, args)
+    failures = evaluate(rows, args, binding=binding)
     print(json.dumps(dict(passed=not failures, failures=failures, binding=binding,
                           snapshot_sha256=snapshot, total=len(rows)), sort_keys=True))
     return 0 if not failures else 1

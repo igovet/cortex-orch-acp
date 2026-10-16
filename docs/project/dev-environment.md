@@ -111,6 +111,15 @@ metadata-only paged route once an exact owned host-to-ACP/task/epoch binding
 has actually been observed. It refuses busy/uncheckpointed storage and never
 initializes or repairs it. An opaque host agent ID or daemon stop alone is not
 binding, engine confirmation or a resource-release receipt.
+
+Qualification assertions require an exact task/current-owner binding and unique,
+matching assignment, attempt, engine session and native confirmation; missing,
+ambiguous, conflicting or replayed identities do not pass. Retained-output
+expectations validate complete, bound execution/output metadata and safe exit
+status, not the output body's bytes. A steering continuation remains pending
+until the matching steering capture and same-attempt progress or terminal result
+are observed. A read-only store snapshot alone cannot prove that the host sent a
+cancel-then-prompt sequence.
 On 2026-09-28, `logs <agent-id> --json` on 0.9.2 printed a text timeline, not
 JSON, so do not parse it as structured evidence; use it only under the
 retained-history rules below. A `cli` check establishes runtime and protocol

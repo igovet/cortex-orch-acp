@@ -28,3 +28,7 @@ integrations/paseo/node_modules/
 /.venv/
 /.verification-venv/
 /.cortex/
+
+# Local qualification scratch helpers and evidence.
+/tmp/
+/.cortex/

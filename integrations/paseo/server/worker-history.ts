@@ -296,14 +296,17 @@ try:
                         # scrubber. No synthetic diff or payload is created.
                         event_result[field] = scrub(value) if isinstance(value, str) else value
                     read_title = str(event_result.get('title') or '')
-                    match = re.match(r'^mcp(?:__|\.)([^.]+?)(?:__|\.)([\w-]+)', read_title, re.I)
                     # A shell call titled with its own command line (Claude's
                     # Bash: 'cat a | grep b') is not a read by its first word.
                     read_args = event_result.get('raw_input') if isinstance(event_result.get('raw_input'), dict) else {}
+                    read_name = ('mcp.cortex.' + read_args['tool']) if read_args.get('server') == 'cortex' and isinstance(read_args.get('tool'), str) else read_title
+                    match = re.match(r'^mcp(?:__|\.)([^.]+?)(?:__|\.)([\w-]+)', read_name, re.I)
+                    cortex_read = (match and match[1].lower() == 'cortex' and match[2].lower() in ('project_read', 'read_skill')) or read_name.lower() in ('project_read', 'read_skill')
                     read_command = read_args.get('command', read_args.get('cmd'))
-                    shell_row = (event_result.get('tool_kind') != 'read' and isinstance(read_command, str) and bool(read_command.strip())
-                                 and (event_result.get('tool_kind') in ('execute', 'terminal') or ' '.join(read_title.split()) == ' '.join(read_command.split())))
-                    read_only_row = (match and match[1].lower() == 'cortex' and match[2].lower() in ('project_read','read_skill')) or (not match and not shell_row and (event_result.get('tool_kind') == 'read' or re.match(r'^(read|view|cat)(?:\s|$)',read_title,re.I)))
+                    shell_row = (event_result.get('tool_kind') != 'read'
+                                 and (event_result.get('tool_kind') in ('execute', 'terminal')
+                                      or (isinstance(read_command, str) and bool(read_command.strip()) and ' '.join(read_title.split()) == ' '.join(read_command.split()))))
+                    read_only_row = event_result.get('tool_kind') == 'read' or cortex_read or (not match and not shell_row and re.match(r'^(read|view|cat)(?:\s|$)', read_title, re.I))
                     if read_only_row:
                         for key in ('output','raw_output','content','error','diff'):
                             event_result.pop(key,None)

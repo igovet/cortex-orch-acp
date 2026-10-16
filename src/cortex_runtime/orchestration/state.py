@@ -694,11 +694,37 @@ def synthesis_checks(db, task_id, revision):
     return checks, gaps
 
 
+def _without_authored_not_verified_section(text, localized_messages):
+    """Strip a coordinator-authored not-verified heading section, if any.
+
+    The runtime is the single owner of this disclosure section
+    (disclosed_synthesis below always appends its own, built from the
+    structured ``not_verified`` list). A coordinator that already drafted
+    its own heading for the same disclosure -- in either supported
+    language, regardless of the task's selected language -- must not make
+    it appear twice in the final message. This removes only that heading
+    and the content that follows it up to the next heading (or the end of
+    the text); it never touches the structured list itself, so every item
+    stays disclosed through the runtime's own appended section.
+    """
+    headings = {localized_messages.render('not_verified_heading', lang) for lang in ('en', 'ru')}
+    pattern = re.compile(
+        r'^[ \t]*#{1,6}[ \t]*(?:' + '|'.join(re.escape(heading) for heading in headings) + r')[ \t]*\n'
+        r'(?:(?!^[ \t]*#{1,6}[ \t]).*\n?)*',
+        re.MULTILINE | re.IGNORECASE,
+    )
+    return pattern.sub('', text)
+
+
 def disclosed_synthesis(text, not_verified, gaps, language='en'):
     """Require and render the same gap disclosure on both final-answer paths.
 
     The heading and label are runtime-authored, so they follow the task's
     selected language; items and blockers are the coordinator's own text.
+    Exactly one such section ever reaches the user: a coordinator-authored
+    heading for the same disclosure, in either language, is stripped before
+    the runtime's own canonical section is appended (see
+    _without_authored_not_verified_section).
     """
     normalized = lambda name: ' '.join(str(name).split()).casefold()
     for index, item in enumerate(not_verified):
@@ -717,6 +743,7 @@ def disclosed_synthesis(text, not_verified, gaps, language='en'):
     from ..acp import messages as localized_messages
     heading = localized_messages.render('not_verified_heading', language)
     label = localized_messages.render('not_verified_blocker_label', language)
+    text = _without_authored_not_verified_section(text, localized_messages)
     return (
         text.rstrip() + f'\n\n## {heading}\n\n' +
         '\n'.join(f"- {item['item']} — {label}: {item['blocker']}" for item in not_verified)

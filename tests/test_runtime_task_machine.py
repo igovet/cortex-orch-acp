@@ -169,6 +169,71 @@ def test_synthesis_gap_disclosure_follows_selected_task_language(machine):
     assert stored == 'Готово\n\n## Не проверено\n\n- Live GUI — причина: GUI недоступен.'
 
 
+def test_disclosed_synthesis_removes_a_coordinator_authored_duplicate_heading():
+    """The owner-reported bug: a final message showed 'Not verified' twice
+    because the coordinator's own text already carried that heading and the
+    runtime appended a second one. The runtime is the single owner of the
+    section: a same-language duplicate heading in the coordinator's own text
+    is stripped before the canonical one is appended, without losing any
+    other content or any structured item."""
+    from cortex_runtime.orchestration.state import disclosed_synthesis
+    authored = ('Summary of the work.\n\n## Not verified\n\n'
+                '- Live GUI — blocker: the model restated the structured list itself.\n\n'
+                '## Next steps\nAsk the user.')
+    items = [dict(item='Live GUI', blocker='GUI unavailable.')]
+    rendered = disclosed_synthesis(authored, items, {}, language='en')
+    assert rendered.count('## Not verified') == 1
+    assert rendered.endswith('- Live GUI — blocker: GUI unavailable.')
+    assert '## Next steps\nAsk the user.' in rendered
+    assert 'the model restated the structured list itself' not in rendered
+
+
+def test_disclosed_synthesis_removes_a_russian_duplicate_heading_regardless_of_selected_language():
+    """A coordinator may draft its own heading in either language; the
+    runtime strips it regardless of the task's currently selected language,
+    so exactly one (correctly localized) section ever reaches the user."""
+    from cortex_runtime.orchestration.state import disclosed_synthesis
+    authored = 'Итог.\n\n## Не проверено\n\n- Другое — причина: модель написала раздел сама.'
+    items = [dict(item='Live GUI', blocker='GUI unavailable.')]
+    rendered = disclosed_synthesis(authored, items, {}, language='en')
+    assert rendered.count('Not verified') == 1
+    assert 'Не проверено' not in rendered
+    assert 'модель написала раздел сама' not in rendered
+
+
+def test_synthesis_submit_shows_exactly_one_not_verified_section_despite_coordinator_duplicate(machine):
+    state, channel = machine
+    state.submit_plan(channel, plan(), 'dup-plan')
+    with state.store.connection() as db:
+        db.execute("UPDATE runtime_tasks SET state='RECONCILING' WHERE task_id=?", (channel.task_id,))
+        db.execute("UPDATE runtime_nodes SET result_json=? WHERE task_id=? AND node_id='N0'",
+                   ('{"checks":[{"name":"Live GUI","outcome":"not_run","blocker":"GUI unavailable"}]}',
+                    channel.task_id))
+        db.commit()
+    authored = 'Done.\n\n## Not verified\n\n- Live GUI — blocker: restated here by mistake.'
+    items = [dict(item='Live GUI', blocker='GUI unavailable.')]
+    assert state.submit_synthesis(channel, authored, items)['recorded']
+    with state.store.connection() as db:
+        stored = db.execute('SELECT synthesis FROM runtime_tasks WHERE task_id=?',
+                            (channel.task_id,)).fetchone()[0]
+    assert stored.count('## Not verified') == 1
+    assert 'restated here by mistake' not in stored
+    assert stored == 'Done.\n\n## Not verified\n\n- Live GUI — blocker: GUI unavailable.'
+
+
+def test_answer_submit_shows_exactly_one_not_verified_section_despite_coordinator_duplicate(machine):
+    state, channel = machine
+    authored = 'An informational answer.\n\n## Not verified\n\n- Stray — blocker: self-authored duplicate.'
+    items = [dict(item='Checked fact', blocker='Could not verify independently.')]
+    assert state.submit_answer(channel, authored, 'answer-dup', not_verified=items)['recorded']
+    with state.store.connection() as db:
+        stored = db.execute('SELECT synthesis FROM runtime_tasks WHERE task_id=?',
+                            (channel.task_id,)).fetchone()[0]
+    assert stored.count('## Not verified') == 1
+    assert 'self-authored duplicate' not in stored
+    assert stored.endswith('- Checked fact — blocker: Could not verify independently.')
+
+
 def test_unrelated_same_name_pass_does_not_resolve_synthesis_gap(tmp_path):
     from cortex_runtime.trusted_channel import resolve_channel
 

@@ -6,9 +6,13 @@ cleanup are injected callables; the defaults only observe metadata through the
 public bound task inspector (``cortex_runtime.storage.inspection``), which stays
 fail-closed: it never initializes, checkpoints, migrates or bypasses a lock.
 A classified observation is evidence of what the inspector returned, never an
-acceptance verdict: run ``scripts/cortex_qualification_assert.py`` for that.
+acceptance verdict. ``scripts/cortex_qualification_assert.py`` checks outcome
+expectations over metadata; it does not decide acceptance either.
 """
+from copy import deepcopy
 import errno
+import hashlib
+import json
 from pathlib import Path
 import sys
 import time
@@ -213,7 +217,11 @@ def select_running_attempt(snapshot, *, stage='execution'):
     if len(found) != 1:
         return dict(status='refused', reason='ambiguous_running_attempts' if found else 'no_running_attempt',
                     candidates=len(found), node_reasons=sorted(reasons))
-    return dict(status='selected', snapshot_sha256=snapshot['snapshot_sha256'], **found[0])
+    event_ids = [e.get('id') for e in _section(snapshot, 'runtime_events')]
+    if any(type(i) is not int or i < 1 for i in event_ids) or len(set(event_ids)) != len(event_ids):
+        return dict(status='refused', reason='ambiguous_runtime_events')
+    return dict(status='selected', snapshot_sha256=snapshot['snapshot_sha256'],
+                binding=dict(snapshot['binding']), event_high_watermark=max(event_ids, default=0), **found[0])
 
 
 class SteerOnce:
@@ -229,38 +237,84 @@ class SteerOnce:
         self._send = send
         self.sent = None
 
-    def __call__(self, selection, text=DECISION_FREE_STEER):
+    def __call__(self, selection, text=DECISION_FREE_STEER, *, origin=None, event_id=None):
         if self.sent is not None:
             raise RuntimeError('steer_already_sent')
         if selection.get('status') != 'selected':
             raise ValueError('steer_requires_selected_attempt')
-        self.sent = dict(selection=selection, receipt=None)
+        # Supply the actual supported input identity, never a guessed host id.
+        # Missing identity permits a send, but cannot prove continuation.
+        actor = f'user:{origin}:{event_id}' if all(isinstance(v, str) and v for v in (origin, event_id)) else None
+        actor_hash = None
+        if actor is not None:
+            encoded = json.dumps(actor, ensure_ascii=False, separators=(',', ':')).encode()
+            actor_hash = hashlib.sha256(encoded).hexdigest()
+        self.sent = dict(selection=deepcopy(selection), actor_sha256=actor_hash, receipt=None)
         self.sent['receipt'] = self._send(text)
         return self.sent['receipt']
 
 
-def check_continuation(selection, snapshot):
-    """Whether the SAME attempt and session continued after the one steer."""
+def check_continuation(selection, snapshot, *, steering=None):
+    """Same-identity progress AFTER capture, not proof of host cancel-then-prompt.
+
+    USER_STEERING is the capture boundary, not STEERING_APPLIED: the latter
+    can be applied after this worker has already completed.
+    """
     if snapshot.get('status') != 'complete':
-        return dict(status='failed', reason='snapshot_incomplete')
+        return dict(status='unverified', reason='snapshot_incomplete')
+    binding = selection.get('binding') or {}
+    if not all(binding.get(k) is not None for k in ('project_root', 'task_id', 'session_id', 'owner_epoch')):
+        return dict(status='unverified', reason='baseline_binding_unavailable')
+    if snapshot.get('binding') != binding:
+        return dict(status='failed', reason='binding_changed')
+    baseline = selection.get('event_high_watermark')
+    if type(baseline) is not int or baseline < 0:
+        return dict(status='unverified', reason='baseline_events_unavailable')
+    if not steering or steering.get('selection') != selection or not steering.get('actor_sha256'):
+        return dict(status='unverified', reason='steering_identity_unavailable')
     ref, attempt_id, session = selection['assignment_ref'], selection['attempt_id'], selection['engine_session_ref']
-    provisioned = [a for a in _section(snapshot, 'attempts') if a['idempotency_key'] == ref]
-    if [(a['attempt_id'], a['engine_session_ref']) for a in provisioned] != [(attempt_id, session)]:
+    provisioned = [a for a in _section(snapshot, 'attempts')
+                   if a.get('idempotency_key') == ref or a.get('attempt_id') == attempt_id
+                   or a.get('engine_session_ref') == session]
+    if (len(provisioned) != 1 or provisioned[0].get('idempotency_key') != ref
+            or provisioned[0].get('attempt_id') != attempt_id or provisioned[0].get('engine_session_ref') != session):
         return dict(status='failed', reason='attempt_replaced')
-    if any(e.get('engine_session_ref') != session for e in _section(snapshot, 'task_events')
-           if e.get('kind') == 'worker_configuration_confirmed' and e.get('attempt_id') == attempt_id):
-        return dict(status='failed', reason='session_changed')
-    outcomes = {e['type'] for e in _section(snapshot, 'runtime_events')
-                if e['type'] in _TERMINAL_WORKER_EVENTS and e.get('attempt_id') == attempt_id}
-    if 'WORKER_FAILED' in outcomes:
+    if provisioned[0].get('owner_epoch') != binding['owner_epoch']:
+        return dict(status='failed', reason='owner_changed')
+    confirmed = [e for e in _section(snapshot, 'task_events')
+                 if e.get('kind') == 'worker_configuration_confirmed'
+                 and (e.get('attempt_id') == attempt_id or e.get('engine_session_ref') == session
+                      or e.get('assignment_ref') == ref)]
+    if (len(confirmed) != 1 or confirmed[0].get('attempt_id') != attempt_id
+            or confirmed[0].get('engine_session_ref') != session
+            or confirmed[0].get('assignment_ref') != ref):
+        return dict(status='failed', reason='native_confirmation_mismatch')
+    events = _section(snapshot, 'runtime_events')
+    ids = [e.get('id') for e in events]
+    if any(type(i) is not int or i < 1 for i in ids) or len(set(ids)) != len(ids):
+        return dict(status='failed', reason='ambiguous_runtime_events')
+    terminal = [e for e in events if e['type'] in _TERMINAL_WORKER_EVENTS and e.get('attempt_id') == attempt_id]
+    if len(terminal) > 1:
+        return dict(status='failed', reason='ambiguous_terminal_result')
+    if any(e['type'] == 'WORKER_FAILED' or e.get('assignment_outcome') == 'failed' for e in terminal):
         return dict(status='failed', reason='attempt_failed')
-    if 'WORKER_COMPLETED' in outcomes:
+    captured = [e for e in events if e['type'] == 'USER_STEERING'
+                and e.get('actor_sha256') == steering['actor_sha256']]
+    if len(captured) > 1 or (captured and captured[0]['id'] <= baseline):
+        return dict(status='failed', reason='steering_replayed_or_ambiguous')
+    if snapshot.get('snapshot_sha256') == selection.get('snapshot_sha256') or not captured:
+        return dict(status='pending', reason='steering_capture_not_observed')
+    boundary = captured[0]['id']
+    if terminal and terminal[0]['id'] > boundary:
         return dict(status='continued', reason='completed_same_attempt')
     again = select_running_attempt(snapshot)
-    if again.get('status') == 'selected' and all(again[k] == selection[k] for k in
-                                                  ('assignment_ref', 'attempt_id', 'engine_session_ref')):
-        return dict(status='continued', reason='running_same_attempt')
-    return dict(status='failed', reason='continuation_not_observed')
+    if (again.get('status') == 'selected' and all(again[k] == selection[k] for k in
+                                               ('assignment_ref', 'attempt_id', 'engine_session_ref'))
+            and any(e['type'] == 'TOOL_COMPLETED' and e['id'] > boundary
+                    and e.get('channel_attempt_id') == attempt_id
+                    and e.get('channel_owner_epoch') == binding['owner_epoch'] for e in events)):
+        return dict(status='continued', reason='progressed_same_attempt')
+    return dict(status='pending', reason='continuation_not_observed')
 
 
 def wait_absent(identities, alive, *, grace, clock=time.monotonic, sleep=time.sleep, poll=0.1):

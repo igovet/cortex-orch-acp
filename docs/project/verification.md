@@ -194,6 +194,19 @@ python3 -B scripts/cortex_acp_setup.py status
 python3 -B scripts/cortex_acp_setup.py add-connection --help
 ```
 
+## Qualification evidence limits
+
+A route assertion passes only with an exact task/current-owner binding and one
+unambiguous provisioning, assignment, engine-session and native-confirmation
+chain; missing, mismatched, superseded or replayed confirmation evidence fails.
+A retained-output expectation establishes complete, uniquely bound execution
+and output metadata, including success and non-truncation, but it does not read
+or verify the retained body's bytes. Steering continuation remains pending until
+the exact steering capture and same-attempt progress or terminal evidence appear;
+an unchanged snapshot or a store-only observation does not prove a host
+cancel-then-prompt transition. No-paid fixtures and tests are not live engine or
+rendered Desktop evidence.
+
 ## Paid live verification on request
 
 Default verification is no-paid. A paid live check runs only when the owner

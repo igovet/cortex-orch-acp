@@ -1,6 +1,9 @@
 """The qualification assertion exits nonzero unless the bound task's complete
 metadata shows every expected outcome. Fresh controller-driven fixtures only."""
+from argparse import Namespace
+from copy import deepcopy
 import hashlib
+import importlib.util
 import json
 from pathlib import Path
 import subprocess
@@ -16,6 +19,9 @@ from test_steering_after_verification import _drive, _misused_then_answered, _tr
 pytestmark = pytest.mark.usefixtures('unjailed_gateway_command')
 
 SCRIPT = Path(__file__).resolve().parents[1] / 'scripts' / 'cortex_qualification_assert.py'
+_spec = importlib.util.spec_from_file_location('qualification_assert', SCRIPT)
+qualification = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(qualification)
 
 
 def _bind(store, tmp_path, task):
@@ -49,14 +55,15 @@ def test_completed_task_passes_and_each_unmet_expectation_exits_nonzero(tmp_path
     code, result = _run(argv + ['--expect-route', 'worker-backend-dev=claude-agent-acp/haiku:high'])
     assert code == 1 and [f['expectation'] for f in result['failures']] == ['route']
     with store.connection() as db:
-        attempts = [r['attempt_id'] for r in db.execute(
-            "SELECT attempt_id FROM delegation_provisioning WHERE task_id=? AND role_id='worker-backend-dev'",
+        attempts = [dict(r) for r in db.execute(
+            "SELECT * FROM delegation_provisioning WHERE task_id=? AND role_id='worker-backend-dev'",
             (task.task_id,))]
     for attempt in attempts:
-        events.append_event(store, task.task_id, 'progress', f'confirmed-{attempt}', dict(
-            kind='worker_configuration_confirmed', attempt_id=attempt, engine='claude-agent-acp', model='haiku',
-            parameters=dict(thought_level='high'), confirmation_evidence_ref='fixture', engine_session_ref=None,
-            config_revision_id=None, connection_id=None), 'fixture')
+        events.append_event(store, task.task_id, 'progress', f"confirmed-{attempt['attempt_id']}", dict(
+            kind='worker_configuration_confirmed', attempt_id=attempt['attempt_id'], engine='claude-agent-acp', model='haiku',
+            parameters=dict(thought_level='high'), confirmation_evidence_ref=f"fixture-{attempt['attempt_id']}",
+            engine_session_ref=attempt['engine_session_ref'], config_revision_id=attempt['config_revision'],
+            connection_id=None), 'fixture', assignment_ref=attempt['idempotency_key'])
     code, result = _run(argv + ['--expect-route', 'worker-backend-dev=claude-agent-acp/haiku:high'])
     assert (code, result['failures']) == (0, [])
     code, result = _run(argv + ['--expect-route', 'worker-backend-dev=claude-agent-acp/haiku:low'])
@@ -64,7 +71,7 @@ def test_completed_task_passes_and_each_unmet_expectation_exits_nonzero(tmp_path
     # This fixture ran no failing check and retained no large output.
     code, result = _run(argv + ['--expect-closed-failure', '--expect-retained-output-bytes', '65537'])
     assert code == 1 and [f['expectation'] for f in result['failures']] == [
-        'failed_check_closed_by_exact_rerun', 'complete_retained_output']
+        'failed_check_closed_by_exact_rerun', 'complete_retained_output_metadata']
     code, result = _run(argv[:-1] + [str(task.owner_epoch.epoch + 1)])
     assert (code, result) == (2, dict(passed=False, error='inspection_binding_mismatch'))
     code, _ = _run(argv + ['--expect-route', 'backend=claude-agent-acp/haiku'])
@@ -88,3 +95,146 @@ def _bind_again(store, tmp_path, task):
     sid = 'acps_' + 'b' * 12
     return [sys.executable, '-B', str(SCRIPT), '--project', str(tmp_path), '--session', sid,
             '--task', task.task_id, '--owner-epoch', str(task.owner_epoch.epoch)]
+
+
+# Controlled metadata counterexamples, not live qualification evidence.
+REF = 'f' * 64
+BINDING = dict(project_root='/fixture', session_id='acps_' + '1' * 12, task_id='t_' + '2' * 12, owner_epoch=1)
+
+
+def _evaluate(rows, *, routes=(), output=None, binding=BINDING):
+    args = Namespace(expect_state='EXECUTING', expect_route=routes, expect_closed_failure=False,
+                     expect_retained_output_bytes=output, task=BINDING['task_id'], owner_epoch=1)
+    return qualification.evaluate([dict(section='runtime', state='EXECUTING', revision=1)] + rows,
+                                  args, binding=binding)
+
+
+def _route_rows():
+    return [
+        dict(section='nodes', role='worker-backend-dev', assignment_ref=REF),
+        dict(section='attempts', role_id='worker-backend-dev', idempotency_key=REF,
+             attempt_id='xa_' + '1' * 12, engine_session_ref='es_' + '1' * 12, owner_epoch=1, config_revision='cr_fixture'),
+        dict(section='task_events', id=1, kind='worker_configuration_confirmed', assignment_ref=REF,
+             attempt_id='xa_' + '1' * 12, engine_session_ref='es_' + '1' * 12,
+             engine='claude-agent-acp', model='haiku', parameters=dict(thought_level='high'),
+             confirmation_evidence_ref='fixture-native-confirmation', config_revision_id='cr_fixture',
+             connection_id='cn_fixture'),
+        dict(section='configuration', id='cr_fixture'),
+        dict(section='dispatch', attempt_id='xa_' + '1' * 12, decision='authorized', role='worker-backend-dev',
+             engine='claude-agent-acp', model='haiku', connection_id='cn_fixture', config_revision_id='cr_fixture'),
+    ]
+
+
+ROUTE = [('worker-backend-dev', 'claude-agent-acp', 'haiku', 'high')]
+
+
+def test_route_requires_native_identity_but_never_infers_unavailable_dispatch():
+    rows = _route_rows()
+    assert _evaluate(rows, routes=ROUTE) == []
+    assert _evaluate(rows[:3], routes=ROUTE) == []  # no dispatch/config rows exposed
+    rows[2]['parameters'] = dict(effort='high')
+    assert _evaluate(rows, routes=ROUTE) == []
+    assert _evaluate(rows, routes=ROUTE, binding=None)[0]['expectation'] == 'route'
+    assert _evaluate(rows, routes=ROUTE, binding=dict(BINDING, task_id='another'))
+
+
+@pytest.mark.parametrize('index, update', [
+    (1, dict(owner_epoch=2)), (1, dict(engine_session_ref=None)), (1, dict(idempotency_key=None)),
+    (2, dict(engine_session_ref=None)), (2, dict(engine_session_ref='es_wrong')),
+    (2, dict(assignment_ref=None)), (2, dict(assignment_ref='e' * 64)),
+    (2, dict(attempt_id='xa_wrong')), (2, dict(confirmation_evidence_ref=None)),
+    (2, dict(confirmation_evidence_ref='')), (2, dict(confirmation_evidence_ref='  ')),
+    (2, dict(config_revision_id='cr_wrong')), (2, dict(id=None)), (2, dict(superseded=True)),
+    (2, dict(parameters=dict(thought_level='high', effort='low'))),
+    (3, dict(id='cr_wrong')), (4, dict(connection_id='cn_wrong')),
+    (4, dict(config_revision_id='cr_wrong')), (4, dict(engine='codex-acp')),
+    (4, dict(model='wrong')), (4, dict(role='worker-qa-engineer')), (4, dict(decision='denied')),
+])
+def test_route_rejects_missing_or_mismatched_identity(index, update):
+    rows = _route_rows()
+    rows[index].update(update)
+    assert _evaluate(rows, routes=ROUTE)[0]['expectation'] == 'route'
+
+
+@pytest.mark.parametrize('index', [0, 1, 2, 3, 4])
+def test_route_rejects_duplicate_relational_rows(index):
+    rows = _route_rows()
+    rows.append(dict(rows[index]))
+    assert _evaluate(rows, routes=ROUTE)
+
+
+@pytest.mark.parametrize('conflict_first', [False, True])
+def test_route_rejects_conflicting_confirmations_in_either_order(conflict_first):
+    rows = _route_rows()
+    conflict = dict(rows[2], id=2, engine_session_ref='es_wrong', confirmation_evidence_ref='different')
+    rows.insert(2 if conflict_first else 3, conflict)
+    assert _evaluate(rows, routes=ROUTE)
+
+
+@pytest.mark.parametrize('update', [
+    dict(id=1, confirmation_evidence_ref='different'),
+    dict(id=2, confirmation_evidence_ref='fixture-native-confirmation'),
+])
+def test_route_rejects_replayed_event_or_confirmation_evidence(update):
+    rows = _route_rows()
+    rows.append(dict(rows[2], attempt_id='xa_other', engine_session_ref='es_other', assignment_ref='e' * 64, **update))
+    assert _evaluate(rows, routes=ROUTE)
+
+
+def _receipt():
+    return dict(section='action_receipts', operation='command_run', identity_sha256='a' * 64,
+                tool_call_ref='gateway:' + 'b' * 32, large_output_id='lo_' + 'c' * 12,
+                complete=True, run_complete=True, exit_code=0, failure=None, error=None,
+                retained_output=dict(bound=True, byte_count=65537, truncated=False, exit_code=0,
+                                     failure=None, signal=None))
+
+
+@pytest.mark.parametrize('operation', ['command_run', 'outside_command'])
+def test_retained_output_accepts_only_complete_metadata_and_exact_size(operation):
+    receipt = _receipt()
+    receipt['operation'] = operation
+    assert _evaluate([receipt], output=65537) == []
+    assert _evaluate([receipt], output=65538)[0]['expectation'] == 'complete_retained_output_metadata'
+
+
+@pytest.mark.parametrize('update', [
+    dict(operation='project_write'), dict(complete=False), dict(complete=None), dict(complete=1),
+    dict(run_complete=False), dict(run_complete=None), dict(run_complete=1),
+    dict(exit_code=1), dict(exit_code=None), dict(exit_code=False),
+    dict(failure='timeout'), dict(error='execution_error'), dict(signal='SIGTERM'),
+    dict(tool_call_ref=None), dict(tool_call_ref='unrecognized'), dict(identity_sha256=None),
+    dict(large_output_id=None), dict(large_output_id='invalid'),
+])
+def test_retained_output_rejects_each_bad_execution_signal(update):
+    receipt = _receipt()
+    receipt.update(update)
+    assert _evaluate([receipt], output=65537)[0]['expectation'] == 'complete_retained_output_metadata'
+
+
+@pytest.mark.parametrize('update', [
+    dict(bound=False), dict(bound=1), dict(truncated=True), dict(truncated=None),
+    dict(exit_code=1), dict(exit_code=None), dict(exit_code=False),
+    dict(failure='timeout'), dict(error='output_error'), dict(signal='SIGTERM'),
+    dict(byte_count=None), dict(byte_count=-1), dict(byte_count='65537'), dict(byte_count=True),
+])
+def test_retained_output_rejects_each_bad_retained_signal(update):
+    receipt = _receipt()
+    receipt['retained_output'].update(update)
+    assert _evaluate([receipt], output=65537)[0]['expectation'] == 'complete_retained_output_metadata'
+
+
+@pytest.mark.parametrize('shared', ['tool_call_ref', 'identity_sha256', 'large_output_id', 'all'])
+def test_retained_output_refuses_duplicate_or_ambiguous_bindings(shared):
+    receipt = _receipt()
+    other = deepcopy(receipt)
+    if shared != 'all':
+        other.update(tool_call_ref='gateway:' + 'd' * 32, identity_sha256='e' * 64, large_output_id='lo_' + 'f' * 12)
+        other[shared] = receipt[shared]
+    assert _evaluate([receipt, other], output=65537)
+
+
+def test_inconsistent_execution_and_output_metadata_cannot_hide_behind_size():
+    receipt = _receipt()
+    receipt.update(complete=False, run_complete=False, failure='timeout', exit_code=0)
+    receipt['retained_output'].update(exit_code=7, failure='timeout', byte_count=1000000)
+    assert _evaluate([receipt], output=65537)

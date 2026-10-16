@@ -47,6 +47,26 @@ import { WorkerCardFence } from "./worker-card-fence.ts";
   assert.equal(fence.toolCall({ ...snapshot, status: "in_progress" as const }).status, "failed");
 }
 
+// Both opposite-terminal directions preserve the first outcome, not just its status.
+for (const [first, opposite] of [["failed", "completed"], ["completed", "failed"]] as const) {
+  const fence = new WorkerCardFence();
+  const frame = (status: string) => ({ method: "session/update", params: {
+    update: { sessionUpdate: "tool_call_update", toolCallId: "worker:terminal", status },
+  } });
+  fence.observe(frame(first));
+  const original = { id: "worker:terminal", status: first, title: "Worker",
+    input: null, output: { summary: "First outcome" }, error: first === "failed" ? "First error" : null, locations: [] };
+  assert.deepEqual(fence.toolCall(original), original);
+  fence.observe(frame(opposite));
+  assert.equal(fence.status(original.id), first);
+  const stale = { ...original, status: opposite, output: { summary: "Contradiction" }, error: "Stale error" };
+  assert.deepEqual(fence.toolCall(stale), original);
+  assert.deepEqual(fence.toolCall({ ...stale, status: "in_progress" }), original);
+  const enriched = { ...original, output: { summary: "Later detail for the same outcome" } };
+  assert.deepEqual(fence.toolCall(enriched), enriched, "matching terminal updates may add detail");
+  assert.deepEqual(fence.toolCall(stale), enriched, "a contradiction cannot replace the enriched outcome");
+}
+
 // -- Real bridge fixture ------------------------------------------------------
 const dir = mkdtempSync(join(tmpdir(), "cortex-worker-steer-"));
 const fixture = join(dir, "agent.py");
@@ -65,6 +85,12 @@ def card(cid, title, *rest):
 JOURNALS = {
     "journal-running": card("worker:w5", "Worker: explorer — Running at reload",
         {"sessionUpdate": "tool_call_update", "toolCallId": "worker:w5", "status": "in_progress"}),
+    "journal-contradictory": card("worker:w8", "Worker: tester — First failure",
+        {"sessionUpdate": "tool_call_update", "toolCallId": "worker:w8", "status": "failed",
+         "rawOutput": "Original worker failure"},
+        {"sessionUpdate": "tool_call_update", "toolCallId": "worker:w8", "status": "completed",
+         "rawOutput": {"summary": "Stale success", "checks": []}},
+        {"sessionUpdate": "tool_call_update", "toolCallId": "worker:w8"}),
     "journal-settled": card("worker:w7", "Worker: explorer — Settled at reload",
         {"sessionUpdate": "tool_call_update", "toolCallId": "worker:w7", "status": "in_progress"},
         {"sessionUpdate": "tool_call_update", "toolCallId": "worker:w7", "status": "completed",
@@ -257,6 +283,18 @@ try {
     assert.equal(settled.cards("worker:w7").at(-1)?.status, "completed");
     assert.equal((settled.cards("worker:w7").at(-1)?.metadata as any)?.cortexWorkerResult?.summary, "Done before reload.");
     await settled.connection.close();
+    const contradictory = await connect({ native: "journal-contradictory" });
+    const replayed = contradictory.cards("worker:w8");
+    const firstFailure = replayed.findIndex((item) => item.status === "failed");
+    assert.ok(firstFailure >= 0);
+    const outcomes = replayed.slice(firstFailure);
+    assert.ok(outcomes.length >= 3);
+    for (const item of outcomes) {
+      assert.equal(item.status, "failed");
+      assert.equal(item.error, "Original worker failure");
+      assert.equal((item.metadata as any)?.cortexWorkerResult, undefined, "no stale success payload");
+    }
+    await contradictory.connection.close();
   }
 } finally {
   rmSync(dir, { recursive: true, force: true });

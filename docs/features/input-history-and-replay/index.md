@@ -99,7 +99,11 @@ Each coordinator prompt turn gets one assistant `messageId`. Every streamed
 the chunks into one visible message. When a new tool call starts, Cortex rotates
 the id before sending later prose; a later continuation turn also receives a
 fresh id. This prevents Paseo from merging text across tool boundaries or
-separate turns. Because chunks of one id are concatenated verbatim, a
+separate turns. Worker-card replay preserves an already recorded terminal
+status; a later contradictory frame does not replace it. If replay finds an
+existing worker card still in progress, `session/load` corrects it only from
+durable assignment or process evidence, never from task status alone. Because
+chunks of one id are concatenated verbatim, a
 runtime-authored block that can follow the coordinator's streamed prose in the
 same message (the final answer or synthesis, a text-fallback question) starts
 with a blank line, so its leading Markdown heading or list is parsed as a new

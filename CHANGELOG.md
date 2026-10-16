@@ -2,6 +2,24 @@
 
 ## 1.0.0 (unreleased)
 
+Coordinator-submitted final answers now show the structured “Not verified”
+disclosure only once: the runtime removes a duplicate coordinator-authored
+section with the English or Russian heading before appending its canonical list.
+Both synthesis and planned-work answer submissions use this path; runtime-composed
+synthesis is unaffected.
+
+Paseo now keeps shell output when command input arrives in a later update, while
+native reads remain metadata-only. Native Edit/Write fields are aliased for
+presentation only, and worker-card projections preserve the first terminal
+status across contradictory updates and replay. Qualification assertions now
+require exact identity-bound confirmations and complete execution/output
+metadata (not output-body verification); steering continuation stays pending
+until matching capture and same-attempt progress are observed. Owner preferences
+continue to suppress unrelated usage ranking when preferred routes disappear
+from the catalog. Removed temporary qualification inspection helpers that could
+print unrestricted payload text. No live or rendered Desktop qualification is
+claimed by these no-paid changes.
+
 A worker that steering left running no longer ends as Canceled in Paseo while it keeps
 working. Paseo sends `session/cancel` before each follow-up prompt; the cancelled prompt's ACP
 feed silently dropped every later update of the worker cards it had created, so the worker's

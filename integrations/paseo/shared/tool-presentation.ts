@@ -218,8 +218,8 @@ export function presentToolSemantics(input: ToolPresentationInput): ToolPresenta
   // or `cat > notes.md <<EOF` must not be taken for a native Read by its
   // first word. Only the engine's own read kind makes a command a read.
   const command = shellCommand(input.rawInput ?? input.input);
-  const commandCall = command !== null && nativeKind !== "read"
-    && (nativeKind === "execute" || nativeKind === "terminal" || sameCommandText(title, command));
+  const commandCall = nativeKind !== "read"
+    && (nativeKind === "execute" || nativeKind === "terminal" || (command !== null && sameCommandText(title, command)));
   const native = commandCall ? NATIVE_SHELL
     : title.match(/^(read|view|cat)\b/i) || nativeKind === "read" ? NATIVE_READ
     : title.match(/^(edit|patch|write|replace|modify)\b/i) ? NATIVE_EDIT
