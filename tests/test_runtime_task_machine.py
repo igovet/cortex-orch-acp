@@ -169,6 +169,45 @@ def test_synthesis_gap_disclosure_follows_selected_task_language(machine):
     assert stored == 'Готово\n\n## Не проверено\n\n- Live GUI — причина: GUI недоступен.'
 
 
+def test_synthesis_gap_disclosure_localized_description_keeps_exact_check_name_for_closure(machine):
+    """Localize display without changing the retained key used to match gaps."""
+    from cortex_runtime.acp import steering
+    state, channel = machine
+    steering.set_language_override(state.store, channel.task_id, 'ru')
+    state.submit_plan(channel, plan(), 'gap-plan-ru-desc')
+    check_name = 'Desktop live verification through the isolated development application'
+    description = 'Проверка в приложении'
+    blocker = 'Владелец не разрешил платную проверку.'
+    with state.store.connection() as db:
+        db.execute("UPDATE runtime_tasks SET state='RECONCILING' WHERE task_id=?", (channel.task_id,))
+        db.execute("UPDATE runtime_nodes SET result_json=? WHERE task_id=? AND node_id='N0'",
+                   (json.dumps(dict(checks=[dict(name=check_name, outcome='not_run',
+                                                blocker='paid live check not requested by the owner')])),
+                    channel.task_id))
+        db.commit()
+    # A translated or unrelated key must not satisfy the retained English gap,
+    # even if its display description and blocker are correct.
+    for wrong_item in (description, 'Different English check'):
+        with pytest.raises(StoreError, match='synthesis_gaps_undisclosed'):
+            state.submit_synthesis(channel, 'Готово',
+                                   [dict(item=wrong_item, description=description, blocker=blocker)],
+                                   language='ru')
+    items = [dict(item=check_name, description=description, blocker=blocker)]
+    assert state.submit_synthesis(channel, 'Готово', items, language='ru')['recorded']
+    with state.store.connection() as db:
+        stored = db.execute('SELECT synthesis FROM runtime_tasks WHERE task_id=?',
+                            (channel.task_id,)).fetchone()[0]
+        payload = json.loads(db.execute(
+            "SELECT payload_json FROM runtime_events WHERE task_id=? AND type='SYNTHESIS_SUBMITTED'",
+            (channel.task_id,)).fetchone()[0])
+    assert stored == ('Готово\n\n## Не проверено\n\n'
+                      '- Проверка в приложении — причина: Владелец не разрешил платную проверку.')
+    assert check_name not in stored
+    assert payload['not_verified'] == items
+    assert items[0]['item'] == check_name
+    assert state.submit_synthesis(channel, 'Готово', items, language='ru')['recorded']
+
+
 def test_disclosed_synthesis_removes_a_coordinator_authored_duplicate_heading():
     """The owner-reported bug: a final message showed 'Not verified' twice
     because the coordinator's own text already carried that heading and the
@@ -199,6 +238,30 @@ def test_disclosed_synthesis_removes_a_russian_duplicate_heading_regardless_of_s
     assert rendered.count('Not verified') == 1
     assert 'Не проверено' not in rendered
     assert 'модель написала раздел сама' not in rendered
+
+
+def test_disclosed_synthesis_renders_only_localized_description():
+    from cortex_runtime.orchestration.state import disclosed_synthesis
+    check_name = 'Desktop live verification through the isolated development application'
+    items = [dict(item=check_name, description='  Проверка в приложении  ',
+                  blocker='Владелец не разрешил платную проверку.')]
+    rendered = disclosed_synthesis('Готово', items, {check_name.casefold(): check_name}, language='ru')
+    assert rendered == ('Готово\n\n## Не проверено\n\n'
+                        '- Проверка в приложении — причина: Владелец не разрешил платную проверку.')
+    assert check_name not in rendered
+    assert items[0]['item'] == check_name
+
+
+@pytest.mark.parametrize('description', [None, '', '   '])
+def test_disclosed_synthesis_without_description_renders_item_directly_unchanged(description):
+    """Backward compatibility: an existing caller that never sends
+    description still renders exactly as it did before this field existed."""
+    from cortex_runtime.orchestration.state import disclosed_synthesis
+    items = [dict(item='Live GUI', blocker='GUI unavailable.')]
+    if description is not None:
+        items[0]['description'] = description
+    rendered = disclosed_synthesis('Done', items, {}, language='en')
+    assert rendered == 'Done\n\n## Not verified\n\n- Live GUI — blocker: GUI unavailable.'
 
 
 def test_synthesis_submit_shows_exactly_one_not_verified_section_despite_coordinator_duplicate(machine):
@@ -232,6 +295,27 @@ def test_answer_submit_shows_exactly_one_not_verified_section_despite_coordinato
     assert stored.count('## Not verified') == 1
     assert 'self-authored duplicate' not in stored
     assert stored.endswith('- Checked fact — blocker: Could not verify independently.')
+
+
+def test_answer_submit_localizes_description_and_retains_original_item(machine):
+    state, channel = machine
+    check_name = 'Desktop live verification through the isolated development application'
+    items = [dict(item=check_name, description='Проверка в приложении',
+                  blocker='Владелец не разрешил платную проверку.')]
+    assert state.submit_answer(channel, 'Готово', 'answer-ru-desc',
+                               not_verified=items, language='ru')['recorded']
+    with state.store.connection() as db:
+        stored = db.execute('SELECT synthesis FROM runtime_tasks WHERE task_id=?',
+                            (channel.task_id,)).fetchone()[0]
+        payload = json.loads(db.execute(
+            "SELECT payload_json FROM runtime_events WHERE task_id=? AND type='ANSWER_SUBMITTED'",
+            (channel.task_id,)).fetchone()[0])
+    assert stored == ('Готово\n\n## Не проверено\n\n'
+                      '- Проверка в приложении — причина: Владелец не разрешил платную проверку.')
+    assert check_name not in stored
+    assert payload['not_verified'] == items
+    assert state.submit_answer(channel, 'Готово', 'answer-ru-desc',
+                               not_verified=items, language='ru')['recorded']
 
 
 def test_unrelated_same_name_pass_does_not_resolve_synthesis_gap(tmp_path):

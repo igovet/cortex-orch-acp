@@ -18,6 +18,12 @@ for exact paths, artifact-test limits and the next upstream-fix decision.
 
 ## Current ACP boundary (1.0.0)
 
+Localized final-answer disclosure descriptions replace raw check names only in
+display. Original names remain unchanged in retained structured evidence and
+gap matching; a translated description cannot satisfy a missing exact-name
+disclosure. Descriptions and blockers are coordinator-authored text, not runtime
+translation or language enforcement. See [final disclosures](docs/features/task-lifecycle/index.md).
+
 Paseo's history boundary distinguishes command output from native reads:
 shell calls retain their output in the shell row, including split
 execute/input/output updates, while native `read` and Cortex `project_read`/

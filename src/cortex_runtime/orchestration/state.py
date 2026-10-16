@@ -720,10 +720,18 @@ def disclosed_synthesis(text, not_verified, gaps, language='en'):
     """Require and render the same gap disclosure on both final-answer paths.
 
     The heading and label are runtime-authored, so they follow the task's
-    selected language; items and blockers are the coordinator's own text.
-    Exactly one such section ever reaches the user: a coordinator-authored
-    heading for the same disclosure, in either language, is stripped before
-    the runtime's own canonical section is appended (see
+    selected language; item, description and blocker are the coordinator's
+    own text. item stays untouched (the exact check name when it closes a
+    retained gap, so matching in ``listed``/``gaps`` below never depends on
+    language); an item's optional description is the coordinator's own
+    localized, human-readable stand-in rendered instead of the raw item.
+    The exact item stays in structured evidence, not the displayed line;
+    gap matching still looks only at item. A coordinator that sent no
+    description (older callers, or an item that is already freeform text)
+    renders exactly as before. Exactly one
+    such section ever reaches the user: a coordinator-authored heading for
+    the same disclosure, in either language, is stripped before the
+    runtime's own canonical section is appended (see
     _without_authored_not_verified_section).
     """
     normalized = lambda name: ' '.join(str(name).split()).casefold()
@@ -744,9 +752,14 @@ def disclosed_synthesis(text, not_verified, gaps, language='en'):
     heading = localized_messages.render('not_verified_heading', language)
     label = localized_messages.render('not_verified_blocker_label', language)
     text = _without_authored_not_verified_section(text, localized_messages)
+
+    def rendered_item(item):
+        description = (item.get('description') or '').strip()
+        return description if description else item['item']
+
     return (
         text.rstrip() + f'\n\n## {heading}\n\n' +
-        '\n'.join(f"- {item['item']} — {label}: {item['blocker']}" for item in not_verified)
+        '\n'.join(f"- {rendered_item(item)} — {label}: {item['blocker']}" for item in not_verified)
     )
 
 

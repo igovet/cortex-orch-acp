@@ -169,11 +169,22 @@ digest, regardless of execution order. Its durable `closed_by` is rederived duri
 synthesis; it never upgrades the worker's original disclosure to a claimed pass.
 The runtime renders that list into the synthesis as "Not verified" (its heading and
 "blocker" label follow the task's turn language, e.g. "Не проверено"/"причина" for
-Russian; items and blockers stay the coordinator's text). Each blocker must name the
-concrete condition that prevented the check; "not run", "out of scope"
+Russian; item, its optional description and blocker stay the coordinator's own text).
+Each `not_verified` item carries its `item` (for a retained worker check, the exact
+check name, kept unchanged by language because gap matching depends on this exact
+spelling), an optional `description`, and a `blocker`; the advertised schema asks the
+coordinator to write `blocker`, and `description` whenever `item` is such an exact
+check name, in the task's selected chat language. When `description` is nonblank the
+rendered line shows only that description, without appending the raw check name
+(e.g. "Проверка в приложении — причина: Владелец не разрешил платную проверку.").
+The unchanged `item` remains in structured evidence for gap matching, not in the
+displayed line. Otherwise the line renders `item` directly, unchanged, which is how an older
+coordinator call without `description` still renders exactly as before. Each blocker
+must name the concrete condition that prevented the check; "not run", "out of scope"
 or "not requested" alone is insufficient. A documented policy requiring an
 explicit owner request can be a concrete blocker when the missing request is
-named (for example, "paid live check not requested by the owner").
+named (for example, "paid live check not requested by the owner", or its
+equivalent written in the task's selected chat language).
 
 For coordinator-submitted synthesis and planned-work answers, the runtime owns
 this disclosure section. Before appending the structured list, it removes any

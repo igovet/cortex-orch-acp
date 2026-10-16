@@ -158,6 +158,27 @@ def test_blocker_descriptions_accept_a_documented_owner_request_policy():
     assert "alone is not a blocker" in ERROR_HELP["check_blocker_required"]
 
 
+def test_not_verified_item_requires_a_localized_description_and_blocker():
+    """item stays the exact (English) check name for gap matching; the
+    schema asks for description/blocker in the task's selected chat language
+    so the rendered final-message block can be fully localized while gap
+    closure still depends only on item's exact spelling."""
+    item_schema = COORDINATOR["synthesis_submit"]["properties"]["not_verified"]["items"]
+    assert item_schema["required"] == ["item", "blocker"]
+    assert item_schema["additionalProperties"] is False
+    item_description = item_schema["properties"]["item"]["description"]
+    assert "exact check name" in item_description and "selected chat language" in item_description
+    description_description = item_schema["properties"]["description"]["description"]
+    assert "selected chat language" in description_description
+    assert "renders only this description, without appending item" in description_description
+    assert "unchanged item stays in structured evidence for gap matching" in description_description
+    assert "inline-code identifier" not in description_description
+    blocker_description = item_schema["properties"]["blocker"]["description"]
+    assert "selected chat language" in blocker_description
+    # answer_submit shares the exact same not_verified schema object.
+    assert COORDINATOR["answer_submit"]["properties"]["not_verified"] is COORDINATOR["synthesis_submit"]["properties"]["not_verified"]
+
+
 def test_worker_question_schema_never_names_skill_proposal():
     import json
     (tool,) = [t for t in mcp_tools.tool_definitions("worker", role_id="worker-backend-dev", stage="execution")

@@ -146,6 +146,11 @@ See [requirements and design](docs/features/design-workflow/index.md).
 
 ## What Cortex is
 
+Final-answer verification disclosures use the coordinator's localized description
+and blocker without appending the original check name. The unchanged name remains
+in structured evidence for matching; without a description it is displayed as before.
+See [final disclosure behavior](docs/features/task-lifecycle/index.md).
+
 When a reviewer requests the plan's exact verification command on the same
 project digest, Cortex returns the runtime-produced receipt instead of rerunning
 it. In-flight checks are awaited for at most five seconds; mismatches, unavailable

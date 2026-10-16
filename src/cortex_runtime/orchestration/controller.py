@@ -651,6 +651,7 @@ def _run(runtime, task_id, session_id, channel, session_ref, content, emit_updat
                        'with the available environment and the user\'s authorizations, submit replan_request to verify it before synthesis. '
                        'List in synthesis not_verified only what a real blocker makes impossible, each with that blocker; '
                        'the synthesis text\'s not-verified list must be exactly those items with their blockers, and omit that list when everything was verified. '
+                       'Write blocker, and description whenever item is an exact retained check name, in this turn\'s selected chat language; item itself stays the exact check name, unchanged by language, whenever it closes a retained gap. '
                        'Runtime decides completion. '
                        'If the user must still decide something (approve a proposed plan, choose between fixes, confirm manual steps), '
                        'do not submit synthesis: write the full details once as message text before the call, then ask with '
