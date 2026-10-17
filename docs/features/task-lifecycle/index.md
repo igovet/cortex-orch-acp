@@ -194,15 +194,24 @@ explicit owner request can be a concrete blocker when the missing request is
 named (for example, "paid live check not requested by the owner", or its
 equivalent written in the task's selected chat language).
 
-For coordinator-submitted synthesis and planned-work answers, the runtime owns
-this disclosure section. Before appending the structured list, it removes any
-coordinator-authored Markdown section whose heading matches the localized
-"Not verified" heading in English or Russian, regardless of the task language;
-that section ends at the next Markdown heading or the end of the text. The
-runtime then renders every retained item and blocker from the structured list
-once. Other coordinator prose and the structured disclosure are not removed.
-Runtime-composed synthesis is a separate path and only runs after all verification
-gaps are closed.
+For coordinator-submitted synthesis and direct answers, structured `not_verified`
+is the sole source of the runtime's disclosure section. When that list is nonempty,
+`orchestration/state.py:disclosed_synthesis` refuses an authored disclosure heading
+in `text` with `synthesis_disclosure_in_text`, before storing or delivering the
+answer. The caller must move gap disclosures into the structured list and keep
+unrelated context elsewhere in the text; the runtime does not silently delete a
+section that might contain unique information. Corrected submissions can retry
+without a failed proposal changing state or claiming an answer delivery key.
+
+The heading guard recognizes canonical and common alternate English/Russian
+labels, including "What was not verified", "Unverified checks" and "Что не
+проверено", regardless of the selected language. ATX and setext headings,
+emphasis, trailing colons/closing hashes and case variations are recognized;
+fenced/indented code and quoted examples are left alone. This is a bounded
+structural guard, not a claim to detect arbitrary semantic repetition in prose.
+All structured items, exact gap names and blockers remain intact and are rendered
+once. Runtime-composed synthesis is separate and only runs after all verification
+gaps are closed. Existing saved history is not rewritten.
 
 The final gate checks the current plan, completed nodes, the final approving review
 (or the revision's `REVIEW_NOT_REQUIRED` record), a latest verification event

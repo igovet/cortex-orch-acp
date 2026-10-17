@@ -1,5 +1,17 @@
 # Gotchas
 
+## Final disclosure ownership
+
+Only structured `not_verified` supplies the runtime's gap section. Matching just
+the literal localized heading misses aliases such as "Что не проверено" beside
+"Не проверено". Deleting a matched section can also discard unrelated context.
+Both final-answer submissions therefore refuse recognized authored disclosure
+headings when the structured list is nonempty; correct the text while retaining
+all gaps and blockers in that list. The guard covers common English/Russian
+headings and Markdown formatting, not arbitrary semantic equivalence. Code and
+quoted examples stay untouched. Stored history is never rewritten.
+See [final disclosure rules](../features/task-lifecycle/index.md#runtime-composed-synthesis).
+
 ## Shared-cache hardlinks in tool environments
 
 Development/Auto writing-worker commands detach granted external hardlinks before

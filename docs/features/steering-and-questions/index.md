@@ -148,6 +148,11 @@ verification, or `answer_submit` with the final summary. That answer must disclo
 unresolved worker checks with concrete blockers, using the same assessment and
 "Not verified" rendering as synthesis; omitting a gap refuses the proposal without
 changing the task state. A gap closed by exact verified evidence needs no disclosure.
+Both final-answer tools put gap disclosures only in structured `not_verified`.
+With that list nonempty, an authored not-verified heading (including common
+English/Russian aliases) refuses the proposal before persistence, rather than
+silently removing context. Correct the text and retry while keeping the complete
+structured list; see [disclosure ownership](../task-lifecycle/index.md#runtime-composed-synthesis).
 The runtime completes
 such an answer only after re-checking the revision's completion gates (completed
 nodes, unchanged report digests, approved review, passing verification on the

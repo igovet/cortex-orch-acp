@@ -311,6 +311,11 @@ required disclosures remain the runtime's final output. Rejected submissions
 do not mute text. This neither stops later tool actions nor changes completion
 authority, replayed history, or the content of native engine transcripts. See
 [synthesis display](docs/features/task-lifecycle/index.md#runtime-composed-synthesis).
+With structured gap disclosures present, both final-answer paths refuse a second
+authored disclosure heading, including common English/Russian aliases, before
+persistence. The guard never silently deletes a section or changes evidence,
+permissions, completion gates or existing replay history; arbitrary semantic
+repetition is not an enforced security boundary.
 
 Successful runtime recovery clears the exhausted planning-cycle counter, not
 question identities or answer receipts. Only the normal exact-answer transition

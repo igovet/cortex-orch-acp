@@ -695,26 +695,50 @@ def synthesis_checks(db, task_id, revision):
     return checks, gaps
 
 
-def _without_authored_not_verified_section(text, localized_messages):
-    """Strip a coordinator-authored not-verified heading section, if any.
+def _has_authored_not_verified_section(text, localized_messages):
+    """Recognize reserved disclosure headings, not arbitrary semantic similarity.
 
-    The runtime is the single owner of this disclosure section
-    (disclosed_synthesis below always appends its own, built from the
-    structured ``not_verified`` list). A coordinator that already drafted
-    its own heading for the same disclosure -- in either supported
-    language, regardless of the task's selected language -- must not make
-    it appear twice in the final message. This removes only that heading
-    and the content that follows it up to the next heading (or the end of
-    the text); it never touches the structured list itself, so every item
-    stays disclosed through the runtime's own appended section.
+    Refuse rather than erase sections: they can contain unique context as well
+    as repeated gaps. Ignore fenced/indented code and quoted examples. The
+    vocabulary covers both chat languages independently of the selected locale.
     """
-    headings = {localized_messages.render('not_verified_heading', lang) for lang in ('en', 'ru')}
-    pattern = re.compile(
-        r'^[ \t]*#{1,6}[ \t]*(?:' + '|'.join(re.escape(heading) for heading in headings) + r')[ \t]*\n'
-        r'(?:(?!^[ \t]*#{1,6}[ \t]).*\n?)*',
-        re.MULTILINE | re.IGNORECASE,
-    )
-    return pattern.sub('', text)
+    headings = {localized_messages.render('not_verified_heading', lang).casefold() for lang in ('en', 'ru')}
+    headings.update({
+        'what is not verified', 'what was not verified', 'what was not checked',
+        'what was not tested', 'unverified', 'unverified checks', 'unverified items',
+        'verification gaps', 'not checked', 'not tested', 'checks not run',
+        'tests not run', 'skipped checks', 'skipped tests',
+        'что не проверено', 'что не было проверено', 'что осталось непроверенным',
+        'непроверенное', 'непроверенные проверки', 'непроверенные пункты',
+        'не выполнено', 'невыполненные проверки', 'не запускалось',
+    })
+
+    def reserved(value):
+        value = re.sub(r'[*_`]', '', value).strip(' \t:#')
+        return ' '.join(value.split()).casefold() in headings
+
+    fence = None
+    previous = ''
+    for line in text.splitlines():
+        marker = re.match(r'^ {0,3}(`{3,}|~{3,})(.*)$', line)
+        if fence:
+            if marker and marker[1][0] == fence[0] and len(marker[1]) >= len(fence) and not marker[2].strip():
+                fence = None
+            continue
+        if marker:
+            fence = marker[1]
+            previous = ''
+            continue
+        if line.startswith(('    ', '\t', '>')):
+            previous = ''
+            continue
+        atx = re.match(r'^ {0,3}#{1,6}[ \t]+(.+?)\s*$', line)
+        if atx and reserved(atx[1]):
+            return True
+        if re.fullmatch(r' {0,3}(?:=+|-+)[ \t]*', line) and reserved(previous):
+            return True
+        previous = line
+    return False
 
 
 def disclosed_synthesis(text, not_verified, gaps, language='en'):
@@ -729,11 +753,9 @@ def disclosed_synthesis(text, not_verified, gaps, language='en'):
     The exact item stays in structured evidence, not the displayed line;
     gap matching still looks only at item. A coordinator that sent no
     description (older callers, or an item that is already freeform text)
-    renders exactly as before. Exactly one
-    such section ever reaches the user: a coordinator-authored heading for
-    the same disclosure, in either language, is stripped before the
-    runtime's own canonical section is appended (see
-    _without_authored_not_verified_section).
+    renders exactly as before. With structured gaps, a second authored
+    disclosure section is refused before persistence; the caller must retain
+    unique context outside it and let the runtime render the gaps once.
     """
     normalized = lambda name: ' '.join(str(name).split()).casefold()
     for index, item in enumerate(not_verified):
@@ -752,7 +774,11 @@ def disclosed_synthesis(text, not_verified, gaps, language='en'):
     from ..acp import messages as localized_messages
     heading = localized_messages.render('not_verified_heading', language)
     label = localized_messages.render('not_verified_blocker_label', language)
-    text = _without_authored_not_verified_section(text, localized_messages)
+    if _has_authored_not_verified_section(text, localized_messages):
+        raise StoreError('synthesis_disclosure_in_text', 'arguments.text', 'authored disclosure section',
+                         'gap disclosures only in not_verified, rendered once by the runtime',
+                         'Remove the authored not-verified section from text, keep every gap and blocker '
+                         'in not_verified, and preserve any other context elsewhere in text. Retry the submission.')
 
     def rendered_item(item):
         description = (item.get('description') or '').strip()

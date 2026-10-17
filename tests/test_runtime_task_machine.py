@@ -208,36 +208,59 @@ def test_synthesis_gap_disclosure_localized_description_keeps_exact_check_name_f
     assert state.submit_synthesis(channel, 'Готово', items, language='ru')['recorded']
 
 
-def test_disclosed_synthesis_removes_a_coordinator_authored_duplicate_heading():
-    """The owner-reported bug: a final message showed 'Not verified' twice
-    because the coordinator's own text already carried that heading and the
-    runtime appended a second one. The runtime is the single owner of the
-    section: a same-language duplicate heading in the coordinator's own text
-    is stripped before the canonical one is appended, without losing any
-    other content or any structured item."""
+@pytest.mark.parametrize('language', ['en', 'ru'])
+def test_disclosed_synthesis_refuses_duplicate_headings_in_either_language(language):
     from cortex_runtime.orchestration.state import disclosed_synthesis
-    authored = ('Summary of the work.\n\n## Not verified\n\n'
-                '- Live GUI — blocker: the model restated the structured list itself.\n\n'
-                '## Next steps\nAsk the user.')
-    items = [dict(item='Live GUI', blocker='GUI unavailable.')]
-    rendered = disclosed_synthesis(authored, items, {}, language='en')
-    assert rendered.count('## Not verified') == 1
-    assert rendered.endswith('- Live GUI — blocker: GUI unavailable.')
-    assert '## Next steps\nAsk the user.' in rendered
-    assert 'the model restated the structured list itself' not in rendered
+    for heading in ('Not verified', 'Не проверено'):
+        authored = f'Done.\n\n## {heading}\n\n- Authored gap.\n\n## Next steps\nKeep context.'
+        items = [dict(item='Live GUI', blocker='GUI unavailable.')]
+        with pytest.raises(StoreError, match='synthesis_disclosure_in_text'):
+            disclosed_synthesis(authored, items, {}, language=language)
+        rendered = disclosed_synthesis('Done.\n\n## Next steps\nKeep context.', items, {}, language=language)
+        assert '## Next steps\nKeep context.' in rendered
+        assert rendered.count('GUI unavailable.') == 1
 
 
-def test_disclosed_synthesis_removes_a_russian_duplicate_heading_regardless_of_selected_language():
-    """A coordinator may draft its own heading in either language; the
-    runtime strips it regardless of the task's currently selected language,
-    so exactly one (correctly localized) section ever reaches the user."""
+@pytest.mark.parametrize('heading', [
+    '### Что не проверено',
+    '## **Что не проверено:**',
+    '## Что не было проверено ##',
+    'Что не проверено\n----------------',
+    '## What was not verified',
+    '## Unverified checks',
+    '## Not verified',
+    '## Не проверено',
+])
+def test_disclosure_in_text_is_refused_without_deleting_context(heading):
     from cortex_runtime.orchestration.state import disclosed_synthesis
-    authored = 'Итог.\n\n## Не проверено\n\n- Другое — причина: модель написала раздел сама.'
-    items = [dict(item='Live GUI', blocker='GUI unavailable.')]
-    rendered = disclosed_synthesis(authored, items, {}, language='en')
-    assert rendered.count('Not verified') == 1
-    assert 'Не проверено' not in rendered
-    assert 'модель написала раздел сама' not in rendered
+    authored = ('Done.\n\n' + heading + '\n\n- Manual checks could not run.\n\n'
+                'An unrelated visual difference remains.\n\n## Next steps\nKeep this context.')
+    items = [dict(item='Manual checks', blocker='Device unavailable.')]
+    with pytest.raises(StoreError, match='synthesis_disclosure_in_text'):
+        disclosed_synthesis(authored, items, {}, language='ru')
+    assert items == [dict(item='Manual checks', blocker='Device unavailable.')]
+    # Moving gaps to structured evidence keeps all other context, not a
+    # heuristic deletion of the entire authored section.
+    clean = 'Done.\n\nAn unrelated visual difference remains.\n\n## Next steps\nKeep this context.'
+    rendered = disclosed_synthesis(clean, items, {}, language='ru')
+    assert rendered.startswith(clean)
+    assert rendered.count('Device unavailable.') == 1
+
+
+@pytest.mark.parametrize('text', [
+    '## Verification\nAll automated checks passed.',
+    '## Not verified behavior\nThis is an API name, not a disclosure.',
+    '```md\n## Not verified\nExample only.\n```',
+    '~~~md\nЧто не проверено\n----------------\n~~~',
+    '    ## Not verified\n    Indented example.',
+    '> ## Not verified\n> Quoted example.',
+    'The phrase Not verified is discussed inline.',
+])
+def test_disclosure_in_text_leaves_examples_and_other_context_untouched(text):
+    from cortex_runtime.orchestration.state import disclosed_synthesis
+    items = [dict(item='Device check', blocker='Device unavailable.')]
+    assert disclosed_synthesis(text, items, {}, 'en').startswith(text)
+    assert disclosed_synthesis(text, [], {}, 'en') == text
 
 
 def test_disclosed_synthesis_renders_only_localized_description():
@@ -264,7 +287,8 @@ def test_disclosed_synthesis_without_description_renders_item_directly_unchanged
     assert rendered == 'Done\n\n## Not verified\n\n- Live GUI — blocker: GUI unavailable.'
 
 
-def test_synthesis_submit_shows_exactly_one_not_verified_section_despite_coordinator_duplicate(machine):
+@pytest.mark.parametrize('heading', ['Not verified', 'Что не проверено'])
+def test_synthesis_submit_shows_exactly_one_not_verified_section_despite_coordinator_duplicate(machine, heading):
     state, channel = machine
     state.submit_plan(channel, plan(), 'dup-plan')
     with state.store.connection() as db:
@@ -273,9 +297,14 @@ def test_synthesis_submit_shows_exactly_one_not_verified_section_despite_coordin
                    ('{"checks":[{"name":"Live GUI","outcome":"not_run","blocker":"GUI unavailable"}]}',
                     channel.task_id))
         db.commit()
-    authored = 'Done.\n\n## Not verified\n\n- Live GUI — blocker: restated here by mistake.'
+    authored = f'Done.\n\n### {heading}\n\n- Live GUI — blocker: restated here by mistake.'
     items = [dict(item='Live GUI', blocker='GUI unavailable.')]
-    assert state.submit_synthesis(channel, authored, items)['recorded']
+    with pytest.raises(StoreError, match='synthesis_disclosure_in_text'):
+        state.submit_synthesis(channel, authored, items)
+    assert state.context(channel.task_id)['synthesis'] is None
+    assert state.get_state(channel.task_id) == 'RECONCILING'
+    assert state.submit_synthesis(channel, 'Done.', items)['recorded']
+    assert state.submit_synthesis(channel, 'Done.', items)['recorded']
     with state.store.connection() as db:
         stored = db.execute('SELECT synthesis FROM runtime_tasks WHERE task_id=?',
                             (channel.task_id,)).fetchone()[0]
@@ -284,11 +313,17 @@ def test_synthesis_submit_shows_exactly_one_not_verified_section_despite_coordin
     assert stored == 'Done.\n\n## Not verified\n\n- Live GUI — blocker: GUI unavailable.'
 
 
-def test_answer_submit_shows_exactly_one_not_verified_section_despite_coordinator_duplicate(machine):
+@pytest.mark.parametrize('heading', ['Not verified', 'Что не проверено'])
+def test_answer_submit_shows_exactly_one_not_verified_section_despite_coordinator_duplicate(machine, heading):
     state, channel = machine
-    authored = 'An informational answer.\n\n## Not verified\n\n- Stray — blocker: self-authored duplicate.'
+    authored = f'An informational answer.\n\n### {heading}\n\n- Stray — blocker: self-authored duplicate.'
     items = [dict(item='Checked fact', blocker='Could not verify independently.')]
-    assert state.submit_answer(channel, authored, 'answer-dup', not_verified=items)['recorded']
+    with pytest.raises(StoreError, match='synthesis_disclosure_in_text'):
+        state.submit_answer(channel, authored, 'answer-dup', not_verified=items)
+    assert state.context(channel.task_id)['synthesis'] is None
+    assert state.get_state(channel.task_id) == 'PLANNING'
+    assert state.submit_answer(channel, 'An informational answer.', 'answer-dup', not_verified=items)['recorded']
+    assert state.submit_answer(channel, 'An informational answer.', 'answer-dup', not_verified=items)['recorded']
     with state.store.connection() as db:
         stored = db.execute('SELECT synthesis FROM runtime_tasks WHERE task_id=?',
                             (channel.task_id,)).fetchone()[0]

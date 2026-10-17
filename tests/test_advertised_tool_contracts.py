@@ -26,6 +26,17 @@ GENERIC = {"Structured fields; use the exact advertised properties.",
            "Bounded list of items described by the item schema."}
 
 
+@pytest.mark.parametrize('operation', ['answer_submit', 'synthesis_submit'])
+def test_final_answer_contract_reserves_gap_rendering_for_runtime(operation):
+    entry = next(t for t in mcp_tools.tool_definitions('coordinator') if t['name'] == operation)
+    text_description = entry['inputSchema']['properties']['text']['description']
+    assert 'only in structured not_verified' in text_description
+    assert 'refused, not deleted' in text_description
+    assert 'preserve other context' in text_description
+    assert 'not_verified' in entry['description']
+    assert 'refused' in entry['description']
+
+
 def test_result_submit_describes_receipt_sources_and_exclusive_report_forms():
     entry = next(t for t in mcp_tools.tool_definitions("worker", role_id="worker-backend-dev", stage="execution")
                  if t["name"] == "result_submit")

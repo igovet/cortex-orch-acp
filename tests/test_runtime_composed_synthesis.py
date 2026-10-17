@@ -138,7 +138,7 @@ def test_metadata_only_attribution_language_and_replay(ready):
 
 
 @pytest.mark.parametrize('delivery', ['streamed', 'delayed', 'new_tool', 'final_only', 'no_callbacks',
-                                      'rejected_then_retry', 'disclosure'])
+                                      'rejected_then_retry', 'disclosure', 'disclosure_retry'])
 def test_committed_synthesis_is_the_only_final_response(ready, monkeypatch, delivery):
     machine, task, *_ = ready
     store = machine.store
@@ -163,8 +163,14 @@ def test_committed_synthesis_is_the_only_final_response(ready, monkeypatch, deli
                 on_delta(correction)
                 assert machine.context(task.task_id)['synthesis'] is None
             args = dict(text=final)
-            if delivery == 'disclosure':
+            if delivery in {'disclosure', 'disclosure_retry'}:
                 args['not_verified'] = [dict(item='Manual check', blocker='Unavailable device')]
+            if delivery == 'disclosure_retry':
+                with pytest.raises(StoreError, match='synthesis_disclosure_in_text'):
+                    mcp_tools.dispatch(store, channel, 'synthesis_submit',
+                                       dict(args, text=final + '\n\n### Что не проверено\n- Manual check.'))
+                assert machine.context(task.task_id)['synthesis'] is None
+                on_tool_call('duplicate', 'other', 'synthesis_submit', 'failed')
             mcp_tools.dispatch(store, channel, 'synthesis_submit', args)
             if delivery == 'rejected_then_retry':
                 mcp_tools.dispatch(store, channel, 'synthesis_submit', args)
@@ -196,7 +202,8 @@ def test_committed_synthesis_is_the_only_final_response(ready, monkeypatch, deli
     assert rewrite not in shown
     assert shown.count(details) == (delivery != 'final_only')
     assert shown.count(correction) == (delivery == 'rejected_then_retry')
-    assert shown.count('Unavailable device') == (delivery == 'disclosure')
+    assert shown.count('Unavailable device') == (delivery in {'disclosure', 'disclosure_retry'})
+    assert 'Что не проверено' not in shown
     assert kinds(machine, task).count('SYNTHESIS_SUBMITTED') == 1
 
 

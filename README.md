@@ -71,7 +71,10 @@ delivered only after the commit can also be omitted; see the
 [question display boundary](docs/features/orchestration/index.md#plan-submission-and-coordinator-polling).
 After coordinator synthesis commits, later engine prose in that turn is also
 withheld: the runtime displays the stored final result, not an additional
-post-tool recap. See [synthesis display](docs/features/task-lifecycle/index.md#runtime-composed-synthesis).
+post-tool recap. Gap disclosures belong only in the structured list: a second
+English/Russian not-verified section in the submitted text is refused before
+publication, rather than silently deleting context. See
+[synthesis display](docs/features/task-lifecycle/index.md#runtime-composed-synthesis).
 
 
 Fresh-install model settings use the saved 2026-10-12 owner default's portable

@@ -903,6 +903,61 @@ def test_session_load_replays_history_in_order_with_zero_mutations(tmp_path):
     assert loader.sessions[session_id]["mcp_servers"] == changed_servers
 
 
+def test_final_disclosure_is_emitted_once_and_replayed_without_recomposition(tmp_path):
+    from cortex_runtime.orchestration.state import disclosed_synthesis
+
+    clean = 'Completed.\n\nAn unrelated visual difference remains.'
+    items = [dict(item='Manual checks', description='Manual device checks',
+                  blocker='No device available.')]
+
+    class FinalRuntime(_CountingFakeRuntime):
+        def start_prompt(self, task_id, session_id, content, emit_update, cancel_event):
+            self.start_prompt_calls.append((task_id, session_id, content))
+            with pytest.raises(StoreError, match='synthesis_disclosure_in_text'):
+                disclosed_synthesis(clean + '\n\n### Что не проверено\n- Manual checks.', items, {}, 'ru')
+            emit_update(disclosed_synthesis(clean, items, {}, 'ru'))
+            return StopReason.END_TURN
+
+    runtime = FinalRuntime()
+    agent = Agent(runtime, environ=_isolated_environ())
+    transport = _RecordingTransport()
+    agent.bind_transport(transport)
+    agent.initialized = True
+    sid = agent._session_new(dict(cwd=str(tmp_path), mcpServers=[]))['sessionId']
+    session = agent.sessions[sid]
+    agent._run_prompt(request_id=1, session_id=sid, session=session,
+                      text='Finish', cancel_event=threading.Event(),
+                      raw_blocks=[dict(type='text', text='Finish')])
+
+    def messages(transport):
+        return [n['params']['update'] for n in transport.notifications
+                if n['params']['update']['sessionUpdate'] == 'agent_message_chunk']
+
+    live = messages(transport)
+    expected = disclosed_synthesis(clean, items, {}, 'ru')
+    assert len(live) == 1
+    assert live[0]['content']['text'] == expected
+    assert expected.count('## Не проверено') == 1
+    assert expected.count('No device available.') == 1
+    store = agent._store_for(session['project'])
+    before = _row_counts(store, session['task_id'])
+    for request_id in (42, 43):
+        # Each fresh reconnect receives one saved final message, with its
+        # original identity; it does not run the renderer or model again.
+        loader = Agent(_CountingFakeRuntime(), environ=agent.environ)
+        replayed = _RecordingTransport()
+        loader.bind_transport(replayed)
+        loader.initialized = True
+        loader._session_load(request_id, dict(sessionId=sid, cwd=str(tmp_path), mcpServers=[]))
+        saved = messages(replayed)
+        assert len(saved) == 1
+        assert saved[0]['content']['text'] == expected
+        assert saved[0]['messageId'] == live[0]['messageId']
+        assert loader.runtime.start_prompt_calls == []
+        assert 'error' not in replayed.response_for(request_id)
+    assert before == _row_counts(store, session['task_id'])
+
+
 def test_session_load_replays_durable_structured_worker_cards(tmp_path):
     """A reconnect restores worker/tool cards as ACP updates, in order.
 
