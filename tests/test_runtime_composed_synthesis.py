@@ -137,6 +137,69 @@ def test_metadata_only_attribution_language_and_replay(ready):
     assert kinds(machine, task).count('SYNTHESIS_RUNTIME_COMPOSED') == 1
 
 
+@pytest.mark.parametrize('delivery', ['streamed', 'delayed', 'new_tool', 'final_only', 'no_callbacks',
+                                      'rejected_then_retry', 'disclosure'])
+def test_committed_synthesis_is_the_only_final_response(ready, monkeypatch, delivery):
+    machine, task, *_ = ready
+    store = machine.store
+    monkeypatch.setattr(synthesis, 'complete', lambda *args: None)
+    details = 'Evidence inspected before submission.'
+    final = 'Implemented, reviewed and verified.'
+    rewrite = 'A differently worded recap of the completed work.'
+    correction = 'The rejected submission needs correction.'
+
+    def router(_store, channel, _ref, _launch, _instructions):
+        def behavior(_store, _channel, _ref, _message, _index, *,
+                     on_delta=None, on_tool_call=None, cancel_event=None):
+            if delivery != 'final_only':
+                on_delta(details)
+            if delivery == 'streamed':
+                on_tool_call('synthesis', 'other', 'synthesis_submit', 'in_progress')
+            if delivery == 'rejected_then_retry':
+                with pytest.raises(StoreError, match='synthesis_blocker_required'):
+                    mcp_tools.dispatch(store, channel, 'synthesis_submit',
+                                       dict(text=final, not_verified=[dict(item='Manual check', blocker=' ')]))
+                on_tool_call('rejected', 'other', 'synthesis_submit', 'failed')
+                on_delta(correction)
+                assert machine.context(task.task_id)['synthesis'] is None
+            args = dict(text=final)
+            if delivery == 'disclosure':
+                args['not_verified'] = [dict(item='Manual check', blocker='Unavailable device')]
+            mcp_tools.dispatch(store, channel, 'synthesis_submit', args)
+            if delivery == 'rejected_then_retry':
+                mcp_tools.dispatch(store, channel, 'synthesis_submit', args)
+            if delivery == 'streamed':
+                on_tool_call('synthesis', None, None, 'completed')
+            if delivery != 'final_only':
+                on_delta(rewrite)
+            if delivery in {'delayed', 'new_tool'}:
+                identity = 'synthesis' if delivery == 'delayed' else 'unrelated'
+                on_tool_call(identity, 'other', 'Tool call', 'in_progress')
+                on_delta(rewrite)
+            return PromptOutcome(StopReason.END_TURN, rewrite)
+        return behavior
+
+    engine = FakeSessionRuntime(store, router, emit_outcome_text_as_delta=False)
+    runtime = OrchestratingRuntime(store, engine, FakeWorkspace(), FakeConfigSnapshotSource(),
+                                   allow_unqualified_delivery=True)
+    visible = []
+    try:
+        channel, session_ref = runtime._ensure_coordinator(task.task_id)
+        result = controller.run(runtime, task.task_id, 'incoming', channel, session_ref, '',
+                                visible.append, threading.Event(), 'en')
+    finally:
+        runtime.shutdown()
+    shown = ''.join(visible)
+    assert result == StopReason.END_TURN
+    assert machine.get_state(task.task_id) == 'COMPLETED'
+    assert shown.count(final) == 1
+    assert rewrite not in shown
+    assert shown.count(details) == (delivery != 'final_only')
+    assert shown.count(correction) == (delivery == 'rejected_then_retry')
+    assert shown.count('Unavailable device') == (delivery == 'disclosure')
+    assert kinds(machine, task).count('SYNTHESIS_SUBMITTED') == 1
+
+
 CASES = [
     'incomplete_node', 'missing_result', 'no_review', 'reject_review', 'stale_review',
     'verification_missing', 'verification_failed', 'verification_stale', 'verification_incomplete',

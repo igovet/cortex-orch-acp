@@ -24,6 +24,16 @@
   </tr>
 </table>
 
+Native authentication loss gets one bounded engine-process restart on the same
+account/model when replay is safe. A second auth failure stops and asks for
+`claude /login` or `codex login`; Cortex itself does not copy credentials or run
+keepalive prompts. See [authentication recovery](docs/features/failures-and-cancellation/index.md#native-authentication-loss).
+Separately, an opt-in `scripts/cortex_auth_keepalive.py` with optional
+`systemd --user` templates under `scripts/systemd/` lets an owner run a
+proven zero-cost refresh-forcing command on a schedule; today it reports
+both Claude Code and Codex CLI `unsupported` because no such command is yet
+proven for either. See [opt-in login keepalive](docs/features/failures-and-cancellation/index.md#opt-in-native-cli-login-keepalive-outside-the-runtime).
+
 Required shared instructions cannot be silently omitted: if an always-included
 skill cannot be loaded or is empty, session startup stops with a diagnostic naming
 the skill and receiving role. Situational skills remain on-demand references.
@@ -59,6 +69,9 @@ After a coordinator question commits, Cortex suppresses further text received
 in that turn, including when tool lifecycle callbacks arrive late. Details
 delivered only after the commit can also be omitted; see the
 [question display boundary](docs/features/orchestration/index.md#plan-submission-and-coordinator-polling).
+After coordinator synthesis commits, later engine prose in that turn is also
+withheld: the runtime displays the stored final result, not an additional
+post-tool recap. See [synthesis display](docs/features/task-lifecycle/index.md#runtime-composed-synthesis).
 
 
 Fresh-install model settings use the saved 2026-10-12 owner default's portable

@@ -1,0 +1,27 @@
+# Template `systemd --user` unit for the opt-in native CLI login keepalive
+# check (scripts/cortex_auth_keepalive.py). This file is a template only:
+# nothing in this repository installs, enables or starts it automatically.
+#
+# Manual install (see scripts/systemd/README.md for the full procedure and
+# uninstall steps):
+#   1. Copy this file and cortex-auth-keepalive.timer to
+#      ~/.config/systemd/user/
+#   2. Replace __CORTEX_CHECKOUT__ below with the absolute path to this
+#      checkout (the directory containing this scripts/ directory).
+#   3. systemctl --user daemon-reload
+#   4. systemctl --user enable --now cortex-auth-keepalive.timer
+#
+# The service only runs the keepalive script; it never copies credentials,
+# never prints token values, and never persists command output (the script
+# itself discards it). A non-zero exit means at least one configured engine
+# needs a manual `claude /login` or `codex login`; it is visible in
+# `journalctl --user -u cortex-auth-keepalive.service`.
+
+[Unit]
+Description=Cortex native CLI auth keepalive check (Claude Code / Codex CLI)
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/env python3 __CORTEX_CHECKOUT__/scripts/cortex_auth_keepalive.py
+# Keepalive is a login-status check, not project work: it needs no project
+# write access and should not run as a build/CI step.

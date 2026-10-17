@@ -463,9 +463,10 @@ class AttemptRouting(NamedTuple):
 # must not raise the model tier. Mirrors engine.failure_classification's own
 # closed class names (plus ``worker_lost``, recorded by
 # orchestration.recovery.retry_lost) so a future class added there is
-# excluded here only by deliberate choice.
+# excluded here only by deliberate choice. Native auth replacement shares
+# infrastructure timing/no-escalation accounting, with its own one-shot fence.
 WORKER_LOST_FAILURE_CLASS = 'worker_lost'
-_INFRASTRUCTURE_RETRY_CLASSES = frozenset({'engine_failure', 'transport_failure', WORKER_LOST_FAILURE_CLASS})
+_INFRASTRUCTURE_RETRY_CLASSES = frozenset({'engine_failure', 'transport_failure', WORKER_LOST_FAILURE_CLASS, 'authorization_loss'})
 
 
 def attempt_routing(store, task_id, attempt_id):

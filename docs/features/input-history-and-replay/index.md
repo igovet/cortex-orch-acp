@@ -111,6 +111,12 @@ block instead of being glued to the previous sentence. The id is stored with the
 `session/load`; older rows without an id receive a deterministic replay id for
 that replay entry, without claiming that the old stream had a historical id.
 
+After coordinator synthesis commits, subsequent engine prose in that turn is
+withheld before the ACP emission/transcript path; the runtime emits the stored
+synthesis on completion instead. This prevents a post-tool paraphrase from
+duplicating the final result, without changing replay or rewriting older history.
+See [synthesis display](../task-lifecycle/index.md#runtime-composed-synthesis).
+
 ## Attachments and availability
 
 `protocol.py` now advertises `promptCapabilities.embeddedContext=true`

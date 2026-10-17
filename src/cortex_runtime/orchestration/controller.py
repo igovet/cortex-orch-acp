@@ -70,6 +70,18 @@ def _own_paragraph(text):
     return text if text.startswith('\n') else '\n\n' + text
 
 
+def _final_response_pending(runtime, task_id, state):
+    if state == 'ANSWER_READY':
+        return True
+    if state != 'RECONCILING':
+        return False
+    # Synthesis commits without changing RECONCILING. Its accepted text will
+    # be rendered by the runtime, not by the engine's post-tool paraphrase.
+    with runtime._store.connection() as db:
+        row = db.execute('SELECT synthesis FROM runtime_tasks WHERE task_id=?', (task_id,)).fetchone()
+    return row is not None and row['synthesis'] is not None
+
+
 def _execution_lock(task_id):
     """Serializes starting a plan revision and dispatching its ready nodes
     between the controller loop and the early start below."""
@@ -693,7 +705,7 @@ def _run(runtime, task_id, session_id, channel, session_ref, content, emit_updat
                     machine.move(task_id,'BLOCKED',blocker=delivery_state['wait_reason'] or 'context_delivery_blocked')
                 return StopReason.END_TURN
             streamed = []
-            answer_pending = False
+            final_pending = False
             # Once the coordinator's question is committed (WAITING_USER), its
             # text for the rest of this turn is suppressed. A delayed lifecycle
             # callback (even a new id) cannot prove that preceding deltas were
@@ -717,15 +729,15 @@ def _run(runtime, task_id, session_id, channel, session_ref, content, emit_updat
                         args=(runtime, machine, task_id, channel, cancel_event, emit_tool_call)))
                     early_start[0].start()
             def on_delta(text):
-                nonlocal answer_pending, question_asked
+                nonlocal final_pending, question_asked
                 # Some adapters deliver text before the tool lifecycle callback.
                 # The committed proposal is the authority for suppressing its echo.
-                if answer_pending: return True
+                if final_pending: return True
                 if not question_asked:
                     current = machine.get_state(task_id)
                     start_early(current)
-                    answer_pending = current == 'ANSWER_READY'
-                    if answer_pending: return True
+                    final_pending = final_pending or _final_response_pending(runtime, task_id, current)
+                    if final_pending: return True
                     question_asked = current == 'WAITING_USER'
                 streamed.append(text)
                 if question_asked:
@@ -734,11 +746,11 @@ def _run(runtime, task_id, session_id, channel, session_ref, content, emit_updat
                 return emit_update(safe) if safe else True
             tool_seen = []
             def on_tool(*args):
-                nonlocal answer_pending, question_asked
+                nonlocal final_pending, question_asked
                 tool_seen.append(True)
                 current = machine.get_state(task_id)
                 start_early(current)
-                answer_pending = current == 'ANSWER_READY'
+                final_pending = final_pending or _final_response_pending(runtime, task_id, current)
                 question_asked = question_asked or current == 'WAITING_USER'
                 flush()
                 if tool_emitter:
@@ -795,8 +807,23 @@ def _run(runtime, task_id, session_id, channel, session_ref, content, emit_updat
                     return _stop_turn(runtime, task_id, machine, emit_tool_call, emit_update, language)
                 else:
                     kind = getattr(error, 'kind', None)
+                    from ..engine.auth_recovery import is_auth_loss, login_blocker
+                    auth_loss = is_auth_loss(error)
                     dead = kind in _COORDINATOR_SESSION_DEAD_KINDS
-                    if dead:
+                    if auth_loss:
+                        try:
+                            if streamed or tool_seen or machine.context(task_id)['state'] != state:
+                                raise StoreError(login_blocker() + ' Turn effects prevent safe replay.')
+                            from .auth_recovery import claim_coordinator
+                            claim_coordinator(runtime._store, task_id)
+                        except StoreError as blocker:
+                            emit_update(_own_paragraph(str(blocker)))
+                            machine.move(task_id, 'BLOCKED', blocker=str(blocker))
+                            continue
+                        finally:
+                            runtime._evict_coordinator_session(task_id, 'authorization_loss')
+                        dead = True
+                    if dead and not auth_loss:
                         # Drop the dead coordinator session so the next user
                         # message reopens a fresh one via recovery, instead of
                         # reusing the corpse and re-raising this forever.
@@ -807,12 +834,17 @@ def _run(runtime, task_id, session_id, channel, session_ref, content, emit_updat
                     # one died), announced in the chat, with the bounded
                     # retry window, so the user's message simply runs
                     # instead of a question.
-                    if (not streamed and not tool_seen and _transient_turn_failure(kind, dead)
+                    if (not streamed and not tool_seen and (auth_loss or _transient_turn_failure(kind, dead))
                             and machine.context(task_id)['state'] == state):
                         from ..engine import retry_policy
                         turn_failures.append(time.monotonic())
                         decision = retry_policy.windowed_retry(
                             turn_failures, time.monotonic(), runtime._engine_retry_window)
+                        if auth_loss and not decision.may_retry:
+                            blocker = login_blocker()
+                            emit_update(_own_paragraph(blocker))
+                            machine.move(task_id, 'BLOCKED', blocker=blocker)
+                            continue
                         if not decision.may_retry:
                             runtime._emit_retry_notice(
                                 task_id, emit_update, language, 'engine_retry.gave_up', error=kind,
@@ -828,13 +860,18 @@ def _run(runtime, task_id, session_id, channel, session_ref, content, emit_updat
                                 if dead:
                                     channel, session_ref = runtime._ensure_coordinator_retrying(
                                         task_id, emit_update, cancel_event, language)
-                            except Exception:
-                                pass
+                            except Exception as reopen_error:
+                                if isinstance(reopen_error, StoreError) and str(reopen_error).startswith('engine_authentication_required:'):
+                                    machine.move(task_id, 'BLOCKED', blocker=str(reopen_error))
+                                    continue
                             else:
                                 prompted[key] -= 1
                                 continue
                     machine.move(task_id, 'BLOCKED', blocker=str(error) if isinstance(error,StoreError) else ('engine_failure:'+kind if kind else f'coordinator_prompt_failed:{type(error).__name__}'))
                 continue
+            if outcome.stop_reason == StopReason.END_TURN:
+                from .auth_recovery import coordinator_recovered
+                coordinator_recovered(runtime._store, task_id)
             if pending_events:
                 events.mark_delivered(runtime._store,task_id,delivery_marker)
             runtime._finalize_generation_delivery(session_ref, delivery_id, failure_kind=None, stop_reason=outcome.stop_reason)
@@ -844,7 +881,9 @@ def _run(runtime, task_id, session_id, channel, session_ref, content, emit_updat
                 tool_emitter.close_group()
             prompt_blocks = None
             if (outcome.text and not streamed and not question_asked
-                    and machine.get_state(task_id) not in {'ANSWER_READY', 'WAITING_USER'}):
+                    and machine.get_state(task_id) != 'WAITING_USER'
+                    and not final_pending
+                    and not _final_response_pending(runtime, task_id, machine.get_state(task_id))):
                 emit_update(outcome.text)
             if outcome.stop_reason == StopReason.CANCELLED:
                 return _stop_turn(runtime, task_id, machine, emit_tool_call, emit_update, language)
@@ -990,7 +1029,10 @@ def _run(runtime, task_id, session_id, channel, session_ref, content, emit_updat
                     # Retries used up: the coordinator decides how to get the
                     # work done (another approach, another role, a smaller
                     # step) before the user is asked.
-                    if not machine.return_to_coordinator(task_id, str(error)):
+                    if str(error).startswith('engine_authentication_required:'):
+                        emit_update(_own_paragraph(str(error)))
+                        machine.move(task_id, 'BLOCKED', blocker=str(error))
+                    elif not machine.return_to_coordinator(task_id, str(error)):
                         machine.move(task_id,'BLOCKED',blocker=str(error))
                 continue
             if all(n['status'] == 'completed' for n in nodes):

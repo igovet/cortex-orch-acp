@@ -152,14 +152,14 @@ def test_a_non_transient_launch_failure_is_not_retried(tmp_path):
     assert "Retry" not in "".join(chunks)
 
 
-def test_an_authentication_failure_is_not_retried(tmp_path):
+def test_an_authentication_failure_is_retried_only_once(tmp_path):
     runtime, engine, _, task_id = _runtime(
         tmp_path, failure=lambda: EngineProtocolError(-32000, "Authentication required", None), failures=5)
 
-    with pytest.raises(EngineProtocolError):
+    with pytest.raises(StoreError, match="engine_authentication_required.*codex login"):
         runtime.start_prompt(task_id, "s1", "Hello.", lambda _t: True, threading.Event())
 
-    assert engine.coordinator_opens == 1
+    assert engine.coordinator_opens == 2
 
 
 def test_a_cancel_during_the_retry_delay_ends_the_wait(tmp_path):

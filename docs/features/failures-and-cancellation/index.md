@@ -120,7 +120,7 @@ failure more than 10 minutes after the previous one starts a new streak.
   failures are never retried, because starting again cannot help:
   - a structured route refusal (exhausted plan, rate limit, unavailable
     model);
-  - an authorization loss, provider restriction, refusal or cancellation;
+  - a provider restriction, refusal or cancellation;
   - a rejected configuration;
   - a validation or authorization `PortableError`, such as a missing launch
     command.
@@ -141,6 +141,69 @@ failure more than 10 minutes after the previous one starts a new streak.
   process, so an idle scheduler pass costs no extra read; a restarted
   runtime retries the node at once. The chat shows that wait as a card
   titled `Retry N: <node> — the worker's engine failed`.
+
+### Native authentication loss
+
+A positively classified native-account auth failure has a separate **one-shot,
+same-route** recovery path. Cortex terminates the owned engine process and
+requires observed absence before launching a replacement, allowing the native
+CLI to re-read its own account state. Cortex neither reads/copies token values
+nor calls a login, token-refresh, usage prompt or keepalive command.
+
+- **Coordinator launch and turn:** the allowance is committed before teardown
+  as a `task_events` progress event with kind `COORDINATOR_AUTH_RETRY`. Launch
+  and turn share that fence, including after runtime recovery. Only a successful
+  prompt records `COORDINATOR_AUTH_RECOVERED` and ends the episode; a successful
+  open alone does not reset it. A second auth failure retains
+  `COORDINATOR_AUTH_BLOCKED`, checked before another launch during recovery.
+  An explicitly identified new user input may make one manual-login probe
+  (`COORDINATOR_AUTH_PROBE`), without replenishing the automatic retry allowance.
+- **Worker:** `retry_lost` reconciles action receipts, confirms process absence
+  and revokes the old channel before making the node pending. The
+  `ASSIGNMENT_RETRIED` event commits `auth_retry=true` with that state change.
+  One allowance applies to a node/plan revision, including runtime restarts.
+  The replacement pins the previous audited connection, engine, model and effort
+  and still passes current dispatch authorization. Missing or no-longer-authorized
+  route identity blocks rather than choosing another account.
+- Both paths use the existing retry window/backoff. Auth replacement is not a
+  quality retry and does not raise model tier or authorize fallback. Rate-limit
+  and provider-restriction behavior is unchanged.
+- A turn with observed prose/tools or changed coordinator state is not blindly
+  replayed. Worker replay additionally requires an explicitly safe first-turn
+  failure; an auth loss during a later continuation blocks. Unknown process exit
+  or incomplete action receipts still block replacement.
+
+If the replacement also loses authentication, Cortex stops automatic recovery
+and shows `engine_authentication_required`, directing the user to
+`claude /login` or `codex login` before resuming. Unsafe replay and an exhausted
+retry window also stop visibly. There is no automatic alternate route or
+escalation for this blocker. Restarting can repair stale in-memory account state;
+it does not guarantee renewal of an expired or revoked native login.
+
+### Opt-in native CLI login keepalive (outside the runtime)
+
+`scripts/cortex_auth_keepalive.py` is a standalone operational script, not
+runtime behavior: the Cortex runtime never invokes it, and installing its
+optional `systemd --user` timer (`scripts/systemd/`) is a manual owner
+choice this repository never performs automatically. Run manually or on a
+timer, it checks, per engine, at most one zero-cost refresh-forcing command
+a prior investigation proved does not make a paid call; if no such command
+is proven for an engine it reports that engine `unsupported` rather than
+guessing one or falling back to a real model prompt. As of this writing no
+zero-cost refresh-forcing command is proven for either the installed
+Claude Code CLI or the installed Codex CLI (installed-CLI `--help` text
+describes status/login display only, never a proven refresh or
+persistence), so both engines currently report `unsupported`.
+
+It never reads, copies or prints a credential/token value, and never logs
+or persists a command's stdout/stderr (only the bare exit code is
+observed): a sanitized `engine`/`status` (`ok`/`needs-login`/`unsupported`/
+`error`)/`exit_code`/`detail` JSON line is all it prints. The process exits
+non-zero exactly when a configured engine reports `needs-login` or `error`,
+so a `systemd` timer surfaces a real re-login need in `journalctl` without
+ever attempting one itself. See `scripts/systemd/README.md` for the manual
+install/uninstall steps and `tests/test_auth_keepalive.py` for its
+mocked-subprocess coverage.
 
 ### Project scans outside the store's write lock
 

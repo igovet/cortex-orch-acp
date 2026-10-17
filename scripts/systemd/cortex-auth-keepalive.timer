@@ -1,0 +1,15 @@
+# Template `systemd --user` timer pairing with cortex-auth-keepalive.service.
+# Runs the opt-in keepalive check every few hours. This file is a template
+# only: nothing in this repository installs, enables or starts it
+# automatically. See scripts/systemd/README.md for install/uninstall steps.
+
+[Unit]
+Description=Run the Cortex native CLI auth keepalive check periodically
+
+[Timer]
+OnBootSec=15min
+OnUnitActiveSec=4h
+Persistent=true
+
+[Install]
+WantedBy=timers.target

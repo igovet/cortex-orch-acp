@@ -84,6 +84,14 @@ the existing ACP assistant-message path and retained pipeline, not a new host AP
 on completion the stored synthesis -- runtime-composed or the coordinator's
 `synthesis_submit` text with its "Not verified" list -- is sent as an assistant
 message before the completion label, so the chat never ends with the bare label.
+Once coordinator synthesis commits, the controller withholds later engine prose
+for that turn (streamed deltas and final-only text), including paraphrases, rather
+than displaying it alongside the stored synthesis. The commit, not a tool title or
+callback ordering, establishes this boundary: synthesis leaves the task in
+`RECONCILING` until completion checks finish. A rejected submission does not mute
+text; an exact retry does not release it. Already accepted prose/redactor tails
+still flush, so this is not semantic deduplication of earlier messages. A new
+engine turn resets the display guard; completion and disclosure gates are unchanged.
 The `answer_submit`/`synthesis_submit` `text` descriptions and the coordinator's per-turn
 language directive ask for readable Markdown (a short conclusion first, then paragraphs,
 headings, lists and code spans) rather than one unbroken block; this is model

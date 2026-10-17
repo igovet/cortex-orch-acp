@@ -1237,6 +1237,11 @@ class EngineSessionManagerAdapter:
                     self._managers.pop(attempt_id, None)
                     self._reservations.pop(attempt_id, None)
                     self._workspace_locks.pop(attempt_id, None)
+            from ..engine.auth_recovery import is_auth_loss
+            if is_worker and is_auth_loss(error):
+                # session/new can fail before the ordinary post-open audit.
+                # Retain the exact attempted identity for its same-route retry.
+                self._record_route_audit(record, task_id, attempt_id, launch)
             if is_worker and manager is not None:
                 self._record_dispatch_route_failure(error, record, route_model, task_id, attempt_id)
             raise
@@ -2037,7 +2042,34 @@ class EngineSessionManagerAdapter:
         (``routing.auto_route``): the role's tier, the models the engines
         actually advertised, how much of each account's plan is left, and
         which routes ``routing.availability`` records as unavailable.
-        An already-resolved route (mixed-team profile, fallback) wins."""
+        An already-resolved route (mixed-team profile, fallback) wins, except
+        that a native-auth replacement must retain its prior exact identity."""
+        if launch.get('assignment_id') and launch.get('task_id') and launch.get('attempt_id') and self._store is not None:
+            from ..orchestration.auth_recovery import worker_route
+            previous = worker_route(self._store, launch['task_id'], launch['attempt_id'])
+            if previous is not None:
+                # Revalidate this exact identity below; never choose an alternate
+                # account/model on an auth retry, even if automatic ranking moved.
+                from ..engine.auth_recovery import login_blocker
+                from ..contracts import StoreError
+                configuration = self._dispatch_configuration(launch)
+                if configuration is None:
+                    raise StoreError(login_blocker(previous['engine']) + ' Route authorization is unavailable.')
+                revision, profile = configuration
+                entries = self._automatic_route_entries(revision, profile, launch.get('role_id'))
+                matches = [e for e in entries if e.connection_id == previous['connection_id']
+                           and e.route.engine == previous['engine'] and e.route.model == previous['model']]
+                if len(matches) != 1:
+                    raise StoreError(login_blocker(previous['engine']) + ' Previous route is no longer authorized.')
+                detail = json.loads(previous['decision_detail_json'])
+                launch.pop('route_override', None)
+                launch.update(resolved_connection_id=previous['connection_id'],
+                              resolved_model=previous['model'], resolved_route_id=matches[0].route.id,
+                              route_basis='auto:pin')
+                if detail.get('effort'):
+                    launch['parameters'] = dict(launch.get('parameters') or {}, effort=detail['effort'])
+                    launch['effort_source'] = 'auth_recovery'
+                return
         if not launch.get('assignment_id') or launch.get('route_override') or launch.get('resolved_connection_id'):
             return
         role = launch.get('role_id')
@@ -3799,6 +3831,9 @@ class EngineSessionManagerAdapter:
             # route so the node's retry is routed elsewhere, and fail the
             # turn under a name that says so. Any other protocol error
             # propagates exactly as before.
+            from ..engine.auth_recovery import is_auth_loss
+            if is_auth_loss(error):
+                raise EngineTurnFailed("authorization_loss") from error
             failure = failure_classification.route_failure(error)
             route = self._attempt_routes.get(attempt_id)
             if failure is None or route is None or self._store is None or task_id is None:

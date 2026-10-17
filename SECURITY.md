@@ -18,6 +18,29 @@ for exact paths, artifact-test limits and the next upstream-fix decision.
 
 ## Current ACP boundary (1.0.0)
 
+Native auth-loss recovery replaces only an owned engine process on its existing
+account/model, after the normal observed-exit and replay-safety gates. Durable
+one-shot fences survive runtime recovery; a repeated auth failure blocks for
+manual `claude /login` or `codex login`, never automatic provider fallback or
+model escalation. No token values are read/copied and no login/refresh/keepalive
+command is run by the runtime itself. This can reload native account state, not
+guarantee token renewal.
+See [authentication recovery](docs/features/failures-and-cancellation/index.md#native-authentication-loss).
+
+Separately, the opt-in `scripts/cortex_auth_keepalive.py` tool (never invoked
+by the runtime; optional `systemd --user` templates under `scripts/systemd/`
+are installed only by explicit owner action) runs, per engine, at most one
+zero-cost refresh-forcing command a prior investigation proved does not make
+a paid call; an engine without such a proven command is reported
+`unsupported`, never guessed. It never reads, copies or prints a
+credential/token value and never logs or persists a command's stdout/stderr,
+only its bare exit code, as a sanitized `ok`/`needs-login`/`unsupported`/
+`error` status. As of this writing both the installed Claude Code CLI and
+the installed Codex CLI report `unsupported`, because no zero-cost refresh
+command is proven for either (installed-CLI `--help` text describes
+status/login display only, never a proven refresh or persistence). See
+[opt-in login keepalive](docs/features/failures-and-cancellation/index.md#opt-in-native-cli-login-keepalive-outside-the-runtime).
+
 Localized final-answer disclosure descriptions replace raw check names only in
 display. Original names remain unchanged in retained structured evidence and
 gap matching; a translated description cannot satisfy a missing exact-name
@@ -282,6 +305,12 @@ received in that turn is suppressed, not released by delayed tool callbacks.
 This is a display boundary only: it does not cancel engine actions, rewrite
 history, or grant authority. Ambiguous late pre-question text may also be omitted;
 see [question display ordering](docs/features/orchestration/index.md#plan-submission-and-coordinator-polling).
+The same display-only principle applies after coordinator synthesis commits:
+later engine prose in that turn is withheld, while the stored synthesis and its
+required disclosures remain the runtime's final output. Rejected submissions
+do not mute text. This neither stops later tool actions nor changes completion
+authority, replayed history, or the content of native engine transcripts. See
+[synthesis display](docs/features/task-lifecycle/index.md#runtime-composed-synthesis).
 
 Successful runtime recovery clears the exhausted planning-cycle counter, not
 question identities or answer receipts. Only the normal exact-answer transition

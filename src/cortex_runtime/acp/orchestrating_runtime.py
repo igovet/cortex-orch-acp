@@ -1054,8 +1054,8 @@ def _describe_failure(error: BaseException) -> dict:
     return described
 
 
-# Never cured by starting the engine again: the account, the model, the
-# configuration or the user said no.
+# Excluded from ordinary transient retries: native auth has its own durable
+# one-shot replacement; other account/model/configuration/user refusals stop.
 _NOT_TRANSIENT_CLASSES = frozenset({
     failure_classification.AUTHORIZATION_LOSS, failure_classification.PROVIDER_RESTRICTION,
     failure_classification.REFUSAL, failure_classification.CANCELLATION,
@@ -2087,6 +2087,7 @@ class OrchestratingRuntime:
 
     def _ensure_coordinator_retrying(
         self, task_id: str, emit_update: Callable[[str], bool], cancel_event: threading.Event, language: str,
+        *, auth_probe_source: tuple[str, str] | None = None,
     ) -> tuple[ChannelContext, str]:
         """:meth:`_ensure_coordinator`, started again while the engine fails
         to start for a transient reason (see :func:`_transient_launch_failure`).
@@ -2097,17 +2098,38 @@ class OrchestratingRuntime:
         again is safe: a failed open leaves the provisioned attempt, which
         the next call fences and replaces through coordinator recovery --
         the same path a user's own resend takes."""
+        from ..engine.auth_recovery import is_auth_loss, login_blocker
+        from ..orchestration.auth_recovery import claim_coordinator, check_coordinator
+        try:
+            check_coordinator(self._store, task_id, auth_probe_source)
+        except StoreError as blocker:
+            emit_update("\n\n" + str(blocker) + "\n")
+            raise
         failures: list[float] = []
         while True:
             try:
                 opened = self._ensure_coordinator(task_id)
             except Exception as error:
-                if (getattr(error, "cortex_launch_stage", None) != "engine_launch"
-                        or cancel_event.is_set() or not _transient_launch_failure(error)):
+                if getattr(error, "cortex_launch_stage", None) != "engine_launch" or cancel_event.is_set():
+                    raise
+                auth_loss = is_auth_loss(error)
+                if auth_loss:
+                    try:
+                        claim_coordinator(self._store, task_id)
+                    except StoreError as blocker:
+                        emit_update("\n\n" + str(blocker) + "\n")
+                        raise blocker from error
+                    finally:
+                        self._evict_coordinator_session(task_id, "authorization_loss")
+                elif not _transient_launch_failure(error):
                     raise
                 failures.append(time.monotonic())
                 decision = retry_policy.windowed_retry(failures, time.monotonic(), self._engine_retry_window)
                 cause = _describe_failure(error)["error"]
+                if auth_loss and not decision.may_retry:
+                    blocker = StoreError(login_blocker())
+                    emit_update("\n\n" + str(blocker) + "\n")
+                    raise blocker from error
                 if not decision.may_retry:
                     self._emit_retry_notice(
                         task_id, emit_update, language, "engine_retry.gave_up",
@@ -2772,6 +2794,7 @@ class OrchestratingRuntime:
         pre_existing = acp_steering.orchestration_exists(self._store, task_id)
         channel, session_ref = self._ensure_coordinator_retrying(
             task_id, emit_update, cancel_event, self._resolve_language(task_id, content_hint=content),
+            auth_probe_source=(source_origin, source_event_id) if source_origin is not None and source_event_id is not None else None,
         )
         # Runtime-owned record, no model turn spent on it (see
         # pipeline_bootstrap module docstring). Always called -- never
@@ -5603,7 +5626,12 @@ class OrchestratingRuntime:
                           or getattr(error, "message", None)
                           or "")
                 failed = dict(error=code, role=payload["role"], detail=_bounded_detail(detail))
-                if not isinstance(error, StoreError) and _transient_launch_failure(error):
+                from ..engine.auth_recovery import is_auth_loss
+                if is_auth_loss(error):
+                    failed["failure_class"] = failure_classification.AUTHORIZATION_LOSS
+                    failed["detail"] = "Native engine authentication was lost."
+                    failed["auth_replay_safe"] = True
+                elif not isinstance(error, StoreError) and _transient_launch_failure(error):
                     # An engine that failed to start (a bare "Internal
                     # error", a crash): infrastructure, retried with the
                     # bounded window (orchestration.recovery.retry_lost).
@@ -5671,6 +5699,7 @@ class OrchestratingRuntime:
         answer_delivery = None
         while True:
             turn_sequence += 1
+            worker_prompt_started = False
             try:
                 # A fallback opens a new attempt. Rebuild its bounded catalog
                 # against current project docs while keeping the assignment
@@ -6019,6 +6048,7 @@ class OrchestratingRuntime:
                             return
                 worker_outcome = None
                 try:
+                    worker_prompt_started = True
                     worker_outcome = self._engine.prompt(
                         result.engine_session_ref, delivered_prompt, cancel_event,
                         on_delta=_on_worker_delta, on_tool_call=_on_worker_tool_call,
@@ -6351,7 +6381,9 @@ class OrchestratingRuntime:
                             self._append_assignment_failure_if_unreported(
                                 task_id, assignment_ref,
                                 dict(error=f"engine_failure:{failure.kind}", kind=failure.kind,
-                                     failure_class=failure_class),
+                                     failure_class=failure_class,
+                                     auth_replay_safe=(worker_prompt_started and turn_sequence == 1 and not worker_delta_seen
+                                                       and not worker_message_boundary_refs)),
                             )
                     # Else: _attempt_worker_route_fallback already recorded
                     # the concrete refusal reason itself -- never a second,

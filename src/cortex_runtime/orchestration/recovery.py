@@ -131,11 +131,13 @@ def retry_lost(runtime,task_id,node):
         failure=db.execute("SELECT payload_json FROM task_events WHERE task_id=? AND assignment_ref=? AND event_type='assignment_failed' AND superseded=0 ORDER BY id DESC LIMIT 1",(task_id,assignment)).fetchone()
         payload=json.loads(failure[0]) if failure else {}
         reason=payload.get('error','')
+        if reason.startswith('engine_authentication_required:'):
+            raise StoreError(reason)
         # A refused fallback after a capacity wait is transient: the same
         # route serves again once a slot frees, so it is retried (bounded by
         # MAX_ATTEMPT_RETRIES) instead of failing the worker for good.
         transient = payload.get('failure_class')=='capacity_unavailable'
-        if reason in {'refusal','authorization_loss','provider_restriction','cancellation'} or (
+        if reason in {'refusal','provider_restriction','cancellation'} or (
                 reason.startswith('fallback_refused:') and not transient):
             raise StoreError('worker_failure_not_retryable:'+reason)
         if reason in ROUTING_REFUSALS:
@@ -150,6 +152,20 @@ def retry_lost(runtime,task_id,node):
         retried=[p for p in map(lambda row: json.loads(row[0]),attempts)
                  if p.get('node')==node['node_id'] and p.get('revision')==node['revision']]
         failure_class=payload.get('failure_class')
+        auth_loss=failure_class=='authorization_loss' or reason=='authorization_loss'
+        if auth_loss:
+            from ..engine.auth_recovery import login_blocker
+            audit = db.execute("SELECT engine FROM attempt_route_audit WHERE task_id=? AND attempt_id=? "
+                               "ORDER BY rowid DESC LIMIT 1",
+                               (task_id, provision['attempt_id'])).fetchone() if provision else None
+            if not payload.get('auth_replay_safe', False):
+                raise StoreError(login_blocker(audit['engine'] if audit else None) + ' Turn effects prevent safe replay.')
+            if any(p.get('auth_retry') for p in retried):
+                raise StoreError(login_blocker(audit['engine'] if audit else None))
+            if unavailable is not None:
+                # An auth replacement never authorizes another route.
+                raise StoreError(login_blocker(audit['engine'] if audit else None))
+            failure_class='authorization_loss'
         if not failure_class and (failure is None or reason=='recovery_worker_lost'):
             # No failure event at all means the worker's process vanished
             # (host disconnect, runtime restart) before it could report or
@@ -158,7 +174,7 @@ def retry_lost(runtime,task_id,node):
             # about the work.
             failure_class=WORKER_LOST_FAILURE_CLASS
         infrastructure=unavailable is None and failure_class in _INFRASTRUCTURE_RETRY_CLASSES
-        count=sum(not p.get('route_failure') and not p.get('failed_at') for p in retried)
+        count=sum(not p.get('route_failure') and not p.get('failed_at') and not p.get('auth_retry') for p in retried)
         backoff=None
         if unavailable is not None:
             if sum(bool(p.get('route_failure')) for p in retried)>=MAX_ROUTE_RETRIES:
@@ -170,6 +186,8 @@ def retry_lost(runtime,task_id,node):
                 sorted([p['failed_at'] for p in retried if p.get('failed_at')]+[failed_at]), failed_at,
                 getattr(runtime, '_engine_retry_window', None) or retry_policy.default_window())
             if not decision.may_retry:
+                if auth_loss:
+                    raise StoreError(login_blocker(audit['engine'] if audit else None))
                 raise StoreError('worker_retry_limit'+(':'+reason if reason else ''))
             backoff=dict(failed_at=failed_at, retry_not_before=failed_at+decision.delay_seconds,
                          infrastructure_retry=decision.retry_number)
@@ -196,6 +214,8 @@ def retry_lost(runtime,task_id,node):
             # The scheduler holds the node until retry_not_before
             # (TaskMachine._ready_nodes) and the chat shows the wait.
             retry.update(backoff, reason=reason or failure_class)
+        if auth_loss:
+            retry['auth_retry']=True
         if failure_class:
             # Durably carries why this retry happened, so routing
             # (orchestration.state.attempt_routing) can tell an
