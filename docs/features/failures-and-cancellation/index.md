@@ -267,6 +267,21 @@ Reservations release only on observed process absence. Unknown engine liveness
 remains a blocker; a terminal event alone never proves process exit. Terminal card
 updates are retained and replayed if the client disconnected before seeing them.
 
+### Stopping one worker command
+
+Stopping a brokered gateway command is distinct from task or assignment
+cancellation. A user-originated `/cortex-kill` input, Paseo command-stop control,
+or owner-local CLI request targets one exact command reference and requires a
+reason. Cortex stores the request and the runner terminates that command's
+process group. The worker receives a structured `stopped_by_user` outcome and
+the reason, while the assignment remains active; the worker is instructed to
+continue without rerunning the same command unchanged. The command activity is a
+failure (not a successful command or a cancelled worker). A durable request
+acknowledgement is not proof of termination: confirmed termination is recorded
+only after kill and wait, while a command that exited first is recorded as a
+missed stop. An unresolved started-command record after a runtime crash is not
+proof that its operating-system process is still alive.
+
 ## Terminal resource cleanup
 
 `OrchestratingRuntime.start_prompt` and explicit `answer_question` turns check

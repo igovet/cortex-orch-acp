@@ -5923,15 +5923,48 @@ class OrchestratingRuntime:
                                               raw_output=None) -> None:
                     """Append one worker project/MCP call to its lifecycle card."""
                     from .read_history import failed_read_output, metadata_only_read
-                    if metadata_only_read(title, kind, raw_input):
-                        raw_output = (failed_read_output(raw_output, content)
-                                      if _acp_tool_call_status(status) == 'failed' else None)
-                        content = None
+                    from ..orchestration.command_control import confirmed_stop, stopped_receipt
                     # The call is recorded for the worker panel only. It is
                     # never a sibling card in the coordinator's timeline.
                     if feed is None or not ref:
                         return
                     tool_ref = str(ref)
+                    stopped = None
+                    # Only a command_run/outside_command call can ever be a real
+                    # stop target; restricting to that kind keeps a forged shape
+                    # embedded in, say, a project_read's own file content from
+                    # even being considered.
+                    if kind == "execute":
+                        candidate = stopped_receipt(raw_output) or stopped_receipt(content)
+                        if candidate:
+                            # The candidate's shape alone is never trust: a worker
+                            # can fabricate it (for example by writing and reading
+                            # back a crafted file naming any tool_call_ref it
+                            # likes). Only a real durable COMMAND_STOPPED record
+                            # for that exact ref counts, and only its own reason
+                            # -- never the candidate's claimed stop_reason text --
+                            # is ever shown. ``attribute_to`` binds that one real
+                            # stop, on first use, to this exact row's own display
+                            # identity, so a worker cannot replay a genuinely
+                            # stopped command's already-known reason onto a
+                            # second, unrelated row by echoing its receipt into
+                            # that row's own output.
+                            with self._store.connection() as _db:
+                                confirmed = confirmed_stop(_db, task_id, candidate.get("tool_call_ref"),
+                                                           attribute_to=tool_ref)
+                            if confirmed:
+                                stopped = dict(candidate, stop_reason=confirmed["reason"])
+                    if stopped:
+                        # Some engines label every successful MCP transport reply
+                        # completed. The command itself failed; retain that fact on
+                        # the existing command row and emit the worker-card update.
+                        status = "failed"
+                        title = f"Stopped by user: {stopped['stop_reason']}"
+                        raw_output = stopped
+                    if metadata_only_read(title, kind, raw_input):
+                        raw_output = (failed_read_output(raw_output, content)
+                                      if _acp_tool_call_status(status) == 'failed' else None)
+                        content = None
                     first = tool_ref not in worker_tool_cards
                     if first:
                         worker_tool_cards.add(tool_ref)

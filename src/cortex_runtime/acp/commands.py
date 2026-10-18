@@ -50,6 +50,7 @@ CORTEX_SETUP = "cortex-setup"
 # channel.
 CORTEX_NEW_TASK = "cortex-new-task"
 CORTEX_STOP = "cortex-stop"
+CORTEX_KILL = "cortex-kill"
 CORTEX_FINISH = "cortex-finish"
 CORTEX_ANSWER = "cortex-answer"
 CORTEX_LANGUAGE = "cortex-language"
@@ -76,6 +77,7 @@ _TRIGGERS: tuple[tuple[str, str], ...] = (
     ("/cortex-effort", CORTEX_EFFORT),
     ("/cortex-setup", CORTEX_SETUP),
     ("/cortex-stop", CORTEX_STOP),
+    ("/cortex-kill", CORTEX_KILL),
     ("/cortex-finish", CORTEX_FINISH),
     ("/cortex-answer", CORTEX_ANSWER),
 )
@@ -87,6 +89,7 @@ AVAILABLE_COMMANDS: tuple[dict, ...] = (
     dict(name=CORTEX_EFFORT, description="Select the thought_level (reasoning effort) value for the current model.", input=dict(hint="<value>")),
     dict(name=CORTEX_SETUP, description="Show onboarding guidance for connecting a model provider. Never changes anything, never prints a secret.", input=None),
     dict(name=CORTEX_NEW_TASK, description="Start a brand-new, separate task without touching the current active task.", input=dict(hint="<task text>")),
+    dict(name=CORTEX_KILL, description="Stop one running worker command with a reason; the worker continues.", input=dict(hint="<command-ref> <reason>")),
     dict(name=CORTEX_STOP, description="Urgently stop the active task: cancels every assignment, queued open, and open question. Does not restart through a later message.", input=None),
     dict(name=CORTEX_FINISH, description="Close this task now at the user's request, without claiming unfinished review, verification, or synthesis passed. Cancels active work.", input=None),
     dict(name=CORTEX_ANSWER, description="Answer one specific open coordinator question by its listed number (use when more than one question is open).", input=dict(hint="<question-number> <answer text>")),

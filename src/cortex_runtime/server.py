@@ -154,7 +154,8 @@ def _reply_content(data):
         content = [dict(type='image', data=data['image_base64'], mimeType=data['mime']),
                    dict(type='text', text=json.dumps(metadata, ensure_ascii=False))]
         return dict(content=content, structuredContent=metadata, isError=False)
-    return dict(content=[dict(type='text',text=json.dumps(data,ensure_ascii=False))], structuredContent=data, isError=False)
+    return dict(content=[dict(type='text',text=json.dumps(data,ensure_ascii=False))], structuredContent=data,
+                isError=isinstance(data, dict) and data.get('failure') == 'stopped_by_user')
 
 
 class ProtocolError(Exception):

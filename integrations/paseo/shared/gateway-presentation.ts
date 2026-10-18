@@ -46,6 +46,7 @@ export function gatewayPresentation(title: string, rawInput: unknown, rawOutput:
     ? envelope.tool : title.match(/^(?:mcp\.cortex\.|mcp__cortex__)([a-z_]+)$/)?.[1];
   const kinds: Record<string, "read" | "edit" | "shell"> = {
     project_read: "read", project_edit: "edit", project_write: "edit", draft_write: "edit", command_run: "shell",
+    outside_command: "shell",
   };
   if (!name || !kinds[name]) return null;
   const input = envelope.server === "cortex" ? fields(envelope.arguments) : envelope;

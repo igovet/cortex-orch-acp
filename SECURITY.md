@@ -505,6 +505,20 @@ patch sites block launch. This is explicit compatibility support for one
 release, not permission to launch arbitrary future adapters. No native account
 or production Paseo installation is changed by the compatibility patch.
 
+### User-only stop control for brokered worker commands
+
+Stopping a worker command is available only through explicit user-originated
+paths: the bound ACP `cortex_stop_command` configuration input (including the
+`/cortex-kill` command), the Paseo worker-panel control, or the owner-local
+`scripts/cortex_commands.py` utility. No model-facing MCP stop tool is exposed;
+model-originated tool dispatch cannot claim the owner origin. Requests are bound
+to an exact brokered gateway command and require a reason. This is not a hostile
+same-user-code boundary: native Codex `apply_patch` and OpenCode `execute` actions
+are not controlled by this command-stop feature, and local processes outside the
+gateway are not claimed to be isolated by it. A request acknowledgement means
+only that the durable request was accepted, not that the process has exited.
+See [command-stop controls](docs/features/steering-and-questions/index.md#stop-one-worker-command-with-a-reason).
+
 Each channel-bound engine process runs in a Linux `bwrap` engine jail. Codex's
 remaining native tools stay jail-bounded: the per-process launcher and the
 verified private adapter's session-config patch both force Codex's own

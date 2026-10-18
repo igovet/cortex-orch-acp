@@ -87,6 +87,40 @@ idempotent, fences late runtime results and prevents completion. Engine process
 termination and ownership checks remain necessary; a cancellation event by itself
 does not prove that an external process is gone.
 
+### Stop one worker command with a reason
+
+`/cortex-kill <command-ref> <reason>` requests stopping one exact running
+worker command without cancelling the assignment or current turn. In the Paseo
+CLI, send the same slash command as a user chat message with `paseo send` to the
+bound chat. The required reason is delivered to that worker; it continues its assignment with that
+constraint and must not repeat the same command unchanged. The command ref is
+the gateway command identity shown in the Paseo worker panel or returned by the
+local listing command. Cortex records the request durably; acknowledgement means
+requested, not that the process has already exited. A race with natural command
+exit is reported as missed/already finished, not as a successful stop.
+
+In Paseo Desktop, open the **Workers** panel, select the worker, then use
+**Running commands → Stop** on the command. Enter a reason and confirm; the
+control remains in the worker panel, not on a native chat tool card. The panel
+shows sending, requested, refused or unconfirmed states and the terminal command
+row displays **Stopped by user** with its reason. Rendered Desktop behavior has
+not been live-qualified for this change.
+
+For a local owner CLI, inspect or stop commands without launching a model:
+
+```bash
+python3 -B scripts/cortex_commands.py list --project-root <project-path> --task-id <task-id>
+python3 -B scripts/cortex_commands.py stop --project-root <project-path> --task-id <task-id> --tool-call-ref <gateway-command-ref> --reason "<reason>"
+```
+
+The list includes only live or unresolved brokered worker commands and a
+scrubbed, bounded argument summary. A stop request must identify one command and
+include non-whitespace reason text (up to 2000 Unicode characters). The CLI
+prints JSON and returns a nonzero exit for refusals. These controls cover
+Cortex gateway commands, not native Codex `apply_patch` or OpenCode `execute`
+actions. The Paseo UI and both CLI routes have automated coverage, but live
+Paseo Desktop/CLI qualification was not run.
+
 `/cortex-finish` (with no argument) is the explicit owner command to close the
 current task **without** claiming unfinished checks passed. It captures the
 command as a real user source before the runtime's stop marker, uses the same

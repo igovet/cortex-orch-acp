@@ -7,6 +7,8 @@ import { readPipeline } from "./shared/pipeline.js";
 import { getWorkerResults } from "./server/worker-results.js";
 import { readWorkerResults } from "./shared/worker-results.js";
 import { instrumentHandler } from "./server/invoke-diagnostics.js";
+import { readRunningCommands, requestCommandStop } from "./shared/command-stop.js";
+import { getRunningCommands, stopCommandHandler } from "./server/command-stop.js";
 import { discoverOpenCode, onboardOpenCode, readConfig, refreshModelCatalog, updateConfig } from "./shared/config.js";
 import { discoverOpenCodeHandler, onboardOpenCodeHandler, readConfigHandler, refreshModelCatalogHandler, updateConfigHandler } from "./server/config.js";
 
@@ -15,6 +17,9 @@ export default function contribute(server: PluginServerContext) {
   server.handle(readWorkerHistory, instrumentHandler(readWorkerHistory.name, getWorkerHistory));
   server.handle(readPipeline, instrumentHandler(readPipeline.name, getPipeline));
   server.handle(readWorkerResults, instrumentHandler(readWorkerResults.name, getWorkerResults));
+  // A user's stop of one running worker command, with a required reason.
+  server.handle(readRunningCommands, instrumentHandler(readRunningCommands.name, getRunningCommands));
+  server.handle(requestCommandStop, instrumentHandler(requestCommandStop.name, stopCommandHandler));
   // Cortex owner configuration (the Cortex JSON files and project store are
   // the source of truth; Paseo's plugin settings document is not used).
   server.handle(readConfig, instrumentHandler(readConfig.name, readConfigHandler));

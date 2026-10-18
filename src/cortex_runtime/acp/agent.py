@@ -1458,6 +1458,11 @@ class Agent:
         if session is None:
             raise RpcError(-32602, "Unknown sessionId.")
         cancel_event = threading.Event()
+        # A command stop is control input, not another prompt or task cancel.
+        # Handle it even while a model turn/question remains in flight.
+        if recognized is not None and recognized[0] == acp_commands.CORTEX_KILL:
+            self._run_command_body(request_id, session_id, session, recognized, cancel_event)
+            return
         background = None
         with session["lock"]:
             if session.get("cancelling"):
@@ -2042,6 +2047,19 @@ class Agent:
             self.transport.send_response(protocol.result_response(request_id, protocol.prompt_result(reason)))
             observe(self.environ, "session/prompt", "command:" + command_id)
 
+        if command_id == acp_commands.CORTEX_KILL:
+            parts = argument.split(None, 1)
+            if len(parts) != 2:
+                _reply("Usage: /cortex-kill <command-ref> <reason>")
+                return
+            try:
+                self._request_command_stop(session_id, session, parts[0], parts[1],
+                                           f"slash:{uuid.uuid4()}", origin="acp_command")
+            except StoreError as error:
+                _reply(f"Command stop refused: {error}. {error.correction or ''}".rstrip())
+                return
+            _reply("Stop requested. The runner will confirm whether it stopped the command; the worker continues.")
+            return
         if command_id == acp_commands.CORTEX_CLEAR:
             parsed = acp_commands.parse_clear_argument(argument)
             if parsed is None:
@@ -2641,6 +2659,23 @@ class Agent:
                 and self.environ.get("CORTEX_PASEO_QUESTION_UI") == "1"):
             self._answer_question_card(request_id, session_id, session, value)
             return
+        if config_id == "cortex_stop_command":
+            if kind != "value_id" or self.environ.get("CORTEX_PASEO_QUESTION_UI") != "1":
+                raise RpcError(-32602, "Command stops require the enabled user config channel.")
+            try:
+                payload = json.loads(value)
+                if not isinstance(payload, dict) or set(payload) != {"toolCallRef", "reason", "requestKey"}:
+                    raise ValueError
+                self._request_command_stop(session_id, session, payload["toolCallRef"], payload["reason"],
+                                           payload["requestKey"], origin="paseo_config")
+            except (ValueError, TypeError, KeyError):
+                raise RpcError(-32602, "A command stop needs toolCallRef, reason and requestKey.") from None
+            except StoreError as error:
+                raise RpcError(-32602, f"Command stop refused: {error}. {error.correction or ''}".rstrip()) from None
+            options = self._config_options_for_session(session, self._store_for(session["project"]))
+            self.transport.send_response(protocol.result_response(
+                request_id, protocol.set_config_option_response(options)))
+            return
         if (config_id == "cortex_queued_message" and kind == "value_id"
                 and self.environ.get("CORTEX_PASEO_QUESTION_UI") == "1"):
             self._queue_paseo_message(request_id, session_id, session, value)
@@ -2655,6 +2690,30 @@ class Agent:
             return
         self.transport.send_response(protocol.result_response(request_id, protocol.set_config_option_response(options)))
         self.transport.send_notification(protocol.config_option_update(session_id, options))
+
+    def _request_command_stop(self, session_id, session, ref, reason, request_key, *, origin):
+        from ..orchestration.command_control import request_stop, validate_stop
+        reason = validate_stop(ref, reason, request_key)
+        task_id = session.get("task_id")
+        if not task_id:
+            raise StoreError("command_stop_no_task")
+        store = self._store_for(session["project"])
+        with store.connection() as db:
+            current = _current_owner_epoch_obj(db, task_id)
+        if current is not None and session.get("owner_epoch") != current:
+            owned = getattr(self.runtime, "active_session_owner_epoch", lambda *_: None)(
+                session["project"], task_id, session_id)
+            if owned != current.epoch:
+                raise StoreError("command_stop_session_not_owner")
+            session["owner_epoch"] = current
+        if current is None:
+            raise StoreError("command_stop_session_not_owner")
+        if origin == "acp_command":
+            source_event = SimpleNamespace(origin=f"acp-command:{session_id}",
+                                           event_id=f"command-stop:{request_key}")
+            append_source_event(store, source_event, f"/cortex-kill {ref} {reason}", task_id)
+        return request_stop(store, task_id, ref, reason, request_key, origin=origin,
+                            session_id=session_id, owner_epoch=current.epoch)
 
     def _start_queued_message_continuation(self, session_id, session):
         """Resume a queued message that crossed the just-finished turn boundary."""

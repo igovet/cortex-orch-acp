@@ -448,6 +448,13 @@ masked, including nested ones; `.codex` and `.claude` are ordinary project paths
 the project's `.git` is visible
 (see below). A command runs until it exits unless it sets `timeout_seconds`, and
 is killed when authority is revoked. There is no unsandboxed fallback.
+
+An owner can also request stopping one exact running brokered worker command
+with a reason, through `/cortex-kill`, the Paseo worker-panel control, or the
+owner-local command CLI. This is a user-originated command-control path, not a
+new model tool and not task cancellation: the command runner records and handles
+the request, then reports a stopped command as a failed activity with the reason
+while the worker continues. See [stopping one worker command](../steering-and-questions/index.md#stop-one-worker-command-with-a-reason).
 `timeout_seconds` advertises only a minimum of 1 on `command_run` and
 `outside_command`. Ordinary `command_run` is unbounded when timeout is omitted;
 exceptional `outside_command` preserves its 600-second default. An enormous value is not refused on the field —

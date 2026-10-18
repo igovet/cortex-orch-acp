@@ -490,11 +490,15 @@ def _command_cwd(root, args, development):
 
 
 def _run_command_process(store, channel, launch, fds, output, effects, limit, *,
-                         policy=None, env=None, cwd=None, directory=None):
+                         policy=None, env=None, cwd=None, directory=None,
+                         tool_call_ref=None, argv=None, operation='command_run'):
     """One authority-watched process group for both command routes."""
     from .sandbox import compact_argv
     proc = None
     failure = None
+    stop = None
+    stopped = False
+    from .command_control import pending_stop
     try:
         with store.connection() as db:
             db.execute('BEGIN IMMEDIATE')
@@ -522,12 +526,19 @@ def _run_command_process(store, channel, launch, fds, output, effects, limit, *,
             finally:
                 for extra in set(actual_fds) - set(fds):
                     os.close(extra)
+            if tool_call_ref:
+                event(db, channel.task_id, 'COMMAND_PROCESS_STARTED',
+                      dict(tool_call_ref=tool_call_ref, operation=operation, argv=list(argv or launch)),
+                      channel.channel_id)
             db.commit()
         deadline = None if limit is None else time.monotonic() + limit
         while proc.poll() is None:
             if deadline is not None and time.monotonic() >= deadline:
                 failure = 'timeout'; break
             with store.connection() as db:
+                stop = pending_stop(db, channel.task_id, tool_call_ref)
+                if stop:
+                    break
                 try:
                     granted, _ = _authority(db, channel)
                 except StoreError:
@@ -544,9 +555,27 @@ def _run_command_process(store, channel, launch, fds, output, effects, limit, *,
                 import signal
                 try:
                     os.killpg(proc.pid, signal.SIGKILL)
+                    stopped = stop is not None
                 except ProcessLookupError:
                     pass
             proc.wait()
+            if stopped:
+                failure = 'stopped_by_user'
+                effects['stop_reason'] = stop['reason']
+            if tool_call_ref:
+                with store.connection() as db:
+                    db.execute('BEGIN IMMEDIATE')
+                    # A stop can arrive between the last poll and natural exit.
+                    requested = pending_stop(db, channel.task_id, tool_call_ref)
+                    detail = dict(tool_call_ref=tool_call_ref, exit_code=proc.returncode,
+                                  failure=failure)
+                    event(db, channel.task_id, 'COMMAND_PROCESS_EXITED', detail, channel.channel_id)
+                    if requested:
+                        event(db, channel.task_id, 'COMMAND_STOPPED' if stopped else 'COMMAND_STOP_MISSED',
+                              dict(detail, reason=requested['reason'], attempt_id=channel.attempt_id,
+                                   outcome='stopped_by_user' if stopped else failure or 'already_finished'),
+                              channel.channel_id)
+                    db.commit()
     return proc.returncode, failure
 
 
@@ -628,7 +657,7 @@ def _command(store,channel,root,scopes,args,ref,owner,effects):
                 # read-only command's profile does not depend on the mode, so
                 # a switch never kills it.
                 policy=policy if development and not read_only else None,
-                directory=(cwd, cwd_fd))
+                directory=(cwd, cwd_fd), tool_call_ref=ref, argv=args['argv'])
         output.seek(0)
         data=output.read()
     if scopes:
@@ -649,13 +678,14 @@ def _command(store,channel,root,scopes,args,ref,owner,effects):
     from ..delegation.evidence import record_tool_result_observed
     record_tool_result_observed(store,channel.task_id,channel.attempt_id,ref,'execute','Gateway command',
                                 'completed' if code==0 and not failure else 'failed')
+    from .command_control import stopped_fields
     # argv is retained so a check citing this receipt can be matched against it.
     return dict(tool_call_ref=ref,argv=list(args['argv']),cwd=cwd,
                 profile=(READ_ONLY_COMMAND_PROFILE if read_only else
                          HOST_WRITABLE_COMMAND_PROFILE if development else GUARDED_COMMAND_PROFILE),
                 access_policy=policy,
-                exit_code=code,complete=failure is None,failure=failure,
-                **_inline_output(data),large_output_id=retained['id'])
+                exit_code=code,complete=failure in (None, 'stopped_by_user'),failure=failure,
+                **stopped_fields(effects), **_inline_output(data),large_output_id=retained['id'])
 
 
 def _inline_output(data):
@@ -746,7 +776,8 @@ def _outside(store,channel,root,operation,args,ref,owner,effects):
             code, failure = _run_command_process(
                 store, channel, args['argv'], (), output, effects,
                 clamp_timeout(args.get('timeout_seconds')) or 600,
-                env=environment, cwd=str(resolved))
+                env=environment, cwd=str(resolved), tool_call_ref=ref,
+                argv=args['argv'], operation='outside_command')
         except OSError as error:
             if effects['possible']:
                 raise  # A late error cannot be relabelled as a non-start.
@@ -760,9 +791,12 @@ def _outside(store,channel,root,operation,args,ref,owner,effects):
     from ..recovery.large_output_store import persist_output
     retained=persist_output(store,task_id=channel.task_id,owner_scope=owner,source_kind='terminal',
                             source_ref=ref,data=data,exit_code=code,failure=failure)
+    from .command_control import stopped_fields
     # cwd completes the command's identity (delegation.evidence.command_identity).
-    return dict(tool_call_ref=ref,argv=list(args['argv']),cwd=str(resolved),exit_code=code,complete=failure is None,
-                failure=failure,profile='outside_confirmed',**_inline_output(data),large_output_id=retained['id'])
+    return dict(tool_call_ref=ref,argv=list(args['argv']),cwd=str(resolved),exit_code=code,
+                complete=failure in (None, 'stopped_by_user'), failure=failure,
+                profile='outside_confirmed',**stopped_fields(effects),
+                **_inline_output(data),large_output_id=retained['id'])
 
 
 def _record_gateway_refusal(store, channel, operation, error):

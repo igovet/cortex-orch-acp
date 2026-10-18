@@ -16,6 +16,8 @@ import { workerPopoverStatus } from "./worker-popover-status.js";
 import { openWorkspaceFile } from "./open-workspace-file.ts";
 import { UsageMeter } from "./usage-meter.tsx";
 import { MarkdownText } from "./markdown-text.tsx";
+import { RunningCommands } from "./command-stop-panel.tsx";
+import { stoppedCommand } from "./command-stop.ts";
 
 const styles = {
   title: { fontSize: 18, lineHeight: 24, fontWeight: "600" as const },
@@ -141,7 +143,16 @@ export function TranscriptEvent({ event, expanded, onToggle, onOpenFile, theme }
   // it printed nothing; the row label shows only a clipped command.
   const canExpand = semantics.expandable && Boolean(shellCommand || output || error || hasEdit || diffs.length || inputText || outputText);
   const running = event.status === "in_progress" || event.status === "pending" || event.status === "running";
-  return <Badge theme={theme} icon={chatToolIcon(event)} label={row.label} summary={row.summary} expanded={expanded && canExpand}
+  // A command the user stopped: Cortex's own status/title say so, set
+  // only once the server has confirmed a genuine stop for this exact row
+  // (see command_control.confirmed_stop). The reason always comes from
+  // that trusted title; the row's own raw output/content is consulted
+  // only for the attempted command text, since a worker can fabricate
+  // that shape in its own tool output (never for the reason itself).
+  const stopped = stoppedCommand(event.status, event.title, event.raw_output ?? event.output)
+    ?? stoppedCommand(event.status, event.title, event.error);
+  const badge = <Badge theme={theme} icon={chatToolIcon(event)} label={stopped ? "Stopped by user" : row.label}
+    summary={stopped ? shellCommand ?? stopped.command ?? row.summary : row.summary} expanded={expanded && canExpand}
     onToggle={canExpand ? onToggle : undefined} loading={running} failed={failure}
     onOpenFile={onOpenFile && row.summary && (row.label === "Read" || row.label === "Edit") ? () => onOpenFile(row.summary!) : undefined}>
     {/* As in the chat, an edit's diff fills the detail edge to edge; the
@@ -159,6 +170,14 @@ export function TranscriptEvent({ event, expanded, onToggle, onOpenFile, theme }
       {shownError && <Text selectable style={[styles.muted, { color: theme.colors.statusDanger }]}>{shownError}</Text>}
     </View>}
   </Badge>;
+  if (!stopped) return badge;
+  return <View>
+    {badge}
+    <Text selectable accessibilityLabel={`Stopped by user. Reason: ${stopped.reason}`}
+      style={[styles.muted, { color: theme.colors.statusWarning, paddingLeft: 38, paddingRight: 8, marginTop: -2, marginBottom: 6 }]}>
+      {`Reason: ${stopped.reason}`}
+    </Text>
+  </View>;
 }
 
 type ScrollOffsets = React.MutableRefObject<Record<string, number>>;
@@ -412,6 +431,9 @@ export function WorkerPanel({ theme, host, layout, workspaceId, agentId, navigat
           </ScrollView>}
           {selectedAttempt.agentId && navigation?.openAgent && <Pressable accessibilityRole="button" onPress={() => navigation.openAgent({ agentId: selectedAttempt.agentId! })}><Text style={[styles.muted, { color: theme.colors.accent }]}>Open full chat ↗</Text></Pressable>}
         </View>
+        {selectedAssignment?.assignmentRef && selectedAssignment.attempts[selectedAssignment.attempts.length - 1]?.id === selectedAttempt.id
+          && <RunningCommands theme={theme} workspaceId={workspaceId} agentId={agentId} assignmentRef={selectedAssignment.assignmentRef}
+            active={workerSection(selectedAttempt.status, selectedAttempt.events.length) === "active"} />}
         <View style={{ gap: 2 }}>
           {selectedAttempt.failureReason && <Text selectable style={[styles.body, { color: selectedAttempt.status === "interrupted" ? theme.colors.statusWarning : theme.colors.statusDanger }]}>{selectedAttempt.failureReason}</Text>}
           {groupToolRuns(transcript).map((item) => item.kind === "group"

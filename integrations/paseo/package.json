@@ -26,7 +26,8 @@
     "test:config": "node --experimental-strip-types server/config.test.ts",
     "test:settings": "node --experimental-strip-types client/settings-model.test.ts && node --experimental-strip-types client/settings-panel.test.ts",
     "test:error-boundary": "node --experimental-strip-types client/plugin-error-boundary.test.ts",
-    "test:client-bundle": "node --experimental-strip-types client/client-bundle.test.ts"
+    "test:client-bundle": "node --experimental-strip-types client/client-bundle.test.ts",
+    "test:command-stop": "node --experimental-strip-types server/command-stop.test.ts && node --experimental-strip-types client/command-stop.test.ts"
   },
   "devDependencies": {
     "@getpaseo/client": "^0.9.1",

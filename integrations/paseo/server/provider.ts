@@ -23,6 +23,14 @@ import {
 } from "../shared/question-marker.ts";
 import { parseWorkerResult } from "../shared/worker-timeline-result.ts";
 import { WorkerCardFence } from "./worker-card-fence.ts";
+import {
+  COMMAND_STOP_ACK_TIMEOUT_MS,
+  commandStopSetting,
+  registerCommandStopSession,
+  unconfirmedStopError,
+  unregisterCommandStopSessions,
+  type CommandStopPayload,
+} from "./command-stop-registry.ts";
 
 type CommandArgv = [string, ...string[]];
 
@@ -763,6 +771,17 @@ export function emulatesSteer(offered: readonly string[], supported: readonly st
  * while a turn is already active. */
 export const QUEUED_MESSAGE_CONFIG_ID = "cortex_queued_message";
 const QUEUE_REQUEST_PREFIX = "cortex-queued-message:";
+/** Request ids of this bridge's own user command-stop configure requests. */
+const STOP_REQUEST_PREFIX = "cortex-stop-command:";
+
+/** The native ACP session id the stock bridge persists for a session. */
+function nativeSessionIdOf(persistence: unknown): string | null {
+  if (!persistence || typeof persistence !== "object") return null;
+  const data = (persistence as { data?: unknown }).data;
+  if (!data || typeof data !== "object" || Array.isArray(data)) return null;
+  const sessionId = (data as { sessionId?: unknown }).sessionId;
+  return typeof sessionId === "string" && sessionId ? sessionId : null;
+}
 
 /** One ACP-shaped content block Cortex can durably queue and later resolve
  * (see ``acp.protocol.content_blocks_to_text`` /
@@ -980,6 +999,11 @@ export function wrapCortexConnection(
   // never Paseo's to see.
   const answerRequests = new Map<string, { resolve: () => void; reject: (error: Error) => void }>();
   const queueRequests = new Map<string, { resolve: () => void; reject: (error: Error) => void }>();
+  const stopRequests = new Map<string, { resolve: () => void; reject: (error: Error) => void }>();
+  // Native ACP session id of each open session, for the command-stop
+  // registry; this connection owns its registrations.
+  const nativeSessions = new Map<string, string>();
+  const stopOwner = {};
   const activeTurns = new Map<string, string>();
   const lastTurns = new Map<string, string>();
   const explainedNativeQueue = new Set<string>();
@@ -991,11 +1015,27 @@ export function wrapCortexConnection(
       }
       else if (activeTurns.get(event.sessionId) === event.turnId) activeTurns.delete(event.sessionId);
     }
+    if (event.type === "session.opened" || event.type === "session.persistence") {
+      const native = nativeSessionIdOf(event.persistence);
+      if (native) {
+        const boundary = event.sessionId;
+        const previous = nativeSessions.get(boundary);
+        if (previous && previous !== native) unregisterCommandStopSessions(stopOwner, previous);
+        nativeSessions.set(boundary, native);
+        registerCommandStopSession(native, stopOwner, (payload) => sendCommandStop(boundary, payload));
+      }
+    }
+    if (event.type === "session.closed" || event.type === "session.runtime_failed") {
+      const native = nativeSessions.get(event.sessionId);
+      nativeSessions.delete(event.sessionId);
+      if (native) unregisterCommandStopSessions(stopOwner, native);
+    }
     if (event.type !== "request.completed" && event.type !== "request.failed") return;
-    const pending = answerRequests.get(event.requestId) ?? queueRequests.get(event.requestId);
+    const pending = answerRequests.get(event.requestId) ?? queueRequests.get(event.requestId) ?? stopRequests.get(event.requestId);
     if (!pending) return;
     answerRequests.delete(event.requestId);
     queueRequests.delete(event.requestId);
+    stopRequests.delete(event.requestId);
     if (event.type === "request.completed") pending.resolve();
     else pending.reject(new Error(event.error.message));
   });
@@ -1027,6 +1067,33 @@ export function wrapCortexConnection(
       item: { type: "user_message", id: `cortex-question-answer:${questionId}`, text: formatQuestionAnswer(questionText, answer) },
     } as ProviderEvent));
     await connection.send({ ...input, response: { behavior: "deny" } });
+  }
+  /**
+   * A user's request to stop one running worker command, sent through the
+   * same concurrent config channel as a queued message, so neither the
+   * running turn nor any worker is cancelled. Resolves only once Cortex has
+   * durably recorded the request; Cortex's refusal rejects with its reason.
+   */
+  async function sendCommandStop(sessionId: string, payload: CommandStopPayload) {
+    const requestId = `${STOP_REQUEST_PREFIX}${randomUUID()}`;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const delivered = new Promise<void>((resolve, reject) => {
+      stopRequests.set(requestId, { resolve, reject });
+      timer = setTimeout(() => reject(unconfirmedStopError()), COMMAND_STOP_ACK_TIMEOUT_MS);
+    });
+    // Observed below; a rejection while the send itself is in flight must
+    // not surface as an unhandled rejection in the daemon.
+    delivered.catch(() => {});
+    try {
+      await connection.send({
+        type: "session.configure", requestId, sessionId,
+        changes: { settings: commandStopSetting(payload) },
+      });
+      await delivered;
+    } finally {
+      stopRequests.delete(requestId);
+      clearTimeout(timer);
+    }
   }
   async function retireForm(sessionId: string, state: QuestionFormState) {
     for (const permissionId of state.permissions) {
@@ -1265,6 +1332,10 @@ export function wrapCortexConnection(
       for (const pending of answerRequests.values()) pending.reject(new Error("Cortex connection closed before answer acknowledgment"));
       answerRequests.clear();
       queueRequests.clear();
+      for (const pending of stopRequests.values()) pending.reject(new Error("Cortex connection closed before the stop request was acknowledged"));
+      stopRequests.clear();
+      unregisterCommandStopSessions(stopOwner);
+      nativeSessions.clear();
       activeTurns.clear();
       lastTurns.clear();
       explainedNativeQueue.clear();
@@ -1282,7 +1353,8 @@ export function wrapCortexConnection(
       const handle = (event: ProviderEvent) => {
         if (!visibleTimeline(event)) return;
         if ((event.type === "request.completed" || event.type === "request.failed")
-          && (event.requestId.startsWith(ANSWER_REQUEST_PREFIX) || event.requestId.startsWith(QUEUE_REQUEST_PREFIX))) return;
+          && (event.requestId.startsWith(ANSWER_REQUEST_PREFIX) || event.requestId.startsWith(QUEUE_REQUEST_PREFIX)
+            || event.requestId.startsWith(STOP_REQUEST_PREFIX))) return;
         if (event.type === "session.opened") {
           openedSessions.add(event.sessionId);
           listener(steer && !event.capabilities.includes("prompt.steer")
