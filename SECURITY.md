@@ -143,9 +143,15 @@ acceptance API. It requires completed nodes, first-pass independent APPROVE and
 complete exact final-verification receipts on the current digest, no open
 evidence gaps or pending decisions/input, and no repair or historical replan.
 Existing report-integrity, project-drift and worker-session absence gates still
-apply. Metadata and escaped attributed report-summary quotations are the only
-text sources; quoted prose is not promoted to verified semantic fact. Composition
-and completion commit atomically. Registry termination bookkeeping reuses that
+apply. Changed paths and escaped, attributed execution-summary quotations are the
+only variable text sources; quoted prose is not promoted to verified semantic fact.
+Backticks, control/format characters and Unicode line/paragraph separators in
+filenames retain coordinator reconciliation rather than entering raw inline code.
+Summary whitespace is flattened and Markdown punctuation escaped, including HTML
+syntax. Missing/blank or overlong summaries and non-whitespace control/format
+characters also retain coordinator reconciliation; outcomes are not truncated.
+This is a text-composition boundary, not a qualification of every client renderer.
+Composition and completion commit atomically. Registry termination bookkeeping reuses that
 same SQLite writer; worker liveness and cancellation are rechecked before commit.
 Before composition, the controller may await already-owned post-result cleanup
 for at most ten seconds outside the SQLite transaction; it neither terminates

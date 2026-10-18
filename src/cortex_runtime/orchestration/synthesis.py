@@ -1,5 +1,7 @@
 """Runtime-only synthesis for a fully closed, unrepaired reviewed plan."""
 import json
+import string
+import unicodedata
 from urllib.parse import quote
 
 from ..contracts import StoreError
@@ -9,6 +11,7 @@ from .reviewer_handoff import path_metadata
 from .worker_waits import ACTIVE, projection
 
 MAX_SYNTHESIS_BYTES = 48 * 1024
+MAX_OUTCOME_CHARS = 1600
 
 # Deterministic reason codes the runtime-composed synthesis gate may record on
 # decline. Eligibility itself is unchanged; this only names, for a durable
@@ -177,39 +180,39 @@ def compose(db, task, language):
         return None
     changed = [dict(path=p, before=before.get(p), after=current.get(p))
                for p in sorted(set(before) | set(current)) if before.get(p) != current.get(p)]
-    labels = (dict(title='Итог составлен runtime', note='Метаданные проверены runtime. Цитаты — заявления авторов отчётов, не выводы runtime.',
-                   paths='Изменённые пути', checks='Проверки и receipts', verification='Итоговая проверка',
-                   reports='Отчёты и цитаты авторов', review='Вердикт независимого ревью')
-              if language == 'ru' else
-              dict(title='Runtime-composed synthesis', note='Metadata verified by the runtime. Quotations are report authors’ statements, not runtime judgements.',
-                   paths='Changed paths', checks='Checks and receipts', verification='Final verification',
-                   reports='Reports and attributed quotations', review='Independent review verdict'))
-    lines = ['# ' + labels['title'], labels['note'], '## ' + labels['paths'],
-             ('Сравнение: исходное состояние → одобренный digest проекта.' if language == 'ru' else
-              'Comparison: execution baseline → approved project digest.'),
-             _metadata(dict(revision=revision, project_digest=observed['dirty_digest'], changed_paths=changed)),
-             '## ' + labels['checks']]
-    for node, check, outcome, assessment, closure in checks:
-        lines.append(_metadata(dict(node=node, submitted_name=check['name'], submitted_outcome=check['outcome'],
-                                current_outcome='passed' if closure else outcome['outcome'],
-                                receipt_ref=check.get('tool_call_ref'),
-                                closed_by=closure or outcome['closed_by'],
-                                retracted_by=outcome.get('retracted_by'), invocation_error=check.get('invocation_error'),
-                                digest_binding='not established for reviewed digest' if not closure else 'current approved digest')))
-    lines.extend(['## ' + labels['review'], 'APPROVE', '## ' + labels['verification']])
-    for argv, ref in runs:
-        lines.append(_metadata(dict(argv=argv, exit_code=0, complete=True, command_ref=ref)))
-    lines.append('## ' + labels['reports'])
-    for node in nodes:
-        result = json.loads(node['result_json'])
-        report = db.execute("SELECT filename FROM reports WHERE task_id=? AND id=?",
-                            (task_id, result.get('report_ref'))).fetchone()
-        if not report or not isinstance(result.get('summary'), str):
-            return None
-        link = quote('.cortex/' + task_id + '/' + report['filename'], safe='/')
-        lines.extend([_metadata(dict(node=node['node_id'], role=node['role'], report_ref=result['report_ref'])),
-                      '[' + result['report_ref'] + '](' + link + ')',
-                      '> ```json\n> ' + _data(result['summary']) + '\n> ```'])
+    paths = [entry['path'] for entry in changed]
+    # Single-backtick spans cannot contain backticks or control characters.
+    # Leave unusual names to coordinator synthesis rather than render them raw.
+    if any(c == '`' or unicodedata.category(c)[0] == 'C'
+           or c in '\u2028\u2029' for path in paths for c in path):
+        return None
+    outcomes = [json.loads(n['result_json']).get('summary')
+                for n in nodes if n['stage'] == 'execution']
+    if not outcomes or any(not isinstance(s, str) or not s.strip() for s in outcomes):
+        return None
+    if sum(len(s) for s in outcomes) > MAX_OUTCOME_CHARS:
+        return None  # Never discard a result or a caveat to shorten the answer.
+    if any(unicodedata.category(c)[0] == 'C' and not c.isspace()
+           for s in outcomes for c in s):
+        return None
+    # Quote only execution outcomes, not review prose, reports or check evidence.
+    # Flatten whitespace and escape all Markdown punctuation, including HTML.
+    escape = str.maketrans({c: '\\' + c for c in string.punctuation})
+    quoted = ['> ' + ' '.join(s.split()).translate(escape) for s in outcomes]
+    if language == 'ru':
+        lines = ['# Готово', 'Работа завершена.']
+        if paths:
+            lines.append('Изменены файлы: ' + ', '.join('`' + path + '`' for path in paths) + '.')
+        else:
+            lines.append('Файлы менять не пришлось.')
+    else:
+        lines = ['# Done', 'The requested work is done.']
+        if paths:
+            lines.append('Files changed: ' + ', '.join('`' + path + '`' for path in paths) + '.')
+        else:
+            lines.append('No files needed changes.')
+    lines[2:2] = [('Результат работы:' if language == 'ru' else 'Work summary:')
+                  + '\n\n' + '\n\n'.join(quoted)]
     text = '\n\n'.join(lines)
     if len(text.encode('utf-8')) > MAX_SYNTHESIS_BYTES:
         return None

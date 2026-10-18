@@ -56,9 +56,10 @@ See [cleanup and disconnects](docs/features/failures-and-cancellation/index.md#t
 On a fully closed, unrepaired first-review path, Cortex can complete with a
 [runtime-composed synthesis](docs/features/task-lifecycle/index.md#runtime-composed-synthesis)
 instead of another coordinator model turn. Independent review, digest-bound
-verification and evidence-gap gates remain mandatory. The final text separates
-runtime metadata from quoted, attributed report summaries; pending decisions,
-gaps or replans retain coordinator reconciliation. Registry exit bookkeeping shares
+verification and evidence-gap gates remain mandatory. The short final answer
+includes the submitted work summary and changed file paths, without internal check
+records. Missing or lengthy summaries and filenames unsafe for inline code keep
+the coordinator path, as do pending decisions, gaps or replans. Registry exit bookkeeping shares
 the completion transaction instead of opening a second SQLite writer; a restart
 from unfinished reconciliation retries the same gates without completing twice.
 Before composition, an already-owned post-result settlement/exit cleanup gets

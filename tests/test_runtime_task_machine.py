@@ -878,7 +878,7 @@ def test_worker_finishing_during_a_scheduler_pass_is_not_treated_as_lost(tmp_pat
             "('RETURNED_TO_COORDINATOR','ASSIGNMENT_RETRIED')", (task.task_id,))]
     assert returned == []
     assert calls == ['coordinator', 'worker', 'worker']
-    assert final['synthesis'].startswith('# Runtime-composed synthesis')
+    assert final['synthesis'].startswith('# Done')
 
 
 def test_question_requires_exact_real_answer_and_retries_share_identity(machine):

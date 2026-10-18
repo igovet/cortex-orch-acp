@@ -335,8 +335,8 @@ lost with its host -- a durable `host_disconnected` record (see
 the attempt, its owning Cortex process is provably gone with no terminal
 event, or recovery wrote it off as `recovery_worker_lost` (including the
 replan cancellation after that) -- the same correction instead reads the
-localized `Interrupted when the host connection closed; no result yet. The
-next message reconciles this worker from saved state.` ACP has no
+localized plain-language line `Work stopped before it was finished. I’ll check
+what was completed.` ACP has no
 interrupted status, so the card status is still `failed`; the title gains the
 suffix ` · Interrupted` (after any earlier status suffix is removed) and the
 update carries `_meta.cortexWorkerInterrupted: {"reason": "host_disconnected"}`.

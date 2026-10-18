@@ -29,9 +29,10 @@ pytestmark = pytest.mark.usefixtures('unjailed_gateway_command')
 ARGV = ['python3', '-B', '-c', 'print("observed verification")']
 
 
-def submit(store, worker, *, checks=(), verdict=None):
+def submit(store, worker, *, checks=(), verdict=None,
+           summary='Submitted summary <script> ```\n[link](unsafe)'):
     args = dict(report=publish_fixture_report(store, worker, 'REPORT_BODY_MUST_NOT_APPEAR'),
-                summary='Submitted summary <script> ```\n[link](unsafe)',
+                summary=summary,
                 checks=list(checks), request_key='result')
     if verdict:
         args['verdict'] = verdict
@@ -70,7 +71,8 @@ def ready(tmp_path, request):
     if failed_check:
         worker_checks.insert(0, dict(name='scoped test', outcome='failed',
                                     tool_call_ref=failed_check['tool_call_ref']))
-    submit(store, worker, checks=worker_checks)
+    submit(store, worker, checks=worker_checks,
+           summary='Enable the feature in Settings to use it')
     reviewer, review_ref = provision_fixture(store, coordinator, key='review', role='code-reviewer')
     with store.connection() as db:
         db.execute("UPDATE runtime_nodes SET stage='review' WHERE assignment_ref=?", (review_ref,))
@@ -92,27 +94,30 @@ def kinds(machine, task):
                                        (task.task_id,))]
 
 
-def test_metadata_only_attribution_language_and_replay(ready):
-    machine, task, _, _, receipt, observation = ready
+def test_plain_language_completion_and_replay(ready):
+    machine, task, _, _, _, _ = ready
     with machine.store.connection() as db:
         db.execute('BEGIN')
         row = db.execute('SELECT * FROM runtime_tasks WHERE task_id=?', (task.task_id,)).fetchone()
         en = synthesis.compose(db, row, 'en')
         ru = synthesis.compose(db, row, 'ru')
         assert synthesis.compose(db, row, 'en') == en
-    assert en.startswith('# Runtime-composed synthesis')
-    assert ru.startswith('# Итог составлен runtime')
+    assert en.startswith('# Done')
+    assert ru.startswith('# Готово')
     for text in (en, ru):
-        assert 'feature.py' in text and 'APPROVE' in text
-        assert receipt['tool_call_ref'] in text
-        assert observation['checks'][0]['command_ref'] in text
-        assert 'worker-backend-dev' in text and 'worker-code-reviewer' in text
-        assert 'Submitted summary' in text and '> ```json' in text
-        assert '<script>' not in text and '\\u003cscript\\u003e' in text
+        assert 'feature.py' in text
+        assert '> Enable the feature in Settings to use it' in text
+        assert 'The requested work is done' in text or 'Работа завершена' in text
+        assert 'review' not in text.lower() and 'check' not in text.lower() and 'провер' not in text
+        assert 'tool_call_ref' not in text and 'command_ref' not in text
+        assert 'project_digest' not in text and 'receipt' not in text
+        assert 'APPROVE' not in text and 'Submitted summary' not in text
+        assert '<script>' not in text
         assert 'REPORT_BODY_MUST_NOT_APPEAR' not in text
         assert 'FILE_CONTENT_MUST_NOT_APPEAR' not in text
         assert 'observed verification\n' not in text  # no terminal output body
-        assert '](' + '.cortex/' + task.task_id + '/' in text
+        assert 'worker-backend-dev' not in text and 'worker-code-reviewer' not in text
+        assert 'report_ref' not in text and 'verification' not in text
     first = synthesis.complete(machine, task.task_id, 'ru', lambda db: True)
     assert first == ru
     # A recovered process reads the committed result; it never recomposes it.
@@ -134,7 +139,97 @@ def test_metadata_only_attribution_language_and_replay(ready):
         runtime.shutdown()
     # Own paragraph after any streamed coordinator prose.
     assert visible.count('\n\n' + ru) == 1
+    assert '> Enable the feature in Settings to use it' in ''.join(visible)
     assert kinds(machine, task).count('SYNTHESIS_RUNTIME_COMPOSED') == 1
+
+
+@pytest.mark.parametrize('language', ['en', 'ru'])
+@pytest.mark.parametrize('path', [
+    'notes`\n\n# FORGED HEADING\n\n`x.txt',
+    'tick`name.txt', 'line\nname.txt', 'tab\tname.txt',
+    'bidi\u202ename.txt', 'line\u2028name.txt', 'paragraph\u2029name.txt',
+    'carriage\rname.txt',
+])
+def test_unsafe_filename_keeps_coordinator_reconciliation(ready, monkeypatch, language, path):
+    machine, task, *_ = ready
+    # Exercise the rendering boundary after the real evidence gates; path_metadata
+    # intentionally preserves these valid POSIX names.
+    monkeypatch.setattr(synthesis, 'path_metadata', lambda observed: {path: dict(kind='f')})
+    assert synthesis.complete(machine, task.task_id, language, lambda db: True) is None
+    assert machine.get_state(task.task_id) == 'RECONCILING'
+    assert machine.context(task.task_id)['synthesis'] is None
+    assert 'SYNTHESIS_RUNTIME_COMPOSED' not in kinds(machine, task)
+
+
+@pytest.mark.parametrize('language', ['en', 'ru'])
+def test_filename_markdown_punctuation_stays_in_code(ready, monkeypatch, language):
+    machine, task, *_ = ready
+    path = '[notes](https://invalid.example)/<b>*_#.txt'
+    monkeypatch.setattr(synthesis, 'path_metadata', lambda observed: {path: dict(kind='f')})
+    with machine.store.connection() as db:
+        row = db.execute('SELECT * FROM runtime_tasks WHERE task_id=?', (task.task_id,)).fetchone()
+        text = synthesis.compose(db, row, language)
+    assert '`' + path + '`' in text
+
+
+@pytest.mark.parametrize('summary', [None, '', ' ', 'x' * 1601, 'bad\x00text', 'bad\u202etext'])
+def test_missing_or_long_outcome_keeps_coordinator_reconciliation(ready, summary):
+    machine, task, assignment, *_ = ready
+    with machine.store.connection() as db:
+        result = json.loads(db.execute('SELECT result_json FROM runtime_nodes WHERE assignment_ref=?',
+                                      (assignment,)).fetchone()[0])
+        result['summary'] = summary
+        db.execute('UPDATE runtime_nodes SET result_json=? WHERE assignment_ref=?',
+                   (json.dumps(result), assignment))
+        db.commit()
+    assert synthesis.complete(machine, task.task_id, 'en', lambda db: True) is None
+    assert machine.get_state(task.task_id) == 'RECONCILING'
+    assert machine.context(task.task_id)['synthesis'] is None
+
+
+@pytest.mark.parametrize('language', ['en', 'ru'])
+def test_outcome_prose_cannot_add_markdown_or_html(ready, language):
+    machine, task, assignment, *_ = ready
+    with machine.store.connection() as db:
+        result = json.loads(db.execute('SELECT result_json FROM runtime_nodes WHERE assignment_ref=?',
+                                      (assignment,)).fetchone()[0])
+        result['summary'] = 'Use <script>\n\n# Heading [link](https://invalid.example) `code`'
+        db.execute('UPDATE runtime_nodes SET result_json=? WHERE assignment_ref=?',
+                   (json.dumps(result), assignment))
+        row = db.execute('SELECT * FROM runtime_tasks WHERE task_id=?', (task.task_id,)).fetchone()
+        text = synthesis.compose(db, row, language)
+    assert r'> Use \<script\> \# Heading \[link\]\(https\:\/\/invalid\.example\) \`code\`' in text
+    assert '\n\n# Heading' not in text
+    assert '<script>' not in text
+
+
+def test_all_execution_outcomes_survive_without_review_prose(ready, monkeypatch):
+    machine, task, *_ = ready
+    original = synthesis.MAX_OUTCOME_CHARS
+    with machine.store.connection() as db:
+        row = dict(db.execute('SELECT * FROM runtime_tasks WHERE task_id=?', (task.task_id,)).fetchone())
+        nodes = [dict(n) for n in db.execute('SELECT * FROM runtime_nodes WHERE task_id=? ORDER BY rowid',
+                                           (task.task_id,))]
+        extra = dict(nodes[0])
+        extra.update(node_id='extra', result_json=json.dumps(dict(summary='Keep the old setting off')))
+        nodes.append(extra)
+        plan = json.loads(row['plan_json'])
+        plan['tasks'].append(dict(id='extra'))
+        row['plan_json'] = json.dumps(plan)
+
+        class WithExtraOutcome:
+            def execute(self, sql, args=()):
+                if sql.startswith('SELECT * FROM runtime_nodes'):
+                    return SimpleNamespace(fetchall=lambda: nodes)
+                return db.execute(sql, args)
+
+        text = synthesis.compose(WithExtraOutcome(), row, 'en')
+        assert '> Enable the feature in Settings to use it' in text
+        assert '> Keep the old setting off' in text
+        assert 'Submitted summary' not in text  # review-only prose
+        monkeypatch.setattr(synthesis, 'MAX_OUTCOME_CHARS', len('Keep the old setting off'))
+        assert synthesis.compose(WithExtraOutcome(), row, 'en') is None
+        monkeypatch.setattr(synthesis, 'MAX_OUTCOME_CHARS', original)
 
 
 @pytest.mark.parametrize('delivery', ['streamed', 'delayed', 'new_tool', 'final_only', 'no_callbacks',
@@ -388,9 +483,9 @@ def test_exact_deferred_closure_allows_runtime_synthesis(ready):
     check = next(n for n in before['nodes'] if n['assignment_ref'] == assignment)['result']['checks'][0]
     assert check['outcome'] == 'not_run' and check['closed_by'].startswith('verification:')
     text = synthesis.complete(machine, task.task_id, 'en', lambda db: True)
-    assert text and '"submitted_outcome": "not_run"' in text
-    assert '"current_outcome": "passed"' in text
-    assert 'current approved digest' in text
+    assert text and text.startswith('# Done')
+    assert 'submitted_outcome' not in text and 'current_outcome' not in text
+    assert 'current approved digest' not in text
 
 
 @pytest.mark.parametrize('ready', ['closed_failure'], indirect=True)
@@ -400,9 +495,9 @@ def test_exact_failed_check_rerun_keeps_history_and_allows_synthesis(ready):
     checks = next(n for n in before['nodes'] if n['assignment_ref'] == assignment)['result']['checks']
     assert checks[0]['outcome'] == 'failed' and checks[0]['closed_by'] == receipt['tool_call_ref']
     text = synthesis.complete(machine, task.task_id, 'en', lambda db: True)
-    assert text and '"submitted_outcome": "failed"' in text
-    assert '"current_outcome": "passed"' in text
-    assert receipt['tool_call_ref'] in text
+    assert text and text.startswith('# Done')
+    assert 'submitted_outcome' not in text and 'current_outcome' not in text
+    assert receipt['tool_call_ref'] not in text
 
 
 def test_transaction_failure_rolls_back_and_recovery_is_idempotent(ready, monkeypatch):
@@ -531,7 +626,7 @@ def test_controller_skips_reconciliation_only_when_eligible(tmp_path, eligible, 
         assert 'SYNTHESIS_RUNTIME_DECLINED' not in kinds(machine, task)
     if delayed_exit:
         assert kinds(machine, task).index('VERIFICATION_PASSED') < kinds(machine, task).index('TEST_REVIEWER_EXIT')
-    assert any(('Runtime-composed synthesis' if eligible else 'Runtime: COMPLETED') in m for m in messages)
+    assert any(('# Done' if eligible else 'Runtime: COMPLETED') in m for m in messages)
     if not eligible:
         # The coordinator's own synthesis reaches the chat, before the label.
         final = [i for i, m in enumerate(messages) if m.startswith('\n\nCoordinator fallback')]

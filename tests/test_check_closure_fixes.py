@@ -303,9 +303,18 @@ def test_synthesis_shows_retracted_failure_without_counting_it_as_passed(tmp_pat
         row = db.execute("SELECT * FROM runtime_tasks WHERE task_id=?", (task.task_id,)).fetchone()
         text = synthesis.compose(db, row, "en")
     assert text is not None
-    assert '"current_outcome": "retracted"' in text
-    assert '"submitted_outcome": "failed"' in text
-    assert failed in text and passed in text and REASON in text
+    assert text.startswith('# Done')
+    # The plain user-facing text no longer dumps check metadata (receipts,
+    # ids, raw outcomes); that evidence stays in the stored checks/events.
+    # The semantic guarantee under test -- a retracted failure is tracked as
+    # 'retracted', never silently folded into 'passed' -- is verified at the
+    # data layer synthesis itself reads.
+    from cortex_runtime.orchestration.state import synthesis_checks
+    with store.connection() as db:
+        checks_now, _gaps = synthesis_checks(db, task.task_id, row['revision'])
+    outcome = next(current for _, check, current, _, _ in checks_now if check.get('tool_call_ref') == failed)
+    assert outcome['outcome'] == 'retracted'
+    assert failed not in text and passed not in text and REASON not in text
     # Missing correction output later reopens the failure at synthesis, rather
     # than trusting the stored retraction marker.
     with store.connection() as db:

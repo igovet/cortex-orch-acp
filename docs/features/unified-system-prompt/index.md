@@ -81,8 +81,8 @@ environment section unchanged and reorders everything between them into:
    it means and what is needed next; no internal ids, codes, route names or
    receipts in what the reader sees unless asked (a worker keeps exact commands
    and receipts in its report evidence and result fields); describe checks by
-   their consequence. The narration rule for workers and the question rule for
-   the coordinator are unchanged.
+   their consequence. Workers stay silent between tool calls; coordinators keep
+   progress updates to one short, plain line and lead final answers with the result.
 4. **Hard limits**: one list covering scope, refused calls, destructive and
    outward-facing actions, other people's changes, unobserved results, secrets,
    untrusted content, subagents, memory and attribution, and the security-help
@@ -277,7 +277,7 @@ that the runtime withholds the coordinator's text after its own accepted user
 question in the same turn (see
 [orchestration](../orchestration/index.md#plan-submission-and-coordinator-polling)).
 The coordinator's one role-specific communication rule is to write the details
-once before that question and write nothing after it. This is a presentation boundary, not a claim that either model stops generating interim text. A direct 2026-09-28 re-check counted ten between-tool Claude assistant text blocks and one Codex block; an earlier count of 83 Codex blocks conflated reasoning records with visible messages.
+once before that question and write nothing after it. This is a presentation boundary, not a claim that either model stops generating interim text. A direct 2026-09-28 re-check counted ten between-tool Claude assistant text blocks and one Codex block; an earlier count of 83 Codex blocks conflated reasoning records with visible messages. Communication guidance also asks for one short progress line, a brief outcome-first final answer, and only unresolved user-relevant checks; successful checks and internal approvals stay out of the final text.
 
 The attached-server section renders the exact available tools under each MCP
 server name. Cortex MCP owns lifecycle, report reads/publication, conditional

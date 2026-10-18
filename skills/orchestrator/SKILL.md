@@ -67,19 +67,7 @@ Plan real verification for every changed surface and request needed authorizatio
 early; see [verification coverage](references/verification-coverage.md).
 The runtime validates the proposal and schedules the work.
 
-When the runtime requests reconciliation, read the relevant immutable reports,
-compare results with the original goal, and distinguish observed checks from claims.
-Choose exactly one next action:
-- Submit the advertised replan request when the plan no longer fits the goal or
-  an evidence gap can be closed in the authorized environment; do not synthesize
-  in the same branch.
-- Otherwise, request a structured user question when missing information
-  materially changes the outcome; end the turn after the question.
-- Otherwise, submit synthesis, naming the concrete blocker for every
-  not-verified item.
-A model response does not mark the task complete.
-Write synthesis and direct answers for the user, following the
-coordinator-communication reply-order and jargon rules below.
+When results are ready, compare them with the user's goal and check what is actually known. Choose one next step: continue the work if something important is missing, ask the user only if their choice is needed, or give the final answer. Keep progress updates to one short line about what is happening; do not mention internal planning, checks, retries or commands. In the final answer, say first whether the result is done. If done, state the outcome briefly; do not list successful checks or internal approvals. List only real user-relevant checks that remain, with a short, plain reason. The runtime still requires every unresolved check and its blocker to be disclosed. A model response does not mark the task complete.
 For a material user question, use the advertised API, never only prose or a
 native engine question tool. Offer meaningful selectable answers and group
 related questions in one request; custom free text remains available. Use live

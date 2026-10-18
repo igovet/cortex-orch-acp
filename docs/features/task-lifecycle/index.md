@@ -53,12 +53,19 @@ REVIEW_CHANGES_REQUESTED is a repair, not the initial review itself. Verificatio
 failure/revision, reopened work and returns to the coordinator are conservative
 fallbacks too.
 
-The deterministic text contains baseline-to-approved changed-path metadata,
-check receipts and closure attribution, final verification argv/outcomes, and
-linked, quoted worker/reviewer submitted report summaries. Summaries remain
-authors' claims, never runtime semantic judgements; English/Russian labels follow
-the task chat language, while quotations stay untranslated and escaped as data.
-Missing baseline metadata or text over 48 KiB falls back rather than truncating.
+The deterministic user-facing text says the work is done, quotes the submitted
+execution summaries, then lists changed file paths when there are any. Summaries
+are attributed as the work summary, not promoted to runtime-verified semantic
+facts. Their whitespace is flattened and Markdown punctuation escaped; review
+prose, report bodies and internal check records are not included. The runtime
+keeps detailed evidence in the task record and reports. Labels follow the selected
+English or Russian chat language; quoted summaries retain their submitted language.
+Missing/blank summaries, summaries over 1,600 characters in total, or non-whitespace
+control/format characters keep coordinator synthesis rather than discarding result
+content or caveats. Filenames containing backticks, control/format characters or
+Unicode line/paragraph separators also keep coordinator synthesis, so they cannot
+escape the inline-code spans. Missing baseline metadata or final text over 48 KiB
+falls back rather than truncating.
 
 Synthesis, `SYNTHESIS_RUNTIME_COMPOSED` and COMPLETED commit in one transaction,
 under the unchanged report-integrity/project-digest completion gates and confirmed
@@ -93,9 +100,11 @@ text; an exact retry does not release it. Already accepted prose/redactor tails
 still flush, so this is not semantic deduplication of earlier messages. A new
 engine turn resets the display guard; completion and disclosure gates are unchanged.
 The `answer_submit`/`synthesis_submit` `text` descriptions and the coordinator's per-turn
-language directive ask for readable Markdown (a short conclusion first, then paragraphs,
-headings, lists and code spans) rather than one unbroken block; this is model
-guidance, not a runtime-enforced format.
+language directive ask for plain, simple Markdown for an ordinary user: start with the
+answer in one or two short sentences using everyday words and no internal jargon unless
+the user used it, keep it brief, use a few short bullets only when helpful, and backticks
+for paths or commands -- never one unbroken block; this is model guidance, not a
+runtime-enforced format.
 Automated tests cover emission and recovery, not rendered Desktop qualification.
 
 For declines covered by its fixed vocabulary, `orchestration/synthesis.py`
@@ -109,8 +118,8 @@ Its payload carries deterministic codes for the covered failing conditions --
 content) -- as the first covered `reason` plus a `reasons` list. This is not
 an exhaustive explanation of every fallback. The early liveness short-circuit
 records only `worker_live`, without evaluating other reasons. Missing baseline
-comparison metadata and oversized text have no reason code and can return
-without any decline event; post-composition integrity/liveness failure or
+comparison metadata, unsafe filenames, unusable summaries and oversized text
+have no reason code and can return without any decline event; post-composition integrity/liveness failure or
 interruption rolls back without one too. A previously recorded event is not
 updated by later attempts, even if conditions change or composition later succeeds.
 Eligibility itself is unchanged. The event is never written when the

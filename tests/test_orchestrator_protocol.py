@@ -26,7 +26,7 @@ def test_instruction_sources_do_not_recreate_retired_model_authority():
     text=load_role('orchestrator').body_portable
     assert 'runtime owns the task lifecycle' in text
     assert 'A model response does not mark the task complete' in text
-    assert 'immutable reports' in text
+    assert "compare them with the user's goal" in text
 
 
 def test_all_specialists_remain_discoverable_and_reports_remain_selective():
@@ -59,11 +59,11 @@ def test_harvest_activation_is_explicit_and_does_not_bypass_runtime_review():
 
 def test_reconciliation_is_exclusive_and_language_is_runtime_selected():
     text = load_role('orchestrator').body_portable
-    assert "Choose exactly one next action" in text
-    assert "do not synthesize" in text
-    assert "Otherwise, request a structured user question" in text
-    assert "missing information\n  materially changes the outcome" in text
-    assert "Otherwise, submit synthesis" in text
+    assert "Choose one next step" in text
+    assert "Keep progress updates to one short line" in text
+    assert "do not mention internal planning, checks, retries or commands" in text
+    assert "say first whether the result is done" in text
+    assert "runtime still requires every unresolved check and its blocker" in text
     for name in ('orchestrator', 'coordinator-communication', 'context-compaction'):
         body = load_role(name).body_portable
         assert "runtime's per-turn language directive" in body

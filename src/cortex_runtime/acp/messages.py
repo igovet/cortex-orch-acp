@@ -54,16 +54,12 @@ _CATALOG: dict[str, dict[str, str]] = {
         "ru": "Пользователь явно запросил обновление документации{scope}. Прочитай `knowledge-harvest-scope` через `read_skill` и обнови подтверждённую источниками документацию проекта для этой задачи: это явный запрос, а не вывод.",
     },
     "worker_interrupted_notice": {
-        "en": "Interrupted when the host connection closed; no result yet. "
-              "The next message reconciles this worker from saved state.",
-        "ru": "Прервано закрытием соединения с хостом; результата ещё нет. "
-              "Следующее сообщение восстановит этого исполнителя из сохранённого состояния.",
+        "en": "Work stopped before it was finished. I’ll check what was completed.",
+        "ru": "Работа прервалась до завершения. Проверю, что удалось сделать.",
     },
     "delivered_but_not_accepted": {
-        "en": "This turn ended with a worker's change integrated into the project and the task "
-              "still not accepted: acceptance is a recorded decision, and none was made.",
-        "ru": "Ход завершён: изменение исполнителя интегрировано в проект, но задача так и не "
-              "принята — приёмка это записанное решение, и его не было.",
+        "en": "A worker's change is in the project, but the task is not marked complete yet.",
+        "ru": "Изменение исполнителя уже в проекте, но задача пока не отмечена как завершённая.",
     },
     "answer_in_language": {
         # The second sentence is not decoration. Told only to answer in
@@ -75,31 +71,31 @@ _CATALOG: dict[str, dict[str, str]] = {
         "en": "Always write your replies to the user in English, whatever language this prompt is in. "
               "This is about talking to the user only: everything you send to a worker -- title, brief, "
               "acceptance criteria, clarifications -- stays in English, always. "
-              "The chat renders Markdown: format every reply readably -- short paragraphs separated by "
-              "blank lines, headings for distinct parts, lists for several items or steps, `code` for "
-              "paths and commands -- never one unbroken block.",
+              "The chat renders Markdown: write every reply in short, simple, plain language for an ordinary user; use everyday words and short paragraphs separated by "
+              "blank lines, headings only when useful, brief lists for several items or steps, `code` for "
+              "paths and commands -- never one unbroken block. For progress updates, use one short line about what is happening; never mention internal planning, reviews, retries, commands, receipts or bookkeeping. If done, state the outcome briefly; do not list successful checks or internal approvals. Mention only important checks still unresolved.",
         "ru": "Всегда пиши свои ответы пользователю по-русски, независимо от того, на каком языке этот запрос. "
               "Это касается только общения с пользователем: всё, что ты отправляешь исполнителю — заголовок, "
               "бриф, критерии приёмки, уточнения — всегда остаётся на английском. "
-              "Чат отображает Markdown: оформляй каждый ответ читаемо — короткие абзацы через пустую строку, "
-              "заголовки для отдельных частей, списки для нескольких пунктов или шагов, `code` для путей и "
-              "команд — никогда не одним сплошным блоком.",
+              "Чат отображает Markdown: пиши просто и понятно обычному человеку — короткими фразами и абзацами через пустую строку, "
+              "заголовки только когда нужны, короткие списки для нескольких пунктов или шагов, `code` для путей и "
+              "команд — никогда не одним сплошным блоком. В сообщениях о ходе работы пиши одной короткой фразой, что происходит; не упоминай внутренние планы, проверки, повторы, команды, квитанции или учёт. Если всё готово, кратко скажи, что сделано; не перечисляй успешные проверки и внутренние одобрения. Упоминай только важные незавершённые проверки.",
     },
     "blocked_no_progress": {
-        "en": "Blocked: no new worker result, question, or user input arrived after repeated waiting.",
-        "ru": "Заблокировано: после многократного ожидания не появилось ни нового результата исполнителя, ни вопроса, ни ввода пользователя.",
+        "en": "Work is paused because no new information arrived.",
+        "ru": "Работа приостановлена: новой информации пока нет.",
     },
     "blocked_limit": {
-        "en": "Blocked on a {kind} limit with no unfinished action or new event.",
-        "ru": "Заблокировано из-за лимита {kind}: нет незавершённых действий или новых событий.",
+        "en": "Work is paused because it reached the {kind} limit.",
+        "ru": "Работа приостановлена: достигнут лимит {kind}.",
     },
     "coordinator_turn_limit": {
-        "en": "Coordinator turn ended: {kind} limit reached.",
-        "ru": "Ход координатора завершён: достигнут лимит {kind}.",
+        "en": "The coordinator stopped because it reached a {kind} limit.",
+        "ru": "Координатор остановился: достигнут лимит {kind}.",
     },
     "engine_failure": {
-        "en": "Coordinator engine turn failed ({kind}).",
-        "ru": "Ход координатора завершился ошибкой движка ({kind}).",
+        "en": "The coordinator could not finish because of a technical problem ({kind}).",
+        "ru": "Координатор не смог закончить работу из-за технической ошибки ({kind}).",
     },
     "coordinator_replaced_by_another_client": {
         "en": "This thread was taken over by another client, so this turn ended here. "

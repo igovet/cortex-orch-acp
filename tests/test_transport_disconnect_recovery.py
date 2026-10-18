@@ -210,7 +210,7 @@ def test_disconnect_with_an_active_worker_is_reconciled_after_restart_not_failed
     [correction] = replay_store.terminal_worker_card_reconciliation(store, task_id, [dict(kind="update", update=dict(
         sessionUpdate="tool_call", toolCallId=card, status="in_progress"))])
     assert correction["toolCallId"] == card and correction["status"] == "failed"
-    assert correction["content"][0]["text"].startswith("Interrupted when the host connection closed")
+    assert correction["content"][0]["text"].startswith("Work stopped before it was finished")
     assert correction["_meta"] == {"cortexWorkerInterrupted": {"reason": "host_disconnected"}}
 
     # Restart: a fresh process reads the persisted state as authority.
@@ -259,7 +259,7 @@ def test_interrupted_worker_card_survives_an_in_place_reload_with_no_confirmed_a
         sessionUpdate="tool_call", toolCallId=card, status="in_progress", title=base_title))])
     assert correction["toolCallId"] == card and correction["status"] == "failed"
     assert correction["title"] == base_title + " · Interrupted"
-    assert correction["content"][0]["text"].startswith("Interrupted when the host connection closed")
+    assert correction["content"][0]["text"].startswith("Work stopped before it was finished")
     assert correction["_meta"] == {"cortexWorkerInterrupted": {"reason": "host_disconnected"}}
     assert context["state"] == "EXECUTING"
 
@@ -305,10 +305,7 @@ def test_interrupted_worker_card_carries_a_localized_title_suffix_paseo_survives
     # for any client build that does forward it).
     assert correction["title"] == base_title + " · Interrupted"
     assert correction["_meta"] == {"cortexWorkerInterrupted": {"reason": "host_disconnected"}}
-    assert correction["content"][0]["text"] == (
-        "Прервано закрытием соединения с хостом; результата ещё нет. "
-        "Следующее сообщение восстановит этого исполнителя из сохранённого состояния."
-    )
+    assert correction["content"][0]["text"] == "Работа прервалась до завершения. Проверю, что удалось сделать."
     assert context["state"] == "EXECUTING"
 
 
@@ -805,7 +802,7 @@ def test_worker_whose_host_was_replaced_without_any_signal_reads_interrupted(tmp
         [correction] = replay_store.terminal_worker_card_reconciliation(store, task_id, [dict(kind="update", update=dict(
             sessionUpdate="tool_call", toolCallId=card, status="in_progress", title=base_title))])
         assert correction["status"] == "failed" and correction["title"] == base_title + " · Interrupted"
-        assert correction["content"][0]["text"].startswith("Interrupted when the host connection closed")
+        assert correction["content"][0]["text"].startswith("Work stopped before it was finished")
         with store.connection() as db:
             assert db.execute("SELECT COUNT(*) FROM task_events WHERE task_id=?", (task_id,)).fetchone()[0] == before
         assert [n["status"] for n in TaskMachine(store).context(task_id)["nodes"]] == ["running"]
@@ -873,7 +870,7 @@ def test_a_worker_lost_with_its_host_stays_interrupted_after_recovery(tmp_path):
     assert lost_card[-1]["status"] == "failed"
     assert lost_card[-1]["title"] == "Worker: backend-dev — Inspect part 0 · Interrupted"
     assert not any(str(u.get("title", "")).endswith("· Cancelled") for u in lost_card)
-    assert "Interrupted when the host connection closed" in lost_card[-1]["text"]
+    assert "Work stopped before it was finished" in lost_card[-1]["text"]
     # Exactly one retry, on a new card (the other new card is the review).
     [retry] = _runtime_events(store, task_id, "ASSIGNMENT_RETRIED")
     assert retry["payload"]["node"] == "N0"

@@ -29,6 +29,27 @@ from cortex_runtime.portable.roles import (  # noqa: E402
 from cortex_runtime.portable.errors import PortableError  # noqa: E402
 
 
+def test_coordinator_plain_language_rule_is_in_skill_and_per_turn_directive():
+    skill = (REPO_ROOT / "skills/coordinator-communication/SKILL.md").read_text()
+    messages = (REPO_ROOT / "src/cortex_runtime/acp/messages.py").read_text()
+    assert "lead with the answer in 1–2 short sentences" in skill
+    assert "everyday words" in skill and "avoid jargon" in skill
+    assert "Keep progress updates to one short line" in skill
+    assert "say first whether the result is done" in skill
+    assert "List only real user-relevant checks" in skill
+    assert "do not list successful checks or internal approvals" in skill
+    assert "short, simple, plain language for an ordinary user" in messages
+    assert "do not list successful checks or internal approvals" in messages
+    assert "не перечисляй успешные проверки и внутренние одобрения" in messages
+    assert "For progress updates, use one short line" in messages
+    assert "пиши просто и понятно обычному человеку" in messages
+    assert "В сообщениях о ходе работы пиши одной короткой фразой" in messages
+    assert "Work stopped before it was finished" in messages
+    assert "Работа прервалась до завершения" in messages
+    assert "Work is paused because no new information arrived" in messages
+    assert "Работа приостановлена: новой информации пока нет" in messages
+
+
 def _read(skill_id, kind):
     from types import SimpleNamespace
     channel = SimpleNamespace(role="coordinator") if kind == "coordinator" else None

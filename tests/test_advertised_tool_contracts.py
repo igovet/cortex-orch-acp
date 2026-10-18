@@ -30,9 +30,17 @@ GENERIC = {"Structured fields; use the exact advertised properties.",
 def test_final_answer_contract_reserves_gap_rendering_for_runtime(operation):
     entry = next(t for t in mcp_tools.tool_definitions('coordinator') if t['name'] == operation)
     text_description = entry['inputSchema']['properties']['text']['description']
-    assert 'only in structured not_verified' in text_description
-    assert 'refused, not deleted' in text_description
-    assert 'preserve other context' in text_description
+    if operation == 'synthesis_submit':
+        assert 'only in not_verified' in text_description
+    else:
+        assert 'Put gap disclosures only in structured not_verified' in text_description
+    if operation == 'synthesis_submit':
+        assert 'runtime rejects other check-disclosure sections' in text_description
+        assert 'Do not explain internal bookkeeping or list successful checks or internal approvals' in text_description
+        assert 'unresolved checks only in not_verified' in text_description
+    else:
+        assert 'refused, not deleted' in text_description
+    assert ('keep other context' if operation == 'synthesis_submit' else 'preserve other context') in text_description
     assert 'not_verified' in entry['description']
     assert 'refused' in entry['description']
 
@@ -163,9 +171,10 @@ def test_blocker_descriptions_accept_a_documented_owner_request_policy():
     synthesis = COORDINATOR["synthesis_submit"]["properties"]["not_verified"]["items"]["properties"]["blocker"]["description"]
     worker = RESULT["properties"]["checks"]["items"]["properties"]["blocker"]["description"]
     for text in (synthesis, worker):
-        assert '"not requested" alone is not a blocker' in text
-        assert "documented project policy that requires an explicit owner request which was not given" in text
-        assert "paid live check not requested by the owner" in text
+        assert '"not requested" alone is not a blocker' in text or '"not requested" alone is not enough' in text
+        assert ('documented project policy that requires an explicit owner request which was not given' in text
+                or 'rule requiring owner approval is a real reason' in text)
+        assert 'paid live check not requested by the owner' in text
     assert "alone is not a blocker" in ERROR_HELP["check_blocker_required"]
 
 
@@ -178,14 +187,17 @@ def test_not_verified_item_requires_a_localized_description_and_blocker():
     assert item_schema["required"] == ["item", "blocker"]
     assert item_schema["additionalProperties"] is False
     item_description = item_schema["properties"]["item"]["description"]
-    assert "exact check name" in item_description and "selected chat language" in item_description
+    assert "Exact name" in item_description and "selected chat language" in item_description
     description_description = item_schema["properties"]["description"]["description"]
-    assert "selected chat language" in description_description
-    assert "renders only this description, without appending item" in description_description
-    assert "unchanged item stays in structured evidence for gap matching" in description_description
-    assert "inline-code identifier" not in description_description
+    assert "Short, plain wording for the user" in description_description
+    assert "user sees this description only" in description_description
+    assert "exact name in item for matching" in description_description
     blocker_description = item_schema["properties"]["blocker"]["description"]
+    assert "briefly say what stopped the check" in blocker_description
     assert "selected chat language" in blocker_description
+    list_description = COORDINATOR["synthesis_submit"]["properties"]["not_verified"]["description"]
+    assert "List every unresolved check" in list_description
+    assert "Do not explain internal bookkeeping" in list_description
     # answer_submit shares the exact same not_verified schema object.
     assert COORDINATOR["answer_submit"]["properties"]["not_verified"] is COORDINATOR["synthesis_submit"]["properties"]["not_verified"]
 
