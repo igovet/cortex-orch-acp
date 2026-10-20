@@ -2,14 +2,38 @@
 
 ## 1.0.0 (unreleased)
 
-The built-in default preset (`policy/model-settings-default.json`) is synced again from the
-owner's edited production `routing.json`: `claude-agent-acp/claude-sonnet-5` now also serves the
-`deep` tier alongside `standard`, and `claude-agent-acp/opus[1m]`'s `preferred_for` narrows to
+The default install preset now matches the refreshed production routing values:
+Sol's `preferred_when` is `null`, so its configured work-kind preferences no longer
+need an exact route hint and remain active on quality retries. At equal quota
+without a provider preference, standard generic design/frontend work now selects
+Sol instead of Sonnet. Affinity-bound frontend design still prefers eligible Opus,
+and quota pressure still applies. The portable Sol coordinator now uses medium
+effort from the saved `default` profile, as confirmed by the owner; Russian language
+and the schema envelope are unchanged. No local identities or session bindings
+are copied, existing installations are not overwritten, and no live qualification
+is claimed.
+
+The built-in default preset (`policy/model-settings-default.json`) was previously synced from the
+owner's edited production `routing.json`: `claude-agent-acp/opus[1m]` drops the `standard` tier
+entirely (now only `flagship` and `deep`) and its `preferred_for` regains `implementation_backend`
+and `implementation_frontend` alongside `design`, `planning`, `implementation_frontend_design`,
+`debugging` and `analysis`; `codex-acp/gpt-6.1-sol`'s `preferred_for` gains `testing`,
+`investigation` and `writing`. Because Opus no longer configures the `standard` tier, standard-tier
+design and implementation work -- hinted or not -- no longer reaches Opus (an explicit Opus hint on
+standard-tier work is now ignored on tier mismatch rather than ranked against the owner's
+preference) and falls to the owner's Sonnet/Sol preference instead; Opus still serves those kinds
+once work is eligible for its `deep`/`flagship` tiers. The complete routing values
+matched production at that time; no other preset field changed in that sync. No live or paid qualification is
+claimed for this change.
+
+The built-in default preset was previously synced from the owner's edited production `routing.json`:
+`claude-agent-acp/claude-sonnet-5` also served the
+`deep` tier alongside `standard`, and `claude-agent-acp/opus[1m]`'s `preferred_for` narrowed to
 `design`, `planning`, `implementation_frontend_design`, `debugging` and `analysis`, dropping
 `implementation_backend`, `implementation_frontend` and `review`; an explicit Opus hint on plain
-backend/frontend/review work is no longer honoured and falls back to the owner's Sonnet/Sol
-preference. Matching production byte-for-byte; no other preset field differs. No live or paid
-qualification is claimed for this change.
+backend/frontend/review work was no longer honoured and fell back to the owner's Sonnet/Sol
+preference. Matching production routing values at that time; no other preset field differed. No live
+or paid qualification was claimed for that change.
 
 Coordinator-submitted final answers now show the structured “Not verified”
 disclosure only once: the runtime removes a duplicate coordinator-authored

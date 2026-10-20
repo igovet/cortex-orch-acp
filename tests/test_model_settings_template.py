@@ -20,7 +20,7 @@ def test_public_asset_preserves_exact_baseline_tiers_efforts_and_coordinator():
     template = defaults.load_model_settings_template()
     routing = template["routing"]
     assert template["coordinator"] == {"engine": "codex-acp", "model": "gpt-6.1-sol",
-                                       "parameters": {"thought_level": "high"}}
+                                       "parameters": {"thought_level": "medium"}}
     assert template["language"] == "ru"
     # Complete portable production default snapshot, saved 2026-10-12 at 14:23 UTC;
     # 2026-10-13: Opus also standard-tier (UI/UX preferred_when) with request labels;
@@ -33,11 +33,18 @@ def test_public_asset_preserves_exact_baseline_tiers_efforts_and_coordinator():
     # also serves the deep tier, and Opus's preferred_for narrows to design,
     # planning, implementation_frontend_design, debugging and analysis (dropping
     # implementation_backend, implementation_frontend and review).
+    # 2026-10-21: synced again from the owner's edited production routing.json --
+    # Opus drops the `standard` tier (flagship/deep only now), its preferred_for
+    # regains implementation_backend and implementation_frontend, and Sol's
+    # preferred_for gains testing, investigation and writing.
+    # Latest sync: Sol preferences are unconditional; the saved default coordinator
+    # uses medium effort (confirmed by the owner), not the session-selected route.
+    assert routing["models"]["codex-acp"]["policy"]["gpt-6.1-sol"]["preferred_when"] is None
     canonical = json.dumps(template, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
-    assert hashlib.sha256(canonical.encode()).hexdigest() == "e74047f858aebbbbc1ef4b55e344549bca90bfaa6e58d7adccd0f16c6e30ce52"
+    assert hashlib.sha256(canonical.encode()).hexdigest() == "ffa81eb0c8e3e7cd7401860828faa60746d2f81dd1bee17f9dbf1afee6cd3c30"
     expected = {
         ("claude-agent-acp", "default"): ("deep",),
-        ("claude-agent-acp", "opus[1m]"): ("flagship", "deep", "standard"),
+        ("claude-agent-acp", "opus[1m]"): ("flagship", "deep"),
         ("claude-agent-acp", "claude-fable-5-1[1m]"): ("flagship",),
         ("claude-agent-acp", "claude-sonnet-5"): ("deep", "standard"),
         ("claude-agent-acp", "haiku"): ("light",),
@@ -149,17 +156,14 @@ def test_install_language_rejects_non_supported_values(tmp_path, language):
 
 
 @pytest.mark.parametrize("role,hint,chosen,hint_status", [
-    # UI/UX design runs on Opus at the standard tier, hinted or not.
-    ("worker-ux-designer", "claude-agent-acp/opus[1m]", "claude-agent-acp/opus[1m]", "honoured"),
-    ("worker-ux-designer", "auto", "claude-agent-acp/opus[1m]", "auto"),
-    # Unhinted standard implementation keeps the owner's Sonnet preference;
-    # plain implementation_frontend is no longer in Opus's preferred_for
-    # (owner's 2026-10-20 production sync), so an exact Opus hint on that
-    # work kind is no longer honoured and the owner's Sonnet preference wins.
-    ("worker-frontend-dev", "auto", "claude-agent-acp/claude-sonnet-5", "auto"),
-    ("worker-frontend-dev", "claude-agent-acp/opus[1m]", "claude-agent-acp/claude-sonnet-5", "ignored:owner_preferred"),
+    # Opus remains ineligible at standard even with an exact hint. Sol now
+    # has an unconditional preference for generic design and frontend work.
+    ("worker-ux-designer", "claude-agent-acp/opus[1m]", "codex-acp/gpt-6.1-sol", "ignored:tier_mismatch"),
+    ("worker-ux-designer", "auto", "codex-acp/gpt-6.1-sol", "auto"),
+    ("worker-frontend-dev", "auto", "codex-acp/gpt-6.1-sol", "auto"),
+    ("worker-frontend-dev", "claude-agent-acp/opus[1m]", "codex-acp/gpt-6.1-sol", "ignored:tier_mismatch"),
 ])
-def test_default_opus_serves_standard_design_work(role, hint, chosen, hint_status):
+def test_default_standard_tier_design_and_frontend_work_no_longer_reaches_opus(role, hint, chosen, hint_status):
     routing = defaults.default_routing()
     entries = [entry(engine, model) for engine, models in routing["enabled"].items() for model in models]
     _picked, decision = auto_route.rank(
@@ -168,6 +172,20 @@ def test_default_opus_serves_standard_design_work(role, hint, chosen, hint_statu
     assert decision["tier"] == "standard"
     assert decision["chosen"] == chosen
     assert decision["model_hint_status"] == hint_status
+
+
+@pytest.mark.parametrize("escalated", [False, True])
+@pytest.mark.parametrize("hot", [False, True])
+def test_default_sol_preference_needs_no_hint_but_still_yields_to_quota(escalated, hot):
+    routing = defaults.default_routing()
+    entries = [entry(engine, model) for engine, models in routing["enabled"].items() for model in models]
+    picked, decision = auto_route.rank(
+        "deep" if escalated else "standard", entries,
+        lambda e: 99.0 if hot and e.route.engine == "codex-acp" else 10.0,
+        role="worker-ux-designer", models=routing["models"], escalated=escalated)
+    assert (picked.route.model == "gpt-6.1-sol") is (not hot)
+    assert decision["purpose"]["status"] == ("ignored:near_quota_limit" if hot else "honoured")
+    assert decision["model_hint_status"] == "auto"
 
 
 def test_default_design_preference_is_only_opus_and_astra_never_serves_deep():
@@ -211,7 +229,7 @@ def test_default_frontend_design_uses_opus_on_initial_retry_and_fix(escalated, p
     routing = defaults.load_model_settings_template()["routing"]
     entries = [entry(engine, model) for engine, models in routing["enabled"].items() for model in models]
 
-    picked, _decision = auto_route.rank(
+    picked, decision = auto_route.rank(
         auto_route.tier_for(role, escalate=escalated),
         entries,
         lambda _entry: 0.0,
@@ -224,6 +242,9 @@ def test_default_frontend_design_uses_opus_on_initial_retry_and_fix(escalated, p
     )
 
     assert picked.route.id == "claude-agent-acp/opus[1m]"
+    assert decision["role_tier"] == ("deep" if escalated else "standard")
+    # Opus no longer serves standard; even an initial attempt falls back to deep.
+    assert decision["tier"] == "deep"
 
 
 def test_default_frontend_design_falls_back_only_on_affinity_engine_when_opus_is_unavailable():

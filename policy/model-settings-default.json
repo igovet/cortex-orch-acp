@@ -62,8 +62,7 @@
           ],
           "opus[1m]": [
             "flagship",
-            "deep",
-            "standard"
+            "deep"
           ]
         },
         "policy": {
@@ -140,7 +139,9 @@
               "planning",
               "implementation_frontend_design",
               "debugging",
-              "analysis"
+              "analysis",
+              "implementation_backend",
+              "implementation_frontend"
             ],
             "preferred_when": "Use for the listed kinds. Always use for implementation_frontend_design and UI/UX design: layout, styling, markup, responsive layout, UI components, visual polish, UX flows, mockups, wireframes and design systems. Never mark such nodes low complexity: that leaves Opus ineligible. For implementation_backend, use only for very complex, narrowly scoped tasks.",
             "request_names": [
@@ -218,9 +219,12 @@
               "review",
               "debugging",
               "operations",
-              "analysis"
+              "analysis",
+              "testing",
+              "investigation",
+              "writing"
             ],
-            "preferred_when": "Use for the listed kinds, including implementation_backend and implementation_frontend without design. Never use for implementation_frontend_design or UI/UX design, layout, styling or visual polish; those belong to Opus.",
+            "preferred_when": null,
             "request_names": null
           }
         }
@@ -287,7 +291,7 @@
     "engine": "codex-acp",
     "model": "gpt-6.1-sol",
     "parameters": {
-      "thought_level": "high"
+      "thought_level": "medium"
     }
   },
   "language": "ru"

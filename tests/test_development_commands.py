@@ -85,7 +85,7 @@ def test_install_snapshot_does_not_override_durable_session_access(tmp_path, cho
     installed = registry.config_root(env) / "defaults.json"
     owner_bytes = installed.read_bytes()
     assert json.loads(owner_bytes)["defaults"]["coordinator"] == {
-        "engine": "codex-acp", "model": "gpt-6.1-sol", "parameters": {"thought_level": "high"}}
+        "engine": "codex-acp", "model": "gpt-6.1-sol", "parameters": {"thought_level": "medium"}}
 
     store, task_id = _store_and_task(tmp_path)
     sessions.create_session(store, "installed", store.project_root, {}, {}, [])

@@ -294,20 +294,33 @@ def test_a_worker_recovery_wrote_off_is_retried_without_escalation(executing, fa
     assert attempt_routing(store, channel.task_id, "xa_next").escalate is False
 
 
-def test_lost_worker_retries_stay_bounded_by_the_retry_window(executing):
+@pytest.mark.parametrize("final_elapsed", [3, 4])
+def test_lost_worker_retries_stay_bounded_by_the_retry_window(executing, monkeypatch, final_elapsed):
     """Infrastructure loss is retried past MAX_ATTEMPT_RETRIES, and stops
-    only once the losses have kept repeating for the whole window."""
+    at or beyond the retry window, independently of database/host latency."""
+    from cortex_runtime.orchestration import recovery
+
     store, machine, channel, runtime = executing
-    runtime._engine_retry_window = RetryWindow(first_delay_seconds=0, max_delay_seconds=0, window_seconds=0.3)
+    # Patch only recovery's clock; past timestamps keep zero-delay scheduler
+    # holds expired without changing clocks used elsewhere in the runtime.
+    clock = SimpleNamespace(now=1000.0)
+    monkeypatch.setattr(recovery, "time", SimpleNamespace(time=lambda: clock.now))
+    runtime._engine_retry_window = RetryWindow(first_delay_seconds=0, max_delay_seconds=0, window_seconds=3)
     for index in range(MAX_ATTEMPT_RETRIES + 1):
+        clock.now = 1000.0 + index
         node = _running_node(machine, channel)
         _provision_only(store, channel.task_id, node, f"xa_{index}")
         retry_lost(runtime, channel.task_id, node)
-        time.sleep(0.12)
+    retries = _retries(store, channel.task_id)
+    assert len(retries) == MAX_ATTEMPT_RETRIES + 1
+    assert [retry["failed_at"] for retry in retries] == [1000.0, 1001.0, 1002.0]
+    assert all(retry["failure_class"] == "worker_lost" for retry in retries)
+    clock.now = 1000.0 + final_elapsed
     node = _running_node(machine, channel)
     _provision_only(store, channel.task_id, node, "xa_last")
     with pytest.raises(StoreError, match="worker_retry_limit"):
         retry_lost(runtime, channel.task_id, node)
+    assert _retries(store, channel.task_id) == retries
 
 
 def test_delivery_qualification_failure_retry_is_route_scoped_and_never_escalates(executing):

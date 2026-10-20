@@ -70,7 +70,7 @@ def test_install_absent_portable_defaults_no_binding_or_discovery(env, monkeypat
     assert result["defaults"]["status"] == "created"
     assert json.loads((root / "defaults.json").read_text()) == {"defaults": {
         "coordinator": {"engine": "codex-acp", "model": "gpt-6.1-sol",
-                        "parameters": {"thought_level": "high"}}, "language": "ru"}}
+                        "parameters": {"thought_level": "medium"}}, "language": "ru"}}
     assert json.loads((root / "routing.json").read_text()) == defaults.default_routing()
     assert not (root / "routing-profiles.json").exists()
     assert (root / "defaults.json").stat().st_mode & 0o777 == 0o600

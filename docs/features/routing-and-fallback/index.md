@@ -79,19 +79,27 @@ but grant no route: pins, deny, automatic membership, providers, tier,
 availability and quota rules remain controlling. Preferences cannot promote
 a model into a different tier. See [configuration](../../configuration.md#user-routing-profiles).
 
-The current install snapshot refines the saved 2026-10-12 default
-profile: the Opus UI/UX conditional preference, explicit OpenCode denial, and
-`codex-acp/gpt-6.1-sol` coordinator at high effort. The UI/UX wording does not
-create a strict role pin or override tier eligibility. Since 2026-10-13 the
-snapshot also lists Opus in the `standard` tier, so standard-tier UI/UX design
-nodes (`ux-designer`) are eligible for it and the coordinator's exact Opus hint
-is honoured there instead of `ignored:tier_mismatch`, and gives it the request
-labels `opus`/`опус`. Since 2026-10-14 the Opus condition covers all UI/UX
-work, including frontend layout and styling (explicit
-`implementation_frontend_design` nodes), and the `gpt-6.1-sol` condition excludes it.
-Explicit frontend-design classification now uses structured preferences on every
-attempt, independently of the conditional hint; other work retains conditional
-preference semantics. See [affinity-bound frontend design](#affinity-bound-frontend-design) and the
+The current install snapshot follows the refreshed saved default profile:
+explicit OpenCode denial and a `codex-acp/gpt-6.1-sol` coordinator at medium effort.
+The 2026-10-21 production routing refresh removes Opus from the `standard` tier:
+its configured tiers are now `flagship` and `deep` only. Standard-tier generic
+`design` and `implementation_frontend` work cannot select Opus, even with an
+exact coordinator hint (`ignored:tier_mismatch`). The UI/UX wording does not
+create a strict role pin or override tier eligibility.
+
+Opus retains the `opus`/`опус` request labels and its UI/UX condition, including
+frontend layout and styling (`implementation_frontend_design`); its
+`preferred_for` also regains `implementation_backend` and `implementation_frontend`.
+Sol's `preferred_for` gains `testing`, `investigation` and `writing`. The latest
+refresh removes Sol's free-text condition (`preferred_when: null`), so its listed
+preferences apply without a route hint, including on quality retries. At equal
+quota and without a provider preference, unhinted standard-tier generic design
+and frontend work select Sol; quota pressure can still pass over that preference.
+Explicit frontend-design classification uses structured preferences on every
+attempt, independently of the conditional hint, and still prefers eligible Opus
+on its affinity engine. Other kinds require an exact matching hint for models
+that retain a non-null `preferred_when`; Sol is no longer conditional.
+See [affinity-bound frontend design](#affinity-bound-frontend-design) and the
 [fresh-install snapshot](../../configuration.md#fresh-install-owner-default-snapshot).
 
 ## Affinity-bound frontend design
@@ -102,9 +110,13 @@ work kind and only the effective affinity engine (Claude in the current preset).
 On that engine, eligible `preferred_for` routes remain preferred independently of
 `preferred_when`, exact coordinator hints and retry diversification. Selection
 searches configured eligible fallback tiers for preferred routes before accepting
-a non-preferred model in a higher tier; it never invents tier membership. A low
-complexity node can therefore use the configured standard-tier preferred route
-through the existing light → standard → deep fallback order.
+a non-preferred model in a higher tier; it never invents tier membership.
+The current preset has no standard-tier frontend-design preference: Opus serves
+only `deep` and `flagship`. When Opus is eligible and not passed over by the
+quota rule below, even an initial node classified as `light` or `standard`
+selects it at `deep` through the configured fallback order (light → standard →
+deep or standard → deep → light, respectively). This promotes the serving tier
+without waiting for a quality retry; it does not give Opus standard-tier membership.
 
 The preset's sole frontend-design preference is Opus. If it is unconfigured,
 unavailable, automatically excluded, outside the task ceiling or exhausted,

@@ -493,7 +493,8 @@ The public install asset is based on the saved production `default` profile from
 2026-10-12 at 14:23 UTC, with the implementation-kind and tier refinements below. Its routing is a non-secret snapshot, including
 multi-tier memberships, effort floors/ceilings, preferences, request labels and
 quota-window associations. The portable coordinator is
-`codex-acp/gpt-6.1-sol` with `thought_level: high`; no mode override is
+`codex-acp/gpt-6.1-sol` with `thought_level: medium` (refreshed from the saved
+`default` profile); no mode override is
 added. New `defaults.json` files also set `language: ru`. The install envelope
 remains schema version 1 with optional `language` (`en` or `ru`); coordinator
 `mode` is optional, and when present the install template accepts `agent`.
@@ -510,22 +511,38 @@ still fail closed; this snapshot is not live qualification.
 The preset makes `gpt-6-astra` flagship-only, never a deep-tier automatic candidate.
 Only `opus[1m]` lists `implementation_frontend_design` in `preferred_for`.
 Synced from the owner's 2026-10-20 production routing update, Opus's
-`preferred_for` no longer names `implementation_backend`, `implementation_frontend`
-or `review`; it now covers only `design`, `planning`,
-`implementation_frontend_design`, `debugging` and `analysis`, so an explicit Opus
-hint on plain backend/frontend/review work is no longer honoured and the
-owner's Sonnet/Sol preference applies instead. Sonnet-5 also gained the `deep`
-tier alongside `standard` in the same sync. The snapshot retains the Opus UI/UX
-condition in `preferred_when` and the narrowly scoped complex backend condition
-as guidance text, independent of the `preferred_for` enum. For explicit
-`implementation_frontend_design`, structured `preferred_for` selection now
+`preferred_for` had narrowed to `design`, `planning`,
+`implementation_frontend_design`, `debugging` and `analysis`, dropping
+`implementation_backend`, `implementation_frontend` and `review`; Sonnet-5 also
+gained the `deep` tier alongside `standard` in that sync.
+
+Synced again from the owner's 2026-10-21 production routing update, Opus's
+configured tiers drop `standard` entirely (now only `flagship` and `deep`),
+and `preferred_for` regains `implementation_backend` and
+`implementation_frontend` (now `design`, `planning`,
+`implementation_frontend_design`, `debugging`, `analysis`,
+`implementation_backend`, `implementation_frontend`). Because Opus no longer
+configures the `standard` tier at all, standard-tier work -- including plain
+`design` and `implementation_frontend` -- never reaches Opus by purpose or by
+an explicit hint: the hint is ignored on tier mismatch rather than ranked
+against the owner's preference, and the owner's eligible Sonnet/Sol preferences
+serve that tier instead. Opus still serves `design`, `implementation_backend` and
+`implementation_frontend` through its remaining `deep`/`flagship` tiers once
+work escalates or is otherwise eligible for those tiers. Sol's (`gpt-6.1-sol`)
+`preferred_for` also gains `testing`, `investigation` and `writing` in this
+sync. The latest refresh removes Sol's free-text condition (`preferred_when: null`),
+so its listed `preferred_for` kinds apply without a route hint, including on
+quality retries. With equal quota and no provider preference, unhinted standard
+`design` and `implementation_frontend` now select Sol rather than Sonnet;
+quota pressure can still pass over that preference. The snapshot retains the
+Opus UI/UX and Sonnet complex-backend conditions in `preferred_when`, independent
+of the `preferred_for` enum. For explicit
+`implementation_frontend_design`, structured `preferred_for` selection
 applies independently of that text and survives quality retries/fixes: Opus
-remains selected while eligible and not passed over by the existing
-hot-and-meaningfully-worse quota rule. Escalation cannot substitute a different
-engine or a non-preferred higher-tier model while a preferred route remains
-usable in an eligible fallback tier. Opus's `standard`, `deep` and `flagship`
-memberships remain unchanged; even low-complexity design can reach its configured
-standard tier through fallback, not tier promotion.
+remains selected while eligible (its configured `deep`/`flagship` tiers) and
+not passed over by the existing hot-and-meaningfully-worse quota rule.
+Escalation cannot substitute a different engine or a non-preferred higher-tier
+model while a preferred route remains usable in an eligible fallback tier.
 
 If Opus is unconfigured, unavailable, automatically excluded, outside the task
 ceiling or exhausted, another eligible route on the affinity engine (Claude in
@@ -538,9 +555,10 @@ coordinator. Pins remain strict; a cross-engine pin is refused regardless of
 this fallback. Confirmed user model requests still precede automatic routing.
 No authorization, tier/effort policy or quota-exhaustion rule is weakened.
 
-Other work kinds, including the role-default `design` kind, still require the
-coordinator's exact offered route hint to satisfy a non-null `preferred_when`,
-and ignore conditional hints on quality escalation. The `request_names`
+For models retaining a non-null `preferred_when` (unlike Sol), other work kinds,
+including the role-default `design` kind, still require the coordinator's exact
+offered route hint to satisfy that condition, and ignore conditional hints on
+quality escalation. The `request_names`
 `opus`/`опус` still permit explicit user requests. OpenCode is explicitly denied
 by `opencode/*` and `auto_allow` is empty; dormant OpenCode model policy remains
 preserved. See [affinity-bound frontend design](features/routing-and-fallback/index.md#affinity-bound-frontend-design).
