@@ -6,6 +6,8 @@ only. Re-check the same states and viewports after every pass.
 
 ## Shared rules
 
+- Apply the hard bans in `design-workflow`'s [banned AI-tell patterns](../../design-workflow/references/DESIGN.md#banned-ai-tell-patterns); remove prohibited stripes and decorative meta dots/chips during refinement.
+
 - Refinement preserves the incumbent identity, behavior, copy and everything
   outside the target. If the concept itself is wrong, say so and recommend a
   separate design-direction task instead of smuggling in a replacement.

@@ -311,6 +311,17 @@ Treat these as conditional taste findings, not universal errors:
 They become defects when they conflict with the named reference, brand system,
 product domain, actor's job, or established project rules.
 
+## Banned AI-tell defects
+
+Flag a decorative accent stripe on one side of any card, list item, callout, quote,
+alert, panel or section. Include `border-left`, `border-inline-start`, inset-shadow
+stripes, pseudo-element bars and equivalent framework utilities (such as Tailwind
+`border-l-4`). Also flag decorative dots/bullets before category, tag, date, status or
+metadata, including inside pills/chips/badges, and decorative pill/eyebrow meta-chips
+used by default. The only exception is a status indicator explicitly required by the
+product spec and carrying real semantic meaning; a dot must not be its only signal.
+Use the canonical [banned AI-tell patterns](../../design-workflow/references/DESIGN.md#banned-ai-tell-patterns) for design alternatives.
+
 ## Mechanical Finding Triage
 
 | Candidate | Confirm with | Typical root fix |

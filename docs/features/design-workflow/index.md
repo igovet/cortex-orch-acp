@@ -75,7 +75,8 @@ It covers art direction against `DESIGN.md`; typography, readability, hierarchy 
 length; composition, alignment and spacing rhythm; reflow, clipping, overlap and long or
 localized content; required content and every in-scope state against `SCREENS.md`;
 navigation, feedback and recovery; contrast, semantic controls, targets, keyboard focus and
-reduced motion; and originality against the approved brief.
+reduced motion; originality against the approved brief; and explicit checks for prohibited
+one-sided accent stripes and decorative leading-dot/meta-chip patterns.
 
 Evidence rules:
 

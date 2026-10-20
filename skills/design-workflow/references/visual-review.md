@@ -16,6 +16,11 @@ self-scores or silently waive an explicit requirement.
   exercise keyboard/focus and appropriate assistive technology when available.
   Screenshot evidence alone cannot prove interaction or accessibility conformance.
 - Check originality against the approved brief, not a reviewer's personal taste.
+- Flag any single-side accent stripe on cards, list items, callouts, quotes, alerts,
+  panels or sections, including border utilities, inset shadows and pseudo-element bars.
+- Flag decorative dot/bullet indicators before category, tag, date, status or metadata,
+  and default decorative pill/eyebrow metadata. Permit a dot only for a spec-required,
+  semantically meaningful status, and never as its sole signal.
 - Record each defect's severity, user impact, region, viewport, state and reproduction.
 - Send defects to the same implementation owner; recapture and recheck affected
   states after fixes, within the planned two-round refinement bound.

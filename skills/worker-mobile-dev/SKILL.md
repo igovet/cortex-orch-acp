@@ -108,7 +108,7 @@ command verification and completion belong to the runtime.
 
 Read the target project's docs/PRODUCT.md, docs/DESIGN.md and docs/SCREENS.md
 when present; follow the approved direction and native platform conventions.
-Use design-ui-ux-pro-max for system rules, design-frontend-design for visual
+Use the `design-workflow` banned AI-tell patterns in the approved DESIGN guidance; do not add one-sided accent stripes or decorative leading dots/meta-chips. Use design-ui-ux-pro-max for system rules, design-frontend-design for visual
 implementation choices, and design-visual-qa for rendered evidence.
 Capture and open screenshots for supported mobile/tablet/desktop size classes
 in a git-ignored project-local evidence path; justify inapplicable classes.

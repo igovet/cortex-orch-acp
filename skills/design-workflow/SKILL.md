@@ -49,7 +49,7 @@ review explicit in objectives and dependencies.
 1. **Art direction — ux-designer, read-only.** Research available references;
    return audience-specific principles, flows, type/color/spacing tokens, component
    states, responsive rules and rationale in the report. Do not write DESIGN.md.
-   Prefer originality and usability over generic card grids or decorative trends.
+   Prefer originality and usability over generic card grids or decorative trends. Apply the hard bans in the [banned AI-tell patterns](references/DESIGN.md#banned-ai-tell-patterns).
 2. **Persist — technical-writer or assigned writing role.** Consume the design
    report and record the chosen direction in docs/DESIGN.md, keeping PRODUCT and
    SCREENS aligned. Dependent implementation consumes that exact approved spec;

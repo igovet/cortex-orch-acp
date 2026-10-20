@@ -57,6 +57,9 @@ sections.
 
 ## Avoid the common tells
 
+Apply the hard bans in `design-workflow`'s [banned AI-tell patterns](../design-workflow/references/DESIGN.md#banned-ai-tell-patterns): no one-sided decorative accent stripes, and no decorative leading dots or default meta-chips. Only a product-spec-required semantic status indicator is permitted; a dot is never its only signal.
+
+
 These treatments mark generated pages. Avoid them unless the brief asks for them:
 
 - Accenting one word of a headline with italic, bold or a second color.

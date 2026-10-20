@@ -102,7 +102,7 @@ command verification and completion belong to the runtime.
 ## Specialist workflow
 
 Read the target project's docs/PRODUCT.md, docs/DESIGN.md and docs/SCREENS.md
-when present. Use design-impeccable for visual critique and design-visual-qa
+when present. Use the `design-workflow` banned AI-tell patterns in approved DESIGN guidance; flag one-sided accent stripes and decorative leading-dot/meta-chip patterns. Use design-impeccable for visual critique and design-visual-qa
 for rendered review when relevant. Open writer-captured mobile/tablet/desktop
 screenshots and report concrete findings against DESIGN/SCREENS, with revision,
 dimensions and state. Do not create captures in this read-only role.

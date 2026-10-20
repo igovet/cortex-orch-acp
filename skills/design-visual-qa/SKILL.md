@@ -72,7 +72,8 @@ needs the matching subject-matter review; a rendering pass cannot certify it.
 
 For each finding, record: the observable symptom, the region, the viewport, the
 state, the impact on the actor, and how to reproduce it. Use the defect
-catalog in `references/defect-checklist.md` for the usual defect families
+catalog in `references/defect-checklist.md` for the usual defect families, including
+banned one-sided accent stripes and decorative leading-dot/meta-chip patterns
 (clipping, orphan lines, dense-item collisions, broken images, focus
 obstruction, repeated-card density) and its triage table for the evidence each
 one needs.

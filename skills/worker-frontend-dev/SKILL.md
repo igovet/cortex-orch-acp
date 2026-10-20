@@ -108,7 +108,7 @@ command verification and completion belong to the runtime.
 
 Read the target project's docs/PRODUCT.md, docs/DESIGN.md and docs/SCREENS.md
 when present; implement the approved direction, not a replacement aesthetic.
-Use design-frontend-design when visual choices are needed, design-impeccable
+Use the `design-workflow` banned AI-tell patterns in the approved DESIGN guidance; do not add one-sided accent stripes or decorative leading dots/meta-chips. Use design-frontend-design when visual choices are needed, design-impeccable
 for refinement, and design-visual-qa for capture and rendered checks.
 For visual changes capture and open mobile/tablet/desktop screenshots in a
 git-ignored project-local evidence path; report dimensions, states, revision

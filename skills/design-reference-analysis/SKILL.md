@@ -51,6 +51,8 @@ copy from the references is reused.
 
 ## Guards
 
+- Do not recommend transferring or introducing one-sided accent stripes or decorative leading dots/meta-chips; follow the hard bans in `design-workflow`'s [banned AI-tell patterns](../design-workflow/references/DESIGN.md#banned-ai-tell-patterns).
+
 - Take principles and tokens, never markup, assets or one-to-one layouts.
 - Mark every value as measured (from a supplied file) or estimated (from a visual
   reading). Do not present an estimate as an exact specification.
