@@ -29,13 +29,17 @@ def test_public_asset_preserves_exact_baseline_tiers_efforts_and_coordinator():
     # 2026-10-14: synced from the owner's edited production routing.json -- Astra is
     # preferred for the generic `design` work kind again (tier membership stays
     # flagship-only) and Opus's configured tiers list is reordered strongest-first.
+    # 2026-10-20: synced from the owner's edited production routing.json -- Sonnet
+    # also serves the deep tier, and Opus's preferred_for narrows to design,
+    # planning, implementation_frontend_design, debugging and analysis (dropping
+    # implementation_backend, implementation_frontend and review).
     canonical = json.dumps(template, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
-    assert hashlib.sha256(canonical.encode()).hexdigest() == "9c9028518433f735c606c30c8ad27598692f92c6f95b2a87f4b7090e86c57e4f"
+    assert hashlib.sha256(canonical.encode()).hexdigest() == "e74047f858aebbbbc1ef4b55e344549bca90bfaa6e58d7adccd0f16c6e30ce52"
     expected = {
         ("claude-agent-acp", "default"): ("deep",),
         ("claude-agent-acp", "opus[1m]"): ("flagship", "deep", "standard"),
         ("claude-agent-acp", "claude-fable-5-1[1m]"): ("flagship",),
-        ("claude-agent-acp", "claude-sonnet-5"): ("standard",),
+        ("claude-agent-acp", "claude-sonnet-5"): ("deep", "standard"),
         ("claude-agent-acp", "haiku"): ("light",),
         ("codex-acp", "gpt-6.1-sol"): ("deep", "standard"),
         ("codex-acp", "gpt-6-astra"): ("flagship",),
@@ -149,9 +153,11 @@ def test_install_language_rejects_non_supported_values(tmp_path, language):
     ("worker-ux-designer", "claude-agent-acp/opus[1m]", "claude-agent-acp/opus[1m]", "honoured"),
     ("worker-ux-designer", "auto", "claude-agent-acp/opus[1m]", "auto"),
     # Unhinted standard implementation keeps the owner's Sonnet preference;
-    # the coordinator's exact Opus hint (judged against preferred_when) is honoured.
+    # plain implementation_frontend is no longer in Opus's preferred_for
+    # (owner's 2026-10-20 production sync), so an exact Opus hint on that
+    # work kind is no longer honoured and the owner's Sonnet preference wins.
     ("worker-frontend-dev", "auto", "claude-agent-acp/claude-sonnet-5", "auto"),
-    ("worker-frontend-dev", "claude-agent-acp/opus[1m]", "claude-agent-acp/opus[1m]", "honoured"),
+    ("worker-frontend-dev", "claude-agent-acp/opus[1m]", "claude-agent-acp/claude-sonnet-5", "ignored:owner_preferred"),
 ])
 def test_default_opus_serves_standard_design_work(role, hint, chosen, hint_status):
     routing = defaults.default_routing()

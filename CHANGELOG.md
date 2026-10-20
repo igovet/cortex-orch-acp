@@ -2,6 +2,15 @@
 
 ## 1.0.0 (unreleased)
 
+The built-in default preset (`policy/model-settings-default.json`) is synced again from the
+owner's edited production `routing.json`: `claude-agent-acp/claude-sonnet-5` now also serves the
+`deep` tier alongside `standard`, and `claude-agent-acp/opus[1m]`'s `preferred_for` narrows to
+`design`, `planning`, `implementation_frontend_design`, `debugging` and `analysis`, dropping
+`implementation_backend`, `implementation_frontend` and `review`; an explicit Opus hint on plain
+backend/frontend/review work is no longer honoured and falls back to the owner's Sonnet/Sol
+preference. Matching production byte-for-byte; no other preset field differs. No live or paid
+qualification is claimed for this change.
+
 Coordinator-submitted final answers now show the structured “Not verified”
 disclosure only once: the runtime removes a duplicate coordinator-authored
 section with the English or Russian heading before appending its canonical list.

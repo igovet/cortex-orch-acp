@@ -508,10 +508,16 @@ one observed selectable route. Missing or unsupported model/effort observations
 still fail closed; this snapshot is not live qualification.
 
 The preset makes `gpt-6-astra` flagship-only, never a deep-tier automatic candidate.
-Only `opus[1m]` lists `implementation_frontend_design` in `preferred_for`;
-other former implementation preferences split into backend and frontend-without-design.
-The snapshot retains the Opus UI/UX condition in `preferred_when` and the
-narrowly scoped complex backend condition. For explicit
+Only `opus[1m]` lists `implementation_frontend_design` in `preferred_for`.
+Synced from the owner's 2026-10-20 production routing update, Opus's
+`preferred_for` no longer names `implementation_backend`, `implementation_frontend`
+or `review`; it now covers only `design`, `planning`,
+`implementation_frontend_design`, `debugging` and `analysis`, so an explicit Opus
+hint on plain backend/frontend/review work is no longer honoured and the
+owner's Sonnet/Sol preference applies instead. Sonnet-5 also gained the `deep`
+tier alongside `standard` in the same sync. The snapshot retains the Opus UI/UX
+condition in `preferred_when` and the narrowly scoped complex backend condition
+as guidance text, independent of the `preferred_for` enum. For explicit
 `implementation_frontend_design`, structured `preferred_for` selection now
 applies independently of that text and survives quality retries/fixes: Opus
 remains selected while eligible and not passed over by the existing
