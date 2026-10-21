@@ -47,10 +47,10 @@ export function workerTerminalState(status: string | null | undefined, checks: r
   const presentation = workerStatusPresentation(status);
   // A failed check an exact later rerun closed is resolved history, not a
   // current open issue.
-  const issueCount = presentation.label === "completed with issues"
-    ? checks.filter((check) => check.outcome !== "passed" && !check.closedBy).length
-    : 0;
-  return { ...presentation, issueCount };
+  const issueCount = checks.filter((check) => check.outcome !== "passed" && !check.closedBy).length;
+  const terminal = presentation.label === "completed" && issueCount > 0
+    ? workerStatusPresentation("completed_with_issues") : presentation;
+  return { ...terminal, issueCount };
 }
 
 /**
@@ -128,20 +128,45 @@ export function isSettledWorkerStatus(status: string | null | undefined): boolea
 }
 
 /**
- * The card's status once the durable attempt status is known. The host keeps
- * a card `running` after its provider connection closed (a plugin reload
- * sends no further update, and Paseo re-sends nothing until the next
- * prompt), so a settled durable status wins over a running host status, and
- * a recorded interruption wins over a generic host failure. A durable
- * status that is still running never overrides anything.
+ * A settled durable verdict overrides coarse host completion/cancellation
+ * guesses and old issue markers. A committed result supersedes stale title
+ * markers; without result evidence the portable Interrupted marker survives
+ * recovery writing a lost attempt off as failed. Active durable rows never
+ * resurrect a terminal card. Counts refine success, not failure/cancellation.
  */
-export function resolveDurableWorkerCardStatus(title: string, status: string, durable: string | null | undefined): string {
-  const resolved = resolveWorkerCardStatus(title, status);
-  if (!isSettledWorkerStatus(durable)) return resolved;
+export function resolveDurableWorkerCardStatus(title: string, status: string, durable: string | null | undefined, openIssues?: number, outcomeStatus?: "completed" | "failed"): string {
+  // A committed assignment verdict outranks even a terminal host guess or
+  // an older title marker. Counts refine success, never failure/cancellation.
+  let resolved = outcomeStatus ?? resolveWorkerCardStatus(title, status);
   const value = (durable ?? "").toLowerCase();
-  if (resolved === "running" || resolved === "working") return value;
-  if (value === "interrupted" && resolved === "failed") return value;
-  return resolved;
+  if (isSettledWorkerStatus(value)) {
+    // A known result count from the compact durable read distinguishes a
+    // committed failure from legacy cancellation/interruption guesses.
+    if (value === "failed" && openIssues !== undefined && resolved === "cancelled") resolved = value;
+    if (resolved === "running" || resolved === "working" || resolved === "canceled") resolved = value;
+    else if (resolved === "failed" && ["interrupted", "cancelled", "canceled"].includes(value)) resolved = value;
+    else if (["completed", "completed_with_issues", "failed"].includes(resolved)
+      && ["completed", "completed_with_issues", "failed"].includes(value)) resolved = value;
+  }
+  return (resolved === "completed" && openIssues !== undefined && openIssues > 0)
+    ? "completed_with_issues" : resolved;
+}
+
+/** Route-selection provenance in a card title's route (`flagship`,
+ * `light→standard`, `hint …`, `by …`, `usage 42%`, see
+ * routing/decision_display.py): kept in pipeline.md and the route audit,
+ * never on the compact coordinator card, where `usage` would also read as
+ * this worker's own usage. */
+const ROUTE_PROVENANCE = /^(?:by|usage|hint)\s|^(?:light|standard|deep|flagship)(?:\s*→\s*(?:light|standard|deep|flagship))?$/i;
+
+/** The compact coordinator card's identity: task title, role, and the
+ * actual engine · model · effort route without selection provenance
+ * (`null` when the title carries no route). */
+export function workerCardIdentity(title: string): { title: string; role: string; route: string | null } {
+  const { name, routeParts } = parseWorkerCardTitle(title);
+  const role = (routeParts[0] || "worker").replace(/^worker-/i, "");
+  const route = routeParts.slice(1).filter((part) => !ROUTE_PROVENANCE.test(part));
+  return { title: name.trim() || role, role, route: route.length ? route.join(" · ") : null };
 }
 
 export function workerCardMetadata(title: string, status: string) {

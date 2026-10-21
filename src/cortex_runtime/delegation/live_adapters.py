@@ -1734,7 +1734,11 @@ class EngineSessionManagerAdapter:
         offered_efforts = set().union(*(
             _offered_values(observed, option_id) for option_id in ("reasoning_effort", "thought_level", "effort")
         ))
-        effort = _effort_within(worker_effort, offered_efforts)
+        if launch.get("effort_source") in {"user_request", "pin"} and worker_effort not in offered_efforts:
+            raise WorkerModeNotConfirmed(
+                f"the engine no longer offers explicitly requested effort {worker_effort!r}; "
+                "no substitution permitted and no worker prompt is sent.")
+        effort = worker_effort if launch.get("effort_source") in {"user_request", "pin"} else _effort_within(worker_effort, offered_efforts)
         if effort is not None:
             key = "thought_level" if "thought_level" in revision["parameters"] else "effort"
             worker_parameters[key] = effort
@@ -2068,7 +2072,11 @@ class EngineSessionManagerAdapter:
                               route_basis='auto:pin')
                 if detail.get('effort'):
                     launch['parameters'] = dict(launch.get('parameters') or {}, effort=detail['effort'])
-                    launch['effort_source'] = 'auth_recovery'
+                    launch['effort_source'] = (detail['effort_source']
+                                               if detail.get('effort_source') in {'user_request', 'pin'}
+                                               else 'auth_recovery')
+                    if launch['effort_source'] in {'user_request', 'pin'} and detail.get('route_decision'):
+                        launch['route_decision'] = dict(detail['route_decision'])
                 return
         if not launch.get('assignment_id') or launch.get('route_override') or launch.get('resolved_connection_id'):
             return
@@ -2142,7 +2150,9 @@ class EngineSessionManagerAdapter:
             launch["route_decision"] = dict(choice.decision)
         if choice.effort:
             launch["parameters"] = dict(launch.get("parameters") or {}, effort=choice.effort)
-            launch["effort_source"] = "auto_route"
+            launch["effort_source"] = ("user_request" if user_request and user_request.get("effort") is not None
+                                       else "pin" if (choice.decision or {}).get("effort_basis") == "pin:explicit_effort"
+                                       else "auto_route")
 
     @staticmethod
     def _route_authorization_error(code):
@@ -2263,6 +2273,12 @@ class EngineSessionManagerAdapter:
         allowed = (auto_route.allowed_efforts(record.engine, model, project_root, self._environ)
                    if launch.get("assignment_id") else None)
         if requested_effort is not None and allowed is not None and requested_effort not in allowed:
+            if launch.get("effort_source") in {"user_request", "pin"}:
+                raise PortableError(category=PortableErrorCategory.VALIDATION,
+                                    code=("user_requested_effort_unavailable" if launch["effort_source"] == "user_request"
+                                          else "pinned_effort_unavailable"),
+                                    remediation="Explicit effort conflicts with current model policy; no substitution permitted.",
+                                    retry_eligible=False)
             # Lowered, never refused: a saved effort from before the rule
             # (e.g. ultra) must not make the thread unusable. Recorded as
             # this attempt's effective effort, with its provenance.

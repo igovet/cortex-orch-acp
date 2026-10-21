@@ -1041,12 +1041,11 @@ def test_light_work_runs_stretch_at_high(tmp_path, monkeypatch):
         choice = auto_route.choose(role, project, environ, complexity=complexity)
         assert (choice.model, choice.effort) == ("gpt-6-luna", "high"), role
         assert choice.decision["stretch"]["status"] == "light_tier"
-    # A pin to Luna at low is raised to the floor, not honoured below it.
+    # An explicit pin below the floor refuses; automatic defaults above stay unchanged.
     project, environ = _live_all(monkeypatch, tmp_path, {"pin": {"*": "codex-acp/gpt-6-luna:low"}})
-    choice = auto_route.choose("worker-backend-dev", project, environ)
-    assert (choice.model, choice.effort) == ("gpt-6-luna", "high")
-    assert choice.decision["stretch"] == dict(status="pinned", chosen=True)
-    # A worker's requested effort is clamped the same way at dispatch.
+    with pytest.raises(PortableError, match="pinned_effort_unavailable"):
+        auto_route.choose("worker-backend-dev", project, environ)
+    # The policy floor remains unchanged at dispatch.
     assert auto_route.allowed_efforts("codex-acp", "gpt-6-luna", project, environ) == ("high", "xhigh", "max")
 
 
@@ -1791,7 +1790,7 @@ def test_arbitrary_configured_model_has_neutral_stretch_audit(
                                "also_standard_for": ["testing"]}}}},
     }
     if pin:
-        routing["pin"] = {"*": engine + "/" + model + ":low"}
+        routing["pin"] = {"*": engine + "/" + model + ":high"}
     project, environ = _live_choose(
         monkeypatch, tmp_path, _all_efforts([_named(connection, model)]), routing)
     choice = auto_route.choose(role, project, environ, escalate=escalate)

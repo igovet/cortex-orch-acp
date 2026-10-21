@@ -299,7 +299,7 @@ def test_each_pinned_adapter_gets_its_own_session_new_meta(tmp_path):
     dumped = json.loads(session_new_dump.read_text(encoding="utf-8"))
     assert dumped['_meta']['claudeCode'] == dict(options=UNIFIED)
     assert dumped['_meta']['systemPrompt'].startswith('# Cortex session\n\nYou are the Cortex coordinator')
-    assert dumped['_meta']['systemPrompt'].endswith('\n\nYou are a backend developer.')
+    assert set(dumped['_meta']) == {'systemPrompt', 'claudeCode'}
 
     # The verified private Codex adapter forwards this metadata to App Server.
     # Role text is not repeated in an ordinary user prompt; recovery carries
@@ -328,15 +328,20 @@ def test_each_pinned_adapter_gets_its_own_session_new_meta(tmp_path):
 
     dumped_codex = json.loads(session_new_dump_codex.read_text(encoding="utf-8"))
     meta_codex = dumped_codex.get("_meta")
-    assert (meta_codex["systemPrompt"] == _with_cheat_sheet("coordinator", "You are a backend developer.")
-            and meta_codex["cortexRole"] == "coordinator")
+    from cortex_runtime.engine.unified_system_prompt import worker_capabilities_section
+    inventory = worker_capabilities_section([])
+    assert meta_codex["systemPrompt"] == (
+        _with_cheat_sheet("coordinator", "You are a backend developer.").rstrip() + "\n\n" + inventory)
+    assert meta_codex["cortexRole"] == "coordinator"
+    assert set(meta_codex) == {"systemPrompt", "cortexRole", "cortexNativeContext", "cortexBaseInstructions"}
     assert meta_codex["cortexNativeContext"] is False
     assert meta_codex["cortexBaseInstructions"].startswith("# Cortex session\n\nYou are the Cortex coordinator")
-    # Role text is identical (cheat sheet aside, which is codex-acp only); native guidance follows the adapter's tool policy.
+    # Both coordinators receive the same separate worker-capability guidance.
+    # Role/base text stays exact; only Codex receives its schema cheat sheet.
     from cortex_runtime.engine.unified_system_prompt import cortex_system_prompt
     assert dumped['_meta']['systemPrompt'] == cortex_system_prompt(
         "coordinator", str(tmp_path), environ=environ, native_tools=False
-    ).rstrip() + "\n\n" + "You are a backend developer."
+    ).rstrip() + "\n\nYou are a backend developer.\n\n" + inventory
     assert meta_codex["cortexBaseInstructions"] == cortex_system_prompt(
         "coordinator", str(tmp_path), environ=environ_codex, native_tools=True
     )

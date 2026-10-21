@@ -329,7 +329,8 @@ def test_worker_result_summary_fallback_is_one_bounded_line():
 
 def test_worker_card_outcome_distinguishes_clean_result_issues_and_execution_failure():
     assert worker_card_outcome("completed", '{"checks":[]}') == ("completed", None)
-    assert worker_card_outcome("failed", '{"checks":[{"outcome":"failed"}]}') == ("completed", "Completed with issues")
+    assert worker_card_outcome("failed", '{"checks":[{"outcome":"failed"}]}') == ("failed", None)
+    assert worker_card_outcome("completed", '{"checks":[{"outcome":"not_run"}]}') == ("completed", "Completed with issues")
     assert worker_card_outcome("failed", None) == ("failed", None)
 
 
@@ -396,6 +397,7 @@ def test_completed_worker_card_embeds_result_projection():
     runtime._emit_assignment_tool_calls("task", cards.append, [result])
     assert len(cards) == 1
     assert cards[0]["raw_output"] == {
+        "cortexWorkerOutcome": {"status": "completed", "openIssues": 1},
         "summary": "Did the thing.",
         "checks": [
             {"name": "tests pass", "outcome": "passed"},

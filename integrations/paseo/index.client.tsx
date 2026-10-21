@@ -1,24 +1,22 @@
 import { isHiddenOperation } from "./shared/timeline-visibility.ts";
 import { useAgent, type PluginClientContext, type PluginTimelineItemProps } from "@getpaseo/plugin/client";
 import { Icon } from "@getpaseo/plugin/client/react-native";
-import { useEffect, useRef } from "react";
-import { Animated, Platform, Pressable, Text, View } from "react-native";
+import { Platform, Pressable, Text, View } from "react-native";
 import { z } from "zod";
 import { WorkerPanel } from "./client/worker-panel.js";
 import { PipelinePanel } from "./client/pipeline-panel.js";
 import { SettingsScreen } from "./client/settings-panel.js";
 import { selectWorker } from "./client/worker-selection.js";
 import { isWorkerTimelineRunning } from "./client/worker-timeline-status.js";
-import { resolveDurableWorkerCardStatus, workerCardMetadata, workerTerminalState, type WorkerStatusTone } from "./client/worker-display.ts";
+import { resolveDurableWorkerCardStatus, workerCardIdentity, workerStatusPresentation, type WorkerStatusTone } from "./client/worker-display.ts";
 import { coalesced } from "./client/coalesce.ts";
 import { UsageMeter, useWorkerUsage } from "./client/usage-meter.tsx";
-import { workerResult } from "./shared/pipeline.js";
-import { parseWorkerResult } from "./shared/worker-timeline-result.ts";
-import { WorkerResultDetail } from "./client/worker-result.tsx";
-import { workerResultItems } from "./client/worker-result-model.ts";
-import { setWorkerCardPulse } from "./client/worker-card-pulse.ts";
-import { useFallbackWorkerResult } from "./client/use-worker-result.ts";
+import { isWorkerCardCallId, WORKER_ROW_KIND, WORKER_ROW_VERSION, workerRowData, workerRowId } from "./shared/worker-card-item.ts";
+import { cardAccessibilityLabel, cardAttention, cardIssueCount, cardStatusAnnouncement, cardStatusKey, shouldAnnounceCardStatus, type CardStatusSnapshot } from "./client/worker-card-model.ts";
+import { useEffect, useRef, useState } from "react";
 import { PluginErrorBoundary } from "./client/plugin-error-boundary.tsx";
+import { readableTextColor } from "./client/card-contrast.ts";
+import { createActivationGuard, createSpaceActivation } from "./client/card-keyboard.ts";
 
 const workerTimelineSchema = z.object({
   callId: z.string(),
@@ -29,17 +27,17 @@ const workerTimelineSchema = z.object({
   // aligned with that exact projected shape so the renderer is mounted
   // instead of falling back to "Plugin timeline item unavailable.".
   status: z.enum(["running", "completed", "canceled", "failed"]),
-  // The runtime's terminal `{summary, checks}` projection, carried on the
-  // host-persisted/replayed tool_call item's `metadata` (see this file's
-  // `worker-tool-call-row` transformer and `server/provider.ts`'s
-  // `presentTimeline`) so a completed card renders it with zero RPC, even
-  // the first time a session is opened. `undefined` for a running card or
-  // an older item that predates this field -- see `useFallbackWorkerResult`.
-  result: workerResult.nullable().optional(),
+  // The only terminal-result fact a coordinator card carries: the open-issue
+  // count (`shared/worker-card-outcome.ts`). The summary, check list,
+  // blockers and evidence gaps live in the worker tab only; an older item's
+  // embedded `result` is reduced to this count by the transformer, and any
+  // other key is stripped by this schema, so replay never brings them back.
+  openIssues: z.number().int().nonnegative().optional(),
+  outcomeStatus: z.enum(["completed", "failed"]).optional(),
   // The host's own bounded, server-redacted ACP tool-call error (see
-  // `_emit_worker_card`'s `raw_output`): the route/reason for a
-  // provisioning failure, a cancellation/interruption reason, or a
-  // worker's own short failure line. Absent for a running/completed card.
+  // `_emit_worker_card`'s `raw_output`). The card never shows it, only a
+  // category (`cardAttention`); opening the worker hands it to the worker
+  // tab, which shows it when no durable attempt explains the failure.
   failureReason: z.string().optional(),
 });
 
@@ -59,93 +57,125 @@ function statusToneColor(tone: WorkerStatusTone, colors: PluginTimelineItemProps
   return colors.accent;
 }
 
+type PressableState = { pressed: boolean; hovered?: boolean; focused?: boolean };
+
 function WorkerTimelineRow({ theme, layout, agentId, item, workspaceId, onOpen }: PluginTimelineItemProps<z.output<typeof workerTimelineSchema>> & { workspaceId: string | null; onOpen: () => void }) {
-  const opacity = useRef(new Animated.Value(1)).current;
-  const pulseElement = useRef<HTMLElement | null>(null);
   const hostWorking = isWorkerTimelineRunning(item.data.status);
   // Polled while the host still shows the card running: a plugin reload
   // closes the provider connection and the host re-sends nothing until the
   // next prompt, so the durable attempt status is what settles the card.
-  const usage = useWorkerUsage(workspaceId, agentId, item.data.assignmentRef, hostWorking);
-  const resolvedStatus = resolveDurableWorkerCardStatus(item.data.title, item.data.status, usage?.status);
-  const isWorking = isWorkerTimelineRunning(resolvedStatus);
-  // A running card never shows a result yet, so the fallback read only ever
-  // triggers once the card is terminal and has no embedded result -- an
-  // older item, or a host build that did not persist the field.
-  const embedded = item.data.result ?? null;
-  const fallback = useFallbackWorkerResult(workspaceId, agentId, item.data.assignmentRef, !isWorking && !embedded);
-  const result = embedded ?? fallback;
-  const terminal = workerTerminalState(resolvedStatus, result?.checks);
-  const metadata = workerCardMetadata(item.data.title, resolvedStatus);
-  const { issueCount } = terminal;
-  const statusColor = statusToneColor(terminal.tone, theme.colors);
-
+  // The read is compact (status, usage and an open-issue count only): an
+  // unopened card never fetches a summary, check list or transcript.
+  const { usage, loaded } = useWorkerUsage(workspaceId, agentId, item.data.assignmentRef, hostWorking);
+  const resolvedStatus = resolveDurableWorkerCardStatus(item.data.title, item.data.status, usage?.status, usage?.openIssues ?? item.data.openIssues, item.data.outcomeStatus);
+  const presentation = workerStatusPresentation(resolvedStatus);
+  const identity = workerCardIdentity(item.data.title);
+  const issueCount = cardIssueCount(presentation.label, usage?.openIssues, item.data.openIssues);
+  const attention = cardAttention(presentation.label, issueCount, item.data.failureReason);
+  // Every coloured text is readable (>= 4.5:1) on every background the card
+  // shows: normal/focused (surface1), hovered/pressed (surface2) and the
+  // status chip (surface0), in whichever theme the host supplies. The theme's
+  // own token is kept when it already passes (card-contrast.ts).
+  const surfaces = [theme.colors.surface0, theme.colors.surface1, theme.colors.surface2];
+  const muted = readableTextColor(theme.colors.foregroundMuted, theme.colors.foreground, surfaces);
+  const statusColor = presentation.tone === "muted" ? muted
+    : readableTextColor(statusToneColor(presentation.tone, theme.colors), theme.colors.foreground, surfaces);
+  const actionColor = readableTextColor(theme.colors.accent, theme.colors.foreground, surfaces);
+  const statusText = presentation.label.charAt(0).toUpperCase() + presentation.label.slice(1);
+  const disabled = !workspaceId;
+  const open = () => {
+    if (!workspaceId) return;
+    selectWorker(agentId, item.data.assignmentRef, { failureReason: item.data.failureReason });
+    onOpen();
+  };
+  // Native activation (Enter, click, touch) and the card's own Space handling
+  // share one guard, so one gesture never opens the worker twice.
+  const openRef = useRef(open);
+  openRef.current = open;
+  const [activateOnce] = useState(() => createActivationGuard(() => openRef.current()));
+  const cardRef = useRef<unknown>(null);
   useEffect(() => {
-    if (Platform.OS === "web") {
-      const element = pulseElement.current;
-      if (!element) return;
-      setWorkerCardPulse(element, isWorking);
-      return () => setWorkerCardPulse(element, false);
-    }
-    if (!isWorking) {
-      opacity.stopAnimation();
-      opacity.setValue(1);
-      return;
-    }
-
-    // Native surfaces still use Animated; web uses CSS so a hidden chat panel
-    // resumes its pulse when the host makes it visible without remounting.
-    opacity.setValue(1);
-    const activity = Animated.loop(
-      Animated.sequence([
-        Animated.timing(opacity, { toValue: 0.58, duration: 850, useNativeDriver: false }),
-        Animated.timing(opacity, { toValue: 1, duration: 850, useNativeDriver: false }),
-      ]),
-    );
-    activity.start();
+    if (Platform.OS !== "web" || disabled || typeof window === "undefined") return;
+    const space = createSpaceActivation({ isCard: (target) => target !== null && target === cardRef.current, activate: activateOnce });
+    const keydown = (event: KeyboardEvent) => space.keydown(event);
+    const keyup = (event: KeyboardEvent) => space.keyup(event);
+    const blur = () => space.cancel();
+    window.addEventListener("keydown", keydown, true);
+    window.addEventListener("keyup", keyup, true);
+    window.addEventListener("blur", blur);
     return () => {
-      activity.stop();
-      opacity.stopAnimation();
-      opacity.setValue(1);
+      window.removeEventListener("keydown", keydown, true);
+      window.removeEventListener("keyup", keyup, true);
+      window.removeEventListener("blur", blur);
     };
-  }, [isWorking, opacity]);
+  }, [activateOnce, disabled]);
+  // One polite announcement per real status transition, naming the worker.
+  // It is a separate live region outside the card's button (whose children
+  // are presentational) and is empty until a transition: mounting or
+  // replaying a card, its first reconciling read and usage polls say nothing.
+  const statusKey = cardStatusKey(statusText, issueCount);
+  const lastStatus = useRef<CardStatusSnapshot | null>(null);
+  const [announcement, setAnnouncement] = useState("");
+  useEffect(() => {
+    const next = { key: statusKey, loaded };
+    if (shouldAnnounceCardStatus(lastStatus.current, next)) {
+      setAnnouncement(cardStatusAnnouncement({ title: identity.title, role: identity.role, status: statusText, issueCount }));
+    }
+    lastStatus.current = next;
+  }, [statusKey, loaded]);
 
-  // A worker is its own block in the coordinator's timeline, never a
-  // plain row between tool calls: bordered card, labelled, opens its panel.
+  // A worker is its own compact block in the coordinator's timeline: one
+  // whole-card action that opens the worker tab, a uniform neutral outline
+  // (no status stripe), status as icon + text, no result body, no motion.
   return (
+    <View style={{ alignSelf: "stretch" }}>
     <Pressable
+      ref={cardRef as never}
       accessibilityRole="button"
-      accessibilityLabel={`Open worker ${metadata.workerName}`}
-      onPress={() => workspaceId && (selectWorker(agentId, item.data.assignmentRef), onOpen())}
-      style={{ marginVertical: layout.compact ? 6 : 8, borderWidth: 1, borderColor: theme.colors.border, borderLeftWidth: 3,
-        borderLeftColor: statusColor, borderRadius: 8,
-        backgroundColor: theme.colors.surface1, paddingHorizontal: 12, paddingVertical: 10, gap: 6 }}
+      accessibilityLabel={cardAccessibilityLabel({ title: identity.title, role: identity.role, status: statusText, route: identity.route, issueCount, disabled })}
+      accessibilityState={{ disabled }}
+      disabled={disabled}
+      onPress={() => { activateOnce(); }}
+      style={(state: PressableState) => ({ alignSelf: "stretch", marginVertical: layout.compact ? 6 : 8, borderWidth: 1, borderColor: theme.colors.border, borderRadius: 8,
+        backgroundColor: !disabled && (state.pressed || state.hovered) ? theme.colors.surface2 : theme.colors.surface1,
+        paddingHorizontal: 12, paddingVertical: layout.compact ? 8 : 10, gap: 6,
+        // Keyboard focus: an outline drawn outside the border, so the
+        // layout never shifts (react-native-web passes `focused`).
+        ...(state.focused ? { outlineWidth: 2, outlineStyle: "solid", outlineColor: actionColor, outlineOffset: 1 } : {}) }) as never}
     >
-      <Animated.View ref={(node) => { pulseElement.current = node as unknown as HTMLElement | null; }} style={{ opacity: Platform.OS === "web" ? 1 : opacity, gap: 6 }}>
-        <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
-          <Icon name="Bot" size={12} color={theme.colors.foregroundMuted} />
-          <Text style={{ flex: 1, color: theme.colors.foregroundMuted, fontSize: 11, fontWeight: "600", letterSpacing: 0.6, textTransform: "uppercase" }}>Worker</Text>
-          {/* Colour plus an icon and a text label, so status is never carried by colour alone. */}
-          <View style={{ flexDirection: "row", alignItems: "center", gap: 4 }}>
-            <Icon name={terminal.icon} size={12} color={statusColor} />
-            <Text style={{ color: statusColor, fontSize: 11, fontWeight: "600", textTransform: "capitalize" }}>{terminal.label}</Text>
-            {issueCount > 0 && <Text style={{ color: statusColor, fontSize: 11, fontWeight: "600" }}>{issueCount} issue{issueCount === 1 ? "" : "s"}</Text>}
+      <View style={{ flexDirection: "row", flexWrap: "wrap", alignItems: "center", justifyContent: "space-between", columnGap: 8, rowGap: 4 }}>
+        <View style={{ flexDirection: "row", alignItems: "center", gap: 6, flexShrink: 1, minWidth: 0 }}>
+          <View style={{ width: 20, height: 20, borderRadius: 6, alignItems: "center", justifyContent: "center", backgroundColor: theme.colors.surface2 }}>
+            <Icon name="Bot" size={14} color={muted} />
           </View>
+          <Text numberOfLines={1} style={{ color: muted, fontSize: 12, lineHeight: 18, flexShrink: 1, minWidth: 0 }}>{identity.role}</Text>
         </View>
-        <Text numberOfLines={2} ellipsizeMode="tail" style={{ color: theme.colors.foreground, fontSize: 14, fontWeight: "600" }}>{metadata.workerName}</Text>
-        <Text numberOfLines={1} ellipsizeMode="tail" style={{ color: theme.colors.foregroundMuted, fontSize: 12 }}>{metadata.subtitle}</Text>
-        {/* The sanitized failure line itself (a provisioning failure's code
-            and reason, a cancellation/interruption reason, or a worker's
-            own crash line): the subtitle above never carries more than the
-            role and status, and this is the one place in the collapsed
-            card that shows why, without opening the Workers panel. */}
-        {!isWorking && item.data.failureReason && <Text numberOfLines={3} ellipsizeMode="tail" style={{ color: statusColor, fontSize: 12 }}>{item.data.failureReason}</Text>}
-        <UsageMeter context={usage?.context} tokens={usage?.tokens} theme={theme} />
-        {!isWorking && result && <View style={{ marginTop: 2, paddingTop: 8, borderTopWidth: 1, borderColor: theme.colors.border }}>
-          <WorkerResultDetail body={result.summary ?? undefined} items={workerResultItems(result.checks)} theme={theme} />
-        </View>}
-      </Animated.View>
+        {/* Colour plus an icon and a text label, so status is never carried by colour alone. */}
+        <View style={{ flexDirection: "row", alignItems: "center", gap: 4, paddingHorizontal: 8, paddingVertical: 2, borderRadius: 999, borderWidth: 1, borderColor: theme.colors.border, backgroundColor: theme.colors.surface0 }}>
+          <Icon name={presentation.icon} size={12} color={statusColor} />
+          <Text style={{ color: statusColor, fontSize: 12, lineHeight: 18, fontWeight: "600" }}>{statusText}{issueCount ? ` · ${issueCount}` : ""}</Text>
+        </View>
+      </View>
+      <Text numberOfLines={2} ellipsizeMode="tail" style={{ color: theme.colors.foreground, fontSize: 14, lineHeight: 20, fontWeight: "600" }}>{identity.title}</Text>
+      <Text style={{ color: muted, fontSize: 12, lineHeight: 18 }}>{identity.route ?? "Route unavailable"}</Text>
+      {attention && <View style={{ flexDirection: "row", alignItems: "center", gap: 6, minWidth: 0 }}>
+        <View style={{ flexShrink: 0 }}><Icon name="CircleAlert" size={12} color={statusColor} /></View>
+        <Text numberOfLines={1} ellipsizeMode="tail" style={{ color: statusColor, fontSize: 12, lineHeight: 18, flexShrink: 1, minWidth: 0 }}>{attention}</Text>
+      </View>}
+      <View style={{ flexDirection: "row", flexWrap: "wrap", alignItems: "center", justifyContent: "space-between", columnGap: 12, rowGap: 4 }}>
+        <View style={{ flexShrink: 1, minWidth: 0 }}>
+          <UsageMeter context={usage?.context} tokens={usage?.tokens} theme={theme} mutedColor={muted} unavailableText={loaded ? "Usage unavailable" : undefined} />
+        </View>
+        <View style={{ flexDirection: "row", alignItems: "center", gap: 2, marginLeft: "auto" }}>
+          <Text style={{ color: disabled ? muted : actionColor, fontSize: 12, lineHeight: 18, fontWeight: "600" }}>{disabled ? "Worker unavailable" : "Open worker"}</Text>
+          {!disabled && <Icon name="ChevronRight" size={12} color={actionColor} />}
+        </View>
+      </View>
     </Pressable>
+    {/* Visually hidden but still in the accessibility tree: clipped to one
+        pixel, never zero opacity, off-screen or display:none. */}
+    <Text accessibilityLiveRegion="polite" style={{ position: "absolute", width: 1, height: 1, overflow: "hidden", color: "transparent" }}>{announcement}</Text>
+    </View>
   );
 }
 
@@ -166,30 +196,20 @@ export default function contribute(client: PluginClientContext) {
       // call; a plugin row here would replace the whole run with that call.
       // The server projection already gives them readable names and native
       // read/edit/shell detail.
-      if (!item.callId.startsWith("worker:")) return undefined;
-      // The server's `presentTimeline` embeds the runtime's terminal
-      // `{summary, checks}` projection at `item.metadata.cortexWorkerResult`
-      // (see `server/provider.ts`). Paseo persists and replays a tool_call
-      // item's `metadata` exactly like its other fields, so this is a
-      // completed card's result the *first* time a session is opened, not
-      // just after a live update -- the result no longer needs its own RPC.
-      const result = parseWorkerResult(item.metadata?.cortexWorkerResult);
-      const failureReason = item.status === "failed" && typeof item.error === "string" && item.error.trim()
-        ? item.error.trim() : undefined;
+      if (!isWorkerCardCallId(item.callId)) return undefined;
+      // The current server provider emits each worker card as a plugin item
+      // with a stable identity (shared/worker-card-item.ts), which the host
+      // merges across turns. This transformer only renders tool_call worker
+      // items an older plugin persisted, with the same compact projection:
+      // an embedded `cortexWorkerResult` is reduced to its open-issue count,
+      // never forwarded into the coordinator card.
       return {
         items: [{
           type: "plugin",
-          // A worker lifecycle is one stable ACP tool call.  The bridge
-          // sends each lifecycle change as a new host timeline record, so
-          // the plugin item must carry the stable call ID explicitly.  If it
-          // is omitted, Paseo derives an ID from each host record and shows
-          // duplicate worker rows after a status update or cancellation.
-          id: `worker-row:${item.callId}`,
-          kind: "worker-row",
-          version: 1,
-          data: { callId: item.callId, assignmentRef: item.callId.slice("worker:".length), title: item.name, status: item.status,
-            ...(result !== undefined ? { result } : {}),
-            ...(failureReason !== undefined ? { failureReason } : {}) },
+          id: workerRowId(item.callId),
+          kind: WORKER_ROW_KIND,
+          version: WORKER_ROW_VERSION,
+          data: workerRowData(item),
         }],
       };
     },

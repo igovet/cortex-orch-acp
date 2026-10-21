@@ -34,10 +34,33 @@ proven zero-cost refresh-forcing command on a schedule; today it reports
 both Claude Code and Codex CLI `unsupported` because no such command is yet
 proven for either. See [opt-in login keepalive](docs/features/failures-and-cancellation/index.md#opt-in-native-cli-login-keepalive-outside-the-runtime).
 
+Explicit model-and-effort requests on covered planned nodes retain the exact
+effort through dispatch, retries and review fixes (for example, ask to use
+`codex-acp/gpt-6.1-sol at medium effort`). Conflicting policy or missing engine
+support refuses before a worker prompt; it never substitutes an automatic effort.
+Mandatory review still uses owner reviewer pins/ranking. An exact reviewer pin
+also refuses instead of clamping its effort. Editor thinking selection alone does
+not set every worker's effort. See [routing](docs/features/routing-and-fallback/index.md#explicit-effort-preservation).
+
 Required shared instructions cannot be silently omitted: if an always-included
 skill cannot be loaded or is empty, session startup stops with a diagnostic naming
 the skill and receiving role. Situational skills remain on-demand references.
 See [instruction delivery](docs/features/roles-and-delegation/index.md#instruction-delivery).
+
+The coordinator answers informational questions with its granted reads and plans
+specialist work when an operation needs worker capabilities, including authorized
+outside-project access. A bounded configured worker MCP summary distinguishes
+worker grants from the coordinator's own tools; it is not proof of access or
+successful discovery. Built-in worker command/read-search discovery does not
+require an external MCP attachment. Unknown external locations are investigation
+objectives, not automatic requests for pasted data; a Paseo UUID is not a local
+Cortex report id. Workers discover safe installed history/export mechanisms and
+report exact-session completeness or a real access limit. Read-only/Guarded command
+`/var/tmp` is private scratch, not the host directory: a missing file there is
+not proof of host absence. Authorized host-only reads use the advertised
+outside-command consent route through a suitable writing specialist; no refusal
+may be retried by another route. Denials cannot be bypassed by delegation. See
+[capability-based delegation](docs/features/roles-and-delegation/index.md#capability-based-delegation).
 
 Terminal tasks automatically tear down their owned coordinator/worker engines;
 `COMPLETED` and `FAILED` are not relabeled `CANCELLED`. Unexpected prompt errors
@@ -362,7 +385,7 @@ batch and worker scenarios were not reached. See
 
 When a planned step cannot start because another worker holds overlapping paths (in this chat or another chat of the same project) or the chat's worker slots are full, the chat shows a "Waiting" card naming the holder, the overlapping paths and when the wait began; it closes when the step starts. While the holder is a worker observed alive, the task keeps waiting rather than stopping on the 30-minute scheduler deadline. See [orchestration](docs/features/orchestration/index.md).
 
-ACP timeline updates use bounded display projections to avoid repeatedly sending growing worker transcripts. Worker cards keep a 20-action, 4 KiB tail for generic clients; per-update and field size limits and a fixed per-card event budget (forward-only status transitions plus at most 8 progress updates, one per 30 s, so at most 13 updates per worker whatever its size) bound host event volume. Coordinator cards send changed fields only, suppress no-op updates, omit an identical MCP text mirror, and reference repeated identical outputs; unchanged context polls return a compact receipt. Coordinator and engine tool cards also have a per-task total budget: the first 150 distinct calls (or 4 MiB of card updates) get their own card with at most 10 updates each; later calls are counted on one aggregate card, sent at most 20 times per task; and up to 50 failed calls past the budget keep their own cards. The budget persists across turns and restarts, and `session/load` replays older journals within the same bound. In the scale test, 1,500 coordinator calls over four turns and a restart sent 324 card updates and 187,517 bytes, against 312 updates for 500 calls. In the recorded scale test, repeated polls were 481–483 bytes, and each Paseo worker card sent 3 updates and 16,959 bytes for 10-, 60- and 300-tool workloads. These limits reduce emitted event volume; they do not cap durable task history or guarantee constant total daemon memory. See [ACP observability and resource limits](docs/features/observability/index.md#bounded-acp-event-projections).
+ACP timeline updates use bounded display projections to avoid repeatedly sending growing worker transcripts. Worker cards keep a 20-action, 4 KiB tail for generic clients; per-update and field size limits and a fixed per-card event budget (forward-only status transitions plus at most 8 progress updates, one per 30 s, so at most 13 updates per worker whatever its size) bound host event volume. Coordinator cards send changed fields only, suppress no-op updates, omit an identical MCP text mirror, and reference repeated identical outputs, even across intervening compact context receipts while the matching projection remains cached; unchanged context polls return a compact receipt. Coordinator and engine tool cards also have a per-task total budget: the first 150 distinct calls (or 4 MiB of card updates) get their own card with at most 10 updates each; later calls are counted on one aggregate card, sent at most 20 times per task; and up to 50 failed calls past the budget keep their own cards. The budget persists across turns and restarts, and `session/load` replays older journals within the same bound. In the scale test, 1,500 coordinator calls over four turns and a restart sent 324 card updates and 187,517 bytes, against 312 updates for 500 calls. In the recorded scale test, repeated polls were 481–483 bytes, and each Paseo worker card sent 3 updates and 16,959 bytes for 10-, 60- and 300-tool workloads. These limits reduce emitted event volume; they do not cap durable task history or guarantee constant total daemon memory. See [ACP observability and resource limits](docs/features/observability/index.md#bounded-acp-event-projections).
 
 Automatic routing uses only explicit version-2 owner settings plus currently observed engine catalogs; no model identity receives a built-in tier, effort policy, or automatic membership by name. The coordinator receives route options from that same effective settings/catalog view. `list_route_options` preserves named policy migration/validation diagnostics and their corrective action, rather than reporting a storage failure. New or renamed model IDs remain ineligible until configured. Preferences rank only within already eligible routes and do not grant eligibility. See [configuration](docs/configuration.md#settings-only-model-policy) and [routing and fallback](docs/features/routing-and-fallback/index.md#settings-only-routing).
 
@@ -482,6 +505,8 @@ paseo plugin reload cortex-acp
 Git installs run their declared preparation hook. Local directory installs use the checkout directly; use the setup helper for a managed local Paseo installation when needed. See [Paseo onboarding and diagnostics](docs/project/packaging.md).
 
 The Paseo plugin shows per-worker context and token usage on worker cards. It does not add a separate provider plan-usage button.
+
+In Paseo's coordinator conversation, worker cards stay compact: role, status, task title, the actual engine · model · effort route, at most one fixed attention category (never the failure text itself), labelled usage and an **Open worker** action, with a uniform outline and no animation; a status transition is announced once with the worker's identity. A worker's terminal summary and its checks (dispositions, blockers, weak-evidence markers) appear only in the opened Workers tab for that exact attempt; the coordinator card keeps just the verdict and open-issue count, including when an older saved session is replayed. A failed assignment remains Failed even after publishing a report or later replan/Stop cleanup; successful work with unresolved checks reads Completed with issues; clean success stays Completed and cancellation stays Cancelled. Coverage is no-paid automated tests and a fixture rendering, not Paseo Desktop evidence. See [bounded ACP event projections](docs/features/observability/index.md#bounded-acp-event-projections).
 Post-result releases with no reported tokens use existing usage-record columns,
 so existing stores need no schema migration. Paseo omits their false token alarm;
 genuine unknown/failed calls remain visible. Missing usage is not zero/free.

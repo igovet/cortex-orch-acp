@@ -58,6 +58,15 @@ assert.equal(resolveDurableWorkerCardStatus(runtimeTitle, "failed", "interrupted
 assert.equal(resolveDurableWorkerCardStatus(runtimeTitle, "failed", "failed"), "failed");
 assert.equal(resolveDurableWorkerCardStatus(runtimeTitle, "completed", "interrupted"), "completed");
 assert.equal(resolveDurableWorkerCardStatus(`${runtimeTitle} · Cancelled`, "failed", "interrupted"), "cancelled");
+// A cancellation the runtime could only send as ACP `failed` (no title
+// marker reached the host) settles from the durable status; a durable
+// failure stays a failure, and the host's own turn-end `canceled` guess
+// yields to the durable outcome.
+assert.equal(resolveDurableWorkerCardStatus(runtimeTitle, "failed", "cancelled"), "cancelled");
+assert.equal(resolveDurableWorkerCardStatus(runtimeTitle, "failed", "canceled"), "canceled");
+assert.equal(resolveDurableWorkerCardStatus(runtimeTitle, "canceled", "completed"), "completed");
+assert.equal(resolveDurableWorkerCardStatus(runtimeTitle, "canceled", "failed"), "failed");
+assert.equal(resolveDurableWorkerCardStatus(runtimeTitle, "completed", "cancelled"), "completed");
 
 // T035: realistic Claude and Codex configOptions shapes -- an alias
 // (`opus[1m]`, `haiku`, `default`) with the engine's own resolved name

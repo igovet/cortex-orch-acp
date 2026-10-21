@@ -340,6 +340,109 @@ def test_repeated_identical_coordinator_polls_are_not_resent(scale_runs, case):
     assert first["bytes"] <= SESSION_UPDATE_MAX_BYTES
 
 
+@pytest.mark.parametrize("interleave_unchanged", [False, True])
+@pytest.mark.parametrize("recreate_emitter", [False, True])
+def test_changed_context_with_identical_projection_is_not_resent(
+    tmp_path, interleave_unchanged, recreate_emitter,
+):
+    """Freeze case4's ten-node state and commit two results between polls.
+
+    Complete contexts differ, but the 16 KiB display reduction omits nodes.
+    An intervening compact MCP receipt must not evict the earlier projection.
+    """
+    import threading
+    from types import SimpleNamespace
+
+    from cortex_runtime.acp import orchestrating_runtime as runtime_module
+    from cortex_runtime.bootstrap import bootstrap_task
+    from cortex_runtime.orchestration import mcp
+    from cortex_runtime.orchestration.state import TaskMachine
+    from cortex_runtime.portable.identity import SourceEvent
+    from cortex_runtime.store import Store
+
+    store = Store(tmp_path / ".cortex", project_root=tmp_path)
+    task = bootstrap_task(store, SourceEvent(origin="test", event_id="projection"), "Inspect it.", "owner")
+    machine = TaskMachine(store)
+    machine.create(task.task_id, "Inspect it.")
+    channel = SimpleNamespace(task_id=task.task_id, channel_id=str(uuid.uuid4()), role="coordinator")
+    machine.submit_plan(channel, dict(
+        tasks=[dict(id=f"n{i}", role="explorer", objective=LONG_OBJECTIVE.format(index=i),
+                    dependencies=[], scope=["."], model="auto") for i in range(10)],
+        verification=[["python3", "-B", "-c", 'print("verified")']],
+    ), "plan")
+    machine.move(task.task_id, "EXECUTING")
+    result = dict(summary="Observed summary. " * 220, checks=[
+        dict(name=f"check {i} " + "n" * 150, outcome="not_run", blocker="Fixture blocker: " + "b" * 900)
+        for i in range(20)
+    ])
+
+    def commit_result(index):
+        with store.connection() as db:
+            changed = db.execute(
+                "UPDATE runtime_nodes SET status='completed',result_json=? WHERE task_id=? AND node_id=?",
+                (json.dumps(result), task.task_id, f"n{index}"),
+            )
+            assert changed.rowcount == 1
+            db.commit()
+
+    runtime = runtime_module.OrchestratingRuntime.__new__(runtime_module.OrchestratingRuntime)
+    runtime._lock = threading.Lock()
+    runtime._store = store
+    runtime._coordinator_card_budgets = {}
+    cards = []
+    emit = runtime._engine_tool_call_emitter(cards.append, task_id=task.task_id)
+    envelope = dict(server="cortex", tool="task_get_context", arguments={})
+
+    def poll(ref):
+        value = mcp.dispatch(store, channel, "task_get_context", {})
+        emit(ref, "other", "mcp.cortex.task_get_context", "in_progress", None, None, envelope, None)
+        emit(ref, None, None, "completed", None, None, envelope, _mcp_result(value))
+        return value, cards[-1]
+
+    commit_result(0)
+    first, first_card = poll("first")
+    projection = first_card["raw_output"]
+    assert "nodes" not in projection["result"]["structuredContent"]
+    assert "truncated" in projection["result"]["structuredContent"]["…"]
+    if interleave_unchanged:
+        unchanged, receipt = poll("unchanged")
+        assert unchanged["unchanged_since_last_read"]
+        assert _update_bytes(receipt) <= REPEATED_POLL_MAX_BYTES
+    commit_result(1)
+    if recreate_emitter:
+        emit = runtime._engine_tool_call_emitter(cards.append, task_id=task.task_id)
+    changed, repeated_card = poll("changed")
+    assert changed != first
+    assert not changed.get("unchanged_since_last_read")
+    assert first["nodes"][1]["status"] == "pending"
+    annotated_result = dict(result, checks=[dict(c, evidence_strength="none") for c in result["checks"]])
+    assert changed["nodes"][1]["result"] == annotated_result
+    assert runtime_module.bound_value(
+        runtime_module._without_mcp_text_mirror(runtime_module._client_safe_raw(_mcp_result(changed))),
+        runtime_module._COORDINATOR_CARD_FIELD_MAX_BYTES,
+    ) == projection
+    assert repeated_card["raw_output"]["repeated_output"] is True
+    assert repeated_card["raw_output"]["same_as"] == first_card["tool_call_id"]
+    assert _update_bytes(repeated_card) <= REPEATED_POLL_MAX_BYTES
+    # Real top-level progress and errors still get terminal updates, not a
+    # stale full-result reference. The authoritative result is never reduced.
+    machine.move(task.task_id, "REVIEWING")
+    progressed, progress_card = poll("progress")
+    assert progressed["state"] == "REVIEWING"
+    assert progress_card["status"] == "completed"
+    assert progress_card["raw_output"]["result"]["structuredContent"]["state"] == "REVIEWING"
+    emit("error", "other", "mcp.cortex.task_get_context", "failed", None, None,
+         envelope, _mcp_result(progressed))
+    assert cards[-1]["status"] == "failed"
+    assert cards[-1]["raw_output"] == progress_card["raw_output"]
+    assert machine.context(task.task_id)["nodes"][1]["result"] == annotated_result
+    with store.connection() as db:
+        retained = db.execute(
+            "SELECT result_json FROM runtime_nodes WHERE task_id=? AND node_id='n1'", (task.task_id,),
+        ).fetchone()[0]
+    assert json.loads(retained) == result
+
+
 @_scale_group(3)
 def test_small_workload_stays_below_the_live_baseline(scale_runs):
     assert scale_runs[(3, "short")]["total"] <= LIVE_BASELINE_THREE_WORKER_BYTES

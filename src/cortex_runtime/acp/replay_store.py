@@ -1123,6 +1123,7 @@ def terminal_worker_card_reconciliation(store, task_id: str, history: Sequence[M
     """
     latest: dict[str, str] = {}
     latest_title: dict[str, str] = {}
+    latest_output: dict[str, Any] = {}
     seen_cards: set[str] = set()
     for entry in history:
         if entry.get("kind") != "update":
@@ -1134,6 +1135,8 @@ def terminal_worker_card_reconciliation(store, task_id: str, history: Sequence[M
         if not isinstance(card_id, str) or not card_id.startswith("worker:"):
             continue
         seen_cards.add(card_id)
+        if "rawOutput" in update:
+            latest_output[card_id] = update["rawOutput"]
         status = update.get("status")
         if isinstance(status, str):
             latest[card_id] = status
@@ -1165,6 +1168,10 @@ def terminal_worker_card_reconciliation(store, task_id: str, history: Sequence[M
                     (task_id,),
                 ).fetchall()
             }
+        has_runtime_nodes = db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='runtime_nodes'").fetchone() is not None
+        node_results = {row["assignment_ref"]: dict(row) for row in db.execute(
+            "SELECT assignment_ref,status,result_json FROM runtime_nodes WHERE task_id=?", (task_id,))} if has_runtime_nodes else {}
         rows = db.execute(
             "SELECT assignment_ref, event_type, payload_json FROM task_events "
             "WHERE task_id=? AND event_type IN ('worker_result','assignment_failed','assignment_cancelled') "
@@ -1204,7 +1211,7 @@ def terminal_worker_card_reconciliation(store, task_id: str, history: Sequence[M
             if not latest_title.get(card_id, "").endswith(" · Interrupted"):
                 interrupted_cards.append(card_id)
             continue
-        if latest.get(card_id) in {"completed", "failed"}:
+        if event_type != "worker_result" and latest.get(card_id) in {"completed", "failed"}:
             continue
         status = "completed" if event_type == "worker_result" else "failed"
         try:
@@ -1213,9 +1220,28 @@ def terminal_worker_card_reconciliation(store, task_id: str, history: Sequence[M
             payload = {}
         if not isinstance(payload, Mapping):
             payload = {}
+        result_output = None
+        result_title = None
         if event_type == "worker_result":
-            summary = payload.get("summary")
-            text = f"Result: {summary}" if isinstance(summary, str) and summary else None
+            from .orchestrating_runtime import worker_card_outcome, worker_card_open_issues, _worker_card_title
+            node = node_results.get(card_id.removeprefix("worker:"))
+            if node is not None:
+                status, label = worker_card_outcome(node["status"], node["result_json"])
+                try:
+                    retained_result = json.loads(node["result_json"] or "{}")
+                except (TypeError, ValueError):
+                    retained_result = {}
+                if isinstance(retained_result, Mapping):
+                    payload = retained_result
+            else:
+                status, label = worker_card_outcome("completed", json.dumps(payload))
+            result_output = {"cortexWorkerOutcome": dict(status=status, openIssues=worker_card_open_issues(payload))}
+            base = _WORKER_STATUS_SUFFIX.sub("", latest_title.get(card_id, ""))
+            result_title = _worker_card_title(base, label) if base else None
+            if latest.get(card_id) == status and latest_output.get(card_id) == result_output and (
+                    result_title is None or latest_title.get(card_id) == result_title):
+                continue
+            text = None
         elif event_type == "assignment_cancelled":
             reason = payload.get("reason")
             text = f"Cancelled: {reason}" if isinstance(reason, str) and reason else None
@@ -1225,6 +1251,10 @@ def terminal_worker_card_reconciliation(store, task_id: str, history: Sequence[M
         update = {"sessionUpdate": "tool_call_update", "toolCallId": card_id, "status": status}
         if text:
             update["content"] = [{"type": "text", "text": text[:300]}]
+        if result_output is not None:
+            update["rawOutput"] = result_output
+        if result_title:
+            update["title"] = result_title
         corrections.append(update)
     existing_terminal = {item["toolCallId"] for item in corrections} | set(terminal_by_card)
 

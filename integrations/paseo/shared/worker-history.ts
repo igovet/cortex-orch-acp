@@ -67,6 +67,16 @@ const attempt = z.object({
     claimedOutcome: z.string().optional(),
     evidenceGap: z.string().optional(),
   })).optional(),
+  // The worker's own terminal summary for this exact attempt (the runtime's
+  // retained result, else this attempt's latest worker_result), scrubbed and
+  // bounded server-side; summaryTruncated says the bound clipped it. Shown
+  // only in the worker tab: coordinator cards never carry it.
+  summary: z.string().optional(),
+  summaryTruncated: z.boolean().optional(),
+  // Compact reads (`compact: true`, the coordinator card's usage poll)
+  // replace the check list with this open-issue count: checks that are not
+  // passed and not closed by an exact later rerun.
+  openIssues: z.number().int().nonnegative().optional(),
   // Latest ACP context fill of this attempt's engine session.
   context: z.object({ used: z.number().int().nonnegative(), size: z.number().int().positive() }).optional(),
   // Engine-reported token totals of this attempt's calls.
@@ -84,6 +94,9 @@ export const readWorkerHistory = defineRpc({
     cursor: z.number().int().nonnegative().optional(),
     limit: z.number().int().min(1).max(200).optional(),
     assignmentCursor: z.string().optional(),
+    // Card-sized read: no summary, no check list (an openIssues count
+    // instead). Coordinator cards use it; the worker tab never does.
+    compact: z.boolean().optional(),
   }),
   output: z.object({
     assignments: z.array(z.object({

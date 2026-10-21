@@ -164,39 +164,86 @@ function createRuntime() {
     render(output, childPath, onElement);
   }
 
+  // Every string child and accessibility label of the last render pass:
+  // what a reader or assistive technology could see, not pixels.
+  let lastText: string[] = [];
+  // The current text of every polite/assertive live region, in render order.
+  let lastLive: string[] = [];
+  let labeledPresses = new Map<string, () => void>();
+  let currentRoot: (() => unknown) | null = null;
+  const flatText = (node: unknown): string => {
+    if (typeof node === "string" || typeof node === "number") return String(node);
+    if (Array.isArray(node)) return node.map(flatText).join("");
+    return "";
+  };
+  const textOf = (element: Element, out: string[]) => {
+    const label = element.props?.accessibilityLabel;
+    if (typeof label === "string") out.push(label);
+    const children = element.props?.children;
+    for (const child of Array.isArray(children) ? children.flat(Infinity) : [children]) {
+      if (typeof child === "string" || typeof child === "number") out.push(String(child));
+    }
+  };
+
+  let count = 0;
+  let presses: Array<() => void> = [];
+  const pass = () => {
+    count = 0;
+    presses = [];
+    labeledPresses = new Map();
+    const texts: string[] = [];
+    const live: string[] = [];
+    render(currentRoot!(), "root", (element) => {
+      count += 1;
+      textOf(element, texts);
+      if (element.props?.accessibilityLiveRegion && element.props.accessibilityLiveRegion !== "none") live.push(flatText(element.props.children));
+      const onPress = element.props?.onPress;
+      if (typeof onPress === "function") {
+        const press = () => (onPress as () => void)();
+        presses.push(press);
+        if (typeof element.props.accessibilityLabel === "string") labeledPresses.set(element.props.accessibilityLabel, press);
+      }
+    });
+    lastText = texts;
+    lastLive = live;
+  };
+  /** Re-render the mounted root until state and effects settle. */
+  const settle = async () => {
+    for (let round = 0; round < 20; round += 1) {
+      dirty = false;
+      pass();
+      const effects = pending;
+      pending = [];
+      for (const effect of effects) effect();
+      await new Promise((done) => setTimeout(done, 0));
+      if (!dirty && pending.length === 0) return;
+    }
+  };
+
   /** Render to a settled state: run effects, let async RPCs land, re-render
-   * while state changed; then press every Pressable once and settle again so
-   * expandable sections render too. Returns the element count seen. */
-  async function mount(root: () => unknown): Promise<number> {
+   * while state changed; then (unless `press: false`) press every Pressable
+   * once and settle again so expandable sections render too. Returns the
+   * element count seen. */
+  async function mount(root: () => unknown, options: { press?: boolean } = {}): Promise<number> {
     // Each surface mounts alone, as on the phone: unsubscribe the previous
     // one so shared pollers start a fresh group with an immediate read.
     unmountAll();
-    let count = 0;
-    let presses: Array<() => void> = [];
-    const pass = () => {
-      count = 0;
-      presses = [];
-      render(root(), "root", (element) => {
-        count += 1;
-        const onPress = element.props?.onPress;
-        if (typeof onPress === "function") presses.push(() => (onPress as () => void)());
-      });
-    };
-    const settle = async () => {
-      for (let round = 0; round < 20; round += 1) {
-        dirty = false;
-        pass();
-        const effects = pending;
-        pending = [];
-        for (const effect of effects) effect();
-        await new Promise((done) => setTimeout(done, 0));
-        if (!dirty && pending.length === 0) return;
-      }
-    };
+    currentRoot = root;
     await settle();
+    if (options.press === false) return count;
     for (const press of presses) press();
     await settle();
     return count;
+  }
+
+  /** Press the one rendered Pressable with this accessible name, then settle. */
+  async function press(label: string | RegExp): Promise<void> {
+    const names = [...labeledPresses.keys()].filter((name) => typeof label === "string" ? name === label : label.test(name));
+    assert.ok(names.length <= 1, `ambiguous pressable ${String(label)}: ${names.join(" | ")}`);
+    const action = names.length ? labeledPresses.get(names[0]) : undefined;
+    assert.ok(action, `no pressable named ${label}; rendered: ${[...labeledPresses.keys()].join(" | ")}`);
+    action();
+    await settle();
   }
 
   function unmountAll(): void {
@@ -206,7 +253,7 @@ function createRuntime() {
     hooks.clear();
   }
 
-  return { react, mount, unmountAll };
+  return { react, mount, press, settle, unmountAll, text: () => lastText.join("\n"), liveRegions: () => [...lastLive] };
 }
 
 const colors = new Proxy({}, { get: () => "#808080" });
@@ -255,7 +302,10 @@ async function configReadFixture(input: { surface: string }): Promise<unknown> {
   return new Promise<never>(() => {});
 }
 
-async function loadClient(platformOs: "android" | "ios" | "web") {
+type RpcCall = { name: string; input: Record<string, unknown> };
+
+async function loadClient(platformOs: "android" | "ios" | "web", rpcOverrides: Record<string, (input: Record<string, unknown>) => Promise<unknown>> = {}) {
+  const rpcCalls: RpcCall[] = [];
   const runtime = createRuntime();
   const component = (name: string) => name;
   const reactNative = new Proxy({}, {
@@ -292,11 +342,16 @@ async function loadClient(platformOs: "android" | "ios" | "web") {
     useRpc(definition: { name: string }) {
       let call = rpcs.get(definition.name);
       if (!call) {
-        call = definition.name === "cortex.pipeline.read"
+        const target = rpcOverrides[definition.name]
+          ?? (definition.name === "cortex.pipeline.read"
           ? async () => pipelineFixture
           : definition.name === "cortex.config.read"
           ? (input: unknown) => configReadFixture(input as { surface: string })
-          : () => new Promise<never>(() => {});
+          : () => new Promise<never>(() => {}));
+        call = (input: unknown) => {
+          rpcCalls.push({ name: definition.name, input: input as Record<string, unknown> });
+          return target(input as Record<string, unknown>);
+        };
         rpcs.set(definition.name, call);
       }
       return call;
@@ -343,7 +398,7 @@ async function loadClient(platformOs: "android" | "ios" | "web") {
   };
   const cleanup = exports.default(client);
   for (let tick = 0; tick < 5 && !pill; tick += 1) await new Promise((done) => setTimeout(done, 0));
-  return { runtime, captured, commands, transformers, pill: () => pill, cleanup };
+  return { runtime, captured, commands, transformers, pill: () => pill, cleanup, rpcCalls };
 }
 
 // The coordinator timeline card's props, from the worker items the provider
@@ -365,15 +420,248 @@ test("worker card props follow the provider's worker items across steering", asy
     assert.equal(running.data.status, "running");
     assert.equal(running.data.assignmentRef, "w1");
     assert.ok(!("failureReason" in running.data), "a running card shows no failure line");
-    const done = card({ status: "completed", error: null, metadata: { cortexWorkerResult: { summary: "Fixed.", checks: [] } } });
+    const done = card({ status: "completed", error: null, metadata: { cortexWorkerOutcome: { openIssues: 0 } } });
     assert.equal(done.id, running.id, "the outcome updates the same row");
     assert.equal(done.data.status, "completed");
-    assert.deepEqual(done.data.result, { summary: "Fixed.", checks: [] });
+    assert.equal(done.data.openIssues, 0);
+    assert.ok(!("result" in done.data));
     assert.ok(!("failureReason" in done.data));
+    // An item persisted by an older plugin still carries the full result:
+    // only its open-issue count reaches the card.
+    const legacy = card({ status: "completed", error: null, metadata: { cortexWorkerResult: { summary: "LEGACY SUMMARY",
+      checks: [{ name: "LEGACY CHECK", outcome: "not_run", blocker: "LEGACY BLOCKER" }, { name: "ok", outcome: "passed" }] } } });
+    assert.equal(legacy.id, running.id, "replay keeps one row identity");
+    assert.equal(legacy.data.openIssues, 1);
+    assert.doesNotMatch(JSON.stringify(legacy), /LEGACY/);
     const crashed = card({ status: "failed", error: "Worker crashed: engine exited 1" });
     assert.equal(crashed.data.status, "failed");
     assert.equal(crashed.data.failureReason, "Worker crashed: engine exited 1");
   } finally {
+    cleanup();
+  }
+});
+
+// The worker-history fixture both views read: the card's compact read gets
+// status/usage/open-issue count only; the worker tab gets the full attempt.
+function workerHistoryFixture(input: Record<string, unknown>) {
+  const full = {
+    summary: "WORKER SUMMARY BODY " + "long ".repeat(400),
+    checks: [
+      { name: "CHECK-NAME-PASSED", outcome: "passed" },
+      { name: "CHECK-NAME-WEAK", outcome: "unverified", claimedOutcome: "passed", evidenceGap: "EVIDENCE-GAP-TEXT", blocker: "BLOCKER-TEXT" },
+    ],
+  };
+  return Promise.resolve({
+    available: true, truncated: false, nextCursor: null, nextAssignmentCursor: null,
+    assignments: [{ taskId: "t_1", id: "wa_1", assignmentRef: "ref1", nodeKey: "n1", title: "Fix it", role: "debugger", status: "completed_with_issues",
+      attempts: [{ id: "xa_1", attemptNo: 1, status: "completed_with_issues", failureReason: "Completed with issues. Runtime did not accept worker checks. CHECK-NAME-WEAK: unverified",
+        context: { used: 330000, size: 1000000 },
+        events: input.compact ? [] : [{ id: 1, type: "worker_activity", createdAt: "2026-10-21T00:00:00Z", text: "ACTIVITY ROW" }],
+        ...(input.compact ? { openIssues: 1 } : full) }] }],
+  });
+}
+
+for (const platformOs of ["android", "web"] as const) {
+  test(`coordinator card renders no result body or checks, even from a legacy payload (${platformOs})`, async () => {
+    const { runtime, captured, cleanup, rpcCalls } = await loadClient(platformOs, { "cortex.worker-history.read": workerHistoryFixture });
+    const host = { theme, host: { id: "h1", label: "Local" }, layout: { compact: platformOs !== "web", platform: platformOs } };
+    try {
+      const title = "Worker: debugger · claude · Opus 5.5 · high · flagship · by user_request · usage 25% — " + "Very long task title ".repeat(40) + "· Completed with issues";
+      for (const data of [
+        { callId: "worker:ref1", assignmentRef: "ref1", title, status: "failed", failureReason: "Completed with issues. Runtime did not accept worker checks. CHECK-NAME-WEAK: unverified",
+          // A replayed legacy item's data can still carry `result`: never rendered.
+          result: { summary: "LEGACY CARD SUMMARY", checks: [{ name: "LEGACY-CHECK", outcome: "not_run", blocker: "LEGACY-BLOCKER" }] } },
+        { callId: "worker:ref1", assignmentRef: "ref1", title, status: "completed", openIssues: 1 },
+      ]) {
+        rpcCalls.length = 0;
+        await runtime.mount(() => ({ type: captured["worker-row"].Component, props: {
+          ...host, agentId: "a1", item: { id: "worker-row:worker:ref1", kind: "worker-row", version: 1, data },
+        } }));
+        const text = runtime.text();
+        for (const hidden of ["LEGACY", "WORKER SUMMARY BODY", "CHECK-NAME", "EVIDENCE-GAP", "BLOCKER-TEXT", "Runtime did not accept", "flagship", "user_request", "usage 25%"]) {
+          assert.ok(!text.includes(hidden), `coordinator card must not render ${hidden}`);
+        }
+        assert.match(text, /Completed with issues\n · 1/);
+        assert.match(text, /1 open issue · details in the worker tab/);
+        assert.match(text, /claude · Opus 5\.5 · high/);
+        assert.match(text, /Context 33%, 330k \/ 1M tokens/);
+        assert.match(text, /Open worker/);
+        assert.ok(text.includes("Very long task title ".repeat(40).trim()), "the accessible name keeps the full title");
+        // Only the compact card read, never the worker tab's full read or the
+        // retired per-card result fetch.
+        assert.ok(rpcCalls.length > 0);
+        for (const call of rpcCalls) {
+          assert.equal(call.name, "cortex.worker-history.read");
+          assert.equal(call.input.compact, true);
+          assert.equal(call.input.limit, 1);
+        }
+      }
+    } finally {
+      runtime.unmountAll();
+      cleanup();
+    }
+  });
+
+  test(`worker tab renders the selected attempt's complete result and checks (${platformOs})`, async () => {
+    const { runtime, captured, cleanup, rpcCalls } = await loadClient(platformOs, { "cortex.worker-history.read": workerHistoryFixture });
+    const host = { theme, host: { id: "h1", label: "Local" }, layout: { compact: platformOs !== "web", platform: platformOs } };
+    try {
+      await runtime.mount(() => ({ type: captured.workers.Component, props: { ...host, workspaceId: "ws1", agentId: "a1", context: "agent" } }));
+      const text = runtime.text();
+      for (const shown of ["Result", "WORKER SUMMARY BODY", "Checks · 2 · 1 open", "CHECK-NAME-PASSED", "Passed", "CHECK-NAME-WEAK", "Unverified",
+        "WEAK EVIDENCE", "BLOCKER-TEXT", "Evidence gap: EVIDENCE-GAP-TEXT", "ACTIVITY ROW"]) {
+        assert.ok(text.includes(shown), `worker tab must render ${shown}`);
+      }
+      // Result and Checks come before the retained activity.
+      assert.ok(text.indexOf("WORKER SUMMARY BODY") < text.indexOf("ACTIVITY ROW"));
+      assert.ok(rpcCalls.every((call) => call.name !== "cortex.worker-history.read" || call.input.compact === undefined), "the tab never uses the card's compact read");
+    } finally {
+      runtime.unmountAll();
+      cleanup();
+    }
+  });
+}
+
+const panelHost = { theme, host: { id: "h1", label: "Local" }, layout: { compact: false, platform: "web" } };
+const workerRow = (data: Record<string, unknown>) => ({ ...panelHost, agentId: "a1",
+  item: { id: `worker-row:${String(data.callId)}`, kind: "worker-row", version: 1, data } });
+const unavailableHistory = { available: false, assignments: [], truncated: false, nextCursor: null, nextAssignmentCursor: null,
+  message: "Worker history is unavailable in this workspace store." };
+
+test("a failed card shows only a category; the worker tab shows its reason when no attempt explains it", async () => {
+  const reason = "Исполнитель не запустился: CODEX_AUTH_MISSING; lint: failed";
+  const { runtime, captured, cleanup } = await loadClient("web", { "cortex.worker-history.read": (input) => Promise.resolve({
+    available: true, truncated: false, nextCursor: null, nextAssignmentCursor: null,
+    assignments: input.assignmentRef === "ref9" ? [{ taskId: "t_1", id: "wa_9", assignmentRef: "ref9", nodeKey: "n9", title: "Start it", status: "failed", attempts: [] }] : [],
+  }) });
+  try {
+    await runtime.mount(() => ({ type: captured["worker-row"].Component, props: workerRow({
+      callId: "worker:ref9", assignmentRef: "ref9", title: "Worker: debugger — Start it", status: "failed", failureReason: reason }) }), { press: false });
+    const card = runtime.text();
+    assert.match(card, /Failure details in the worker tab/);
+    for (const hidden of ["CODEX_AUTH_MISSING", "Исполнитель", "lint"]) assert.ok(!card.includes(hidden), `card must not render ${hidden}`);
+    await runtime.press(/Open worker$/);
+    await runtime.mount(() => ({ type: captured.workers.Component, props: { ...panelHost, workspaceId: "ws1", agentId: "a1", context: "agent" } }), { press: false });
+    const tab = runtime.text();
+    assert.match(tab, /Selected worker has no attempt history/);
+    assert.ok(tab.includes(reason), "the worker tab keeps the reason reachable");
+  } finally {
+    runtime.unmountAll();
+    cleanup();
+  }
+});
+
+test("an initial history read failure keeps the selection, explains itself and retries", async () => {
+  let fail = true;
+  const { runtime, captured, cleanup, rpcCalls } = await loadClient("web", { "cortex.worker-history.read": (input) =>
+    input.compact || !fail ? workerHistoryFixture(input) : Promise.reject(new Error("socket closed at /home/someone/private")) });
+  try {
+    await runtime.mount(() => ({ type: captured["worker-row"].Component, props: workerRow({
+      callId: "worker:ref1", assignmentRef: "ref1", title: "Worker: debugger — Fix it", status: "completed", openIssues: 1 }) }), { press: false });
+    await runtime.press(/Open worker$/);
+    rpcCalls.length = 0;
+    await runtime.mount(() => ({ type: captured.workers.Component, props: { ...panelHost, workspaceId: "ws1", agentId: "a1", context: "agent" } }), { press: false });
+    const failed = runtime.text();
+    assert.match(failed, /Worker history could not be read\./);
+    assert.match(failed, /Retry reading worker history/);
+    for (const hidden of ["No worker assignments recorded yet", "Loading worker history", "socket closed", "private"]) {
+      assert.ok(!failed.includes(hidden), `a failed read must not render ${hidden}`);
+    }
+    assert.ok(rpcCalls.length > 0 && rpcCalls.every((call) => call.input.assignmentRef === "ref1"), "the read stays scoped to the selected worker");
+    fail = false;
+    await runtime.press("Retry reading worker history");
+    const recovered = runtime.text();
+    assert.match(recovered, /WORKER SUMMARY BODY/);
+    assert.ok(!recovered.includes("could not be read"));
+  } finally {
+    runtime.unmountAll();
+    cleanup();
+  }
+});
+
+for (const failure of ["rejected", "unavailable"] as const) {
+  test(`${failure === "rejected" ? "a rejected" : "an unavailable"} refresh of a terminal worker keeps its details, marks them stale and retries`, async () => {
+    let mode: "ok" | "failing" = "ok";
+    const { runtime, captured, cleanup } = await loadClient("web", { "cortex.worker-history.read": (input) =>
+      mode === "ok" ? workerHistoryFixture(input) : failure === "rejected" ? Promise.reject(new Error("boom")) : Promise.resolve(unavailableHistory) });
+    const panel = () => ({ type: captured.workers.Component, props: { ...panelHost, workspaceId: "ws1", agentId: "a1", context: "agent" } });
+    try {
+      await runtime.mount(panel, { press: false });
+      await runtime.press(/^Open worker /);
+      assert.match(runtime.text(), /WORKER SUMMARY BODY/);
+      // A terminal worker no longer polls: reopening the tab restores its
+      // retained view and its one refresh fails.
+      mode = "failing";
+      await runtime.mount(panel, { press: false });
+      const stale = runtime.text();
+      for (const shown of ["WORKER SUMMARY BODY", "CHECK-NAME-WEAK", "ACTIVITY ROW", "Showing the last retained history", "Retry reading worker history"]) {
+        assert.ok(stale.includes(shown), `a stale view keeps ${shown}`);
+      }
+      assert.ok(stale.includes(failure === "rejected" ? "Worker history could not be read." : unavailableHistory.message));
+      assert.ok(!stale.includes("boom"));
+      mode = "ok";
+      await runtime.press("Retry reading worker history");
+      const fresh = runtime.text();
+      assert.match(fresh, /WORKER SUMMARY BODY/);
+      assert.ok(!fresh.includes("Showing the last retained history"));
+    } finally {
+      runtime.unmountAll();
+      cleanup();
+    }
+  });
+}
+
+test("an available:false first read explains itself instead of an empty worker list", async () => {
+  const { runtime, captured, cleanup } = await loadClient("web", { "cortex.worker-history.read": () => Promise.resolve(unavailableHistory) });
+  try {
+    await runtime.mount(() => ({ type: captured.workers.Component, props: { ...panelHost, workspaceId: "ws1", agentId: "a1", context: "agent" } }), { press: false });
+    const text = runtime.text();
+    assert.equal(text.split(unavailableHistory.message).length - 1, 1, "the reason is shown once");
+    assert.match(text, /Retry reading worker history/);
+    assert.ok(!text.includes("No worker assignments recorded yet"));
+  } finally {
+    runtime.unmountAll();
+    cleanup();
+  }
+});
+
+test("status announcements name the worker, once per transition, never for usage polls", async () => {
+  const durable: Record<string, string> = { w1: "running", w2: "running" };
+  let reads = 0;
+  const { runtime, captured, cleanup } = await loadClient("web", { "cortex.worker-history.read": (input) => {
+    reads += 1;
+    const ref = String(input.assignmentRef);
+    return Promise.resolve({ available: true, truncated: false, nextCursor: null, nextAssignmentCursor: null,
+      assignments: [{ taskId: "t_1", id: `wa_${ref}`, assignmentRef: ref, nodeKey: ref, status: durable[ref], attempts: [{ id: `xa_${ref}`, attemptNo: 1,
+        status: durable[ref], failureReason: null, events: [], context: { used: 1000 + reads, size: 100000 } }] }] });
+  } });
+  const data: Record<string, Record<string, unknown>> = {
+    w1: { callId: "worker:w1", assignmentRef: "w1", title: "Worker: debugger · claude · Opus — Fix one", status: "running" },
+    w2: { callId: "worker:w2", assignmentRef: "w2", title: "Worker: reviewer · codex · gpt — Review two", status: "running" },
+  };
+  const Card = captured["worker-row"].Component;
+  try {
+    await runtime.mount(() => [{ type: Card, props: workerRow(data.w1) }, { type: Card, props: workerRow(data.w2) }], { press: false });
+    assert.deepEqual(runtime.liveRegions(), ["", ""], "mounting and the first durable reads announce nothing");
+    const readsBefore = reads;
+
+    durable.w1 = "completed";
+    data.w1 = { ...data.w1, status: "completed" };
+    await runtime.settle();
+    assert.ok(reads > readsBefore, "the settled card re-read its usage");
+    assert.deepEqual(runtime.liveRegions(), ["Worker debugger, Fix one: Completed", ""]);
+    // A further usage-only change says nothing new.
+    await runtime.settle();
+    assert.deepEqual(runtime.liveRegions(), ["Worker debugger, Fix one: Completed", ""]);
+
+    durable.w2 = "failed";
+    data.w2 = { ...data.w2, status: "failed" };
+    await runtime.settle();
+    assert.deepEqual(runtime.liveRegions(), ["Worker debugger, Fix one: Completed", "Worker reviewer, Review two: Failed"]);
+    // The visible status pill is no longer a live region of its own.
+    assert.equal(runtime.liveRegions().length, 2);
+  } finally {
+    runtime.unmountAll();
     cleanup();
   }
 });
@@ -406,7 +694,7 @@ for (const platformOs of ["android", "web"] as const) {
       assert.ok(card, "worker-row timeline renderer registered");
       for (const data of [
         { callId: "worker:ref1", assignmentRef: "ref1", title: "worker-debugger · Fix it", status: "running" },
-        { callId: "worker:ref1", assignmentRef: "ref1", title: "worker-debugger · Fix it", status: "completed", result: { summary: "Fixed.", checks: [check] } },
+        { callId: "worker:ref1", assignmentRef: "ref1", title: "worker-debugger · Fix it", status: "completed", openIssues: 0 },
       ]) {
         const count = await runtime.mount(() => ({ type: card.Component, props: {
           ...host, agentId: "a1", item: { id: "worker-row:worker:ref1", kind: "worker-row", version: 1, data },

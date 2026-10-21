@@ -69,6 +69,11 @@ import json, os, sqlite3, sys
 from urllib.parse import quote
 import re
 root, task_id, attempt_id, cursor, limit, assignment_cursor, assignment_ref = sys.argv[1], sys.argv[2], sys.argv[3] or None, int(sys.argv[4] or 0), min(max(int(sys.argv[5] or 200), 1), 200), sys.argv[6] or '', sys.argv[7] or None
+# Card-sized read for coordinator cards: no summary and no check list,
+# only an open-issue count. The worker tab always reads the full attempt.
+compact = len(sys.argv) > 8 and sys.argv[8] == '1'
+# Worker-tab bound for one attempt's own summary text.
+SUMMARY_MAX_CHARS = 16000
 db_path = root + '/.cortex/cortex.sqlite3'
 ${STORE_PYTHON_HELPERS}def process_identity_absent(row):
     """Return True only when the durable worker identity is provably gone."""
@@ -114,6 +119,26 @@ def task_language(db, tables, task_id):
             cyrillic = sum(1 for ch in letters if '\u0400' <= ch <= '\u04ff')
             return 'ru' if letters and cyrillic / len(letters) >= 0.30 else 'en'
     return 'en'
+def project_checks(checks, legacy=False):
+    """One result's checks for display, or None when absent or malformed.
+
+    An empty list stays an empty list ("No checks reported"); None means the
+    check data is unavailable. closedBy: an exact later rerun closed this
+    failure (it stays as run history, resolved). claimedOutcome/evidenceGap:
+    the runtime kept an insufficiently-evidenced "passed" claim as
+    unverified/failed -- both already stored by
+    delegation.evidence.accept_checks, never re-derived here. A legacy
+    worker_result event's free text also passes the display scrubber.
+    """
+    if not (isinstance(checks, list) and all(isinstance(check, dict) and isinstance(check.get('name'), str) and isinstance(check.get('outcome'), str) for check in checks)):
+        return None
+    text = scrub if legacy else (lambda value: value)
+    return [{'name': text(check['name']), 'outcome': check['outcome'],
+        **({'blocker': text(check['blocker'][:600])} if isinstance(check.get('blocker'), str) and check['blocker'].strip() else {}),
+        **({'closedBy': check['closed_by']} if isinstance(check.get('closed_by'), str) and check['closed_by'].strip() else {}),
+        **({'claimedOutcome': check['claimed_outcome']} if isinstance(check.get('claimed_outcome'), str) and check['claimed_outcome'].strip() else {}),
+        **({'evidenceGap': check['evidence_gap']} if isinstance(check.get('evidence_gap'), str) and check['evidence_gap'].strip() else {})}
+        for check in checks]
 try:
     db = sqlite3.connect('file:' + quote(db_path, safe='/') + '?mode=ro', uri=True)
     db.row_factory = sqlite3.Row
@@ -343,7 +368,12 @@ try:
                         and bool(process_rows)
                         and all(process_identity_absent(row) for row in process_rows)
                     )
+                attempt_summary = None
                 attempt_route = None
+                # Set when a runtime node row exists for this attempt: its
+                # verdict and checks are authoritative, so the legacy
+                # worker_result fallback below never replaces them.
+                runtime_authoritative = False
                 if has_route_audit:
                     route_row = None
                     for execution_attempt_ref in execution_attempt_refs:
@@ -427,11 +457,10 @@ try:
                     attempt_result['status'] = 'failed'
                     if not attempt_result['failureReason']:
                         attempt_result['failureReason'] = 'Worker process exited before reporting a result.'
-                # Runtime verdict outranks report publication. A submitted
-                # report with rejected checks is a completed worker turn with
-                # issues, while a failed node without a result is an execution
-                # failure. This is the same distinction as the coordinator
-                # ACP card; both derive it from runtime_nodes. A durably
+                # Runtime verdict outranks report publication: a failed node
+                # stays failed even with a result. A successful node's open
+                # checks refine success to completed_with_issues below. Both
+                # surfaces derive this from runtime_nodes. A durably
                 # interrupted attempt keeps that status here: the graph row
                 # can still read "running" until recovery reconciles it, and
                 # that stale word must never resurrect a live spinner for a
@@ -441,33 +470,25 @@ try:
                         'select n.status,n.result_json from runtime_nodes n join delegation_provisioning p on p.task_id=n.task_id and p.idempotency_key=n.assignment_ref where n.task_id=? and p.attempt_id in (%s)' % ','.join('?' for _ in execution_attempt_refs),
                         (task['id'], *execution_attempt_refs),
                     ).fetchall()
+                    runtime_authoritative = bool(runtime_rows)
                     if len(runtime_rows) == 1:
                         runtime_status, runtime_result = runtime_rows[0]['status'], runtime_rows[0]['result_json']
-                        attempt_result['status'] = 'completed_with_issues' if runtime_status == 'failed' and runtime_result is not None else runtime_status
+                        attempt_result['status'] = runtime_status
                         try:
                             result = json.loads(runtime_result or '{}') if runtime_result is not None else {}
                         except (TypeError, ValueError):
                             result = {}
                         if not isinstance(result, dict):
                             result = {}
-                        checks = result.get('checks')
-                        if isinstance(checks, list) and all(isinstance(check, dict) and isinstance(check.get('name'), str) and isinstance(check.get('outcome'), str) for check in checks):
-                            attempt_result['checks'] = [{'name': check['name'], 'outcome': check['outcome'],
-                                **({'blocker': check['blocker'][:600]} if isinstance(check.get('blocker'), str) and check['blocker'].strip() else {}),
-                                # closedBy: an exact later rerun closed this
-                                # failure (it stays as run history, resolved).
-                                # claimedOutcome/evidenceGap: the runtime kept
-                                # an insufficiently-evidenced "passed" claim as
-                                # unverified/failed -- both already stored by
-                                # delegation.evidence.accept_checks, never
-                                # re-derived here.
-                                **({'closedBy': check['closed_by']} if isinstance(check.get('closed_by'), str) and check['closed_by'].strip() else {}),
-                                **({'claimedOutcome': check['claimed_outcome']} if isinstance(check.get('claimed_outcome'), str) and check['claimed_outcome'].strip() else {}),
-                                **({'evidenceGap': check['evidence_gap']} if isinstance(check.get('evidence_gap'), str) and check['evidence_gap'].strip() else {})}
-                                for check in checks]
+                        runtime_checks = project_checks(result.get('checks'))
+                        if runtime_checks is not None:
+                            attempt_result['checks'] = runtime_checks
+                        runtime_summary = result.get('summary')
+                        if not compact and isinstance(runtime_summary, str) and runtime_summary.strip():
+                            attempt_summary = runtime_summary
                         if runtime_rows[0]['status'] == 'failed':
                             unresolved = [check.get('name', 'check') + ': ' + check.get('outcome', 'unverified') for check in result.get('checks', []) if check.get('outcome') != 'passed']
-                            prefix = 'Completed with issues. Runtime did not accept worker checks. ' if runtime_result is not None else 'Worker failed. '
+                            prefix = 'Worker failed. Runtime did not accept worker checks. ' if runtime_result is not None else 'Worker failed. '
                             attempt_result['failureReason'] = scrub(prefix + '; '.join(unresolved))
                     elif len(runtime_rows) > 1:
                         attempt_result['status'] = 'failed'
@@ -482,6 +503,41 @@ try:
                     tokens = sum_tokens(db.execute('select basis,tokens_json,stop_reason,failed from usage_records where task_id=? and attempt_id in (%s)' % ','.join('?' for _ in usage_refs), (task['id'], *usage_refs)).fetchall())
                     if tokens is not None:
                         attempt_result['tokens'] = tokens
+                legacy_summary_needed = not compact and attempt_summary is None
+                legacy_checks_needed = not runtime_authoritative and 'checks' not in attempt_result
+                if terminal_type == 'worker_result' and (legacy_summary_needed or legacy_checks_needed):
+                    # No retained runtime result (older store): this exact
+                    # attempt's own latest worker_result, never another one's.
+                    # Its checks fill in only when no runtime node row exists
+                    # for the attempt (a runtime verdict is never replaced),
+                    # so the worker tab keeps them and a card read still
+                    # counts their open issues.
+                    summary_row = db.execute(f'''select payload_json from task_events where task_id=? and assignment_ref in ({placeholders}) and event_type='worker_result' order by id desc limit 1''', (task['id'], *refs)).fetchone()
+                    try:
+                        summary_payload = json.loads(summary_row['payload_json']) if summary_row is not None else {}
+                    except (TypeError, ValueError):
+                        summary_payload = {}
+                    if not isinstance(summary_payload, dict):
+                        summary_payload = {}
+                    candidate_summary = summary_payload.get('summary')
+                    if legacy_summary_needed and isinstance(candidate_summary, str) and candidate_summary.strip():
+                        attempt_summary = candidate_summary
+                    legacy_checks = project_checks(summary_payload.get('checks'), legacy=True) if legacy_checks_needed else None
+                    if legacy_checks is not None:
+                        attempt_result['checks'] = legacy_checks
+                if attempt_summary is not None:
+                    attempt_summary = scrub(attempt_summary.strip())
+                    if len(attempt_summary) > SUMMARY_MAX_CHARS:
+                        attempt_summary = attempt_summary[:SUMMARY_MAX_CHARS - 1] + '…'
+                        attempt_result['summaryTruncated'] = True
+                    attempt_result['summary'] = attempt_summary
+                if 'checks' in attempt_result:
+                    open_issues = sum(1 for check in attempt_result['checks'] if check['outcome'] != 'passed' and 'closedBy' not in check)
+                    if attempt_result['status'] == 'completed' and open_issues:
+                        attempt_result['status'] = 'completed_with_issues'
+                    if compact:
+                        attempt_result['openIssues'] = open_issues
+                        del attempt_result['checks']
                 if completed_at is not None:
                     attempt_result['completedAt'] = completed_at
                 if attempt_route is not None:
@@ -693,11 +749,11 @@ export async function resolveAgentTask(input: { workspaceId: string; agentId: st
   return { projectRoot, taskId };
 }
 
-export async function getWorkerHistory(input: { workspaceId: string; agentId: string; attemptId?: string; assignmentRef?: string; cursor?: number; limit?: number; assignmentCursor?: string }, context: PluginHandlerContext) {
+export async function getWorkerHistory(input: { workspaceId: string; agentId: string; attemptId?: string; assignmentRef?: string; cursor?: number; limit?: number; assignmentCursor?: string; compact?: boolean }, context: PluginHandlerContext) {
   const resolved = await resolveAgentTask(input, context);
   if ("message" in resolved) return { assignments: [], available: false, truncated: false, nextCursor: null, nextAssignmentCursor: null, message: resolved.message };
   const { projectRoot, taskId } = resolved;
-  const result = await runPython(["-B", "-c", PYTHON, projectRoot, taskId, input.attemptId ?? "", String(input.cursor ?? 0), String(input.limit ?? 200), input.assignmentCursor ?? "", input.assignmentRef ?? ""], {
+  const result = await runPython(["-B", "-c", PYTHON, projectRoot, taskId, input.attemptId ?? "", String(input.cursor ?? 0), String(input.limit ?? 200), input.assignmentCursor ?? "", input.assignmentRef ?? "", input.compact ? "1" : ""], {
     timeoutMs: 5000,
     maxBuffer: 64 * 1024 * 1024,
   });

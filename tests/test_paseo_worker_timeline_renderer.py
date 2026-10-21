@@ -8,23 +8,33 @@ SELECTION = Path(__file__).parents[1] / "integrations" / "paseo" / "client" / "w
 def test_paseo_worker_timeline_row_uses_supported_agent_context_and_panel_navigation():
     source = SOURCE.read_text(encoding="utf-8")
     assert 'query: { itemType: "tool_call" }' in source
-    assert 'item.callId.startsWith("worker:")' in source
+    # Legacy persisted tool_call worker items still render through the
+    # transformer; current worker cards arrive as stable-identity provider
+    # plugin items (shared/worker-card-item.ts).
+    assert 'if (!isWorkerCardCallId(item.callId)) return undefined;' in source
+    item = (Path(__file__).parents[1] / "integrations" / "paseo" / "shared" / "worker-card-item.ts").read_text(encoding="utf-8")
+    assert 'callId.startsWith(WORKER_CARD_PREFIX)' in item and 'export const WORKER_CARD_PREFIX = "worker:";' in item
+    provider = (Path(__file__).parents[1] / "integrations" / "paseo" / "server" / "provider.ts").read_text(encoding="utf-8")
+    assert 'listener(presentWorkerCard(presentTimeline(event)));' in provider
     assert 'status: z.enum(["running", "completed", "canceled", "failed"])' in source
-    # The result section and its status both render with zero RPC once the
-    # host has replayed the runtime's embedded projection (`item.data.result`,
-    # `resolveWorkerCardStatus`'s title channel) -- `readWorkerResults` is
-    # only the batched fallback for an older item. See client/use-worker-result.ts.
     # A settled durable attempt status (polled only while the host still
     # shows the card running) settles a card the host left stale after a
     # plugin reload.
-    assert 'resolveDurableWorkerCardStatus(item.data.title, item.data.status, usage?.status)' in source
-    assert 'workerCardMetadata(item.data.title, resolvedStatus)' in source
-    assert 'const embedded = item.data.result ?? null;' in source
-    assert 'useFallbackWorkerResult(workspaceId, agentId, item.data.assignmentRef, !isWorking && !embedded)' in source
+    assert 'resolveDurableWorkerCardStatus(item.data.title, item.data.status, usage?.status, usage?.openIssues ?? item.data.openIssues, item.data.outcomeStatus)' in source
+    assert 'workerCardIdentity(item.data.title)' in source
+    # The coordinator card is compact: no terminal summary or check list (the
+    # worker tab shows them), no per-card result fetch, no status stripe and
+    # no pulse animation.
+    assert 'WorkerResultDetail' not in source
+    assert 'useFallbackWorkerResult' not in source
+    assert 'item.data.result' not in source
+    assert 'borderLeftWidth' not in source
+    assert 'setWorkerCardPulse' not in source and 'Animated' not in source
+    usage = (Path(__file__).parents[1] / "integrations" / "paseo" / "client" / "usage-meter.tsx").read_text(encoding="utf-8")
+    assert 'limit: 1, compact: true' in usage
     display = (Path(__file__).parents[1] / "integrations" / "paseo" / "client" / "worker-display.ts").read_text(encoding="utf-8")
     assert 'return "cancelled"' in display and 'return "working"' in display
-    assert '>Worker</Text>' in source and '{metadata.workerName}' in source
-    assert '{metadata.subtitle}' in source
+    assert '{identity.title}' in source and '"Open worker"' in source
     assert 'Open Workers' not in source
     assert 'routeParts.slice(1)' in display
     assert 'useAgent(props.agentId, (agent) => agent.workspaceId)' in source
@@ -36,7 +46,7 @@ def test_paseo_worker_timeline_row_uses_supported_agent_context_and_panel_naviga
     assert 'the popover owns the empty state' in source
     assert 'refreshVisibility' not in source
     assert 'if (!candidates.has(agentId))' in source
-    assert 'selectWorker(agentId, item.data.assignmentRef)' in source
+    assert 'selectWorker(agentId, item.data.assignmentRef, { failureReason: item.data.failureReason })' in source
 
 
 def test_paseo_pill_catalogue_lists_active_agents_once_by_workspace():

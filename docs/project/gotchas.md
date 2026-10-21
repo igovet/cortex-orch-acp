@@ -791,3 +791,23 @@ before blaming an engine version, and start daemons with `outside_command`. See
 
 These are implementation contracts, not proof of zero errors in a later paid
 desktop workload. Qualification still requires real retained run evidence.
+
+## Paseo 0.12.0 worker cards: per-turn tool rows, Stop status and Space (2026-10-21)
+
+- **A `tool_call` row is per turn.** The installed Paseo 0.12.0 client keys a
+  tool_call timeline row by `turn:<turnId>/<callId>`, and plugin transformer
+  output is derived per host row, so a stable transformer item id does not
+  merge two rows. A worker update from a later turn (Stop, steering, the
+  outcome) therefore rendered a second identical card. Provider-emitted
+  `plugin` items are merged by `<pluginId>/<id>` across turns; worker cards use
+  them (`integrations/paseo/shared/worker-card-item.ts`). The host refuses a
+  provider plugin item whose `pluginId` is not the emitting plugin's manifest id.
+- **Every cancellation path marks the title.** ACP has no cancelled tool-call
+  status. Only the event-claim path used to append `· Cancelled`; the stop path
+  sent a bare `failed`, which read as a genuine failure. All paths now use
+  `_cancelled_worker_card_fields`.
+- **Space on a plain button.** The installed Desktop bundle binds a bare Space
+  outside text fields to a window-level voice-mute shortcut; a focused worker
+  card ignored Space in a recorded run while Enter worked. The card handles
+  Space for its own element (`client/card-keyboard.ts`); other buttons in the
+  plugin are not covered by that fix.

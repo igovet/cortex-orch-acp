@@ -167,11 +167,12 @@ def test_generations_tier_and_instruction_delivery_qualification_are_this_engine
     assert plan.qualification == fixture.expected_delivery_qualification
 
 
-def test_claude_agent_acp_run_carries_no_codex_metadata_anywhere(tmp_path):
+@pytest.mark.parametrize("recipient", ["coordinator", "worker"])
+def test_claude_agent_acp_run_carries_no_codex_metadata_anywhere(tmp_path, recipient):
     """The core residual-audit assertion: a claude-agent-acp route's own
-    launch command, process environment, and session/new payload never
-    contain a Codex-specific token/env var/path -- and its role
-    instructions never mention codex-acp either."""
+    launch command, process environment, and session/new protocol metadata
+    never contain Codex-specific fields, tokens or paths. A coordinator may
+    name other engines only in the exact worker-capability guidance."""
     claude = ADAPTERS[1]
     assert claude.engine == "claude-agent-acp"
 
@@ -196,7 +197,10 @@ def test_claude_agent_acp_run_carries_no_codex_metadata_anywhere(tmp_path):
         lambda task_id: record, lambda task_id: str(tmp_path), environ=environ, call_timeout=10.0,
     )
     attempt_id = "xa_" + connection_id[3:]
-    adapter.open("shared_project_root", dict(task_id="t_aaaaaaaaaaaa", attempt_id=attempt_id), role.body_portable)
+    launch = dict(task_id="t_aaaaaaaaaaaa", attempt_id=attempt_id)
+    if recipient == "worker":
+        launch.update(assignment_id="assignment-a", role_id="worker-backend-dev")
+    adapter.open("shared_project_root", launch, role.body_portable)
     for manager in list(adapter._managers.values()):
         manager.shutdown(grace=2.0)
 
@@ -206,8 +210,21 @@ def test_claude_agent_acp_run_carries_no_codex_metadata_anywhere(tmp_path):
     assert "CLAUDE_CONFIG_DIR" in observed_env
 
     session_new_params = json.loads(session_new_dump_path.read_text(encoding="utf-8"))
-    dumped_text = json.dumps(session_new_params)
-    assert "codex" not in dumped_text.lower()
-    assert session_new_params["_meta"]["systemPrompt"].startswith("# Cortex session\n\n")
-    assert session_new_params["_meta"]["systemPrompt"].endswith("\n\n" + role.body_portable)
+    meta = session_new_params["_meta"]
+    assert set(meta) == {"systemPrompt", "claudeCode"}
+    # Only the instruction value may contain the cross-engine capability hint;
+    # retain the blanket ban over every other protocol key/value and option.
+    protocol = {**session_new_params, "_meta": {k: v for k, v in meta.items() if k != "systemPrompt"}}
+    assert "codex" not in json.dumps(protocol).lower()
+    from cortex_runtime.engine.unified_system_prompt import cortex_system_prompt, worker_capabilities_section
+    expected = cortex_system_prompt(recipient, str(tmp_path), environ=environ, native_tools=False).rstrip()
+    expected += "\n\n" + role.body_portable
+    assert "codex" not in expected.lower()
+    if recipient == "coordinator":
+        inventory = worker_capabilities_section([])
+        assert "`codex-acp`: no eligible configured worker external MCP servers." in inventory
+        expected = expected.rstrip() + "\n\n" + inventory
+    else:
+        assert "codex" not in json.dumps(session_new_params).lower()
+    assert meta["systemPrompt"] == expected
     assert "codex" not in role.body_portable.lower()

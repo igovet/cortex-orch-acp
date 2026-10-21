@@ -155,7 +155,7 @@ def test_paseo_worker_card_has_no_transcript_body_but_panel_history_is_full(tmp_
         assert "content" not in update, update
     terminal = [u for u in worker if u.get("status") in {"completed", "failed"}]
     assert terminal and terminal[-1]["status"] == "completed"
-    assert "summary" in terminal[-1]["rawOutput"]
+    assert terminal[-1]["rawOutput"] == {"cortexWorkerOutcome": {"status": "completed", "openIssues": 0}}
     # Paseo shows no per-token or per-tool body redraws.
     assert len(worker) <= 8, [u.get("status") for u in worker]
     # The durable Workers-panel history still holds every tool call in full.
@@ -379,7 +379,7 @@ def test_paseo_card_update_carries_no_body_and_body_changes_emit_nothing():
     for card in cards:
         assert "text" not in card and "raw_input" not in card and "content" not in card
         assert _update_bytes(card) <= 2048
-    assert cards[-1]["raw_output"] == {"summary": "done", "checks": []}
+    assert cards[-1]["raw_output"] == {"cortexWorkerOutcome": {"status": "completed", "openIssues": 0}}
 
 
 def test_failed_card_carries_one_short_failure_line():
@@ -395,7 +395,7 @@ def test_failed_card_carries_one_short_failure_line():
 
 
 def test_completed_result_projection_is_capped():
-    runtime = _card_runtime(paseo=True)
+    runtime = _card_runtime(paseo=False)
     cards = []
     checks = [dict(name=f"check {index} " + "n" * 150, outcome="passed") for index in range(30)]
     runtime._emit_worker_card(cards.append, "a1", status="pending", title="Worker")
@@ -505,6 +505,34 @@ def test_coordinator_tool_card_sends_nothing_twice():
     emit("p5", "other", "Shell", "in_progress", None, None, {"command": "ls"}, None)
     emit("p5", "other", "Shell", "in_progress", None, None, {"command": "ls"}, None)
     assert len(cards) == count + 1
+
+
+def test_output_repeat_cache_keeps_distinct_projections_with_bounded_lru():
+    cards = []
+    runtime = OrchestratingRuntime.__new__(OrchestratingRuntime)
+    budget = runtime_module._CoordinatorCardBudget()
+    runtime._coordinator_card_budget = lambda task_id: budget
+    emit = runtime._engine_tool_call_emitter(cards.append)
+    envelope = {"server": "cortex", "tool": "task_get_context", "arguments": {}}
+
+    def complete(ref, value):
+        emit(ref, "other", "mcp.cortex.task_get_context", "completed", None, None,
+             envelope, _mcp_output({"value": value}))
+        return cards[-1]
+
+    limit = runtime_module._COORDINATOR_REPEAT_MEMORY
+    for index in range(limit):
+        assert complete(f"p{index}", index)["raw_output"]["result"]["structuredContent"] == {"value": index}
+    assert len(budget.outputs) == limit
+    # A different result for the same input does not overwrite all earlier
+    # projections. Touching one projection refreshes its LRU position.
+    assert complete("hot", 0)["raw_output"]["same_as"] == "call:coordinator:p0"
+    complete("overflow", limit)
+    assert len(budget.outputs) == limit
+    assert complete("still-hot", 0)["raw_output"]["same_as"] == "call:coordinator:p0"
+    # Eviction costs one bounded resend, never a stale reference/result.
+    assert complete("evicted", 1)["raw_output"]["result"]["structuredContent"] == {"value": 1}
+    assert len(budget.outputs) == limit
 
 
 def test_mcp_text_that_is_not_the_structured_mirror_is_kept():

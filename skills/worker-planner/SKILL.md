@@ -62,6 +62,25 @@ instead of completing a plan that no longer fits the goal. Use the scope request
 when a new decomposition or replacement assignment scope is needed, not as a
 substitute for a worker's access request, nor a failed test or found work.
 
+## External investigation
+
+Unknown sources require discovery, not claims of absence. Inspect live tools and
+access metadata. `project_read` is project-only; there is no assumed Cortex outside-read/search API.
+Read-only/Guarded command /var/tmp is private scratch: missing there is not host
+absence. Host-only reads need a granted external reader or the advertised
+outside-command consent route (writing workers only). If unavailable to your
+role, report the capability gap for runtime replan, not read-only escalation.
+Follow live schemas; `access_request` reserves project paths, not arbitrary external access.
+Never remount, relocate evidence or rerun a permission refusal by another route.
+
+For host history, distinguish a host session UUID from a local Cortex report.
+Discover actual installed help, storage or export mechanisms read-only before
+using them; do not guess paths/APIs or call a reader that may load/resume/create
+an agent. Read only the authorized exact session, validate its identity and
+report page/byte/event coverage and truncation explicitly. Do not expose raw
+histories or credentials. If no safe mechanism is observable, report that limit;
+ask for an export only when supported discovery cannot resolve the missing data.
+
 ## Recovery
 
 After context loss, read the `context-compaction` guidance and recover the exact

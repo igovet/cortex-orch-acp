@@ -15,7 +15,7 @@ known/unknown call counts, while diagnostics retain a separate
 unknown/failed calls still show unavailable. This uses existing store columns
 without changing CHECK constraints or format, and never means zero/free usage. It aggregates the full task; its public per-call list remains bounded. Replayed UI events do not create usage records. Repeated real engine prompts, including retries, each create their own record. The installed Claude adapter supplies per-turn `PromptResponse.usage` on a settled prompt, with uncached input, output, cache reads, cache writes and total tokens. If a prompt is interrupted before that response arrives, its partial `usage_update.used/size` still describes context occupancy and cannot be converted into a token total; the call remains explicitly unavailable.
 
-The Paseo plugin displays per-worker context occupancy and token counts on worker cards. It does not display provider subscription-window percentages: Paseo's provider schema exposes context and token-count fields, but no plan-quota field or API for replacing the host's native Context window indicator.
+The Paseo plugin displays per-worker context occupancy (labelled **Context**) and token counts on worker cards; a coordinator card that read its worker's history and found neither says **Usage unavailable** rather than zero. It does not display provider subscription-window percentages: Paseo's provider schema exposes context and token-count fields, but no plan-quota field or API for replacing the host's native Context window indicator.
 
 ## Coverage and interrupted turns
 

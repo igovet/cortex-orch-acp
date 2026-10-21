@@ -148,7 +148,7 @@ test("worker cards use the one detail Paseo overview never groups", () => {
   assert.equal(event.item.metadata, undefined);
 });
 
-test("a completed worker card's embedded result projection reaches item.metadata.cortexWorkerResult", () => {
+test("a completed worker card carries only its open-issue count, never the result body", () => {
   const event = presentTimeline({
     type: "timeline.item",
     sessionId: "s",
@@ -163,9 +163,36 @@ test("a completed worker card's embedded result projection reaches item.metadata
   });
   if (event.type !== "timeline.item" || event.item.type !== "tool_call") throw new Error("wrong event");
   assert.deepEqual(event.item.detail, { type: "plan", text: "Worker: debugger — audit" });
-  assert.deepEqual(event.item.metadata, {
-    cortexWorkerResult: { summary: "Did the thing.", checks: [{ name: "tests", outcome: "passed" }] },
+  assert.deepEqual(event.item.metadata, { cortexWorkerOutcome: { openIssues: 0 } });
+  assert.equal(JSON.stringify(event).includes("Did the thing."), false);
+  assert.equal(JSON.stringify(event).includes("tests"), false);
+});
+
+test("a replayed older worker item's embedded full result is reduced to its open-issue count", () => {
+  const event = presentTimeline({
+    type: "timeline.item",
+    sessionId: "s",
+    item: {
+      type: "tool_call", id: "worker:a1", callId: "worker:a1", name: "Worker: debugger — audit",
+      status: "failed", error: "Completed with issues.",
+      detail: { type: "plan", text: "Worker: debugger — audit" },
+      metadata: { cortexWorkerResult: { summary: "LEGACY SUMMARY", checks: [
+        { name: "lint", outcome: "passed" },
+        { name: "unit", outcome: "failed", closedBy: "gateway:x" },
+        { name: "live", outcome: "not_run", blocker: "LEGACY BLOCKER" },
+        { name: "weak", outcome: "unverified", evidenceGap: "LEGACY GAP" },
+      ] } },
+    },
   });
+  if (event.type !== "timeline.item" || event.item.type !== "tool_call") throw new Error("wrong event");
+  assert.deepEqual(event.item.metadata, { cortexWorkerOutcome: { openIssues: 2 } });
+  for (const body of ["LEGACY SUMMARY", "LEGACY BLOCKER", "LEGACY GAP"]) {
+    assert.equal(JSON.stringify(event).includes(body), false, body);
+  }
+  // An already-compact item replays unchanged.
+  const again = presentTimeline({ ...event, item: { ...event.item } } as never);
+  if (again.type !== "timeline.item" || again.item.type !== "tool_call") throw new Error("wrong event");
+  assert.deepEqual(again.item.metadata, { cortexWorkerOutcome: { openIssues: 2 } });
 });
 
 test("a worker card whose rawOutput is not the result shape embeds no metadata", () => {
@@ -182,7 +209,7 @@ test("a worker card whose rawOutput is not the result shape embeds no metadata",
   assert.equal(event.item.metadata, undefined);
 });
 
-test("worker timeline history keeps only bounded card fields and its bounded result", () => {
+test("worker timeline history keeps only bounded card fields and an open-issue count", () => {
   const transcript = "secret-full-worker-transcript ".repeat(3000);
   const hugeSummary = "🙂".repeat(12000);
   const checks = Array.from({ length: 40 }, (_, index) => ({
@@ -217,16 +244,14 @@ test("worker timeline history keeps only bounded card fields and its bounded res
   assert.equal(event.item.callId, "worker:assignment-1");
   assert.equal(event.item.status, "failed");
   assert.deepEqual(event.item.detail, { type: "plan", text: event.item.name });
-  assert.deepEqual(Object.keys(event.item.metadata ?? {}), ["cortexWorkerResult"]);
+  assert.deepEqual(event.item.metadata, { cortexWorkerOutcome: { openIssues: 0 } });
   assert.ok(Buffer.byteLength(JSON.stringify(event.item.name), "utf8") <= 1024);
   assert.ok(Buffer.byteLength(JSON.stringify(event.item.error), "utf8") <= 1024);
-  assert.ok(Buffer.byteLength(JSON.stringify(event.item.metadata?.cortexWorkerResult), "utf8") <= 16 * 1024);
-  assert.ok(Buffer.byteLength(JSON.stringify(event), "utf8") <= 32 * 1024);
+  // Long data stays out entirely: no summary, no check names.
+  assert.ok(Buffer.byteLength(JSON.stringify(event), "utf8") <= 4 * 1024);
   assert.equal(JSON.stringify(event).includes("secret-full-worker-transcript"), false);
-  const result = event.item.metadata?.cortexWorkerResult as { summary?: string; checks?: unknown[] } | undefined;
-  assert.equal(typeof result?.summary, "string");
-  assert.ok(result?.summary?.includes("[truncated"));
-  assert.ok((result?.checks?.length ?? 0) > 0);
+  assert.equal(JSON.stringify(event).includes("🙂"), false);
+  assert.equal(JSON.stringify(event).includes("result-check-"), false);
 });
 
 test("generic tool timeline history removes raw metadata and caps retained detail bytes", () => {

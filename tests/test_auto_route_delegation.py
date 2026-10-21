@@ -420,14 +420,13 @@ def test_an_explicit_task_route_profile_outranks_auto_routing(tmp_path):
     assert not launch.get("parameters")
 
 
-def test_an_effort_above_the_models_ceiling_is_lowered_not_refused(tmp_path):
-    """A saved ultra (from before the rule) must not make a thread unusable."""
+def test_an_explicit_pin_above_the_models_ceiling_refuses_before_launch(tmp_path):
+    """An exact owner effort is never silently replaced, including saved pins."""
     store, channel, provisioning, adapter, connection_a, connection_b, log_a, log_b, project, environ = _setup(tmp_path)
     _routing(project, {"pin": {"*": "codex-acp/coordinator-model:ultra"}})
-    result = provisioning.delegate(channel, "Plan", "Plan it.", "planner", "Planned.", "req-1")
-    assert result.status == "ready"
-    assert _effort_calls(log_a)[-1]["params"]["value"] == "high"
-    adapter.terminate_owned(result.attempt_id)
+    with pytest.raises(PortableError, match="pinned_effort_unavailable"):
+        provisioning.delegate(channel, "Plan", "Plan it.", "planner", "Planned.", "req-1")
+    assert _read_log(log_a) == [] and _read_log(log_b) == []
     from cortex_runtime.routing import auto_route
 
     allowed = auto_route.allowed_efforts("codex-acp", "coordinator-model", str(project), environ)

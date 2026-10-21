@@ -2,24 +2,30 @@ import { useRpc, type PluginHostProps } from "@getpaseo/plugin/client";
 import { useEffect, useState } from "react";
 import { Text, View } from "react-native";
 import { readWorkerHistory, type WorkerHistory } from "../shared/worker-history.js";
-import { contextSummary, formatTokens, isSettledWorkerStatus, tokensAccessibilityLabel, tokensSummaryLabel } from "./worker-display.ts";
+import { contextSummary, isSettledWorkerStatus, tokensAccessibilityLabel, tokensSummaryLabel } from "./worker-display.ts";
+import { cardUsageSnapshot, sameCardUsage, type CardUsage } from "./worker-card-model.ts";
 
 type Attempt = WorkerHistory["assignments"][number]["attempts"][number];
 type Theme = PluginHostProps["theme"];
 
 /** Context fill as a short bar plus percent, then Claude Code's `↑ in ↓ out`
  * token counts. Renders nothing until the engine has reported either. */
-export function UsageMeter({ context, tokens, theme }: { context?: Attempt["context"]; tokens?: Attempt["tokens"] | null; theme: Theme }) {
+export function UsageMeter({ context, tokens, theme, unavailableText, mutedColor }: { context?: Attempt["context"]; tokens?: Attempt["tokens"] | null; theme: Theme; unavailableText?: string;
+  /** The caller's own readable secondary text colour (the coordinator card
+   * derives one that holds 4.5:1 on its hover background). */
+  mutedColor?: string }) {
   const summary = contextSummary(context);
-  if (!summary && !tokens) return null;
+  const mutedText = mutedColor ?? theme.colors.foregroundMuted;
+  // Missing usage is unknown, never zero: say so only when asked to.
+  if (!summary && !tokens) return unavailableText ? <Text style={{ color: mutedText, fontSize: 11 }}>{unavailableText}</Text> : null;
   const color = summary?.level === "danger" ? theme.colors.statusDanger : summary?.level === "warning" ? theme.colors.statusWarning : theme.colors.accent;
-  const muted = { color: theme.colors.foregroundMuted, fontSize: 11 };
+  const muted = { color: mutedText, fontSize: 11 };
   return <View style={{ flexDirection: "row", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
     {summary && <View accessibilityLabel={`Context ${summary.percent}%, ${summary.detail} tokens`} style={{ flexDirection: "row", alignItems: "center", gap: 5 }}>
       <View style={{ width: 32, height: 4, borderRadius: 2, backgroundColor: theme.colors.surface2, overflow: "hidden" }}>
         <View style={{ width: `${summary.percent}%`, height: 4, backgroundColor: color }} />
       </View>
-      <Text style={muted}>{summary.percent}% · {summary.detail}</Text>
+      <Text style={muted}>Context {summary.percent}% · {summary.detail}</Text>
     </View>}
     {tokens && <Text accessibilityLabel={tokensAccessibilityLabel(tokens) ?? undefined} style={muted}>
       {tokensSummaryLabel(tokens)}
@@ -35,10 +41,15 @@ export function latestAttempt(assignment: WorkerHistory["assignments"][number]):
 const CARD_USAGE_POLL_MS = 3000;
 
 /** One worker's latest attempt for its chat card: polled while it runs, read
- * once more when it settles. The cursor keeps its transcript out of the read. */
-export function useWorkerUsage(workspaceId: string | null, agentId: string, assignmentRef: string, live: boolean) {
+ * once more when it settles. The cursor keeps its transcript out of the read
+ * and `compact` keeps its summary and check list out (an open-issue count
+ * instead); the card keeps only that snapshot, and an unchanged poll keeps
+ * the same state object so it does not re-render the card. `loaded` is set
+ * after the first answered read. */
+export function useWorkerUsage(workspaceId: string | null, agentId: string, assignmentRef: string, live: boolean): { usage: CardUsage | undefined; loaded: boolean } {
   const rpc = useRpc(readWorkerHistory);
-  const [attempt, setAttempt] = useState<Attempt>();
+  const [attempt, setAttempt] = useState<CardUsage>();
+  const [loaded, setLoaded] = useState(false);
   useEffect(() => {
     if (!workspaceId) return;
     let active = true;
@@ -46,10 +57,14 @@ export function useWorkerUsage(workspaceId: string | null, agentId: string, assi
     const load = async () => {
       let settled = false;
       try {
-        const history = await rpc({ workspaceId, agentId, assignmentRef, cursor: Number.MAX_SAFE_INTEGER, limit: 1 });
+        const history = await rpc({ workspaceId, agentId, assignmentRef, cursor: Number.MAX_SAFE_INTEGER, limit: 1, compact: true });
         const assignment = history.assignments[0];
         const latest = assignment && latestAttempt(assignment);
-        if (active && latest) setAttempt(latest);
+        if (active && latest) {
+          const next = cardUsageSnapshot(latest);
+          setAttempt((current) => sameCardUsage(current, next) ? current : next);
+        }
+        if (active && history.available) setLoaded(true);
         // A settled attempt never runs again (a retry is a new card), so a
         // card the host still shows running stops polling once it settles.
         settled = isSettledWorkerStatus(latest?.status);
@@ -61,5 +76,5 @@ export function useWorkerUsage(workspaceId: string | null, agentId: string, assi
     void load();
     return () => { active = false; clearTimeout(timer); };
   }, [agentId, assignmentRef, live, rpc, workspaceId]);
-  return attempt;
+  return { usage: attempt, loaded };
 }

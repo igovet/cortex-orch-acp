@@ -6,8 +6,8 @@ The runtime-created mandatory review node has no plan hint, so no user request
 ever covers it; only an owner pin decides its route deterministically
 (``auto_route.choose``: user request, then pin, then ranking). This preflight
 lets a caller refuse a paid run visibly before launch when the review stage
-would not run on the selected route, instead of finding a substituted
-reviewer afterwards.
+would not run on the selected route or execution/review effort conflicts with
+policy. It does not establish specialist readiness or engine support.
 
 It reads only the owner routing policy (``auto_route.load_overrides``). It never
 reads or refreshes connection registries, quota caches or a task store, never
@@ -21,6 +21,7 @@ import hashlib
 import os
 import re
 from collections.abc import Mapping
+from types import SimpleNamespace
 
 from . import auto_route, model_policy
 from ..portable.errors import PortableError
@@ -30,7 +31,8 @@ _ROUTE = re.compile(r"([a-z0-9-]{1,64})/([A-Za-z0-9_.\[\]-]{1,128})(?::([a-z]{1,
 _LIMITS = (
     "a captured user request covers execution, retries and review fixes only after the user names the route",
     "connection availability, quota and the task profile/ceiling are re-checked at dispatch",
-    "a pin effort the model policy does not permit is clamped and recorded at dispatch",
+    "exact execution effort requires a captured model+effort request, not only an editor selection",
+    "effort checks here establish policy permission only; live engine support and native confirmation remain required",
 )
 
 
@@ -55,8 +57,20 @@ def _hard_policy(overrides: Mapping, engine: str, model: str) -> str | None:
     return None
 
 
+def _effort_policy(overrides: Mapping, engine: str, model: str, effort: str | None) -> str | None:
+    if effort is None:
+        return None
+    # Policy-domain evaluation only, not an observed catalogue or support claim.
+    entry = SimpleNamespace(route=SimpleNamespace(
+        engine=engine, model=model,
+        supported_parameters=tuple(("thought_level", value) for value in auto_route.EFFORT_ORDER)))
+    policy = model_policy.policy_for(engine, model, overrides)
+    return (None if effort in auto_route.efforts_in_any_tier(entry, policy)
+            else "selected_effort_conflicts_with_policy")
+
+
 def preflight(route: str, project_root=None, environ: Mapping[str, str] | None = None) -> dict:
-    """Assess ``engine/model[:effort]`` for every stage; ``ready`` only when all are covered."""
+    """Assess stage policy for ``engine/model[:effort]``; ready is not native readiness."""
     match = _ROUTE.fullmatch(route) if isinstance(route, str) else None
     if match is None:
         return dict(ready=False, refusals=["invalid_route"], stages={}, limits=list(_LIMITS))
@@ -69,7 +83,8 @@ def preflight(route: str, project_root=None, environ: Mapping[str, str] | None =
         return dict(ready=False, route=label, effort=effort, refusals=[f"routing_policy_unavailable:{error.code}"],
                     stages={}, limits=list(_LIMITS))
     refusals = []
-    blocked = _hard_policy(overrides, engine, model)
+    blocked = (_hard_policy(overrides, engine, model)
+               or _effort_policy(overrides, engine, model, effort))
     execution = dict(status="refused", code=blocked) if blocked else dict(
         status="requires_captured_user_request", hard_policy="allowed")
     if blocked:
@@ -82,7 +97,8 @@ def preflight(route: str, project_root=None, environ: Mapping[str, str] | None =
         resolved = f"{pin_engine}/{pin_model}" + (f":{pin_effort}" if pin_effort else "")
         code = ("review_route_pin_mismatch" if (pin_engine, pin_model) != (engine, model)
                 else "review_effort_mismatch" if effort is not None and pin_effort != effort
-                else _hard_policy(overrides, pin_engine, pin_model))
+                else _hard_policy(overrides, pin_engine, pin_model)
+                or _effort_policy(overrides, pin_engine, pin_model, pin_effort))
         review = dict(status="refused", code=code, resolved=resolved) if code else dict(status="pinned", resolved=resolved)
     if review["status"] == "refused":
         refusals.append(f"review:{review['code']}")

@@ -30,17 +30,62 @@ To run an entire workload on one selected route, the owner pins the reviewer
 role to it. Review fixes inherit the planned node's hint, so they stay covered.
 Before a run, `python3 -B scripts/cortex_paseo_dev.py route-preflight --route
 ENGINE/MODEL[:EFFORT]` reads only the dev profile's routing policy and exits 1
-with a visible refusal in three cases:
+with a visible refusal for the following policy mismatches:
 
 - `review_route_not_pinned`: no pin applies to the reviewer;
 - `review_route_pin_mismatch` or `review_effort_mismatch`: the applicable pin
   names another route or effort;
 - `route_denied_by_owner_policy`, `route_provider_not_allowed` or
-  `route_policy_missing`: owner policy would refuse the route.
+  `route_policy_missing`: owner policy would refuse the route;
+- `selected_effort_conflicts_with_policy`: execution or reviewer effort is
+  outside configured policy even when the pin text matches.
 
 It never refreshes quota or connection data, never grants consent and never
 writes. Availability, quota and a task's ceiling are checked again at dispatch
 (`src/cortex_runtime/routing/stage_preflight.py`).
+
+### Explicit effort preservation
+
+A covered exact-model request can also select an exact effort in that **same
+retained user message or answer**: `Use engine/model:medium`,
+`Use engine/model/medium`, or `Use engine/model at medium effort throughout`.
+A uniquely enabled bare model id also works. Only adjacent effort syntax is
+recognized; unrelated adjectives, report text, plan reasons and an editor-only
+thinking selection do not become worker-effort consent. A newer model request
+replaces the earlier selection; a newer model refusal revokes it. Conflicting
+efforts for the same model in one source refuse as ambiguous. State one exact
+model-and-effort selection rather than relying on distant prose.
+
+`routing.auto_route.user_model_request` binds the effort to the existing
+`source_ref`; no plan effort field is needed. `choose` preserves it within
+observed support and the configured model policy, including quality retries,
+infrastructure retries and review fixes. Deep-tier `high` is an automatic
+default, not a minimum floor. A model whose explicit floor is `medium` may run
+at `medium` even when placed in deep/standard tiers. The runtime does not lower
+floors or alter owner policy to satisfy a request.
+
+Policy/support conflicts raise `user_requested_effort_unavailable` before
+worker launch. Explicit owner effort pins likewise raise
+`pinned_effort_unavailable` rather than clamp; a model-only pin retains its
+automatic effort calculation. Saved automatic settings without an explicit
+selection keep their existing supported-effort narrowing. The mandatory reviewer
+still follows its owner pin/ranking, not a planned-node model request. To require
+the same effort throughout a workload, the reviewer needs a matching owner pin.
+
+At dispatch, the audit distinguishes `effort_source=user_request`, `pin` and
+`auto_route`. Auth replacement preserves exact-effort strictness. After
+session creation/model selection, missing live support or a configuration
+mismatch stops the worker before any prompt instead of narrowing the explicit
+effort. The native `worker_configuration_confirmed` event and recovery capsule
+remain bound to that exact assignment/attempt/session. An audit or coordinator
+confirmation alone never proves a specialist's actual effort.
+
+The read-only stage preflight now checks execution and reviewer effort against
+policy, refusing `selected_effort_conflicts_with_policy` even when the reviewer
+pin text matches the requested route. It does **not** inspect live engine
+support, grant a user request, configure a coordinator, or prove specialist
+readiness. Check exact native confirmations at each stage; see
+[dev preflight](../../project/dev-environment.md#route-preflight-before-a-paid-cli-run).
 
 Critical roles require qualified instruction delivery for the exact engine
 version. Dispatch excludes unregistered Claude versions before engine launch.

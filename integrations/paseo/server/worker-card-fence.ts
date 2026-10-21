@@ -22,6 +22,8 @@
  * the bridge's failure: nothing then proves the worker survived.
  */
 
+import { workerCardOutcome } from "../shared/worker-card-outcome.ts";
+
 export const WORKER_CARD_PREFIX = "worker:";
 
 type AcpToolStatus = "pending" | "in_progress" | "completed" | "failed";
@@ -35,7 +37,7 @@ function isWorkerCard(id: unknown): id is string {
 
 export class WorkerCardFence {
   private statuses = new Map<string, AcpToolStatus>();
-  private outcomes = new Map<string, { id: string; status: string }>();
+  private outcomes = new Map<string, { id: string; status: string; output?: unknown }>();
 
   /** Record the status Cortex itself sent for a worker card. ACP omits the
    * status of an update that does not change it. A terminal status is final:
@@ -52,7 +54,12 @@ export class WorkerCardFence {
     const status = update.status;
     if (!isWorkerCard(id) || typeof status !== "string" || !ACP_TOOL_STATUSES.has(status)) return;
     const current = this.statuses.get(id);
-    if (current !== undefined && TERMINAL.has(current)) return;
+    // A runtime replay correction carries the committed verdict/count in
+    // rawOutput. It can repair a pre-fix synthetic Completed; ordinary late
+    // frames still obey first-terminal-wins.
+    const verdict = workerCardOutcome(undefined, update.rawOutput);
+    if (current !== undefined && TERMINAL.has(current)
+      && !(current === "completed" && status === "failed" && verdict?.status === "failed")) return;
     this.statuses.set(id, status as AcpToolStatus);
   }
 
@@ -71,6 +78,14 @@ export class WorkerCardFence {
     if (authoritative === undefined) return snapshot;
     if (TERMINAL.has(authoritative)) {
       const retained = this.outcomes.get(snapshot.id);
+      const committed = workerCardOutcome(undefined, retained?.output);
+      const incoming = workerCardOutcome(undefined, (snapshot as { output?: unknown }).output);
+      // Failure and cancellation both use ACP failed. A later cleanup frame
+      // can agree on that coarse status while erasing the committed verdict
+      // and count. Only another matching committed result may refine it.
+      if (retained && committed?.status === authoritative && incoming?.status !== committed.status) {
+        return { ...retained } as T;
+      }
       // Keep the outcome payload too: changing only the status would attach
       // a stale success result to a failure (or a stale error to a success).
       if (snapshot.status !== authoritative && retained) return { ...retained } as T;

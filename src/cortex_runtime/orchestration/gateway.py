@@ -98,15 +98,15 @@ SCHEMAS = {
                             content=text('Complete Markdown including the required first line from create_draft.',1000000),
                             request_key=text('Unique action identity.',128))),
     'command_run': obj(dict(argv=array(text('Literal command argument. Only scoped workers may run commands; coordinators and consultants cannot execute them. No implicit shell.',16384),
-                                       'Command as argv, run without a shell. Only scoped workers may run commands. For the current reviewer, exact plan verification argv at the same project digest reuses a runtime-produced receipt; an in-flight run is awaited for at most five seconds (or the shorter requested timeout). Otherwise the command executes normally.', maximum=128, minimum=1),
+                                       'Command as argv, run without a shell. Only scoped workers may run commands. Read-only/Guarded commands have private scratch /var/tmp; FileNotFoundError there is not proof of host absence. Authorized host-only inspection requires an offered outside_command and consent, never a refusal bypass. For the current reviewer, exact plan verification argv at the same project digest reuses a runtime-produced receipt; an in-flight run is awaited for at most five seconds (or the shorter requested timeout). Otherwise the command executes normally.', maximum=128, minimum=1),
                             cwd=text('Absolute existing working directory. Omitted: task working tree. Outside-tree cwd requires a writing worker in Development or Auto; private and protected targets are refused, never retried outside the sandbox.',4096),
                             timeout_seconds=timeout('Optional maximum runtime in seconds, including child processes. Omit to run until the command exits.'),
                             request_key=text('Unique action identity; ambiguous interrupted calls are never re-executed automatically.',128)), required=['argv','request_key']),
     'outside_write': obj(dict(path=text('Absolute path OUTSIDE the project (inside it, write with your own tools). In Guarded the user confirms first; in Development or Auto only protected control-plane paths ask. The parent directory must exist.',4096),
                               content=text('Complete new UTF-8 file content.',1000000),
                               request_key=text('Unique action identity.',128))),
-    'outside_command': obj(dict(argv=array(text('Literal command argument, run as the user outside the sandbox after the user confirms (e.g. a global install, a change in HOME). No implicit shell.',16384),
-                                           'Command as argv, run as the user outside the sandbox without a shell, after the user confirms.', maximum=128, minimum=1),
+    'outside_command': obj(dict(argv=array(text('Literal command argument, run as the user in the host environment after consent, including authorized bounded outside-file reads/searches. Writing workers only; not an escalation for a read-only role or a way around a refusal. No implicit shell.',16384),
+                                           'Command as argv in the real host namespace without a shell, after consent. Suitable for authorized host-only data hidden by command scratch mounts. A refusal is final; never relaunch it through another tool, engine or worker.', maximum=128, minimum=1),
                                 cwd=text('Absolute working directory; defaults to the project root.',4096),
                                 timeout_seconds=timeout('Optional maximum runtime in seconds; default 600.'),
                                 request_key=text('Unique action identity.',128)), required=['argv','request_key']),
@@ -756,7 +756,7 @@ def _outside(store,channel,root,operation,args,ref,owner,effects):
              and not _protected_outside(root,resolved))
     if not routine and not consent.request(store,channel,operation,consent.subject_of(operation,args),still_allowed=still_allowed):
         raise StoreError('outside_action_not_confirmed','operation',operation,'the user allowing it',
-                         'The user did not allow this action; do the work another way or explain what you need.')
+                         'The user did not allow this action. Do not relaunch it through another tool, engine or worker; report the blocker.')
     effects['possible']=True
     from .ignore_guard import snapshot, enforce
     ignore_before = snapshot(root) if operation == 'outside_command' else None

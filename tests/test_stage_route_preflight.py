@@ -112,6 +112,31 @@ def test_effort_mismatch_invalid_route_and_missing_policy_fail_closed(tmp_path):
     assert not (tmp_path / 'none').exists()
 
 
+def test_selected_effort_checks_execution_and_review_policy_before_launch(tmp_path):
+    sol = "codex-acp/gpt-6.1-sol"
+    env = _config(tmp_path, pin={REVIEW_ROLE: sol + ":medium"})
+    assert preflight(sol + ":medium", None, env)["ready"]
+    file = Path(env["XDG_CONFIG_HOME"]) / "cortex" / "routing.json"
+    routing = json.loads(file.read_text())
+    routing["models"]["codex-acp"]["policy"]["gpt-6.1-sol"]["effort_floor"] = "high"
+    file.write_text(json.dumps(routing))
+    before = _tree(tmp_path)
+    result = preflight(sol + ":medium", None, env)
+    assert result["refusals"] == [
+        "execution:selected_effort_conflicts_with_policy",
+        "review:selected_effort_conflicts_with_policy",
+    ]
+    assert _tree(tmp_path) == before
+
+
+def test_reviewer_pin_that_would_be_clamped_is_not_ready(tmp_path):
+    env = _config(tmp_path, pin={REVIEW_ROLE: HAIKU + ":medium"})
+    assert preflight(HAIKU + ":medium", None, env)["refusals"] == [
+        "execution:selected_effort_conflicts_with_policy",
+        "review:selected_effort_conflicts_with_policy",
+    ]
+
+
 def test_project_policy_takes_precedence(tmp_path):
     environ = _config(tmp_path, pin={'*': SONNET})
     project = tmp_path / 'project'

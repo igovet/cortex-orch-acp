@@ -4,7 +4,7 @@ import { Icon, ScrollView } from "@getpaseo/plugin/client/react-native";
 import { Pressable, Text, View } from "react-native";
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { readWorkerHistory, type WorkerHistory } from "../shared/worker-history.js";
-import { savedWorkerView, saveWorkerView, selectedWorker, subscribeWorkerSelection } from "./worker-selection.js";
+import { savedWorkerView, saveWorkerView, selectedWorker, selectedWorkerDetail, subscribeWorkerSelection } from "./worker-selection.js";
 import { workerSection } from "./worker-panel-status.js";
 import { historyCursor, mergeWorkerHistory, shouldPollWorkerHistory, shouldShowWorkerHistoryLoader, WORKER_HISTORY_POLL_MS } from "./worker-panel-refresh.js";
 import { groupWorkerEvents, type WorkerEvent } from "./worker-panel-events.js";
@@ -17,6 +17,7 @@ import { openWorkspaceFile } from "./open-workspace-file.ts";
 import { UsageMeter } from "./usage-meter.tsx";
 import { MarkdownText } from "./markdown-text.tsx";
 import { RunningCommands } from "./command-stop-panel.tsx";
+import { WorkerAttemptResult } from "./worker-result.tsx";
 import { stoppedCommand } from "./command-stop.ts";
 
 const styles = {
@@ -32,6 +33,29 @@ const styles = {
 
 export { diffBlocks, diffLines, rawText } from "./worker-panel-diff.js";
 type Theme = PluginAgentPanelProps["theme"];
+
+/** The last history read's problem. A rejected request never shows its own
+ * error text (it is transport detail, possibly unsafe); an unavailable store
+ * shows the server's fixed message. Neither means the worker failed. */
+type HistoryReadProblem = { message: string };
+const HISTORY_READ_FAILED = "Worker history could not be read.";
+
+/** A failed or unavailable read: with retained content it marks that content
+ * stale; without any it replaces a false empty state. Retry re-reads the
+ * same selection. */
+function HistoryReadNotice({ problem, stale, onRetry, theme }: { problem: HistoryReadProblem; stale: boolean; onRetry: () => void; theme: Theme }) {
+  const text = stale ? `${problem.message} Showing the last retained history; it may be out of date.` : problem.message;
+  return <View accessibilityLiveRegion="polite" style={[styles.card, { borderColor: theme.colors.border, backgroundColor: theme.colors.surface1 }]}>
+    <View style={{ flexDirection: "row", alignItems: "flex-start", gap: 6 }}>
+      <View style={{ paddingTop: 3 }}><Icon name="CircleAlert" size={12} color={theme.colors.statusWarning} /></View>
+      <Text style={[styles.muted, { color: theme.colors.foreground, flexShrink: 1, minWidth: 0 }]}>{text}</Text>
+    </View>
+    <Pressable accessibilityRole="button" accessibilityLabel="Retry reading worker history" onPress={onRetry}
+      style={[styles.button, { borderWidth: 1, borderColor: theme.colors.border, backgroundColor: theme.colors.surface2 }]}>
+      <Text style={[styles.muted, { color: theme.colors.accent }]}>Retry</Text>
+    </Pressable>
+  </View>;
+}
 
 /** Paseo's DiffViewer: no line numbers or file header, a +/-/space prefix,
  * the chat's add/remove/context backgrounds, changed words highlighted, and
@@ -235,11 +259,18 @@ export function WorkerPanel({ theme, host, layout, workspaceId, agentId, navigat
   const [expandedEvent, setExpandedEvent] = useState<number | null>(saved?.expandedEvent ?? null);
   const [expandedGroups, setExpandedGroups] = useState<Set<number>>(() => new Set(saved?.expandedGroups));
   const [loading, setLoading] = useState(!saved?.history);
+  const [readProblem, setReadProblem] = useState<HistoryReadProblem | null>(null);
   const mountedRef = useRef(true);
   const refreshInFlightRef = useRef<string | null>(null);
   const historyRef = useRef<WorkerHistory | null>(saved?.history ?? null);
   const scrollOffsets = useRef<Record<string, number>>(saved?.scroll ?? {});
   const restoringRef = useRef(saved !== null);
+  // A worker opened from its coordinator card (mouse, Enter or Space) moves
+  // keyboard focus to the opened worker's heading once it resolves, so the
+  // destination is announced and Tab continues from it. A restored view
+  // (remount) keeps focus where the host put it.
+  const focusDestinationRef = useRef(saved === null && selectedWorker(agentId) !== null);
+  const headingRef = useRef<{ focus?: (options?: { preventScroll?: boolean }) => void } | null>(null);
   const pageScroll = useKeptScroll(scrollOffsets, `page:${selected ?? "all"}`);
   const switcherScroll = useKeptScroll(scrollOffsets, `switcher:${selected ?? "all"}`, true);
 
@@ -255,6 +286,7 @@ export function WorkerPanel({ theme, host, layout, workspaceId, agentId, navigat
   useEffect(() => {
     const applySelection = () => {
       const assignmentRef = selectedWorker(agentId);
+      focusDestinationRef.current = assignmentRef !== null;
       setSelectedAssignmentRef(assignmentRef);
       // Until the assignment response resolves, `selected` carries the
       // assignment ref. The refresh request recognizes the separate
@@ -287,6 +319,7 @@ export function WorkerPanel({ theme, host, layout, workspaceId, agentId, navigat
     setNextAssignmentCursor(null);
     setHistoryContext(null);
     setExpandedEvent(null);
+    setReadProblem(null);
   }, [contextKey]);
 
   const refresh = useCallback(async () => {
@@ -310,6 +343,14 @@ export function WorkerPanel({ theme, host, layout, workspaceId, agentId, navigat
         ...(incrementalCursor > 0 ? { cursor: incrementalCursor } : {}),
       });
       if (!mountedRef.current || requestKey !== currentRequestRef.current) return;
+      if (!result.available) {
+        // Unavailable now: keep whatever was already shown (marked stale)
+        // rather than merging an empty unavailable page over it.
+        setReadProblem({ message: result.message?.trim() || HISTORY_READ_FAILED });
+        if (priorHistory) return;
+      } else {
+        setReadProblem(null);
+      }
       const displayed = priorHistory ? mergeWorkerHistory(priorHistory, result) : result;
       historyRef.current = displayed;
       setHistory(displayed);
@@ -324,6 +365,10 @@ export function WorkerPanel({ theme, host, layout, workspaceId, agentId, navigat
           setSelected(attempt.id);
         }
       }
+    } catch {
+      // The selection and any retained history stay as they are; the
+      // notice offers a retry (a terminal worker no longer polls).
+      if (mountedRef.current && requestKey === currentRequestRef.current) setReadProblem({ message: HISTORY_READ_FAILED });
     }
     finally {
       if (refreshInFlightRef.current === requestKey) refreshInFlightRef.current = null;
@@ -335,8 +380,15 @@ export function WorkerPanel({ theme, host, layout, workspaceId, agentId, navigat
     if (!nextCursor || !selected) return;
     const requestContext = contextKey;
     const requestKey = selectionKey;
-    const result = await rpc({ workspaceId, agentId, attemptId: selected, cursor: nextCursor });
+    let result: WorkerHistory;
+    try {
+      result = await rpc({ workspaceId, agentId, attemptId: selected, cursor: nextCursor });
+    } catch {
+      if (mountedRef.current && requestKey === currentRequestRef.current) setReadProblem({ message: HISTORY_READ_FAILED });
+      return;
+    }
     if (requestKey !== currentRequestRef.current) return;
+    if (!result.available) { setReadProblem({ message: result.message?.trim() || HISTORY_READ_FAILED }); return; }
     const displayed = historyRef.current ? mergeWorkerHistory(historyRef.current, result) : result;
     historyRef.current = displayed;
     setHistory(displayed);
@@ -347,8 +399,15 @@ export function WorkerPanel({ theme, host, layout, workspaceId, agentId, navigat
     if (!nextAssignmentCursor) return;
     const requestContext = contextKey;
     const requestKey = selectionKey;
-    const result = await rpc({ workspaceId, agentId, assignmentCursor: nextAssignmentCursor });
+    let result: WorkerHistory;
+    try {
+      result = await rpc({ workspaceId, agentId, assignmentCursor: nextAssignmentCursor });
+    } catch {
+      if (mountedRef.current && requestKey === currentRequestRef.current) setReadProblem({ message: HISTORY_READ_FAILED });
+      return;
+    }
     if (requestKey !== currentRequestRef.current) return;
+    if (!result.available) { setReadProblem({ message: result.message?.trim() || HISTORY_READ_FAILED }); return; }
     const displayed = historyRef.current ? mergeWorkerHistory(historyRef.current, result) : result;
     historyRef.current = displayed;
     setHistory(displayed);
@@ -395,14 +454,36 @@ export function WorkerPanel({ theme, host, layout, workspaceId, agentId, navigat
   const transcript = selectedAttempt ? groupWorkerEvents(selectedAttempt.events) : [];
   const route = selectedAttempt?.route ?? selectedAssignment?.route;
   const selectedTerminal = workerTerminalState(selectedAssignment ? workerPopoverStatus(selectedAssignment) : selectedAttempt?.status, selectedAttempt?.checks);
+  // A worker opened from its card whose durable history has no attempt yet
+  // (e.g. it could not be started) still shows why, from the card's own
+  // host-provided reason, once the read has settled.
+  const pendingAssignment = selectedAssignmentRef
+    ? currentHistory?.assignments.find((assignment) => assignment.id === selectedAssignmentRef || assignment.assignmentRef === selectedAssignmentRef)
+    : undefined;
+  const handoffReason = selectedAssignmentRef && !loading && !(pendingAssignment && pendingAssignment.attempts.length > 0)
+    ? selectedWorkerDetail(agentId, selectedAssignmentRef)?.failureReason ?? null : null;
+  const readNotice = readProblem
+    ? <HistoryReadNotice problem={readProblem} stale={Boolean(currentHistory?.available)} onRetry={() => void refresh()} theme={theme} />
+    : null;
+  const selectedAttemptId = selectedAttempt?.id ?? null;
+  useEffect(() => {
+    if (!selectedAttemptId || !focusDestinationRef.current) return;
+    focusDestinationRef.current = false;
+    headingRef.current?.focus?.({ preventScroll: true });
+  }, [selectedAttemptId]);
   const selectedStatusColor = selectedTerminal.tone === "success" ? theme.colors.statusSuccess : selectedTerminal.tone === "danger" ? theme.colors.statusDanger : selectedTerminal.tone === "muted" ? theme.colors.foregroundMuted : selectedTerminal.tone === "warning" ? theme.colors.statusWarning : theme.colors.accent;
   return (
     <ScrollView {...pageScroll} style={{ flex: 1, backgroundColor: theme.colors.surface0 }} contentContainerStyle={{ paddingHorizontal: layout.compact ? 12 : 16, paddingTop: 15, paddingBottom: 28, gap: 12 }}>
       {!selectedAttempt ? <>
         <Text style={[styles.title, { color: theme.colors.foreground }]}>Workers</Text>
         {loading && <Text style={[styles.muted, { color: theme.colors.foregroundMuted }]}>Loading worker history…</Text>}
-        {!loading && currentHistory && !currentHistory.available && <Text style={[styles.muted, { color: theme.colors.statusWarning }]}>{currentHistory.message}</Text>}
-        {!loading && currentHistory?.available && currentHistory.assignments.length === 0 && <Text style={[styles.muted, { color: theme.colors.foregroundMuted }]}>No worker assignments recorded yet.</Text>}
+        {!loading && readNotice}
+        {!loading && !readProblem && currentHistory && !currentHistory.available && <Text style={[styles.muted, { color: theme.colors.statusWarning }]}>{currentHistory.message}</Text>}
+        {handoffReason && <View style={[styles.card, { borderColor: theme.colors.border, backgroundColor: theme.colors.surface1 }]}>
+          <Text style={[styles.muted, { color: theme.colors.foregroundMuted, fontWeight: "600" }]}>Selected worker has no attempt history</Text>
+          <Text selectable style={[styles.body, { color: theme.colors.statusDanger }]}>{handoffReason}</Text>
+        </View>}
+        {!loading && !readProblem && currentHistory?.available && currentHistory.assignments.length === 0 && <Text style={[styles.muted, { color: theme.colors.foregroundMuted }]}>No worker assignments recorded yet.</Text>}
         {currentHistory?.truncated && <Text style={[styles.muted, { color: theme.colors.statusWarning }]}>History is bounded; open a specific attempt for its retained events.</Text>}
         {activeAssignments.length > 0 && <Text style={[styles.muted, { color: theme.colors.foregroundMuted, fontWeight: "600" }]}>Active</Text>}
         {activeAssignments.map(workerCard)}
@@ -412,7 +493,9 @@ export function WorkerPanel({ theme, host, layout, workspaceId, agentId, navigat
       </> : <>
         <Pressable accessibilityRole="button" accessibilityLabel="Back to all workers" onPress={() => setSelected(null)} style={{ alignSelf: "flex-start", paddingVertical: 2 }}><Text style={[styles.muted, { color: theme.colors.accent }]}>‹  All workers</Text></Pressable>
         <View style={{ gap: 8, paddingBottom: 14, borderBottomWidth: 1, borderColor: theme.colors.border }}>
-          <Text style={[styles.title, { color: theme.colors.foreground }]}>{selectedAssignment?.title?.trim() || "Worker"}</Text>
+          <View ref={headingRef as never} tabIndex={-1} accessibilityRole="header">
+            <Text style={[styles.title, { color: theme.colors.foreground }]}>{selectedAssignment?.title?.trim() || "Worker"}</Text>
+          </View>
           <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 7, alignItems: "center" }}>
             <Text style={[styles.muted, { color: selectedStatusColor }]}>{selectedAssignment ? workerDisplayName(selectedAssignment) : "worker"}</Text>
             {route && <><Text style={[styles.muted, { color: theme.colors.foregroundMuted }]}>·</Text><Text style={[styles.muted, { color: theme.colors.foregroundMuted }]}>{route.provider}</Text><Text style={[styles.muted, { color: theme.colors.foregroundMuted }]}>·</Text><Text style={[styles.muted, { color: theme.colors.foregroundMuted }]}>{workerModelDisplay(route)}</Text>{route.effort && <><Text style={[styles.muted, { color: theme.colors.foregroundMuted }]}>·</Text><Text style={[styles.muted, { color: theme.colors.foregroundMuted }]}>{route.effort} effort</Text></>}</>}
@@ -434,6 +517,10 @@ export function WorkerPanel({ theme, host, layout, workspaceId, agentId, navigat
         {selectedAssignment?.assignmentRef && selectedAssignment.attempts[selectedAssignment.attempts.length - 1]?.id === selectedAttempt.id
           && <RunningCommands theme={theme} workspaceId={workspaceId} agentId={agentId} assignmentRef={selectedAssignment.assignmentRef}
             active={workerSection(selectedAttempt.status, selectedAttempt.events.length) === "active"} />}
+        {readNotice}
+        {/* The terminal result and every check of this exact attempt: the
+            detail the coordinator card no longer carries. */}
+        <WorkerAttemptResult attempt={selectedAttempt} theme={theme} />
         <View style={{ gap: 2 }}>
           {selectedAttempt.failureReason && <Text selectable style={[styles.body, { color: selectedAttempt.status === "interrupted" ? theme.colors.statusWarning : theme.colors.statusDanger }]}>{selectedAttempt.failureReason}</Text>}
           {groupToolRuns(transcript).map((item) => item.kind === "group"

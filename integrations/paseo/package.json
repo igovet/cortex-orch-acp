@@ -12,6 +12,7 @@
     "test:diff": "node --experimental-strip-types client/worker-panel-diff.test.ts",
     "test:status": "node --experimental-strip-types client/worker-panel-status.test.ts",
     "test:display": "node --experimental-strip-types client/worker-display.test.ts",
+    "test:worker-card": "node --experimental-strip-types client/worker-card-model.test.ts && node --experimental-strip-types client/card-a11y.test.ts && node --experimental-strip-types server/provider-worker-card.test.ts",
     "test:terminal-status": "node --experimental-strip-types client/worker-terminal-status.test.ts",
     "test:replay": "node --experimental-strip-types server/replay.test.ts",
     "test:coalesce": "node --experimental-strip-types client/coalesce.test.ts",

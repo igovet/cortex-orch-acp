@@ -60,6 +60,82 @@ One shared-skill allowlist supplies read authorization and the role's `read_skil
 enum; coordinators cannot read worker-only procedures, and consultants cannot read
 these project procedures. All 23 profiles and their access classes remain intact.
 
+## Capability-based delegation
+
+The canonical `skills/orchestrator/SKILL.md` distinguishes answering from doing:
+the coordinator can answer simple informational questions using granted reads.
+Changes, substantial investigation, and operations requiring capabilities outside
+its role go into a specialist objective in a structured plan, even if phrased as
+a simple read. This is general guidance, not server-name or request-keyword
+routing. Worker command and outside-project permission routes do not become
+coordinator tools. Missing coordinator tools do not establish machine-wide
+unavailability; unconfigured or unknown worker capability must stay explicit.
+A refusal is not a discovery gap: do not retry it via another tool, engine or
+worker. Additional access still requires runtime validation.
+
+`engine.unified_system_prompt.worker_capabilities_section` renders a separate
+configured-worker MCP summary from the session's source inventory. It applies
+`host_mcp_servers` worker/engine admission filters, then shows read-only-tool
+intersection and writing-tool grants for each eligible server and engine filter.
+The consultant receives no external servers. Engine filter identities are not a
+claim that a route is installed or available; the live route menu and runtime
+policy decide dispatch. An absent source inventory is labeled unavailable;
+an empty or fully filtered inventory reports no eligible configured servers.
+These cases must not be presented as a successful external read.
+
+Only sanitized server/tool identifiers are shown: at most 24 tool names per access
+class and a 12,000-character row budget, with explicit omitted-name/row counts
+and a small fixed explanatory footer. No command, arguments, environment values,
+filesystem grant paths, descriptions or tool schemas are copied. The summary is
+a startup snapshot of configuration, not observed tool discovery or successful
+invocation, and does not perform full proxy admission checks. Workers inspect
+their actual live tool surface and report refusals or missing configuration.
+
+`EngineSessionManager.create_session` delivers this summary to coordinators even
+when they have no attached external servers; Codex and Claude receive it through
+the existing instruction metadata. OpenCode receives it through its launch
+prompt. Workers still receive only their own attached-server section. The
+metadata-only `external_mcp_inventory` receipt continues to describe only the
+current session's forwarded servers, not worker capabilities or model use.
+
+The same coordinator section includes a built-in Cortex discovery roster derived
+from current `tool_definitions` offers for a read-only investigator, writing
+specialist and consultant. It is independent of external MCP attachments and
+lists only relevant operation names, not copied schemas. A worker can use an
+offered `command_run` for authorized bounded reads in its actual command namespace;
+Cortex has no separate outside-read/search tool. Read-only/Guarded commands have
+private scratch at `/var/tmp`, not host data. A missing file there proves only
+command-environment visibility. For authorized host-only reads/searches, use the
+advertised `outside_command` consent route through a writing specialist with a
+bounded read-only objective, or a granted external reader. A read-only investigator
+cannot escalate to that command route; it reports the capability gap for runtime
+replanning. Neither remounting nor moving a fixture establishes the original read.
+`project_read` remains project-only. Role, mode, protected paths and owner
+constraints still apply. `access_request` handles assignment-local additional
+project work paths, not outside grants or remounts. Exceptional outside
+command/write routes belong to writing workers, never to read-only escalation
+or denial bypass.
+
+Unknown external source locations become worker discovery objectives. The
+coordinator orients with its permitted reads, then proposes a suitable investigator
+rather than demanding pasted data because its own tools cannot reach the source.
+A Paseo session UUID identifies host history, not a current-project Cortex report;
+`read_report` cannot resolve that host identity. Ordinary workers receive canonical
+shared guidance to inspect actual installed help, storage or export mechanisms
+read-only, validate the authorized exact-session binding, and report bounded
+page/byte/event coverage and truncation. A reader that may load, resume or create
+an agent does not satisfy a no-resume investigation. If no safe mechanism is
+observable, evidence remains unavailable; an export request is a last supported
+option, not the starting assumption. No host path or API is assumed.
+
+No-paid regressions in `tests/test_worker_capability_discovery.py` exercise
+arbitrarily named multi-server grants, engine/access filtering, sanitized bounds,
+missing inventory, built-in discovery without external attachments, unknown
+locations, Paseo UUID/report separation, composed instructions, unchanged role
+tool offers, real cwd validation, command refusal and scripted plan-to-worker handoff. Existing direct-answer tests retain
+informational reads without workers. These prove delivery and deterministic
+runtime behavior, not that a paid model will choose delegation correctly.
+
 ## Coordinator-to-worker location hand-off
 
 When the coordinator has actually looked up relevant source locations, the

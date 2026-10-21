@@ -324,6 +324,7 @@ npm --prefix integrations/paseo run test:steer      # steer, steered worker card
 npm --prefix integrations/paseo run test:installed-questions -- /absolute/path/to/installed/Metro/index.js # installed question helper/component structure and state (no pixel rendering)
 npm --prefix integrations/paseo run test:diff      # client/worker-panel-diff.test.ts
 npm --prefix integrations/paseo run test:status    # client/worker-panel-status.test.ts
+npm --prefix integrations/paseo run test:worker-card # card model, card contrast/Space activation, and one stable worker-card identity across turns/replay (cancel vs. real failure)
 npm --prefix integrations/paseo run test:replay    # server/replay.test.ts
 npm --prefix integrations/paseo run test:coalesce  # client/coalesce.test.ts
 npm --prefix integrations/paseo run test:worker-result-batch # client/worker-result-batch.test.ts

@@ -418,4 +418,147 @@ function makeHostLossFixture(): { root: string; cleanup: () => void } {
   }
 }
 
+// The worker tab's full read carries this exact attempt's summary and every
+// check; the coordinator card's compact read carries neither, only the
+// open-issue count (a closed failure is history, not an open issue).
+{
+  const { root, cleanup } = makeInterruptFixture();
+  try {
+    const context = mockContext(WORKSPACE_ID, AGENT_ID, root, SESSION_ID);
+    const full = await getWorkerHistory({ workspaceId: WORKSPACE_ID, agentId: AGENT_ID, assignmentRef: "req-checks" }, context);
+    const fullAttempt = full.assignments[0].attempts.at(-1)!;
+    assert.equal(fullAttempt.summary, "Done with history");
+    assert.equal(fullAttempt.summaryTruncated, undefined);
+    assert.equal(fullAttempt.checks?.length, 2);
+    assert.equal(fullAttempt.openIssues, undefined);
+
+    const compact = await getWorkerHistory({ workspaceId: WORKSPACE_ID, agentId: AGENT_ID, assignmentRef: "req-checks",
+      cursor: Number.MAX_SAFE_INTEGER, limit: 1, compact: true }, context);
+    const compactAttempt = compact.assignments[0].attempts.at(-1)!;
+    assert.equal(compactAttempt.summary, undefined, "no summary in a card read");
+    assert.equal(compactAttempt.checks, undefined, "no check list in a card read");
+    assert.equal(compactAttempt.openIssues, 1);
+    assert.deepEqual(compactAttempt.events, []);
+    assert.doesNotMatch(JSON.stringify(compact), /Done with history|unit tests|tool_call_ref_missing/);
+  } finally {
+    cleanup();
+  }
+}
+
+// Without a retained runtime result (an older store), the summary comes from
+// this exact attempt's own worker_result and is bounded for display.
+{
+  const { root, cleanup } = makeFixture();
+  try {
+    const context = mockContext(WORKSPACE_ID, AGENT_ID, root, SESSION_ID);
+    const legacy = await getWorkerHistory({ workspaceId: WORKSPACE_ID, agentId: AGENT_ID }, context);
+    assert.equal(legacy.assignments[0].attempts[0].summary, "Done");
+    const long = "L".repeat(20000);
+    execSqlite(join(root, ".cortex", "cortex.sqlite3"), `insert into task_events (task_id, event_type, assignment_ref, payload_json, created_at) values ${sqlValues([TASK_ID, "worker_result", "xa_1", JSON.stringify({ summary: long, checks: [] }), "2026-01-01T00:06:00Z"])};`);
+    const clipped = (await getWorkerHistory({ workspaceId: WORKSPACE_ID, agentId: AGENT_ID }, context)).assignments[0].attempts[0];
+    assert.equal(clipped.summary?.length, 16000);
+    assert.equal(clipped.summaryTruncated, true);
+  } finally {
+    cleanup();
+  }
+}
+
+// Without a runtime node row (an older store), each attempt's own latest
+// worker_result also supplies its checks: outcomes, blockers and evidence
+// annotations survive, a known empty list stays empty, absent or malformed
+// check data stays absent, and attempts never borrow each other's checks.
+{
+  const { root, cleanup } = makeFixture();
+  const dbPath = join(root, ".cortex", "cortex.sqlite3");
+  const result = (ref: string, payload: unknown, at: string) =>
+    `insert into task_events (task_id, event_type, assignment_ref, payload_json, created_at) values ${sqlValues([TASK_ID, "worker_result", ref, JSON.stringify(payload), at])};`;
+  try {
+    execSqlite(dbPath, `
+      insert into work_assignments (assignment_id, task_id, node_key, idempotency_key, status) values ${sqlValues(["wa_legacy", TASK_ID, "node-legacy", "idem-legacy", "completed"])};
+      insert into work_assignment_attempts (attempt_id, assignment_id, attempt_no, status, failure_reason) values ${sqlValues(["xa_l1", "wa_legacy", 1, "completed", null])};
+      insert into work_assignment_attempts (attempt_id, assignment_id, attempt_no, status, failure_reason) values ${sqlValues(["xa_l2", "wa_legacy", 2, "completed", null])};
+      insert into task_events (task_id, event_type, assignment_ref, payload_json, created_at) values ${sqlValues([TASK_ID, "delegation_requested", "idem-legacy", JSON.stringify({ title: "Legacy worker", role: "worker-debugger" }), "2026-01-01T00:00:00Z"])};
+      ${result("xa_l1", { summary: "First try", checks: [{ name: "stale", outcome: "passed" }] }, "2026-01-01T00:01:00Z")}
+      ${result("xa_l1", { summary: "First try, final", checks: [
+        { name: "unit", outcome: "failed", blocker: "2 errors in /home/someone/project/a.ts" },
+        { name: "typecheck", outcome: "unverified", claimed_outcome: "passed", evidence_gap: "tool_call_ref_missing" },
+        { name: "old", outcome: "failed", closed_by: "gateway:1" },
+      ] }, "2026-01-01T00:02:00Z")}
+      ${result("xa_l2", { summary: "Second try", checks: [{ name: "live", outcome: "not_run", blocker: "paid live check not requested by the owner" }] }, "2026-01-01T00:03:00Z")}
+
+      insert into work_assignments (assignment_id, task_id, node_key, idempotency_key, status) values ${sqlValues(["wa_nochecks", TASK_ID, "node-nochecks", "idem-nochecks", "completed"])};
+      insert into work_assignment_attempts (attempt_id, assignment_id, attempt_no, status, failure_reason) values ${sqlValues(["xa_nochecks", "wa_nochecks", 1, "completed", null])};
+      insert into task_events (task_id, event_type, assignment_ref, payload_json, created_at) values ${sqlValues([TASK_ID, "delegation_requested", "idem-nochecks", JSON.stringify({ title: "No check data" }), "2026-01-01T00:00:00Z"])};
+      ${result("xa_nochecks", { summary: "No check key" }, "2026-01-01T00:04:00Z")}
+
+      insert into work_assignments (assignment_id, task_id, node_key, idempotency_key, status) values ${sqlValues(["wa_badchecks", TASK_ID, "node-badchecks", "idem-badchecks", "completed"])};
+      insert into work_assignment_attempts (attempt_id, assignment_id, attempt_no, status, failure_reason) values ${sqlValues(["xa_badchecks", "wa_badchecks", 1, "completed", null])};
+      insert into task_events (task_id, event_type, assignment_ref, payload_json, created_at) values ${sqlValues([TASK_ID, "delegation_requested", "idem-badchecks", JSON.stringify({ title: "Malformed check data" }), "2026-01-01T00:00:00Z"])};
+      ${result("xa_badchecks", { summary: "Bad checks", checks: [{ name: "x" }] }, "2026-01-01T00:05:00Z")}
+    `);
+    const context = mockContext(WORKSPACE_ID, AGENT_ID, root, SESSION_ID);
+    const history = await getWorkerHistory({ workspaceId: WORKSPACE_ID, agentId: AGENT_ID }, context);
+    const byTitle = (title: string) => history.assignments.find((assignment) => assignment.title === title)!;
+
+    assert.deepEqual(byTitle("Fix the bug").attempts[0].checks, [], "a known empty list stays empty");
+    const [first, second] = byTitle("Legacy worker").attempts;
+    assert.equal(first.id, "xa_l1");
+    assert.equal(first.summary, "First try, final");
+    assert.deepEqual(first.checks, [
+      { name: "unit", outcome: "failed", blocker: "2 errors in [private path]" },
+      { name: "typecheck", outcome: "unverified", claimedOutcome: "passed", evidenceGap: "tool_call_ref_missing" },
+      { name: "old", outcome: "failed", closedBy: "gateway:1" },
+    ]);
+    assert.equal(second.id, "xa_l2");
+    assert.equal(second.summary, "Second try");
+    assert.deepEqual(second.checks, [{ name: "live", outcome: "not_run", blocker: "paid live check not requested by the owner" }]);
+    assert.equal(byTitle("No check data").attempts[0].checks, undefined, "absent check data stays absent");
+    assert.equal(byTitle("Malformed check data").attempts[0].checks, undefined, "malformed check data is never guessed");
+
+    // An exact attempt read binds to that attempt only.
+    const exact = await getWorkerHistory({ workspaceId: WORKSPACE_ID, agentId: AGENT_ID, attemptId: "xa_l1" }, context);
+    const exactAttempts = exact.assignments.flatMap((assignment) => assignment.attempts);
+    assert.deepEqual(exactAttempts.map((attempt) => attempt.id), ["xa_l1"]);
+    assert.equal(exactAttempts[0].checks?.length, 3);
+
+    // A card read counts the legacy checks' open issues and carries no list.
+    const card = await getWorkerHistory({ workspaceId: WORKSPACE_ID, agentId: AGENT_ID, assignmentRef: "idem-legacy",
+      cursor: Number.MAX_SAFE_INTEGER, limit: 1, compact: true }, context);
+    const cardAttempts = card.assignments[0].attempts;
+    assert.deepEqual(cardAttempts.map((attempt) => attempt.openIssues), [2, 1]);
+    assert.doesNotMatch(JSON.stringify(card), /First try|Second try|tool_call_ref_missing|paid live check/);
+  } finally {
+    cleanup();
+  }
+}
+
+// A runtime node row is authoritative: an attempt whose runtime result has
+// no check data keeps it absent rather than taking the worker_result's list.
+{
+  const { root, cleanup } = makeInterruptFixture();
+  try {
+    execSqlite(join(root, ".cortex", "cortex.sqlite3"), `
+      insert into work_assignments (assignment_id, task_id, node_key, idempotency_key, status) values ${sqlValues(["wa_runtime", TASK_ID, "node-runtime", "idem-runtime", "completed"])};
+      insert into work_assignment_attempts (attempt_id, assignment_id, attempt_no, status, failure_reason) values ${sqlValues(["xa_runtime", "wa_runtime", 1, "completed", null])};
+      insert into task_events (task_id, event_type, assignment_ref, payload_json, created_at) values ${sqlValues([TASK_ID, "delegation_requested", "req-runtime", JSON.stringify({ title: "Runtime worker", work_attempt_ref: "xa_runtime" }), "2026-01-01T00:00:00Z"])};
+      insert into delegation_provisioning (idempotency_key, task_id, assignment_id, attempt_id, role_id, step, status, owner_epoch, created_at, updated_at) values ${sqlValues(["req-runtime", TASK_ID, "wa_runtime", "exec-runtime", "worker-debugger", "execution", "provisioned", 1, "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z"])};
+      insert into task_events (task_id, event_type, assignment_ref, payload_json, created_at) values ${sqlValues([TASK_ID, "worker_result", "xa_runtime", JSON.stringify({ summary: "Worker claim", checks: [{ name: "WORKER-CLAIM", outcome: "passed" }] }), "2026-01-01T00:05:00Z"])};
+      insert into runtime_nodes (task_id, revision, node_id, role, objective, dependencies_json, scope_json, stage, status, assignment_ref, result_json) values ${sqlValues([
+        TASK_ID, 1, "n-runtime", "worker-debugger", "Objective", "[]", "[]", "execution", "completed", "req-runtime", JSON.stringify({ summary: "Runtime summary" }),
+      ])};
+    `);
+    const context = mockContext(WORKSPACE_ID, AGENT_ID, root, SESSION_ID);
+    const history = await getWorkerHistory({ workspaceId: WORKSPACE_ID, agentId: AGENT_ID, assignmentRef: "req-runtime" }, context);
+    const attempt = history.assignments[0].attempts.at(-1)!;
+    assert.equal(attempt.summary, "Runtime summary");
+    assert.equal(attempt.checks, undefined);
+    assert.doesNotMatch(JSON.stringify(history), /WORKER-CLAIM/);
+    // The existing runtime check list is unchanged by the fallback.
+    const checked = await getWorkerHistory({ workspaceId: WORKSPACE_ID, agentId: AGENT_ID, assignmentRef: "req-checks" }, context);
+    assert.equal(checked.assignments[0].attempts.at(-1)!.checks?.length, 2);
+  } finally {
+    cleanup();
+  }
+}
+
 console.log("worker-history: ok");

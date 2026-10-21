@@ -34,10 +34,19 @@ function write(key: string, value: string | null): boolean {
   } catch { return false; }
 }
 const handoffKey = (agentId: string) => `cortex-acp:worker-handoff:${agentId}`;
+const handoffDetailKey = (agentId: string) => `cortex-acp:worker-handoff-detail:${agentId}`;
 const viewKey = (agentId: string) => `cortex-acp:worker-view:${agentId}`;
 
-export function selectWorker(agentId: string, assignmentRef: string): void {
+/** What the opening card already knew about its worker: the host's own
+ * bounded, server-redacted failure reason. The worker tab shows it only
+ * for a worker whose durable history has no attempt to explain itself
+ * (e.g. one that could not be started); the card shows only a category. */
+export type WorkerHandoffDetail = { failureReason?: string };
+
+export function selectWorker(agentId: string, assignmentRef: string, detail?: WorkerHandoffDetail): void {
   write(handoffKey(agentId), assignmentRef);
+  const failureReason = detail?.failureReason?.trim();
+  write(handoffDetailKey(agentId), failureReason ? JSON.stringify({ assignmentRef, failureReason }) : null);
   // A chat card opens a different worker from the top, not the old view.
   write(viewKey(agentId), null);
   for (const listener of listeners) listener();
@@ -45,6 +54,17 @@ export function selectWorker(agentId: string, assignmentRef: string): void {
 
 export function selectedWorker(agentId: string): string | null {
   return read(handoffKey(agentId));
+}
+
+/** The handed-off detail for exactly this assignment, never another one's. */
+export function selectedWorkerDetail(agentId: string, assignmentRef: string): WorkerHandoffDetail | null {
+  const raw = read(handoffDetailKey(agentId));
+  if (!raw) return null;
+  try {
+    const value = JSON.parse(raw) as { assignmentRef?: unknown; failureReason?: unknown };
+    return value.assignmentRef === assignmentRef && typeof value.failureReason === "string" && value.failureReason.trim()
+      ? { failureReason: value.failureReason } : null;
+  } catch { return null; }
 }
 
 export function subscribeWorkerSelection(listener: Listener): () => void {

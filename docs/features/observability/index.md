@@ -134,10 +134,104 @@ never counted.
 
 Worker activity is retained in the durable task event history, while the ACP
 timeline receives a bounded display projection. Worker tool cards omit
-transcripts and raw inputs. Paseo cards carry status and title, with a bounded
-failure line or terminal result; generic clients receive a rolling tail of at
-most 20 action lines and 4 KiB. Runtime worker prose is buffered by message
-block instead of being emitted per token.
+transcripts and raw inputs. Paseo cards carry status and title, the host's
+bounded failure line, and only the open-issue count of a terminal result;
+generic clients receive a rolling tail of at most 20 action lines and 4 KiB.
+Runtime worker prose is buffered by message block instead of being emitted per
+token.
+
+In Paseo, the coordinator conversation keeps worker cards compact. The
+runtime sends `cortexWorkerOutcome: { status, openIssues }` in a panel card's
+`rawOutput`, which survives the installed bridge's dropped update metadata.
+The provider reduces legacy terminal `{summary, checks}` to the same count
+(open issues are checks that did not pass and that no exact later rerun closed), and its timeline
+transformer reduces an item saved by an older plugin, which still carries the
+full `cortexWorkerResult`, to the same count. A replayed session therefore
+never brings the summary, check names, blockers or evidence gaps back into the
+coordinator stream (`integrations/paseo/shared/worker-card-outcome.ts`). The
+card shows the role, status (icon and text), task title, the actual
+engine · model · effort route without route-selection provenance, at most one
+fixed attention category (for example "Failure details in the worker tab";
+never any part of a failure or cancellation reason), labelled context/token
+usage ("Usage unavailable" when nothing was reported) and one whole-card
+**Open worker** action. A hidden polite live region outside the card's button
+announces each real status or issue-count transition once with the worker's
+role and title; mounting or replaying a card, its first reconciling read and
+usage polls announce nothing. Its only
+store read is a compact history read (`compact: true`: status, usage and the
+open-issue count, no summary, check list or events), polled while the host
+shows the card running; an unchanged poll keeps the same state and does not
+re-render the card. The per-card result fetch is retired.
+
+One worker is one card. A worker's ACP tool call outlives the coordinator turn
+that created it, and the installed Paseo client (0.12.0) merges a `tool_call`
+item only into a row of the same turn, so a Stop or a later turn's outcome used
+to add a second, identical card. The plugin's provider therefore emits each
+worker card as a provider plugin item `worker-row:<callId>` of plugin
+`cortex-acp`, which the host merges by that identity across turns and replays,
+replacing its data in place (`integrations/paseo/shared/worker-card-item.ts`).
+The client transformer keeps the same compact projection for `tool_call`
+worker items an older plugin persisted; such a legacy item and a new plugin
+item for the same worker in one session can still show twice. A cancelled
+worker reads **Cancelled**, not Failed: every runtime cancellation path
+(event claim, `/cortex-stop`, Paseo Stop and a stop racing a recorded
+cancellation) sends ACP `failed` with the `· Cancelled` title marker, and the
+card lets a settled durable `cancelled`/`interrupted` status override a host
+`failed` and lets any settled durable status override the host's own turn-end
+`canceled` guess. A durable `failed` keeps a genuine failure failed, even when it published a
+report and an older host item says Completed. Every result-emission path reads
+the committed node verdict, including worker-turn cleanup and stop races.
+Replan/Stop cancellation projection first resolves any already committed worker
+result using the exact assignment/attempt binding; process cleanup and its
+retained event do not relabel that result. The provider preserves the compact
+result against later same-ACP-status cleanup (`failed` also represents
+cancellation), and carries its explicit `outcomeStatus` into the saved plugin
+row. That result verdict overrides obsolete title markers with no extra read.
+For older saved rows without a verdict, the existing compact durable read can
+repair a Cancelled marker when a failed result and its check count are known;
+absent or legacy count-only metadata alone never proves a failure.
+Failed assignments keep their issue count; successful assignments with unresolved
+checks read Completed with issues; clean success stays Completed. The compact
+history reader and full worker tab use the same verdict. Session/load repairs
+older false-completion ACP cards from persisted nodes; old saved plugin rows are
+reconciled by the compact durable read. No result body or check list is added to
+the coordinator. Scripted runtime/bridge/client regressions establish these
+projections, not paid-model obedience or rendered Desktop behavior.
+
+Each coloured text on the card (role, route and usage in `foregroundMuted`,
+status, attention line and the **Open worker** action in its status or accent
+token) uses the theme's own token when it reaches 4.5:1 on every card
+background (surface0/1/2: normal, focus, hover, pressed), else the least blend
+toward `foreground` that does (`client/card-contrast.ts`); the focus outline
+uses the action colour. The installed light theme's muted text (4.40:1 on
+hover) and default dark theme's accent (about 2.5:1) are lifted this way; the
+host theme itself is never changed. Space on
+the focused card opens the worker on release: in a recorded Paseo 0.12.0
+Desktop run a focused card ignored Space (Enter and click worked), and the
+installed bundle binds a bare Space outside text fields to a window-level
+voice-mute shortcut, so the card handles Space for its own element only, and a shared
+activation guard keeps Enter, click and Space to one navigation per gesture
+(`client/card-keyboard.ts`). Opening a worker from its card moves focus to the
+worker heading in the Workers tab once the attempt resolves.
+
+The opened Workers tab reads the selected attempt's full history and shows its
+terminal **Result** (the attempt's own retained runtime summary, else its own
+latest `worker_result`, scrubbed and clipped at 16,000 characters with a
+visible note) and **Checks** (each with its disposition, resolved history,
+weak-evidence marker, blocker and evidence gap) above the retained activity,
+with the existing bounded paging. When no runtime node row exists for the
+attempt (an older store), the checks come from that attempt's own latest
+`worker_result`, validated and scrubbed; a runtime row's checks are never
+replaced. Active attempts and attempts that ended without a result show no
+terminal sections; absent check data reads "Check details unavailable", a
+known empty list "No checks reported". A rejected or unavailable history read
+keeps the selection and any retained history, shows a safe reason (marking
+retained content as possibly out of date) and a **Retry** action; it never
+reads as an empty list or a failed worker. A worker opened from a failed card
+whose history has no attempt shows the card's host-provided reason there.
+Coverage is
+no-paid provider, history, model and client-bundle render-walk tests plus a
+react-native-web fixture rendering; it is not Paseo Desktop evidence.
 
 Each worker card also has a fixed event budget, because Paseo keeps every
 update however small. Status transitions move forward only (create as
@@ -174,7 +268,13 @@ non-mirror text is retained. If a completed call repeats an earlier call's
 title, input and output exactly, the emitter sends a small
 `repeated_output: true` reference with `same_as` pointing to the first card
 instead of copying the output. The repeat cache retains at most 64
-(tool, input) keys; a cache miss sends the full bounded result again.
+(title, input, bounded output) digest keys. A compact unchanged-context receipt
+does not displace an earlier matching display projection: full contexts can
+change only in fields that the display truncates. Each repeated projection
+still carries its call's terminal status and references the earlier card;
+changed projections and failed calls retain their bounded output. This cache
+affects only the host display, not the complete authoritative MCP response or
+durable history. A cache miss or eviction sends the full bounded result again.
 
 The number of coordinator and engine tool cards is bounded per task, not only
 per card (`wire_budget.COORDINATOR_*`). The first 150 distinct calls of a task

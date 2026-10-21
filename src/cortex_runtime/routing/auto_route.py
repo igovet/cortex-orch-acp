@@ -393,15 +393,21 @@ def choose(role: str, project_root=None, environ: Mapping[str, str] | None = Non
             raise _policy_error("user_requested_route_unavailable",
                                 f"{model_hint}: no configured tier/effort policy; no substitution permitted.")
         requested_tier = policy.tier
-        effort = nearest(EFFORT_BY_TIER[requested_tier],
-                         permitted_efforts(picked, requested_tier, policy))
+        explicit_effort = user_request.get("effort")
+        permitted = efforts_in_any_tier(picked, policy)
+        if explicit_effort is not None and explicit_effort not in permitted:
+            raise _policy_error("user_requested_effort_unavailable",
+                                f"{model_hint}:{explicit_effort} is not supported within current effort policy; "
+                                "no substitution permitted. Select a permitted effort or ask the owner to revise policy.")
+        effort = (explicit_effort if explicit_effort is not None else
+                  nearest(EFFORT_BY_TIER[requested_tier], permitted_efforts(picked, requested_tier, policy)))
         decision = dict(
             role=role, base_role_tier=base_role_tier, role_tier=requested_tier, tier=requested_tier,
             basis="user_request", decided_by="user_request", rank_version=RANK_VERSION,
             escalated=escalate, preference=preference,
             preference_status="ignored:user_request" if preference else "none",
             model_hint=model_hint, model_hint_status="honoured", model_hint_reason=model_reason,
-            effort_basis=f"user_request:{requested_tier}",
+            effort_basis="user_request:explicit_effort" if explicit_effort is not None else f"user_request:{requested_tier}",
             user_model_request=dict(user_request, status="honoured"),
             candidates=[_candidate(e, usage, role, False, affinity=affinity, work_kind_override=work_kind_override) for e in requested],
             chosen=model_hint, chosen_connection_id=picked.connection_id)
@@ -477,14 +483,15 @@ def choose(role: str, project_root=None, environ: Mapping[str, str] | None = Non
                           if best.route.id in stretch_ids and best_policy.effort_ladder
                           else EFFORT_BY_TIER[tier_for(role, escalate, complexity)])
         permitted = efforts_in_any_tier(best, best_policy)
-        if best_policy.effort_ladder and default_effort not in permitted:
+        if effort is None and best_policy.effort_ladder and default_effort not in permitted:
             raise _policy_error("model_effort_policy_unsupported", "Pinned effort_ladder step is not permitted.")
         pinned_effort = nearest(effort or default_effort, permitted)
         if effort is not None and pinned_effort != effort:
-            # A configured pin effort routing.json's own policy
-            # does not permit is silently lowered/raised to the nearest
-            # permitted step (never refused); record that it happened.
-            decision["pin_effort_clamped"] = dict(configured=effort, applied=pinned_effort)
+            raise _policy_error("pinned_effort_unavailable",
+                                f"The owner pin {_route_label(best)}:{effort} conflicts with observed support or effort policy; "
+                                "no substitution permitted. Ask the owner to revise the pin or policy.")
+        if effort is not None:
+            decision["effort_basis"] = "pin:explicit_effort"
         return Choice(best.connection_id, model, pinned_effort,
                       "auto:pin", decision, best.route.id)
     default_denied = {entry.route.id for entry in allowed if _default_auto_denied(overrides, entry)}
@@ -1809,6 +1816,51 @@ def ambiguous_user_model_request(store, task_id: str, model_hint: str) -> dict |
     return None
 
 
+def _effort_source_text(text: str, identities: Sequence[str]) -> str:
+    """Recognize engine/model:effort (or /effort), never a configured longer ID."""
+    spellings = {*identities, *(identity.partition("/")[2] for identity in identities)}
+    tokens = "|".join(re.escape(token) for token in sorted(spellings, key=len, reverse=True))
+    if not tokens:
+        return text
+    suffix = re.compile(
+        rf"(?<!\S)(?P<open>[\"'\x60«“]?)(?P<model>{tokens})"
+        rf"(?P<effort>[:/](?:{'|'.join(EFFORT_ORDER)}))(?P<close>[\"'\x60»”]?)(?=[.,!?;:]?(?:\s|$))")
+    def strip(match):
+        opening, closing = match["open"], match["close"]
+        if ((opening and {'"': '"', "'": "'", "\x60": "\x60", "«": "»", "“": "”"}.get(opening) != closing)
+                or (not opening and closing) or match["model"] + match["effort"] in spellings):
+            return match.group(0)
+        # Keep source offsets, moving a paired closing quote next to the model.
+        return opening + match["model"] + closing + " " * len(match["effort"])
+    return suffix.sub(strip, text)
+
+
+def _source_effort(source: str, normalized: str, pattern: re.Pattern, matched: str) -> str | None:
+    """Effort directly attached to a granted mention, from that same user source.
+
+    Deliberately bounded grammar: no inherited editor setting, report text,
+    distant adjective or effort from another model/message becomes consent.
+    """
+    values = set()
+    levels = r"(?:low|medium|high|xhigh|max|ultra)(?![\w/-])"
+    suffix = re.compile(
+        rf"^[\"'\x60»”]*(?:\s*[:/]\s*(?P<attached>{levels})|"
+        rf"\s+(?:at|with|на|с)\s+(?P<qualified>{levels})|"
+        rf"[,\s]+effort\s*[=:]\s*(?P<named>{levels})|"
+        rf"[,\s]+(?P<described>{levels})(?=\s+(?:effort|throughout)\b))", re.IGNORECASE)
+    for mention in pattern.finditer(normalized):
+        if mention.group(0) != matched or _refused_mention(_mention_context(normalized, mention)):
+            continue
+        found = suffix.match(source[mention.end():])
+        if found is not None:
+            values.add(next(value for value in found.groupdict().values() if value is not None).lower())
+    if len(values) > 1:
+        raise _policy_error("user_requested_effort_ambiguous",
+                            "Conflicting effort selections for one model in the same user source; "
+                            "state one exact engine/model:effort before dispatch.")
+    return next(iter(values), None)
+
+
 def _user_model_consent(store, task_id: str, model_hint: str,
                         names: Sequence[str] | None = None) -> tuple[dict | None, dict | None]:
     """``(grant, revocation)`` from the newest user message that either
@@ -1830,6 +1882,10 @@ def _user_model_consent(store, task_id: str, model_hint: str,
     refusal = None
     with store.connection() as db:
         for source_ref, text in _user_texts(store, db, task_id):
+            # Strip only known effort suffixes from exact configured identities,
+            # keeping offsets intact for source-bound effort extraction below.
+            source_text = text
+            text = _effort_source_text(text, identities)
             # Within one message a refusal outweighs a grant of the same identity.
             refused = refuses_family(text, family, names, pattern=pattern)
             if refused is not None:
@@ -1845,7 +1901,11 @@ def _user_model_consent(store, task_id: str, model_hint: str,
                     identity = f"{engine}/{model}"
                     if identity != model_hint and family_pattern(identity, policy.get("request_names")).search(matched):
                         raise _policy_error("model_request_label_ambiguous", "The requested label matches multiple configured identities.")
-            return dict(source_ref=source_ref, family=family, matched=matched), None
+            grant = dict(source_ref=source_ref, family=family, matched=matched)
+            effort = _source_effort(source_text, text, pattern, matched)
+            if effort is not None:
+                grant["effort"] = effort
+            return grant, None
     return None, None
 
 

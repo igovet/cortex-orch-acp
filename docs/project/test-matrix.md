@@ -20,6 +20,48 @@ and `tests/test_no_hardcoded_model_names.py` (current template-derived prompt/sc
 
 Positive mode/permission/session/fallback fixtures must write the minimum exact version-2 owner policy into disposable project or HOME/XDG roots. `tests/model_policy_fixtures.py` supplies opt-in helpers; no global autouse production template or unknown-model enablement is permitted. Keep missing/malformed/denied policy cases separate. `tests/test_delegation_mcp_tools.py`, `tests/test_stdio.py` and `tests/test_delegation_worker_mode_floor.py` cover actionable route-menu diagnostics and refusal before capacity/engine launch.
 
+Focused no-paid delegation/capability checks:
+
+```
+python3 -B -m pytest -q tests/test_worker_capability_discovery.py tests/test_host_mcp_forwarding.py tests/test_truthful_tool_advertising.py tests/test_unified_system_prompt.py tests/test_prompt_drift.py tests/test_runtime_task_machine.py::test_project_overview_reads_and_answers_once_without_workers
+```
+
+They cover configured grants versus session attachments, arbitrary multi-server
+names, role/engine filtering, bounded sanitized summaries, missing inventory,
+composed prompts, native discovery with no external MCP, unknown source
+locations, Paseo UUID versus local reports, real outside-cwd validation, command
+refusal, scripted specialist handoff and direct informational answers. Scripted reasoning does not establish real-model
+delegation choices or rendered Desktop behavior.
+
+Additional focused host-environment and outcome regressions:
+
+```
+python3 -B -m pytest -q -rs tests/test_external_host_read_route.py tests/test_worker_outcome_projection.py tests/test_worker_capability_discovery.py tests/test_paseo_worker_history_boundary.py
+npm --prefix integrations/paseo run test:steer
+npm --prefix integrations/paseo run test:worker-card
+```
+
+These run real consent-backed host subprocess reads of temporary `/var/tmp`
+fixtures (allowed, denied, missing), plus actual runtime output through the
+installed ACP bridge, compact provider and client status projection, live and
+replayed. Outcome cases separate genuine user cancellation from failed work
+before cleanup, replan/Stop after a committed failure, stale same-status host
+updates, and old Cancelled rows without verdict metadata. They do not prove
+model tool selection, GUI rendering or containment.
+The separate namespace visibility cases require working user namespaces and
+remain explicit skips when unavailable; fixtures are not relocated to pass.
+
+Focused no-paid effort preservation checks:
+
+```
+python3 -B -m pytest -q tests/test_explicit_effort_handoff.py tests/test_auto_route_delegation.py tests/test_stage_route_preflight.py tests/test_routing_quota_fixes.py tests/test_engine_auth_recovery.py tests/test_delegation_worker_mode_floor.py
+```
+
+These cover source-bound exact model+effort, automatic defaults, owner pins,
+policy/support conflicts before worker prompts, real fake-engine wire
+confirmation, plan/retry/fix propagation and exact recovery identity. They do not
+establish paid-engine or rendered Desktop behavior.
+
 ## Local plugin prerequisites
 
 Before the default suite or `tests/test_qualification_binding.py` and

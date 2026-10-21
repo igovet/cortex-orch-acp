@@ -18,6 +18,37 @@ for exact paths, artifact-test limits and the next upstream-fix decision.
 
 ## Current ACP boundary (1.0.0)
 
+Explicit worker effort comes only from the same retained user source that
+authorizes the exact planned model, or an owner effort pin; model-authored reasons
+and the coordinator's editor setting do not authorize it. Policy floors/ceilings,
+observed support and native configuration confirmation still apply. Conflicts
+refuse before a worker prompt, including after auth recovery or a live option
+change; no policy file is rewritten to make a request pass. Dispatch intent is
+not native confirmation. See [effort preservation](docs/features/routing-and-fallback/index.md#explicit-effort-preservation).
+
+Coordinator capability guidance is instructional, not deterministic model
+obedience. Its separate configured-worker MCP summary contains bounded, sanitized
+server/tool identifiers grouped by engine filter and read-only/writing access
+class, never launch arguments, filesystem grant paths, credentials or schemas.
+It neither attaches worker-only tools to the coordinator nor grants access.
+Actual proxy/channel checks and runtime-owned dispatch remain authoritative;
+a refusal must not be retried through another tool, engine or worker. Configuration
+and forwarding are not evidence of discovery, invocation or success.
+A separate built-in discovery roster is derived from role tool offers, not
+external MCP configuration. Worker commands can inspect authorized outside data;
+`project_read` remains project-only and assignment-local `access_request` reserves
+project work paths, not external grants. Unknown source locations do not authorize
+unbounded host searches. Host-history discovery must establish a supported
+read-only route and exact session identity, without resumption, creation,
+credential access or production mutation; unavailable or incomplete evidence stays
+explicit. Read-only/Guarded commands mount private scratch at `/var/tmp`, so an in-command
+missing-file error cannot establish host absence. The existing `outside_command`
+consent route supports authorized bounded host-only reads, but only writing
+workers receive it; read-only roles must report the capability gap. No mounts,
+authorization checks or coordinator execution rights are widened. These are
+instructions, not an additional enforcement boundary. See
+[capability-based delegation](docs/features/roles-and-delegation/index.md#capability-based-delegation).
+
 Native auth-loss recovery replaces only an owned engine process on its existing
 account/model, after the normal observed-exit and replay-safety gates. Durable
 one-shot fences survive runtime recovery; a repeated auth failure blocks for
@@ -464,16 +495,39 @@ Session replay applies the same bound to older journals. Permission requests
 and user questions are separate host requests and are never folded. These limits
 constrain individual wire updates and the number of cards and updates per
 task, and avoid retransmitting cumulative content; durable task history and
-work remain proportional to the task.
+work remain proportional to the task. Coordinator repeat detection keeps at most
+64 title/input/bounded-output digest entries, after redaction and truncation.
+Intervening compact context receipts do not displace a matching projection;
+references preserve terminal call status, while failed calls retain their output.
+This is display deduplication, not suppression of complete MCP responses or
+durable evidence.
 
 The Paseo provider withholds only the ACP bridge's own turn-end settlement
 (`failed`, `canceled` or `completed`) of a worker card that Cortex still reports
 running, when the turn was cancelled or completed. The runtime keeps journaling
 and sending only `worker:` card updates after their turn is cancelled; every
-other update of a cancelled turn is still dropped. It never withholds or replaces a terminal status Cortex sent (a
-later non-terminal frame for a settled card keeps the settled status), and a
+other update of a cancelled turn is still dropped. A committed worker result
+outranks later cancellation cleanup, including when both map to ACP `failed`;
+the provider retains its verdict/count against delayed cleanup frames. This does
+not suppress process termination or rewrite the retained cancellation event.
+A later non-terminal frame cannot reopen a settled card, and a
 failed prompt keeps the bridge's failure. This is display integrity only: it does not
 change task state, permissions, results or verification.
+
+The Paseo provider also reduces a worker card's terminal result to its
+open-issue count before the host persists the item, and the client reduces
+older saved items the same way, so worker summaries, check names, blockers and
+evidence gaps are not kept in the coordinator timeline. The selected worker's
+summary and checks are read from the project store only by the opened Workers
+tab, through the same read-only history reader and display scrubber (summary
+clipped at 16,000 characters; an older store's `worker_result` checks pass the
+same scrubber). The card never renders its failure text; opening it hands that
+already host-redacted text to the Workers tab through the plugin's session-local
+selection state, shown only when no attempt history explains the failure. A
+failed history read shows a fixed message, never the transport error. This
+changes presentation and what the host timeline stores, not task state,
+permissions, evidence or verification; the full result remains in the project
+store and published reports.
 
 The Paseo client wraps its rendered panels, composer popover, and timeline card in per-surface error boundaries. If reading or coercing a thrown value fails while formatting the fallback, it uses `unknown error`. This is a UI recovery boundary, not an execution sandbox or a root-cause diagnosis.
 

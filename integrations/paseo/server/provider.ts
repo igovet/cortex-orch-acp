@@ -21,8 +21,9 @@ import {
   CORTEX_QUESTION_INPUT_MARKER,
   isCortexQuestionRequest,
 } from "../shared/question-marker.ts";
-import { parseWorkerResult } from "../shared/worker-timeline-result.ts";
+import { WORKER_CARD_OUTCOME_KEY, workerCardOutcome } from "../shared/worker-card-outcome.ts";
 import { WorkerCardFence } from "./worker-card-fence.ts";
+import { isWorkerCardCallId, workerCardPluginItem } from "../shared/worker-card-item.ts";
 import {
   COMMAND_STOP_ACK_TIMEOUT_MS,
   commandStopSetting,
@@ -249,7 +250,6 @@ function visibleTimeline(event: ProviderEvent): boolean {
 }
 
 const TIMELINE_DETAIL_MAX_BYTES = 16 * 1024;
-const TIMELINE_RESULT_MAX_BYTES = 16 * 1024;
 const TIMELINE_ERROR_MAX_BYTES = 1024;
 const TIMELINE_ID_MAX_BYTES = 512;
 const TIMELINE_LABEL_MAX_BYTES = 1024;
@@ -437,49 +437,6 @@ function boundToolDetail(detail: unknown): BoundedJson {
   return bounded;
 }
 
-function boundedWorkerResult(value: unknown): ReturnType<typeof parseWorkerResult> {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
-  const source = value as Record<string, unknown>;
-  if (source.summary !== null && typeof source.summary !== "string") return undefined;
-  if (!Array.isArray(source.checks)) return undefined;
-
-  // Keep room for check names and dispositions even when a legacy result has
-  // an unbounded summary. Drop checks from the tail when the fixed projection
-  // budget is reached, matching the runtime's result contract.
-  const summary = source.summary === null ? null : clipJsonString(source.summary, 4 * 1024);
-  const checks: Array<Record<string, string>> = [];
-  let encodedBytes = Buffer.byteLength(JSON.stringify({ summary, checks }), "utf8");
-  const optionalLimits = {
-    blocker: 1024,
-    closedBy: 512,
-    claimedOutcome: 256,
-    evidenceGap: 1024,
-  } as const;
-  const count = Math.min(source.checks.length, MAX_BOUNDED_COLLECTION_ITEMS);
-  for (let index = 0; index < count; index += 1) {
-    const candidate = source.checks[index];
-    if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) return undefined;
-    const checkSource = candidate as Record<string, unknown>;
-    if (typeof checkSource.name !== "string" || typeof checkSource.outcome !== "string") return undefined;
-    const check: Record<string, string> = {
-      name: clipJsonString(checkSource.name, 512),
-      outcome: clipJsonString(checkSource.outcome, 256),
-    };
-    for (const [key, limit] of Object.entries(optionalLimits)) {
-      const field = checkSource[key];
-      if (field === undefined) continue;
-      if (typeof field !== "string") return undefined;
-      check[key] = clipJsonString(field, limit);
-    }
-    const checkBytes = Buffer.byteLength(JSON.stringify(check), "utf8");
-    const addedBytes = checkBytes + (checks.length === 0 ? 0 : 1);
-    if (encodedBytes + addedBytes > TIMELINE_RESULT_MAX_BYTES) break;
-    checks.push(check);
-    encodedBytes += addedBytes;
-  }
-  return parseWorkerResult({ summary, checks });
-}
-
 function boundedTimelineEnvelope(event: TimelineItemEvent): Pick<TimelineItemEvent, "type" | "sessionId" | "timestamp"> {
   return {
     type: "timeline.item",
@@ -495,18 +452,28 @@ function boundedToolError(item: ToolCallTimelineItem): BoundedJson | null {
   return boundJsonValue(item.error, TIMELINE_ERROR_MAX_BYTES) ?? "Tool call failed";
 }
 
+/** The coordinator card of a presented worker tool_call: one provider plugin
+ * item whose stable identity the host merges across turns and replays (see
+ * shared/worker-card-item.ts). Every other event passes unchanged. */
+export function presentWorkerCard(event: ProviderEvent): ProviderEvent {
+  if (event.type !== "timeline.item" || event.item.type !== "tool_call" || !isWorkerCardCallId(event.item.callId)) return event;
+  return { ...event, item: workerCardPluginItem(event.item) } as ProviderEvent;
+}
+
 export function presentTimeline(event: ProviderEvent): ProviderEvent {
   const repaired = restoreReplayUserMessage(repairFailedTimelineError(event));
   if (repaired.type !== "timeline.item" || repaired.item.type !== "tool_call") return repaired;
 
   const sourceItem = repaired.item;
   if (sourceItem.callId.startsWith("worker:")) {
-    // Worker transcripts and raw runtime mirrors are unnecessary for both
-    // the inline row and the Workers panel (the panel reads durable history).
-    // Bound before validation so legacy runtimes and replay rows are safe too.
-    const resultSource = sourceItem.metadata?.cortexWorkerResult
-      ?? (sourceItem.detail.type === "unknown" ? sourceItem.detail.output : undefined);
-    const result = boundedWorkerResult(resultSource);
+    // Worker transcripts, raw runtime mirrors and the terminal result body
+    // (summary, checks, blockers, evidence gaps) are unnecessary for the
+    // coordinator card: the worker tab reads them from durable attempt
+    // history. Only the open-issue count survives, so neither a live update
+    // nor the replay of an older item that embedded the full result puts
+    // that body back into the coordinator timeline.
+    const outcome = workerCardOutcome(sourceItem.metadata,
+      sourceItem.detail.type === "unknown" ? sourceItem.detail.output : undefined);
     const name = clipJsonString(sourceItem.name, TIMELINE_LABEL_MAX_BYTES);
     const workerItem = {
       type: "tool_call" as const,
@@ -516,7 +483,7 @@ export function presentTimeline(event: ProviderEvent): ProviderEvent {
       status: sourceItem.status,
       error: boundedToolError(sourceItem),
       detail: { type: "plan" as const, text: name },
-      ...(result === undefined ? {} : { metadata: { cortexWorkerResult: result } }),
+      ...(outcome === undefined ? {} : { metadata: { [WORKER_CARD_OUTCOME_KEY]: outcome } }),
     } as ToolCallTimelineItem;
     return { ...boundedTimelineEnvelope(repaired), item: workerItem };
   }
@@ -1365,7 +1332,7 @@ export function wrapCortexConnection(
           try {
             for (const item of pending?.frames() ?? []) {
               const historical = item as ProviderEvent;
-              if (visibleTimeline(historical)) listener(presentTimeline(historical));
+              if (visibleTimeline(historical)) listener(presentWorkerCard(presentTimeline(historical)));
             }
           } finally { pending?.close(); }
           return;
@@ -1513,7 +1480,7 @@ export function wrapCortexConnection(
           listener({ ...event, config: withAccessModeVisuals(event.config) });
           return;
         }
-        listener(presentTimeline(event));
+        listener(presentWorkerCard(presentTimeline(event)));
       };
       unsubscribe ??= connection.onEvent((event) => {
         if (workerCards && event.type === "timeline.item" && workerCards.isSynthesizedTerminal(event.item)) {

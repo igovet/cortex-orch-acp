@@ -695,12 +695,47 @@ def test_stop_terminalizes_pending_worker_card_once(tmp_path):
     assert len(terminal) == 1
     assert terminal[0]["tool_call_id"] == cards[0]["tool_call_id"]
     assert "Cancelled: urgent stop (" in terminal[0]["text"]
+    # ACP has no cancelled status: the stop path carries the same portable
+    # title marker as the event-claim path, so the card never reads Failed.
+    assert terminal[0]["title"] == "Worker: backend-dev — inspect · Cancelled"
     with store.connection() as db:
         rows = db.execute(
             "SELECT event_type FROM task_events WHERE task_id=? AND assignment_ref=?",
             (task_id, assignment_ref),
         ).fetchall()
     assert [row["event_type"] for row in rows] == ["delegation_requested", "assignment_cancelled"]
+
+
+def test_stop_cancellation_keeps_the_route_title_and_a_genuine_failure_stays_unmarked(tmp_path):
+    """An active worker stopped mid-run keeps its resolved route title with
+    the Cancelled marker, sent once; a genuine failure is never marked."""
+    store, task_id = _task(tmp_path)
+    runtime, _engine = _make_runtime(store, lambda *_args: None)
+    cards = []
+    assignment_ref = "assignment-active-stop"
+    base = "Worker: explorer · codex · 6.1 Sol · medium — inspect"
+    runtime._emit_worker_card(cards.append, assignment_ref, title="Worker: explorer — inspect",
+                              kind="other", status="pending")
+    runtime._worker_card_title[assignment_ref] = base
+    runtime._emit_worker_card(cards.append, assignment_ref, title=base, status="in_progress")
+    runtime._worker_card_emitters[assignment_ref] = cards.append
+    delegation_events.append_event(
+        store, task_id, "delegation_requested", "request-active-stop",
+        {"title": "inspect", "role": "explorer"}, origin="coordinator", assignment_ref=assignment_ref,
+    )
+
+    assert runtime.stop_task(task_id, "s1", lambda _text: True) is True
+    # A repeated cancellation of the same card is idempotent.
+    runtime._cancel_assignment(task_id, assignment_ref, "urgent stop (/cortex-stop)")
+    terminal = [card for card in cards if card.get("status") == "failed"]
+    assert len(terminal) == 1
+    assert terminal[0]["title"] == f"{base} · Cancelled"
+
+    failed_cards = []
+    runtime._emit_worker_card(failed_cards.append, "assignment-crash", title=base, kind="other", status="in_progress")
+    runtime._emit_worker_card(failed_cards.append, "assignment-crash", status="failed", entry="Not delegated/failed: engine exited 1")
+    assert failed_cards[-1]["status"] == "failed"
+    assert not failed_cards[-1].get("title", "").endswith("Cancelled")
 
 
 def test_stop_reconciles_durable_worker_result_to_completed_card(tmp_path):

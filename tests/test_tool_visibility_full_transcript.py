@@ -11,6 +11,9 @@ from cortex_runtime.store import Store
 import uuid
 import json
 import pytest
+import re
+import subprocess
+from pathlib import Path
 
 
 def test_coordinator_cortex_tools_have_human_titles_and_full_readable_input():
@@ -201,22 +204,94 @@ def test_worker_lifecycle_card_keeps_ordered_bounded_actions_without_worker_sibl
     assert "raw_input" not in lifecycle[-1]
 
 
-def test_paseo_surface_card_has_no_body_and_keeps_result():
-    runtime = _bounded_card_runtime({"assignment-paseo": True})
+def test_paseo_surface_card_has_no_body_and_keeps_result(tmp_path):
+    """Cards carry only the outcome; the selected worker history keeps details."""
+    from cortex_runtime.delegation.events import append_event
+    from test_runtime_gateway import _role_worker
+
+    store, worker, _ = _role_worker(tmp_path, "backend-dev")
+    with store.connection() as db:
+        assignment_ref = db.execute(
+            "SELECT idempotency_key FROM delegation_provisioning WHERE attempt_id=?",
+            (worker.attempt_id,),
+        ).fetchone()[0]
+        request = json.loads(db.execute(
+            "SELECT payload_json FROM task_events WHERE task_id=? "
+            "AND event_type='delegation_requested' AND assignment_ref=?",
+            (worker.task_id, assignment_ref),
+        ).fetchone()[0])
+        graph_attempt = request["work_attempt_ref"]
+    result = {
+        "summary": "Verified the result. " * 200,
+        "checks": [
+            {"name": "Focused regression", "outcome": "passed"},
+            {"name": "Live verification", "outcome": "not_run", "blocker": "No paid authorization"},
+        ],
+    }
+    # Fixture the authoritative runtime result and its exact-attempt history event.
+    with store.connection() as db:
+        updated = db.execute(
+            "UPDATE runtime_nodes SET status='completed',result_json=? "
+            "WHERE task_id=? AND assignment_ref=?",
+            (json.dumps(result), worker.task_id, assignment_ref),
+        )
+        assert updated.rowcount == 1
+        db.commit()
+    append_event(store, worker.task_id, "worker_result", "compact-result", result,
+                 origin="runtime", assignment_ref=worker.attempt_id)
+    runtime = _bounded_card_runtime({assignment_ref: True})
     cards = []
-    runtime._emit_worker_card(cards.append, "assignment-paseo", status="pending", title="Worker: explorer — Inspect")
-    runtime._emit_worker_card(cards.append, "assignment-paseo", status="in_progress",
+    runtime._emit_worker_card(cards.append, assignment_ref, status="pending", title="Worker: explorer — Inspect")
+    runtime._emit_worker_card(cards.append, assignment_ref, status="in_progress",
                               entry="Tool: Read skill — " + "knowledge-harvest " * 500,
                               entry_ref="worker-tool:skill")
-    runtime._emit_worker_card(cards.append, "assignment-paseo", status="in_progress",
+    runtime._emit_worker_card(cards.append, assignment_ref, status="in_progress",
                               entry="[final response] Verified the result.", entry_ref="worker-final")
-    runtime._emit_worker_card(cards.append, "assignment-paseo", status="completed",
-                              result_payload={"summary": "Verified the result.", "checks": []})
+    runtime._emit_worker_card(cards.append, assignment_ref, status="completed", result_payload=result)
     assert [card["status"] for card in cards] == ["pending", "in_progress", "completed"]
-    assert not any("text" in card or "raw_input" in card for card in cards)
-    assert cards[-1]["raw_output"] == {"summary": "Verified the result.", "checks": []}
+    assert not any(key in card for card in cards for key in ("text", "content", "raw_input"))
+    assert all(card["tool_call_id"] == "worker:" + assignment_ref for card in cards)
+    assert not any("raw_output" in card for card in cards[:-1])
+    assert cards[-1]["raw_output"] == {
+        "cortexWorkerOutcome": {"status": "completed", "openIssues": 1},
+    }
     # The runtime tail still exists for a generic client of the same task.
-    assert "knowledge-harvest" in "\n".join(runtime._worker_action_log["assignment-paseo"])
+    assert "knowledge-harvest" in "\n".join(runtime._worker_action_log[assignment_ref])
+
+    # Exercise the real Workers-tab query, not a copy of its projection.
+    source = (Path(__file__).resolve().parents[1] /
+              "integrations/paseo/server/worker-history.ts").read_text()
+    query = re.search(r"const PYTHON = String\.raw`\n(.*?)\n`;", source, re.S)
+    helpers = re.search(r"export const STORE_PYTHON_HELPERS = String\.raw`(.*?)`;", source, re.S)
+    assert query and helpers
+    script = query.group(1).replace("${STORE_PYTHON_HELPERS}", helpers.group(1))
+    history = subprocess.run(
+        ["python3", "-B", "-c", script, str(tmp_path), worker.task_id, graph_attempt,
+         "0", "200", "", assignment_ref],
+        capture_output=True, text=True, check=True,
+    )
+    output = json.loads(history.stdout)
+    assert output["available"] and not output["truncated"]
+    assert len(output["assignments"]) == 1
+    assignment = output["assignments"][0]
+    assert assignment["assignmentRef"] == assignment_ref
+    assert len(assignment["attempts"]) == 1
+    attempt = assignment["attempts"][0]
+    assert attempt["id"] == graph_attempt
+    assert attempt["status"] == "completed_with_issues"
+    assert attempt["summary"] == result["summary"].strip()
+    assert attempt["checks"] == result["checks"]
+    retained = [event for event in attempt["events"] if event["type"] == "worker_result"]
+    assert len(retained) == 1
+    assert retained[0]["text"] == result["summary"]
+    with store.connection() as db:
+        durable = db.execute(
+            "SELECT payload_json FROM task_events WHERE id=? AND task_id=? "
+            "AND event_type='worker_result' AND assignment_ref=?",
+            (retained[0]["id"], worker.task_id, worker.attempt_id),
+        ).fetchone()
+    assert durable is not None
+    assert json.loads(durable["payload_json"]) == result
 
 
 def test_non_paseo_surface_keeps_bounded_worker_card_tail():

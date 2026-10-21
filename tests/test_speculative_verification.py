@@ -30,11 +30,13 @@ def _events(store, task_id):
             'SELECT type,payload_json FROM runtime_events WHERE task_id=? ORDER BY id', (task_id,))]
 
 
-@pytest.mark.parametrize('scenario', ['approve', 'changed', 'request_changes', 'failure', 'in_flight', 'stop'])
+@pytest.mark.parametrize('scenario', ['approve', 'changed', 'request_changes', 'failure', 'in_flight', 'fast_review', 'stop'])
 def test_speculation_composed_runtime(tmp_path, monkeypatch, scenario):
     store = Store(tmp_path / '.cortex', project_root=tmp_path)
     task = bootstrap_task(store, SourceEvent(origin='speculation', event_id=scenario), 'Implement', 'owner')
     finished = threading.Event()
+    verification_started = threading.Event()
+    credit_pending = threading.Event()
     reviewer_approved = threading.Event()
     observed = []
     reviews = []
@@ -52,13 +54,35 @@ def test_speculation_composed_runtime(tmp_path, monkeypatch, scenario):
     def observe(*args):
         context = args[2]
         if scenario == 'in_flight':
+            assert context['state'] == 'REVIEWING'
+            verification_started.set()
             assert reviewer_approved.wait(15)
+            assert credit_pending.wait(15), 'controller did not wait for the in-flight candidate'
+        elif scenario == 'fast_review':
+            assert context['state'] == 'VERIFYING'
         result = original(*args)
         observed.append((context['revision'], args[3], result))
         finished.set()
         return result
 
     monkeypatch.setattr(controller, '_verification_observation', observe)
+    if scenario == 'in_flight':
+        credit = controller._SpeculativeVerification.credit
+        def credit_while_running(candidate, context, machine):
+            result = credit(candidate, context, machine)
+            if result is None:
+                credit_pending.set()
+            return result
+        monkeypatch.setattr(controller._SpeculativeVerification, 'credit', credit_while_running)
+    if scenario == 'fast_review':
+        process = OrchestratingRuntime._process_new_events_safely
+        def process_before_snapshot(runtime, *args, **kwargs):
+            result = process(runtime, *args, **kwargs)
+            if TaskMachine(store).context(task.task_id)['state'] == 'REVIEWING':
+                # Force approval before the controller's post-dispatch snapshot.
+                assert reviewer_approved.wait(15)
+            return result
+        monkeypatch.setattr(OrchestratingRuntime, '_process_new_events_safely', process_before_snapshot)
     repaired = []
     def router(store, channel, session_ref, launch, instructions):
         def behavior(store, channel, ref, message, call_index):
@@ -96,7 +120,12 @@ def test_speculation_composed_runtime(tmp_path, monkeypatch, scenario):
                 if scenario == 'stop':
                     assert cancelled.wait(15)
                     return PromptOutcome(StopReason.CANCELLED, '')
-                if scenario == 'in_flight':
+                if scenario in {'in_flight', 'fast_review'}:
+                    if scenario == 'in_flight':
+                        # Approval must follow candidate start, not race it.
+                        assert verification_started.wait(15), 'speculation did not start during review'
+                    assert not finished.is_set()
+                    assert not any(t.startswith('VERIFICATION_') for t, _ in _events(store, task.task_id))
                     _submit(store, channel, verdict='APPROVE')
                     reviewer_approved.set()
                 else:
@@ -141,6 +170,9 @@ def test_speculation_composed_runtime(tmp_path, monkeypatch, scenario):
     if scenario in {'approve', 'in_flight'}:
         assert len(observed) == len(authoritative) == 1
         assert any(t == 'SPECULATIVE_VERIFICATION_CREDITED' for t, _ in events)
+    elif scenario == 'fast_review':
+        assert len(observed) == len(authoritative) == 1
+        assert not any(t.startswith('SPECULATIVE_VERIFICATION_') for t, _ in events)
     elif scenario in {'changed', 'request_changes'}:
         assert len(observed) >= 2
         assert observed[0][1] != observed[-1][1]

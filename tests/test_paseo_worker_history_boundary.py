@@ -272,9 +272,9 @@ def test_embedded_history_query_binds_lifecycle_and_worker_events_to_one_attempt
         capture_output=True, text=True, check=True,
     )
     failed_assignment = json.loads(failed.stdout)['assignments'][0]
-    assert failed_assignment['status'] == 'completed_with_issues'
-    assert failed_assignment['attempts'][0]['status'] == 'completed_with_issues'
-    assert failed_assignment['attempts'][0]['failureReason'].startswith('Completed with issues.')
+    assert failed_assignment['status'] == 'failed'
+    assert failed_assignment['attempts'][0]['status'] == 'failed'
+    assert failed_assignment['attempts'][0]['failureReason'].startswith('Worker failed.')
     assert 'actual check: unverified' in failed_assignment['attempts'][0]['failureReason']
 
     # A failed node without a retained worker result is a real execution

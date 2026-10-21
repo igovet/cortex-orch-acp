@@ -327,9 +327,21 @@ and SHA-256 and refuses `~/.paseo`. It does not start, refresh or write anything
 
 The exit status is the outcome:
 
-- **0 (`ready`)**: the reviewer is pinned to the exact route.
+- **0 (`ready`)**: the reviewer is pinned to the exact route and selected
+  execution/reviewer efforts do not conflict with policy. This is policy-only
+  readiness, not live support or a specialist native confirmation.
 - **1 (refusal)**: the JSON names the refused stage and the route that would run
   instead. Do not launch the paid run.
+
+For exact execution effort, the captured owner request must name both model and
+effort, for example `Use codex-acp/gpt-6.1-sol at medium effort throughout`.
+An editor thinking selection or reviewer-only pin does not set specialist effort.
+The runtime preserves that source-bound selection on covered planned nodes,
+retries and review fixes; explicit policy/support conflicts refuse without
+substitution. Explicit effort pins also refuse instead of clamping. Preflight
+reports `selected_effort_conflicts_with_policy` before launch, but live support
+and exact coordinator/specialist/reviewer native confirmations must still be
+checked separately. See [effort preservation](../features/routing-and-fallback/index.md#explicit-effort-preservation).
 
 To make the reviewer follow the selected route, change only the dev profile:
 

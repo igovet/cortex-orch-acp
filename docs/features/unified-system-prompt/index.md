@@ -279,8 +279,8 @@ question in the same turn (see
 The coordinator's one role-specific communication rule is to write the details
 once before that question and write nothing after it. This is a presentation boundary, not a claim that either model stops generating interim text. A direct 2026-09-28 re-check counted ten between-tool Claude assistant text blocks and one Codex block; an earlier count of 83 Codex blocks conflated reasoning records with visible messages. Communication guidance also asks for one short progress line, a brief outcome-first final answer, and only unresolved user-relevant checks; successful checks and internal approvals stay out of the final text.
 
-The attached-server section renders the exact available tools under each MCP
-server name. Cortex MCP owns lifecycle, report reads/publication, conditional
+The attached-server section renders configured granted tool names under each
+attached MCP server name; it does not prove engine discovery or invocation. Cortex MCP owns lifecycle, report reads/publication, conditional
 skills, scoped project operations, command receipts and result submissions; it
 does not provide code-search, graph or index operations. External MCP servers
 own their own domain tools (for example `codebase-memory-mcp` owns its graph and
@@ -339,6 +339,24 @@ ask an authorized worker to bootstrap. A conditional "prefer the
 index when available" was not enough: on 2026-09-28 Claude sessions with the index
 attached and its lookup tools loaded still searched source with the shell, and the
 project lookup tool they would have needed first was deferred.
+
+Coordinators also receive a separate
+[configured-worker capability summary](../roles-and-delegation/index.md#capability-based-delegation),
+including when they have no external attachments themselves. It lists only
+bounded sanitized server/tool names by engine filter and access class, not
+schemas or private launch data. Worker-only grants remain discovery hints, not
+coordinator tool offers. Unavailable inventory and omissions remain explicit.
+This uses instruction metadata for Codex/Claude and the launch prompt for
+OpenCode, without changing channel authority or runtime-owned worker dispatch.
+The same section now includes a bounded built-in Cortex discovery roster derived
+from current role tool offers, independently of external attachments. Shared
+ordinary-worker guidance distinguishes command namespaces from the host:
+read-only/Guarded `/var/tmp` is private scratch, and missing there is not host
+absence. Authorized host-only reads/searches use a granted external reader or
+the advertised outside-command consent route (writing workers only), not remounts
+or denial bypass. It also covers project-only path reservations, installed
+host-history/export discovery, exact-session identity and explicit completeness;
+the consultant remains packet-only.
 
 ## Delivery
 

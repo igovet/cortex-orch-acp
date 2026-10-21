@@ -279,12 +279,23 @@ def _acp_tool_call_status(status: str | None) -> str:
 
 def worker_card_outcome(node_status: str | None, result_json: str | None) -> tuple[str, str | None]:
     """Map the authoritative runtime node to an ACP card state and label."""
-    # ACP has no ``completed_with_issues`` status. A worker whose result was
-    # rejected for failed checks is complete, but must visibly retain that
-    # outcome; a failed node without a result is an execution failure.
     if node_status == "failed":
-        return ("completed", "Completed with issues") if result_json is not None else ("failed", None)
+        return "failed", None
+    if node_status == "completed" and result_json is not None:
+        try:
+            result = json.loads(result_json)
+        except (TypeError, ValueError):
+            result = {}
+        if isinstance(result, Mapping) and worker_card_open_issues(result):
+            return "completed", "Completed with issues"
     return (_acp_tool_call_status(node_status), None)
+
+
+def worker_card_open_issues(payload: Mapping[str, Any]) -> int:
+    """Count the complete retained checks, before any display truncation."""
+    return sum(1 for check in payload.get("checks", []) if isinstance(check, Mapping)
+               and check.get("outcome") != "passed"
+               and not check.get("closed_by") and not check.get("closedBy"))
 
 
 # The same bounds Paseo's ``pipeline.ts`` reader applies to a worker's
@@ -408,7 +419,7 @@ _WORKER_TOOL_ELIDED_ARGUMENTS = frozenset({"content", "text"})
 #: Coordinator tool cards: cap for each of rawInput, rawOutput and every
 #: content block on the wire.
 _COORDINATOR_CARD_FIELD_MAX_BYTES = 16 * 1024
-#: Recent (tool, input) -> output digests a coordinator emitter remembers to
+#: Recent (tool, input, output) digests a coordinator emitter remembers to
 #: replace a repeated identical output with a reference to its first card.
 _COORDINATOR_REPEAT_MEMORY = 64
 #: Coordinator/engine tool-card ids whose disposition (own card or folded)
@@ -457,8 +468,8 @@ class _CoordinatorCardBudget:
         self.seen: "collections.OrderedDict[str, dict]" = collections.OrderedDict()
         # Open own cards: digests of the fields already sent.
         self.sent: "collections.OrderedDict[str, dict[str, str]]" = collections.OrderedDict()
-        # (call identity digest) -> (output digest, first card id).
-        self.outputs: dict[str, tuple[str, str]] = {}
+        # (call identity digest, output digest) -> first card id.
+        self.outputs: dict[tuple[str, str], str] = {}
 
     def remember(self, table, key, value):
         table[key] = value
@@ -3182,8 +3193,8 @@ class OrchestratingRuntime:
                     if event_type == "worker_result":
                         payload = json.loads(terminal_row["payload_json"] or "{}")
                         summary = payload.get("summary") if isinstance(payload, dict) else None
-                        self._emit_worker_card(
-                            bound_emitter, assignment_ref, status="completed",
+                        self._emit_result_worker_card(
+                            task_id, bound_emitter, assignment_ref,
                             entry=("Result: " + _compact_text(summary, _WORKER_ACTIVITY_MAX_CHARS - 8)
                                    if isinstance(summary, str) and summary else None),
                             result_payload=payload if isinstance(payload, dict) else None,
@@ -3191,11 +3202,18 @@ class OrchestratingRuntime:
                     else:
                         payload = json.loads(terminal_row["payload_json"] or "{}")
                         reason = payload.get("reason") or payload.get("error") or event_type
+                        # A cancellation keeps its portable title marker so
+                        # the card never reads as a genuine failure.
+                        terminal_fields: dict[str, Any] = (
+                            self._cancelled_worker_card_fields(task_id, assignment_ref)
+                            if event_type == "assignment_cancelled" else {"status": "failed"}
+                        )
                         self._emit_worker_card(
-                            bound_emitter, assignment_ref, status="failed",
+                            bound_emitter, assignment_ref,
                             entry=_compact_text(f"Cancelled: {reason}" if event_type == "assignment_cancelled"
                                                 else f"Not delegated/failed: {reason}",
                                                 _ASSIGNMENT_FAILED_DETAIL_MAX_CHARS),
+                            **terminal_fields,
                         )
                 continue
             self._cancel_assignment(
@@ -3877,23 +3895,8 @@ class OrchestratingRuntime:
                 )
             elif event.event_type == "assignment_cancelled" and event.assignment_ref:
                 self._close_assignment(task_id, event.assignment_ref)
-                text = f"Cancelled: {event.payload.get('reason', '')}"
-                fields: dict[str, Any] = {"status": _TOOL_CALL_STATUS_FOR_CANCELLED}
-                # ACP's ToolCallStatus has no "cancelled" value (this card is
-                # rendered "failed", per the module docstring), so a client
-                # with zero live pipeline data cannot otherwise tell a
-                # cancelled assignment from a genuine failure. Carry it on
-                # the same portable title channel T035 already uses for
-                # "Completed with issues" -- see worker-display.ts's
-                # `resolveWorkerCardStatus`.
-                with self._lock:
-                    base_title = getattr(self, "_worker_card_title", {}).get(event.assignment_ref)
-                if base_title:
-                    fields["title"] = _worker_card_title(base_title, "Cancelled")
-                self._emit_worker_card(
-                    emit_tool_call, event.assignment_ref,
-                    entry=_compact_text(text, _ASSIGNMENT_FAILED_DETAIL_MAX_CHARS),
-                    **fields,
+                self._emit_cancelled_worker_card(
+                    task_id, emit_tool_call, event.assignment_ref, event.payload.get("reason", ""),
                 )
 
     def _close_assignment(self, task_id: str, assignment_ref: str) -> None:
@@ -3910,10 +3913,25 @@ class OrchestratingRuntime:
             # also handles an already-snapshotted tick racing this cleanup.
             self._worker_activity.pop(assignment_ref, None)
 
+    def _emit_result_worker_card(self, task_id: str, emit_tool_call, assignment_ref: str, **fields) -> None:
+        """Every result path uses the committed node verdict, including turn-finally races."""
+        status, label = self._worker_card_outcome(task_id, assignment_ref)
+        fields["status"] = status
+        with self._lock:
+            base = getattr(self, "_worker_card_title", {}).get(assignment_ref)
+        if not base and getattr(self, "_store", None) is not None:
+            base = self._worker_base_title(task_id, assignment_ref)
+        if base:
+            fields["title"] = _worker_card_title(base, label)
+        self._emit_worker_card(emit_tool_call, assignment_ref, **fields)
+
     def _worker_card_outcome(self, task_id: str, assignment_ref: str) -> tuple[str, str | None]:
         """Read the same runtime node state used by pipeline and worker history."""
+        store = getattr(self, "_store", None)
+        if store is None:
+            return "completed", None
         try:
-            with self._store.connection() as db:
+            with store.connection() as db:
                 row = db.execute(
                     "SELECT status,result_json FROM runtime_nodes WHERE task_id=? AND assignment_ref=?",
                     (task_id, assignment_ref),
@@ -4297,18 +4315,67 @@ class OrchestratingRuntime:
             entry=replay_store.interrupted_notice_text(self._store, task_id), **fields,
         )
 
-    def _persist_terminal_worker_card(self, session_id: str, assignment_ref: str, reason: str) -> None:
-        """Persist a terminal update to the card's owning session only."""
-        from . import replay_store
-
-        replay_store.append_host_update(
-            self._store, session_id,
-            dict(
-                sessionUpdate="tool_call_update", toolCallId=_worker_tool_call_id(assignment_ref),
-                status=_TOOL_CALL_STATUS_FOR_CANCELLED,
-                content=[dict(type="text", text=_compact_text(f"Cancelled: {reason}", _ASSIGNMENT_FAILED_DETAIL_MAX_CHARS))],
-            ),
+    def _emit_cancelled_worker_card(self, task_id: str, emit_tool_call, assignment_ref: str, reason: str) -> None:
+        # Replanning/Stop still terminate owned processes and retain their
+        # cancellation event, but cannot relabel work that already reported.
+        if self._mirror_durable_worker_result_card(task_id, assignment_ref, emit_tool_call=emit_tool_call):
+            return
+        self._emit_worker_card(
+            emit_tool_call, assignment_ref,
+            entry=_compact_text(f"Cancelled: {reason}", _ASSIGNMENT_FAILED_DETAIL_MAX_CHARS),
+            **self._cancelled_worker_card_fields(task_id, assignment_ref),
         )
+
+    def _cancelled_worker_card_fields(self, task_id: str, assignment_ref: str) -> dict[str, Any]:
+        """The terminal fields of a cancelled worker card.
+
+        ACP has no ``cancelled`` tool-call status, so the card is sent
+        ``failed`` and carries the portable `` · Cancelled`` title suffix
+        that clients read (worker-display.ts's ``resolveWorkerCardStatus``).
+        Every cancellation path -- the event-claim handler, a Paseo Stop or
+        /cortex-stop, and a stop racing an already-recorded cancellation --
+        uses these same fields, so a deliberate cancellation never renders
+        as a genuine failure merely because it took the stop path.
+        """
+        fields: dict[str, Any] = {"status": _TOOL_CALL_STATUS_FOR_CANCELLED}
+        with self._lock:
+            base_title = (getattr(self, "_worker_card_title", {}).get(assignment_ref)
+                          or getattr(self, "_worker_card_last_title", {}).get(assignment_ref))
+        durable = bool(task_id) and getattr(self, "_store", None) is not None
+        if not base_title and durable:
+            base_title = self._durable_worker_card(task_id, assignment_ref)[1]
+        if not base_title and durable:
+            base_title = self._worker_base_title(task_id, assignment_ref)
+        if base_title:
+            fields["title"] = _worker_card_title(_WORKER_STATUS_SUFFIX.sub("", base_title), "Cancelled")
+        return fields
+
+    def _persist_terminal_worker_card(
+        self, session_id: str, assignment_ref: str, reason: str, *, task_id: str | None = None,
+    ) -> None:
+        """Persist a terminal update to the card's owning session only."""
+        from . import replay_store, protocol
+
+        def persist(fields):
+            fields = dict(fields)
+            card_id = fields.pop("tool_call_id")
+            fields.pop("new")
+            fields.pop("kind", None)
+            update = protocol.tool_call_update(session_id, card_id, **fields)["params"]["update"]
+            replay_store.append_host_update(self._store, session_id, update)
+
+        if task_id and self._mirror_durable_worker_result_card(task_id, assignment_ref, emit_tool_call=persist):
+            return
+        update = dict(
+            sessionUpdate="tool_call_update", toolCallId=_worker_tool_call_id(assignment_ref),
+            status=_TOOL_CALL_STATUS_FOR_CANCELLED,
+            content=[dict(type="text", text=_compact_text(f"Cancelled: {reason}", _ASSIGNMENT_FAILED_DETAIL_MAX_CHARS))],
+        )
+        if task_id:
+            title = self._cancelled_worker_card_fields(task_id, assignment_ref).get("title")
+            if title:
+                update["title"] = title
+        replay_store.append_host_update(self._store, session_id, update)
 
     def _bind_worker_card_surface(self, task_id: str, assignment_ref: str) -> None:
         """Bind the task's client surface to this assignment's card."""
@@ -4382,6 +4449,15 @@ class OrchestratingRuntime:
                 fields["title"] = resolved_title
         if fields.get("title"):
             fields["title"] = _worker_card_title(fields["title"])
+            # The card's own last-sent name, without a status suffix: a later
+            # cancellation re-sends it with `` · Cancelled`` even when no
+            # resolved base title was ever cached (a pending card stopped
+            # before ``assignment_ready``).
+            with self._lock:
+                last_titles = getattr(self, "_worker_card_last_title", None)
+                if last_titles is None:
+                    last_titles = self._worker_card_last_title = {}
+                last_titles[assignment_ref] = _WORKER_STATUS_SUFFIX.sub("", fields["title"])
         if entry:
             self._append_worker_entry(assignment_ref, entry, entry_ref)
         # The card body is not a caller's to set, and no transcript mirror is
@@ -4406,17 +4482,16 @@ class OrchestratingRuntime:
             failure = _worker_card_line(entry, card_root) if entry else (tail[-1] if tail else "")
             if failure:
                 fields["raw_output"] = clip_text(failure, _WORKER_CARD_FAILURE_MAX_BYTES)
-        # Embed the worker's terminal result projection (bounded summary +
-        # checks) directly on the completed card's rawOutput, so a client
-        # that persists/replays this ACP update can render the result
-        # section with zero follow-up RPC. Only ever set for "completed"
-        # (a bare "failed" card owns raw_output as its failure line above,
-        # and worker_card_outcome only maps to "failed" when there is no
-        # result at all).
-        if incoming_status == "completed" and isinstance(result_payload, Mapping):
-            fields["raw_output"] = _bounded_worker_result(
-                _client_safe_raw(worker_result_projection(result_payload)),
-            )
+        # Carry the verdict/count through rawOutput: the installed bridge
+        # drops update _meta. Panel cards never need result bodies; other ACP
+        # clients retain their bounded legacy projection as well.
+        if incoming_status in {"completed", "failed"} and isinstance(result_payload, Mapping):
+            outcome = dict(status=incoming_status, openIssues=worker_card_open_issues(result_payload))
+            fields["raw_output"] = {
+                **({} if panel else _bounded_worker_result(
+                    _client_safe_raw(worker_result_projection(result_payload)))),
+                "cortexWorkerOutcome": outcome,
+            }
         with self._lock:
             first = card_id not in self._emitted_worker_cards
             if first:
@@ -4496,17 +4571,21 @@ class OrchestratingRuntime:
                        if key in changed or key in {"new", "tool_call_id"}}
         emit_tool_call(payload)
 
-    def _mirror_durable_worker_result_card(self, task_id: str, assignment_ref: str) -> None:
+    def _mirror_durable_worker_result_card(self, task_id: str, assignment_ref: str, *, emit_tool_call=None) -> bool:
         """Settle a worker card from its durable ``worker_result``, if any.
 
-        A no-op when the card already reached a terminal status or no result
-        was published.
+        Cancellation cleanup may supply its emitter: a committed result then
+        outranks cleanup even before the worker turn has emitted its outcome.
+        Return whether a result was found, not whether an update was needed.
         """
+        store = getattr(self, "_store", None)
+        if store is None:
+            return False
         with self._lock:
-            if _worker_tool_call_id(assignment_ref) in self._worker_card_terminal:
-                return
+            if emit_tool_call is None and _worker_tool_call_id(assignment_ref) in self._worker_card_terminal:
+                return False
         try:
-            with self._store.connection() as db:
+            with store.connection() as db:
                 attempt_row = db.execute(
                     "SELECT attempt_id FROM delegation_provisioning WHERE task_id=? "
                     "AND idempotency_key=?",
@@ -4524,9 +4603,9 @@ class OrchestratingRuntime:
                     (task_id, *result_refs),
                 ).fetchone()
         except (sqlite3.Error, StoreError):
-            return
+            return False
         if result_row is None:
-            return
+            return False
         try:
             result_payload = json.loads(result_row["payload_json"])
         except (TypeError, ValueError, json.JSONDecodeError):
@@ -4534,13 +4613,14 @@ class OrchestratingRuntime:
         summary = result_payload.get("summary", "") if isinstance(result_payload, dict) else ""
         with self._lock:
             has_final_response = assignment_ref in self._worker_final_response_seen
-            pending_feed = self._worker_card_emitter(task_id, assignment_ref)
-        self._emit_worker_card(
-            pending_feed, assignment_ref, status="completed",
+            pending_feed = emit_tool_call or self._worker_card_emitter(task_id, assignment_ref)
+        self._emit_result_worker_card(
+            task_id, pending_feed, assignment_ref,
             entry=("Result: " + _compact_text(summary, _WORKER_ACTIVITY_MAX_CHARS - 8)
                    if summary and not has_final_response else None),
             result_payload=result_payload if isinstance(result_payload, dict) else None,
         )
+        return True
 
     def _worker_card_is_panel(self, emit_tool_call, assignment_ref: str) -> bool:
         """Whether this card renders on Paseo (title/status/result only).
@@ -4770,15 +4850,19 @@ class OrchestratingRuntime:
                 if "raw_output" in fields and fields.get("status") == "completed":
                     identity = _field_digest([card.get("identity:title"), card.get("identity:raw_input")])
                     digest = _field_digest(fields["raw_output"])
-                    earlier = outputs.pop(identity, None)
-                    if earlier is not None and earlier[0] == digest and earlier[1] != tool_call_id:
+                    # A compact unchanged-read receipt can intervene between
+                    # two equal display projections of different full contexts.
+                    # Remember both outputs, not just the last one for this call.
+                    output_key = (identity, digest)
+                    earlier = outputs.pop(output_key, None)
+                    if earlier is not None and earlier != tool_call_id:
                         fields["raw_output"] = dict(
-                            repeated_output=True, same_as=earlier[1],
+                            repeated_output=True, same_as=earlier,
                             note="Same output as the earlier identical call; full result in task history.",
                         )
-                        outputs[identity] = earlier
+                        outputs[output_key] = earlier
                     else:
-                        outputs[identity] = (digest, tool_call_id)
+                        outputs[output_key] = tool_call_id
                     while len(outputs) > _COORDINATOR_REPEAT_MEMORY:
                         outputs.pop(next(iter(outputs)))
                 if not fields["new"]:
@@ -6191,8 +6275,8 @@ class OrchestratingRuntime:
                         with self._lock:
                             has_final_response = assignment_ref in self._worker_final_response_seen
                             pending_feed = self._worker_card_emitter(task_id, assignment_ref)
-                        self._emit_worker_card(
-                            pending_feed, assignment_ref, status="completed",
+                        self._emit_result_worker_card(
+                            task_id, pending_feed, assignment_ref,
                             entry=("Result: " + _compact_text(summary, _WORKER_ACTIVITY_MAX_CHARS - 8)
                                    if summary and not has_final_response else None),
                             result_payload=pending_result,
@@ -6212,8 +6296,8 @@ class OrchestratingRuntime:
                         with self._lock:
                             has_final_response = assignment_ref in self._worker_final_response_seen
                             pending_feed = self._worker_card_emitter(task_id, assignment_ref)
-                        self._emit_worker_card(
-                            pending_feed, assignment_ref, status="completed",
+                        self._emit_result_worker_card(
+                            task_id, pending_feed, assignment_ref,
                             entry=("Result: " + _compact_text(summary, _WORKER_ACTIVITY_MAX_CHARS - 8)
                                    if summary and not has_final_response else None),
                             result_payload=pending_result,
@@ -6330,8 +6414,8 @@ class OrchestratingRuntime:
                     with self._lock:
                         has_final_response = assignment_ref in self._worker_final_response_seen
                         pending_feed = self._worker_card_emitter(task_id, assignment_ref)
-                    self._emit_worker_card(
-                        pending_feed, assignment_ref, status="completed",
+                    self._emit_result_worker_card(
+                        task_id, pending_feed, assignment_ref,
                         entry=("Result: " + _compact_text(summary, _WORKER_ACTIVITY_MAX_CHARS - 8)
                                if summary and not has_final_response else None),
                         result_payload=parked_result,
@@ -7007,24 +7091,16 @@ class OrchestratingRuntime:
         # leak an update into the newly connected session.
         if emit_tool_call is not None and session_id in durable_sessions:
             if durable_sessions[session_id] not in {"completed", "failed"}:
-                self._emit_worker_card(
-                    emit_tool_call, assignment_ref,
-                    status=_TOOL_CALL_STATUS_FOR_CANCELLED,
-                    entry=_compact_text(f"Cancelled: {reason}", _ASSIGNMENT_FAILED_DETAIL_MAX_CHARS),
-                )
+                self._emit_cancelled_worker_card(task_id, emit_tool_call, assignment_ref, reason)
         else:
             with self._lock:
                 bound_emitter = self._worker_card_emitters.get(assignment_ref)
             if bound_emitter is not None:
-                self._emit_worker_card(
-                    bound_emitter, assignment_ref,
-                    status=_TOOL_CALL_STATUS_FOR_CANCELLED,
-                    entry=_compact_text(f"Cancelled: {reason}", _ASSIGNMENT_FAILED_DETAIL_MAX_CHARS),
-                )
+                self._emit_cancelled_worker_card(task_id, bound_emitter, assignment_ref, reason)
             else:
                 for owner_session, status in durable_sessions.items():
                     if status not in {"completed", "failed"}:
-                        self._persist_terminal_worker_card(owner_session, assignment_ref, reason)
+                        self._persist_terminal_worker_card(owner_session, assignment_ref, reason, task_id=task_id)
         # Not self._notify() here: a waiting coordinator observes the new
         # event via its own bounded DB poll instead (see
         # _wait_for_progress) -- no _running entry is added/removed by this

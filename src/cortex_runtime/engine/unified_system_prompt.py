@@ -502,14 +502,120 @@ def attached_servers_section(servers, workspace_root: str | None = None, *, role
     return "\n".join(lines)
 
 
+def native_worker_capabilities_section() -> str:
+    """Small role-specific discovery roster derived from the current tool offer."""
+    from ..delegation.mcp_tools import tool_definitions
+
+    relevant = {"command_run", "access_request", "outside_command", "outside_write", "read_large_output"}
+    lines = [
+        "# Built-in Cortex worker discovery", "",
+        "Independent of external MCP attachments. These are role-level tool offers, not a live "
+        "channel grant or proof of successful access. Inspect runtime access metadata and live schemas.",
+    ]
+    for label, role_id in (("read-only investigator", "worker-explorer"),
+                           ("writing specialist", "worker-backend-dev"),
+                           ("consultant", "worker-senior-consultant")):
+        offered = sorted(tool["name"] for tool in tool_definitions("worker", role_id=role_id)
+                         if tool["name"] in relevant)
+        lines.append(f"- {label}: " + (", ".join(f"`{name}`" for name in offered)
+                                       or "none of these operations") + ".")
+    lines.extend([
+        "project_read stays project-only; no assumed outside-read API exists. command_run uses role/mode-specific "
+        "mounts: read-only/Guarded /var/tmp is private scratch, not host data. Missing there is not proof of host "
+        "absence. For authorized host-only reads/searches select an offered outside_command and consent. "
+        "Read-only investigators lack that route; plan a writing specialist with a bounded read-only objective "
+        "when needed. Never retry a permission refusal through another tool, engine or worker.",
+        "access_request handles assignment-local additional project paths, not external grants or a "
+        "sandbox remount. Outside operations are writing-worker permission routes, never a read-only "
+        "fallback around refusal. Unknown locations can be discovery objectives; unavailable safe "
+        "mechanisms must remain explicit. Tool arguments belong only in live schemas.",
+    ])
+    return "\n".join(lines)
+
+
+def worker_capabilities_section(servers) -> str:
+    """Bounded configured grants, not discovered tools or new authority.
+
+    Use the same role/engine admission as session creation. Never render launch
+    data, filesystem grants, schemas or arbitrary descriptions into instructions.
+    """
+    import re
+
+    from .mcp_bridge import _ENGINES, host_mcp_servers
+
+    lines = [
+        native_worker_capabilities_section(), "",
+        "# Configured worker MCP capabilities", "",
+        "Discovery hints only, not tools attached to this coordinator or permission to call them.",
+        "This snapshot lists configured tool-name grants, not observed discovery, invocation or success.",
+        "Engine filters do not establish an available route; use the live route menu. Runtime dispatch "
+        "and channel authorization still apply. Read-only workers get only read-only grants; "
+        "the consultant receives no external MCP servers.",
+        "For work outside your role, propose a specialist objective using these hints. Do not use "
+        "delegation, another engine or another tool to bypass a denied action.",
+    ]
+    if servers is None:
+        return "\n".join(lines + ["Worker inventory unavailable; do not assume a worker has the needed tool."])
+    # Identifiers are untrusted data too: omit anything that could introduce
+    # prompt markup or control characters instead of reproducing it.
+    def safe(value):
+        return isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", value) is not None
+
+    def names(values):
+        if not isinstance(values, (list, tuple)):
+            return "unavailable (explicit tool grants missing)"
+        granted = sorted({value for value in values if safe(value)})
+        omitted = len(values) - len(granted[:24])
+        result = ", ".join(f"`{value}`" for value in granted[:24]) or "none"
+        return result + (f" ({omitted} tool names omitted)" if omitted else "")
+
+    budget = 12000
+    used = sum(len(line) + 1 for line in lines)
+    omitted_rows = 0
+    for engine in _ENGINES:
+        eligible = host_mcp_servers(servers, role="worker", engine=engine)
+        rows = []
+        for server in eligible:
+            name = server["name"]
+            if not safe(name):
+                omitted_rows += 1
+                continue
+            allowed = server.get("allowed_tools")
+            readonly = server.get("read_only_tools", [])
+            reads = ([tool for tool in allowed if tool in readonly]
+                     if isinstance(allowed, list) and isinstance(readonly, list) else [])
+            rows.append(f"- `{engine}` / `{name}`: read-only worker: {names(reads)}; "
+                        f"writing worker: {names(allowed)}.")
+        if not eligible:
+            rows.append(f"- `{engine}`: no eligible configured worker external MCP servers.")
+        for row in rows:
+            if used + len(row) + 1 > budget:
+                omitted_rows += 1
+                continue
+            lines.append(row)
+            used += len(row) + 1
+    if omitted_rows:
+        lines.append(f"Inventory incomplete: {omitted_rows} server/engine rows omitted by size or identifier limits.")
+    lines.append("Absent or omitted tools are not evidence of availability. Workers must inspect live schemas "
+                 "and report missing configuration or refusals, not claim access from this summary.")
+    return "\n".join(lines)
+
+
 def with_attached_servers(meta: dict, servers, workspace_root: str | None = None, *, role: str = "worker",
                           role_id: str | None = None,
-                          code_index_project: str | None = None, native_search: bool = True) -> dict:
-    """``meta`` with :func:`attached_servers_section` appended to the text the
-    model reads as its instructions: the plain-string ``systemPrompt`` both
-    adapters send, or an ``append`` object. Never mutates ``meta``."""
+                          code_index_project: str | None = None, native_search: bool = True,
+                          worker_servers=None) -> dict:
+    """Append own attachments and, for coordinators, separate worker hints.
+
+    Supports the plain-string ``systemPrompt`` both adapters send, or an
+    ``append`` object. Never mutates ``meta``. Unknown worker inventory stays
+    explicit; it is never reconstructed from coordinator-only attachments.
+    """
     note = attached_servers_section(servers, workspace_root, role=role, role_id=role_id,
                                     code_index_project=code_index_project, native_search=native_search)
+    if role == "coordinator":
+        inventory = worker_capabilities_section(worker_servers)
+        note = note + "\n\n" + inventory if note else inventory
     result = dict(meta)
     if note is None:
         return result

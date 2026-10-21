@@ -519,7 +519,7 @@ class EngineSessionManager:
         if not isinstance(self._engine_instructions, str) or not self._engine_instructions.strip():
             raise _fail("opencode_instructions_required",
                         "An OpenCode session needs its role prompt at launch (engine_instructions).")
-        from .unified_system_prompt import attached_servers_section
+        from .unified_system_prompt import attached_servers_section, worker_capabilities_section
 
         servers = host_mcp_servers(self._host_mcp_servers, role=self._mcp_role, engine=self._record.engine,
                                     role_id=self._mcp_role_id)
@@ -532,6 +532,9 @@ class EngineSessionManager:
             role_id=self._mcp_role_id,
             code_index_project=None,
         )
+        if self._mcp_role == "coordinator":
+            inventory = worker_capabilities_section(self._host_mcp_servers)
+            note = note + "\n\n" + inventory if note else inventory
         return self._engine_instructions.rstrip() + ("\n\n" + note + "\n" if note else "\n")
 
     def sent_engine_instructions(self) -> str | None:
@@ -847,7 +850,7 @@ class EngineSessionManager:
             if not isinstance(session_new_meta, dict):
                 raise _fail("invalid_field", "session_new_meta must be a dict.", field="session_new_meta")
             params["_meta"] = session_new_meta
-        if external_servers and session_new_meta is not None:
+        if session_new_meta is not None and (external_servers or self._mcp_role == "coordinator"):
             # H1 fix: this runtime never observes whether the attached
             # external code-index server actually has this workspace
             # indexed -- naming a project from the path convention alone
@@ -863,7 +866,8 @@ class EngineSessionManager:
                 session_new_meta, external_servers, self._workspace_root, role=self._mcp_role,
                 role_id=self._mcp_role_id,
                 code_index_project=None,
-                native_search=self._record.engine != "claude-agent-acp")
+                native_search=self._record.engine != "claude-agent-acp",
+                worker_servers=self._host_mcp_servers)
         with self._lock:
             result = self._client.call("session/new", params, timeout=self._call_timeout)
             wire_session_id = result.get("sessionId")

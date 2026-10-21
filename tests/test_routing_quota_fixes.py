@@ -11,8 +11,7 @@
 - The stretch exclusion applies only to stretch candidacy -- a model
   configured with several native tiers (e.g. both light and standard)
   keeps its own non-stretch tiers.
-- A pinned effort routing.json's own policy clamps to a different step is
-  recorded in the route decision.
+- An explicit pinned effort conflicting with policy is refused before launch.
 """
 from __future__ import annotations
 
@@ -235,13 +234,12 @@ def test_a_light_only_stretch_excluded_model_is_still_fully_excluded(tmp_path, m
     assert "codex-acp/gpt-light-only" in refused.value.remediation
 
 
-# --- a clamped pin effort is recorded in the route decision ------
+# --- explicit pins are exact, not automatic effort targets ------
 
-def test_a_clamped_pin_effort_is_recorded(tmp_path, monkeypatch):
+def test_a_pin_effort_below_the_policy_floor_is_refused(tmp_path, monkeypatch):
     project, environ = _live_all(monkeypatch, tmp_path, {"pin": {"*": "codex-acp/gpt-6-luna:low"}})
-    choice = auto_route.choose("worker-backend-dev", project, environ)
-    assert (choice.model, choice.effort) == ("gpt-6-luna", "high")
-    assert choice.decision["pin_effort_clamped"] == dict(configured="low", applied="high")
+    with pytest.raises(PortableError, match="pinned_effort_unavailable"):
+        auto_route.choose("worker-backend-dev", project, environ)
 
 
 def test_an_honoured_pin_effort_records_no_clamp(tmp_path, monkeypatch):

@@ -629,7 +629,22 @@ Only the owner-global registry may grant external servers. Project files cannot
 install a server. Each enabled entry must list exact `allowed_tools`; optional
 `read_paths`, `env` and `network` are explicit administrator grants. Read-only roles
 can invoke only the subset named in `read_only_tools`. MCP annotations never grant
-rights. Coordinators receive no external execution servers.
+rights. Coordinators receive no external execution servers. Their own tool
+grants remain narrowed to `coordinator_tools` (or `read_only_tools` when unset).
+The separate configured-worker inventory is a bounded discovery hint, not a
+grant or proof of successful access. Delegation is appropriate for a capability
+outside the coordinator role, never as a fallback around a denied action.
+Built-in worker command/read-search discovery does not depend on external MCP
+configuration. Its role-offer hints confer no access; project path reservations
+are not outside grants, and safe host-history discovery must not resume an agent.
+Read-only/Guarded command `/var/tmp` is scratch-backed, so a missing path in that
+namespace is not proof of host absence. Authorized host-only reads/searches can
+use the existing `outside_command` consent route offered only to writing workers;
+a read-only investigator instead reports the capability gap. This does not
+relax masks or permit retrying a denied operation. Executable no-paid fixtures
+exercise allowed, denied and genuinely missing host reads without a sandbox;
+namespace-dependent checks remain unverified wherever user namespaces are unavailable. See
+[capability-based delegation](../roles-and-delegation/index.md#capability-based-delegation).
 
 The engine receives a private broker endpoint, not the original executable or
 credentials. The runtime proxy starts the server in the same scoped sandbox,
