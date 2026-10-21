@@ -84,6 +84,17 @@ def test_safe_extension_is_atomic_replayable_and_visible_not_a_fake_remount(boun
     assert capsule['sections']['pipeline_and_assignments']['runtime']['nodes'][0]['access']['declared_scope_revision'] == 1
 
 
+def test_a_directory_with_a_trailing_slash_is_that_directory(bound):
+    """A 2026-10-21 worker asked for ``.next/`` and ``test-results/`` and
+    stopped on the resulting ``unsafe_path`` refusal."""
+    store, _, _, workers = bound
+    (Path(store.project_root) / '.next').mkdir()
+    receipt = _request(store, workers[0], ['.next/', 'test-results/', 'next-env.d.ts', '.next'])
+    assert receipt['status'] == 'granted' and receipt['complete'], receipt
+    assert receipt['added_paths'] == ['.next', 'test-results', 'next-env.d.ts']
+    assert _request(store, workers[0], ['dir//'], key='double')['reason'] == 'unsafe_path'
+
+
 @pytest.mark.parametrize('path', ['../escape', '/absolute', '.cortex/private', '.git/config',
                                   'nested/.cortex/x', '.', 'dir//file', 'dir/./file',
                                   'glob/*', 'back\\slash', 'bad\x00path'])

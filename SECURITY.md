@@ -643,7 +643,9 @@ narrower. That declared area coordinates parallel writers; it is not a gateway
 write boundary. The gateway enforces assignment/role authority, user-protected
 paths, private-path restrictions and path safety, but does not compare ordinary
 writes with the declared work area. An `access_request` reserves additional
-work for coordination; it does not remount or widen the OS jail. Writer conflicts
+work for coordination; it does not remount or widen the OS jail. A directory path with one
+trailing slash (`.next/`) is that directory, not an unsafe path; generated build/test output
+needs no request. Writer conflicts
 receive bounded delayed runtime rechecks (1/2/4 seconds), then a runtime grant or
 denial without a user question. Private, unsafe, deny-write and read-only refusals
 are immediate runtime decisions. Retained old access cards are cancelled; late

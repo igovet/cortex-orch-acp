@@ -119,6 +119,16 @@ def _safe_path(root, value):
         os.close(fd)
 
 
+def _directory_form(path):
+    """``.next/`` names the directory ``.next``: drop one trailing slash
+    instead of refusing the request as ``unsafe_path`` (a 2026-10-21 worker
+    stopped on that refusal). ``dir//`` and every other form stay as given and
+    are judged by ``_safe_path``."""
+    if isinstance(path, str) and len(path) > 1 and path.endswith('/') and not path.endswith('//'):
+        return path[:-1]
+    return path
+
+
 def predicate(db, binding, paths):
     node = db.execute('SELECT * FROM runtime_nodes WHERE task_id=? AND assignment_ref=?',
                       (binding['task_id'], binding['assignment_ref'])).fetchone()
@@ -183,7 +193,7 @@ def request(store, channel, args):
         binding = dict(task_id=channel.task_id, assignment_ref=provision['idempotency_key'],
                        attempt_id=channel.attempt_id, channel_id=channel.channel_id, owner_epoch=channel.owner_epoch,
                        engine_session_ref=provision['engine_session_ref'], revision=revision,
-                       request_id=new_id('ar_'), paths=list(dict.fromkeys(args['paths'])),
+                       request_id=new_id('ar_'), paths=list(dict.fromkeys(_directory_form(path) for path in args['paths'])),
                        justification=args['reason'], created_at=now())
         if not worker_waits.valid(db, binding):
             raise StoreError('gateway_assignment_inactive')

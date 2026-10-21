@@ -284,7 +284,13 @@ from that assignment, never from model-provided role, task or capability fields.
 Writing workers receive project-wide gateway write authority, except private and
 user-protected paths; a declared assignment scope is a coordination work area,
 not an enforced project-path boundary. Writers reserve additional paths with
-`access_request` before changing them so parallel assignments remain coordinated.
+`access_request` before changing them so parallel assignments remain coordinated. A directory
+path with one trailing slash (`.next/`) names that directory; other non-canonical forms
+(`dir//`, `dir/./x`) remain `unsafe_path`. Generated build/test output (build and cache
+directories, test reports, a regenerated type stub such as `next-env.d.ts`) needs no request:
+a writer's `command_run` already writes it in Development and Auto, and runtime verification
+discards its own generated writes. On 2026-10-21 a worker asked in advance for `.next/` and
+`test-results/`, received `unsafe_path` for the trailing slash and stopped without running the build.
 Owner deny-write entries come only from an explicit `deny-write: <path>` instruction (bare,
 single-quoted, double-quoted or backtick-quoted). Natural-language requests such as "do not
 modify X" create no entry, and a value containing wildcard or mask characters is skipped
