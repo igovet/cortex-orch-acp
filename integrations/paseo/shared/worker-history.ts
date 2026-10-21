@@ -73,6 +73,20 @@ const attempt = z.object({
   // only in the worker tab: coordinator cards never carry it.
   summary: z.string().optional(),
   summaryTruncated: z.boolean().optional(),
+  // The assignment text this exact attempt was sent (its dispatch request's
+  // optional title, brief and acceptance; never runtime system instructions),
+  // scrubbed server-side. `state`: sent (bound by the runtime's sent record),
+  // queued (not yet recorded as sent), unrecorded (no sent record: older
+  // history, or ended before its first prompt), mismatch/unavailable (no
+  // content). Only worker-tab reads of a selected worker carry it.
+  prompt: z.object({
+    state: z.enum(["sent", "queued", "unrecorded", "mismatch", "unavailable"]),
+    sentAt: z.string().optional(),
+    title: z.string().optional(),
+    brief: z.string().optional(),
+    acceptance: z.string().optional(),
+    truncated: z.boolean().optional(),
+  }).optional(),
   // Compact reads (`compact: true`, the coordinator card's usage poll)
   // replace the check list with this open-issue count: checks that are not
   // passed and not closed by an exact later rerun.

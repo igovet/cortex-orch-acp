@@ -108,6 +108,7 @@ def _observe(runtime, task, root, checks, cancel=None, run_id=1):
 @pytest.mark.real_verification_sandbox
 def test_verification_launch_is_the_read_only_profile(tmp_path, home, project, monkeypatch):
     _fake_bwrap(monkeypatch)
+    monkeypatch.setattr(sandbox, 'tmp_overlay_supported', lambda: True)
     monkeypatch.setattr(sandbox, 'development_command', lambda *a, **kw: pytest.fail('host-writable profile'))
     monkeypatch.setattr(revision, 'ignored_directories', lambda root: ['build'])
     scratch = tmp_path / 'scratch'
@@ -122,8 +123,12 @@ def test_verification_launch_is_the_read_only_profile(tmp_path, home, project, m
         assert _writable(command) == {str(home / '.cache'), str(home / '.npm'),
                                       str(home / '.docker/buildx/activity'), str(scratch), '/tmp'}
         assert ['--bind', str(scratch / 'var-tmp'), '/var/tmp'] in windows
-        # The project stays read-only except its git-ignored directories.
-        project_at = sandbox._project_mount(command, project.resolve())
+        # The project is a discarded overlay over its pinned source; only its
+        # git-ignored directories are writable in place, on top of it.
+        project_at = command.index('--overlay-src')
+        assert command[project_at + 1].startswith('/proc/self/fd/')
+        assert command[project_at + 2:project_at + 4] == ['--tmp-overlay', str(project.resolve())]
+        assert not any(w[0] == '--ro-bind' and w[2] == str(project.resolve()) for w in windows)
         grants = [w for w in windows[project_at:] if w[0] == '--bind' and w[1].startswith('/proc/self/fd/')]
         assert [w[2] for w in grants] == [str(project / 'build')]
         # pytest's cache goes to scratch (the last --setenv wins over an
@@ -201,8 +206,13 @@ def test_real_verification_writes_caches_and_temp_not_home_or_project(tmp_path, 
         '            pathlib.Path(tempfile.gettempdir()) / "t", pathlib.Path("/var/tmp/v")]\n'
         'for path in writable:\n'
         '    path.write_text("ok")\n'
+        # A tracked or new project file is written to the discarded overlay
+        # (refused where the host cannot overlay); either way the host keeps it.
+        'for path in (pathlib.Path("a.txt"), pathlib.Path("new.txt")):\n'
+        '    try: path.write_text("discarded")\n'
+        '    except OSError: pass\n'
         'for path in (home / ".bashrc", home / ".nvm/x", home / ".config/x", home / ".local/state/x",\n'
-        '             home / "new", pathlib.Path("a.txt"), pathlib.Path("new.txt")):\n'
+        '             home / "new"):\n'
         '    try: path.write_text("forbidden")\n'
         '    except OSError: pass\n'
         '    else: raise AssertionError(path)\n'
@@ -218,6 +228,57 @@ def test_real_verification_writes_caches_and_temp_not_home_or_project(tmp_path, 
     assert (home / '.cache/tool').read_text() == 'ok' and (project / 'build/out').read_text() == 'ok'
     assert (home / '.bashrc').read_text() == '# owner\n' and not (home / 'new').exists()
     assert (project / 'a.txt').read_text() == 'one\n' and not (project / '.pytest_cache').exists()
+    assert not (project / 'new.txt').exists()
+
+
+@pytest.mark.real_verification_sandbox
+def test_verification_keeps_the_read_only_project_mount_without_overlay_support(tmp_path, home, project, monkeypatch):
+    _fake_bwrap(monkeypatch)
+    monkeypatch.setattr(sandbox, 'tmp_overlay_supported', lambda: False)
+    monkeypatch.setattr(revision, 'ignored_directories', lambda root: ['build'])
+    scratch = tmp_path / 'scratch'
+    scratch.mkdir()
+    with controller._verification_command(project, scratch, ['python3', '-c', 'pass']) as (command, _):
+        assert '--overlay-src' not in command and '--tmp-overlay' not in command
+        sandbox._project_mount(command, project.resolve())
+
+
+@pytest.mark.parametrize('mode', ['auto', 'guarded'])
+@pytest.mark.requires_bwrap
+@pytest.mark.real_verification_sandbox
+def test_real_verification_may_regenerate_a_tracked_file_without_changing_it(tmp_path, home, project, mode):
+    """``next typegen`` rewrites the tracked ``next-env.d.ts`` on every run; a
+    2026-10-21 task's final verification failed with EROFS on it in every
+    mode and after the user's consent. The write now lands in the discarded
+    overlay: the check passes, the host file and the revision stay as they
+    were, and a git-ignored build directory is still written in place."""
+    if not sandbox.tmp_overlay_supported():
+        pytest.skip('bubblewrap cannot create a tmp overlay on this host')
+    (project / 'next-env.d.ts').write_text('// generated\n')
+    _git('add', 'next-env.d.ts', cwd=project)
+    _git('-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '-qm', 'typegen', cwd=project)
+    runtime, store, task = _runtime(tmp_path, project, mode)
+    before = _digest(project)
+    script = ('from pathlib import Path\n'
+              'Path("next-env.d.ts").write_text("// regenerated\\n")\n'
+              'assert Path("next-env.d.ts").read_text() == "// regenerated\\n"\n'
+              'Path("build/out").write_text("kept")\n')
+    observed = _observe(runtime, task, project, [[sys.executable, '-B', '-c', script]])
+    assert not observed.get('blocker') and not observed['stale'], observed
+    assert [c['exit_code'] for c in observed['checks']] == [0], observed
+    assert (project / 'next-env.d.ts').read_text() == '// generated\n'
+    assert (project / 'build/out').read_text() == 'kept'
+    assert _digest(project) == before
+
+
+def test_verification_contract_says_consent_cannot_change_its_sandbox():
+    from cortex_runtime.orchestration.contracts import COORDINATOR
+    description = COORDINATOR['verification_submit']['properties']['verification']['description']
+    assert 'no user consent, permission or mode change alters that sandbox' in description
+    assert 'never ask the user to authorize it' in description
+    guidance = controller._verification_repair_request(dict(
+        nodes=[{}], verification=dict(checks=[dict(exit_code=1, complete=True)])))
+    assert 'never ask the user to authorize it' in guidance
 
 
 # --- Gap closure (state.synthesis_checks) -----------------------------------

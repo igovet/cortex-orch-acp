@@ -186,6 +186,7 @@ def test_command_run_commits_and_reports_planted_git_configuration(tmp_path, rep
     lands; a planted repository pointer is removed and fails the command."""
     from cortex_runtime.bootstrap import bootstrap_task
     from cortex_runtime.orchestration import gateway
+    from cortex_runtime.orchestration.state import SCHEMA
     from cortex_runtime.portable.identity import SourceEvent
     from cortex_runtime.store import Store
     from cortex_runtime.trusted_channel import resolve_channel
@@ -199,7 +200,13 @@ def test_command_run_commits_and_reports_planted_git_configuration(tmp_path, rep
     store = Store(tmp_path / 'runtime' / '.cortex', project_root=tmp_path / 'runtime')
     boot = bootstrap_task(store, SourceEvent(origin='git-test', event_id='one'), 'Implement', 'owner')
     channel = resolve_channel(store, boot.channel_id, boot.secret)
-    channel = SimpleNamespace(task_id=channel.task_id, attempt_id='xa_test', role='worker')
+    channel = SimpleNamespace(task_id=channel.task_id, channel_id=channel.channel_id,
+                              attempt_id='xa_test', role='worker')
+    # Command lifecycle events reference the runtime task row.
+    with store.connection() as db:
+        db.executescript(SCHEMA)
+        db.execute('INSERT INTO runtime_tasks(task_id,state,goal,created_at,updated_at) VALUES(?,?,?,?,?)',
+                   (channel.task_id, 'EXECUTING', 'Implement', store._now(), store._now()))
     monkeypatch.setattr(gateway, '_authority', lambda db, channel: (['.'], 'owner'))
 
     def run(argv, ref):

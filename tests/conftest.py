@@ -11,6 +11,47 @@ import time
 
 import pytest
 
+# --- Optional default parallelism -----------------------------------------
+def _auto_parallel(config, environ):
+    """Use xdist only for an unconfigured top-level invocation."""
+    if (environ.get("CORTEX_PYTEST_SERIAL") == "1"
+            or environ.get("CORTEX_PYTEST_CHILD") == "1"
+            or environ.get("PYTEST_XDIST_WORKER")
+            or environ.get("PYTEST_CURRENT_TEST")
+            or hasattr(config, "workerinput")
+            or not config.pluginmanager.hasplugin("xdist")):
+        return False
+    if (config.option.numprocesses is not None or config.option.dist != "no"
+            or config.option.tx or config.option.collectonly
+            or getattr(config.option, "looponfail", False)):
+        return False
+    # Respect explicit distribution choices, including --dist=no, in all three
+    # sources of pytest arguments. Parsed numprocesses above handles every -n form.
+    import shlex
+    args = [*config.getini("addopts"), *shlex.split(environ.get("PYTEST_ADDOPTS", "")),
+            *config.invocation_params.args]
+    return not any(arg == "--dist" or arg.startswith("--dist=") for arg in args)
+
+
+@pytest.hookimpl(wrapper=True, tryfirst=True)
+def pytest_cmdline_main(config):
+    # A wrapper runs before xdist's tryfirst hook resolves "auto" to a CPU count.
+    # Mark serial parents too: all inherited child pytest invocations stay serial,
+    # without changing their argv/deadlines or relying on optional -n flags.
+    if _auto_parallel(config, os.environ):
+        config.option.numprocesses = "auto"
+        config.option.dist = "loadgroup"
+    previous = os.environ.get("CORTEX_PYTEST_CHILD")
+    os.environ["CORTEX_PYTEST_CHILD"] = "1"
+    try:
+        return (yield)
+    finally:
+        if previous is None:
+            os.environ.pop("CORTEX_PYTEST_CHILD", None)
+        else:
+            os.environ["CORTEX_PYTEST_CHILD"] = previous
+
+
 # --- Temporary files removed after the run --------------------------------
 #
 # A few full runs left 13 of the 16 GB RAM-backed /tmp on the development

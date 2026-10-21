@@ -78,16 +78,17 @@ _COMMON_BODY = """\
 # Tools
 
 - @@ROLE_CORTEX_TOOLS@@
-- Before the first call to any tool, read its full advertised description and argument schema. Never fill arguments from another tool's or engine's conventions, and never guess a value the schema does not explain.
+@@TOOL_SCHEMAS@@
 @@NATIVE_TOOLS@@
-- Run independent reads and searches together; keep dependent steps, edits, approvals and other mutations sequential.
+@@PARALLEL@@
+@@ECONOMY@@
 @@ROLE_COMMANDS@@
 - A refused tool call, a permission denial or a read-only error is a decision, not a glitch. Do not retry it and do not reach the same effect another way (another tool, a shell command, a copy or a temporary file). @@ROLE_REFUSAL@@
 
 # Cortex skills
 
 - Cortex skills are procedures the runtime keeps for you, read with `read_skill` on the `cortex` server. The engine's own skill loaders, if any, are not part of this session; project and user skills, when there are any, are listed under Project and user skills below.
-- The skills that apply to almost every session are already included in full in your role instructions; follow them from your first action and do not re-read them. The other skills are conditional. Before an action that matches a listed trigger, call the `read_skill` tool from the `cortex` MCP server with that exact skill id and follow its returned body. For example, @@SKILL_EXAMPLE@@ Do not read a conditional skill when its trigger has not arisen. Reading a matching skill is part of the work, not an optional extra.
+- The skills that apply to almost every session are already included in full in your role instructions; follow them from your first action and do not re-read them. The other skills are conditional. Before an action that matches a listed trigger, call the `read_skill` tool from the `cortex` MCP server with that exact skill id and follow its returned body. For example, @@SKILL_EXAMPLE@@ Do not read a conditional skill when its trigger has not arisen. Reading a matching skill is part of the work, not an optional extra. @@SKILL_MATCH@@
 
 @@ROLE_FINDING_CODE@@
 
@@ -101,7 +102,7 @@ _COMMON_BODY = """\
 
 # Safety
 
-- Stay inside the granted scope. Deleting data, changing shared or production systems, spending money, sending messages and other hard-to-reverse or outward-facing actions need explicit authorization in the assignment or from the user.
+- Stay inside the granted scope. Deleting data, changing shared or production systems, spending money, sending messages and other hard-to-reverse or outward-facing actions need explicit authorization in the assignment or from the user. @@NO_CEREMONY@@
 - Keep secrets, credentials, private data and raw host logs out of reports, results and messages.
 - Help with authorized security testing, defensive security and education. Refuse destructive techniques, denial of service, mass targeting, supply chain compromise and detection evasion for malicious purposes.
 
@@ -113,7 +114,7 @@ _COMMON_BODY = """\
 
 # Context
 
-- Your context may be compacted during long work. Afterwards, recover the exact assignment and evidence from the runtime (the `context-compaction` skill describes how) instead of guessing from memory.
+@@COMPACTION@@
 """
 
 
@@ -409,7 +410,8 @@ def code_index_project_name(workspace_root: str | None) -> str | None:
 
 def attached_servers_section(servers, workspace_root: str | None = None, *, role: str = "worker",
                              role_id: str | None = None,
-                             code_index_project: str | None = None, native_search: bool = True) -> str | None:
+                             code_index_project: str | None = None, native_search: bool = True,
+                             code_mode: bool = False) -> str | None:
     """What the runtime knows only when a session starts: which external MCP
     servers were really attached to it. Added after the role instructions for
     every engine, or ``None`` when none were attached.
@@ -497,8 +499,10 @@ def attached_servers_section(servers, workspace_root: str | None = None, *, role
             lines.append("For literal text, configuration and documentation, use `search_code` on "
                          "`codebase-memory-mcp` or `project_read` on `cortex` for a known file; this "
                          "session has no native shell or file search.")
-    lines += ["", "If a tool of an attached server is not in your tool list, load it with the engine's tool "
-                  "search before concluding it is unavailable."]
+    if not code_mode:
+        # Codex code mode already lists every attached tool by name and description.
+        lines += ["", "If a tool of an attached server is not in your tool list, load it with the engine's tool "
+                      "search before concluding it is unavailable."]
     return "\n".join(lines)
 
 
@@ -604,7 +608,7 @@ def worker_capabilities_section(servers) -> str:
 def with_attached_servers(meta: dict, servers, workspace_root: str | None = None, *, role: str = "worker",
                           role_id: str | None = None,
                           code_index_project: str | None = None, native_search: bool = True,
-                          worker_servers=None) -> dict:
+                          worker_servers=None, code_mode: bool = False) -> dict:
     """Append own attachments and, for coordinators, separate worker hints.
 
     Supports the plain-string ``systemPrompt`` both adapters send, or an
@@ -612,7 +616,8 @@ def with_attached_servers(meta: dict, servers, workspace_root: str | None = None
     explicit; it is never reconstructed from coordinator-only attachments.
     """
     note = attached_servers_section(servers, workspace_root, role=role, role_id=role_id,
-                                    code_index_project=code_index_project, native_search=native_search)
+                                    code_index_project=code_index_project, native_search=native_search,
+                                    code_mode=code_mode)
     if role == "coordinator":
         inventory = worker_capabilities_section(worker_servers)
         note = note + "\n\n" + inventory if note else inventory
@@ -644,12 +649,81 @@ _CORTEX_TOOLS = (
     "question, proposal and result tools. External MCP servers (for example `codebase-memory-mcp`) "
     "provide their own domain tools, not Cortex lifecycle operations."
 )
-_NATIVE_TOOLS = (
+_NATIVE_TOOL_SEARCH = (
     "- If a tool you need is not in your list, look it up with the engine's tool search when one exists "
     "before concluding it is unavailable.\n"
+)
+_NATIVE_TOOLS = _NATIVE_TOOL_SEARCH + (
     "- The engine's native shell, file and search tools are local workspace aids where permitted; "
     "they do not publish Cortex reports or submit results."
 )
+_TOOL_SCHEMAS = (
+    "- Before the first call to any tool, read its full advertised description and argument schema. Never fill "
+    "arguments from another tool's or engine's conventions, and never guess a value the schema does not explain."
+)
+_PARALLEL = (
+    "- Run independent reads and searches together; keep dependent steps, edits, approvals and other mutations "
+    "sequential."
+)
+
+# Codex code mode (``code_mode=True``) nests every tool behind ``exec`` and
+# shows each by name and description only; its ``ALL_TOOLS`` array returns
+# just those two fields. Retained Cortex rollouts of 2026-10-22 showed 10% of
+# ``exec`` calls only querying ``ALL_TOOLS``, 57% carrying at most one tool
+# call and 9% using ``Promise.all``. These lines replace the schema-reading,
+# tool-search and parallel rules above for that mode; the argument shapes
+# come from the schema-derived cheat sheet (``delegation.codex_tool_cheat_sheet``).
+_CODE_MODE_TOOL_SCHEMAS = (
+    "- Code mode lists each offered tool by name and description; `ALL_TOOLS` returns only those two fields, "
+    "never an argument schema, so do not query it for a tool already listed. Take Cortex tool arguments from the "
+    "Cortex tool cheat sheet in your role instructions and call the tool directly. Never fill arguments from "
+    "another tool's or engine's conventions, and never guess a value the cheat sheet or description does not "
+    "explain. If a call fails validation, correct the arguments from the error once."
+)
+_CODE_MODE_PARALLEL = _PARALLEL + (
+    "\n- Put independent calls in one `exec` with `await Promise.allSettled([...])` and inspect every result."
+)
+
+# Shared by every engine and both editions. Claude kept to these without
+# being told; Codex, whose own base prompt states them, did not once that
+# prompt was replaced (retained stores, 2026-10-22: on the same seeded
+# tasks Codex made 1.9x the tool calls, and over all current-prompt attempts
+# 3.9x the skill reads per attempt, 121 `context-compaction` reads against 19
+# observed compactions, and its coordinators read 3.5x the reports).
+_ECONOMY = (
+    "- Act once you know enough for the next step. Do not re-read a file, report page or skill you already read "
+    "in this session unless it may have changed, and do not repeat a call that already succeeded."
+)
+_SKILL_MATCH = (
+    "A trigger matches when your next action is the one it names, not when a skill's topic merely looks related; "
+    "read each skill once per session, and again only after a compaction."
+)
+_NO_CEREMONY = "Do not add approval steps, warnings or checklists for hypothetical risks."
+_COMPACTION = (
+    "- Your context may be compacted during long work. Compaction does not end the work: continue from the "
+    "summarized state without redoing completed steps. When the summary lacks an exact assignment detail or "
+    "evidence you need, recover it from the runtime (the `context-compaction` skill describes how) instead of "
+    "guessing from memory."
+)
+_TEST_SCOPE = (
+    "Widen testing only when new changes, failures or doubts justify it. Do not add tests for low-impact, "
+    "reversible changes or tests that only restate the implementation."
+)
+_WORKER_AUTONOMY = (
+    "- Inside your assignment, make routine choices yourself (approach, naming, which of several reasonable "
+    "options) and record the assumption in your report.\n"
+    "- Ask the user, request access or request a re-plan only when the goal cannot be reached without it: "
+    "each such call pauses your work, and a re-plan stops every worker. A failing check is fixed or reported; "
+    "a broken environment or extra work you discovered is reported. None of them alone calls for a re-plan."
+)
+_COORDINATOR_AUTONOMY = (
+    "- Make routine planning choices yourself and record the assumption in the plan or synthesis. Ask the "
+    "user only when a decision is reserved to them or the goal cannot be reached without their answer: "
+    "each question pauses the task.\n"
+    "- Orient only as far as the plan needs: workers do the detailed investigation, and you reconcile their "
+    "reports instead of repeating their work."
+)
+_CONSULTANT_AUTONOMY = "- Make routine judgments yourself and state each assumption in your report."
 _WORKER_COMMANDS = (
     "- Treat shell command text as code: quote arguments, never expose a secret through command output, "
     "and avoid blocking waits longer than a minute. Ordinary host command capability is not consent "
@@ -672,25 +746,29 @@ _PRESERVATION = """\
 _ROLE_BLOCKS = {
     "coordinator": {
         "tools": _CORTEX_TOOLS + " Use scoped project tools when supplied for project reads.",
-        "work": "# Project boundaries\n\n- You do not change the project or run commands; plan that work for workers.\n" + _PRESERVATION,
+        "work": ("# Project boundaries\n\n- You do not change the project or run commands; plan that work for workers.\n"
+                 + _COORDINATOR_AUTONOMY + "\n" + _PRESERVATION),
         "evidence": "- Reconcile retained worker reports and runtime verification evidence; do not infer a passing check from absent evidence.",
         "commands": "",
     },
     "write": {
         "tools": _CORTEX_TOOLS + " Use scoped project tools for project reads and edits, and `command_run` for worker checks.",
-        "work": "# Changing the project\n\n- Change only what the assignment and granted scope cover. Follow the surrounding code's conventions, naming and comment density, and make the smallest coherent change.\n" + _PRESERVATION,
-        "evidence": "- Verify what you change with the checks that exercise it.\n" + _WORKER_EVIDENCE,
+        "work": ("# Changing the project\n\n- Change only what the assignment and granted scope cover. Follow the surrounding code's conventions, naming and comment density, and make the smallest coherent change.\n"
+                 + _WORKER_AUTONOMY + "\n" + _PRESERVATION),
+        "evidence": "- Verify what you change with the checks that exercise it. " + _TEST_SCOPE + "\n" + _WORKER_EVIDENCE,
         "commands": _WORKER_COMMANDS,
     },
     "read_only": {
         "tools": _CORTEX_TOOLS + " Use scoped project tools for project reads, and `command_run` only for authorized non-mutating checks.",
-        "work": "# Project boundaries\n\n- Your assignment is read-only: do not create or change project files.\n" + _PRESERVATION,
+        "work": ("# Project boundaries\n\n- Your assignment is read-only: do not create or change project files.\n"
+                 + _WORKER_AUTONOMY + "\n" + _PRESERVATION),
         "evidence": "- Run only authorized non-mutating checks needed as evidence for the assignment.\n" + _WORKER_EVIDENCE,
         "commands": _WORKER_COMMANDS,
     },
     "consultant": {
         "tools": "The `cortex` MCP server is the runtime's channel: use `read_report` for retained reports, `read_skill` for conditional Cortex skills, draft/publication tools for your report, and the result tool. This role is offered no external MCP server, project reads or commands.",
-        "work": "# Project boundaries\n\n- Consult from the packet and retained reports only; do not create or change project files.\n" + _PRESERVATION,
+        "work": ("# Project boundaries\n\n- Consult from the packet and retained reports only; do not create or change project files.\n"
+                 + _CONSULTANT_AUTONOMY + "\n" + _PRESERVATION),
         "evidence": "- Evaluate the supplied evidence; name missing evidence in your report instead of running checks or inventing results.",
         "commands": "",
         # The consultant asks the user nothing and
@@ -765,37 +843,26 @@ _CONSULTANT_WORKING_MATERIAL = (
 # hard limits, then tool mechanics. Absolute wording is kept for the hard
 # limits; process tools get an explicit "only when" so a literal reader does
 # not reach for them by default. Keyed like ``_ROLE_BLOCKS``.
-_E2_WORKER_AUTONOMY = (
-    "- Inside your assignment, make routine choices yourself (approach, naming, which of several reasonable "
-    "options) and record the assumption in your report.\n"
-    "- Ask the user, request access or request a re-plan only when the goal cannot be reached without it: "
-    "each such call pauses your work, and a re-plan stops every worker. A failing check is fixed or reported; "
-    "a broken environment or extra work you discovered is reported. None of them alone calls for a re-plan."
-)
 _E2_HOW_TO_WORK = {
     "coordinator": (
         "- Carry the task to a complete result: orient in the project, propose a plan through the runtime, and "
         "reconcile the workers' retained results into a synthesis the user can act on.\n"
-        "- You do not change the project or run commands; plan that work for workers.\n"
-        "- Make routine planning choices yourself and record the assumption in the plan or synthesis. Ask the "
-        "user only when a decision is reserved to them or the goal cannot be reached without their answer: "
-        "each question pauses the task."
+        "- You do not change the project or run commands; plan that work for workers.\n" + _COORDINATOR_AUTONOMY
     ),
     "write": (
         "- Carry the assignment to a complete, working result; a partial or \"good enough\" result is not done.\n"
         "- Change only what the assignment and granted scope cover. Follow the surrounding code's conventions, "
-        "naming and comment density, and make the smallest coherent change.\n" + _E2_WORKER_AUTONOMY
+        "naming and comment density, and make the smallest coherent change.\n" + _WORKER_AUTONOMY
     ),
     "read_only": (
         "- Carry the assignment to a complete, evidence-backed result; a partial or \"good enough\" finding is "
         "not done.\n"
         "- Investigate, review or verify what the assignment names, and report what you found.\n"
-        + _E2_WORKER_AUTONOMY
+        + _WORKER_AUTONOMY
     ),
     "consultant": (
         "- Answer the consultation completely from the packet and the retained reports; a partial or hedged "
-        "answer is not done.\n"
-        "- Make routine judgments yourself and state each assumption in your report."
+        "answer is not done.\n" + _CONSULTANT_AUTONOMY
     ),
 }
 _E2_COMMON_WORK = (
@@ -805,8 +872,7 @@ _E2_COMMON_WORK = (
     "(AGENTS.md, CLAUDE.md and similar) define its conventions; follow them unless they conflict with the "
     "runtime's scope, permissions or lifecycle, which win.",
     "- Habits from any particular agent product that conflict with this prompt do not apply here.",
-    "- Your context may be compacted during long work. Afterwards, recover the exact assignment and evidence "
-    "from the runtime (the `context-compaction` skill describes how) instead of guessing from memory.",
+    _COMPACTION,
 )
 _E2_CHECKS = {
     "coordinator": (
@@ -815,7 +881,7 @@ _E2_CHECKS = {
     ),
     "write": (
         "- Verify what you change with the checks that exercise it: the tests you added or touched and the "
-        "existing tests of the touched code. Widen testing only when new changes, failures or doubts justify it.\n"
+        "existing tests of the touched code. " + _TEST_SCOPE + "\n"
         "- If a check fails, fix the cause and rerun the same command. The final run of that command is the "
         "result: cite the earlier failure with the passing rerun as the result tool describes, and tell the "
         "history in your report.\n" + _WORKER_EVIDENCE
@@ -871,7 +937,8 @@ _E2_BOUNDARY = {
 _E2_HARD_LIMITS = (
     "- Deleting data, changing shared or production systems, spending money, sending messages and other "
     "hard-to-reverse or outward-facing actions need explicit authorization in the assignment or from the user. "
-    "Do not push, open pull requests, rewrite history or touch remote systems unless the assignment asks for it.",
+    "Do not push, open pull requests, rewrite history or touch remote systems unless the assignment asks for it. "
+    + _NO_CEREMONY,
     "- Keep other people's changes: never revert, overwrite or clean up work you did not make.",
     "- Never report a check, result or file content you did not observe, and never present an unrun or failed "
     "check as passed.",
@@ -885,14 +952,10 @@ _E2_HARD_LIMITS = (
     "- Help with authorized security testing, defensive security and education. Refuse destructive techniques, "
     "denial of service, mass targeting, supply chain compromise and detection evasion for malicious purposes.",
 )
-_E2_TOOL_SCHEMAS = (
-    "- Before the first call to any tool, read its full advertised description and argument schema. Never fill "
-    "arguments from another tool's or engine's conventions, and never guess a value the schema does not explain. "
-    "Tool argument contracts live only in those schemas; this prompt does not repeat them."
-)
-_E2_PARALLEL = (
-    "- Run independent reads and searches together; keep dependent steps, edits, approvals and other mutations "
-    "sequential."
+_E2_CONTRACTS = " Tool argument contracts live only in those schemas; this prompt does not repeat them."
+_E2_CODE_MODE_CONTRACTS = (
+    " Tool argument contracts live only in the schemas the cheat sheet is rendered from; this prompt does not "
+    "repeat them."
 )
 _E2_SKILLS = (
     "- Cortex skills are procedures the runtime keeps for you, read with `read_skill` on the `cortex` server. "
@@ -902,11 +965,13 @@ _E2_SKILLS = (
     "follow them from your first action and do not re-read them. The other skills are conditional. Before an "
     "action that matches a listed trigger, call the `read_skill` tool from the `cortex` MCP server with that "
     "exact skill id and follow its returned body. For example, @@SKILL_EXAMPLE@@ Do not read a conditional skill "
-    "when its trigger has not arisen. Reading a matching skill is part of the work, not an optional extra.",
+    "when its trigger has not arisen. Reading a matching skill is part of the work, not an optional extra. "
+    + _SKILL_MATCH,
 )
 
 
-def _edition_2_body(role: str, block_key: str, block: dict, *, native: str, finding: str, refusal: str) -> str:
+def _edition_2_body(role: str, block_key: str, block: dict, *, native: str, finding: str, refusal: str,
+                    code_mode: bool = False) -> str:
     def section(title: str, items, lead: str = "") -> str:
         lines = "\n".join(item for item in items if item)
         return f"# {title}\n\n" + (lead + "\n\n" if lead else "") + lines
@@ -915,6 +980,7 @@ def _edition_2_body(role: str, block_key: str, block: dict, *, native: str, find
                "retry it and do not reach the same effect another way (another tool, a shell command, a copy or a "
                "temporary file). " + refusal)
     skills = tuple(item.replace("@@SKILL_EXAMPLE@@", _SKILL_EXAMPLE[block_key]) for item in _E2_SKILLS)
+    schemas = (_CODE_MODE_TOOL_SCHEMAS + _E2_CODE_MODE_CONTRACTS) if code_mode else (_TOOL_SCHEMAS + _E2_CONTRACTS)
     return "\n\n".join((
         section("How to work", (_E2_HOW_TO_WORK[block_key], *_E2_COMMON_WORK)),
         section("Checks", (_E2_CHECKS[block_key], _E2_KEEP_EXPLICIT,
@@ -923,7 +989,8 @@ def _edition_2_body(role: str, block_key: str, block: dict, *, native: str, find
         section("Writing for your reader", (_E2_READER["coordinator" if role == "coordinator" else "worker"],
                                             *_E2_WRITING, _ROLE_COMMUNICATION[role])),
         section("Hard limits", (_E2_BOUNDARY[block_key], refused, *_E2_HARD_LIMITS), lead=_E2_HARD_LIMITS_LEAD),
-        section("Tools and evidence", ("- " + block["tools"], _E2_TOOL_SCHEMAS, native, _E2_PARALLEL,
+        section("Tools and evidence", ("- " + block["tools"], schemas, native,
+                                       _CODE_MODE_PARALLEL if code_mode else _PARALLEL, _ECONOMY,
                                        block["commands"], *skills)),
         finding.replace("# ", "## ", 1),
     ))
@@ -986,13 +1053,17 @@ def prompt_access_class(role: str, role_id: str | None) -> str:
 
 def cortex_system_prompt(role: str, workspace_root: str | None, *, today: datetime.date | None = None,
                          environ=None, consultant: bool = False, access_class: str = "write",
-                         native_tools: bool = True, edition: int | None = None) -> str:
+                         native_tools: bool = True, edition: int | None = None,
+                         code_mode: bool = False) -> str:
     """Render coordinator, write, read-only or consultant guidance.
 
     ``consultant`` remains a compatibility selector. Launch seams supply the
     profile's access class and the adapter's observed native-tool capability;
     defaults preserve ordinary worker callers outside those seams.
     ``edition`` defaults to :func:`prompt_edition` of ``environ``.
+    ``code_mode`` is set only for Codex, whose tools sit behind ``exec``: it
+    swaps the schema-reading, tool-search and parallel-call lines for their
+    code-mode forms and changes nothing else.
     """
     if role not in _ROLES:
         raise ValueError("role must be 'coordinator' or 'worker'")
@@ -1007,6 +1078,8 @@ def cortex_system_prompt(role: str, workspace_root: str | None, *, today: dateti
     block = _ROLE_BLOCKS["coordinator" if role == "coordinator" else
                          "consultant" if consultant else access_class]
     native = _NATIVE_TOOLS if native_tools and not consultant else ""
+    if code_mode:
+        native = native.replace(_NATIVE_TOOL_SEARCH, "")
     if native_tools and role == "worker" and not consultant:
         native += "\n- Native shell output alone is not a verified check receipt."
     if native_tools and consultant:
@@ -1017,6 +1090,9 @@ def cortex_system_prompt(role: str, workspace_root: str | None, *, today: dateti
         "ROLE_CORTEX_TOOLS": block["tools"], "ROLE_WORK": block["work"],
         "ROLE_EVIDENCE": block["evidence"], "ROLE_COMMANDS": block["commands"],
         "NATIVE_TOOLS": native, "SKILL_EXAMPLE": _SKILL_EXAMPLE[skill_example_key],
+        "TOOL_SCHEMAS": _CODE_MODE_TOOL_SCHEMAS if code_mode else _TOOL_SCHEMAS,
+        "PARALLEL": _CODE_MODE_PARALLEL if code_mode else _PARALLEL, "ECONOMY": _ECONOMY,
+        "SKILL_MATCH": _SKILL_MATCH, "NO_CEREMONY": _NO_CEREMONY, "COMPACTION": _COMPACTION,
     }.items():
         body = body.replace("@@" + marker + "@@", value)
     finding = _CONSULTANT_WORKING_MATERIAL if consultant else _FINDING_CODE
@@ -1024,7 +1100,7 @@ def cortex_system_prompt(role: str, workspace_root: str | None, *, today: dateti
         return "\n\n".join(part for part in (
             _SESSION_HEADING + _INTRO[role],
             _edition_2_body(role, skill_example_key, block, native=native, finding=finding,
-                            refusal=_ROLE_REFUSAL["consultant" if consultant else role]),
+                            refusal=_ROLE_REFUSAL["consultant" if consultant else role], code_mode=code_mode),
             project_skills_section(workspace_root, environ),
             environment_section(workspace_root, today=today),
         ) if part) + "\n"

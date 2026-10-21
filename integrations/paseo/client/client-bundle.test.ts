@@ -169,6 +169,8 @@ function createRuntime() {
   let lastText: string[] = [];
   // The current text of every polite/assertive live region, in render order.
   let lastLive: string[] = [];
+  // The `active` prop of every executing-indicator pulse in render order.
+  let lastPulses: boolean[] = [];
   let labeledPresses = new Map<string, () => void>();
   let currentRoot: (() => unknown) | null = null;
   const flatText = (node: unknown): string => {
@@ -193,8 +195,10 @@ function createRuntime() {
     labeledPresses = new Map();
     const texts: string[] = [];
     const live: string[] = [];
+    const pulses: boolean[] = [];
     render(currentRoot!(), "root", (element) => {
       count += 1;
+      if (typeof element.type === "function" && /^WorkingPulse\d*$/.test(element.type.name)) pulses.push(element.props.active === true);
       textOf(element, texts);
       if (element.props?.accessibilityLiveRegion && element.props.accessibilityLiveRegion !== "none") live.push(flatText(element.props.children));
       const onPress = element.props?.onPress;
@@ -206,6 +210,7 @@ function createRuntime() {
     });
     lastText = texts;
     lastLive = live;
+    lastPulses = pulses;
   };
   /** Re-render the mounted root until state and effects settle. */
   const settle = async () => {
@@ -253,7 +258,7 @@ function createRuntime() {
     hooks.clear();
   }
 
-  return { react, mount, press, settle, unmountAll, text: () => lastText.join("\n"), liveRegions: () => [...lastLive] };
+  return { react, mount, press, settle, unmountAll, text: () => lastText.join("\n"), liveRegions: () => [...lastLive], pulses: () => [...lastPulses] };
 }
 
 const colors = new Proxy({}, { get: () => "#808080" });
@@ -304,8 +309,11 @@ async function configReadFixture(input: { surface: string }): Promise<unknown> {
 
 type RpcCall = { name: string; input: Record<string, unknown> };
 
-async function loadClient(platformOs: "android" | "ios" | "web", rpcOverrides: Record<string, (input: Record<string, unknown>) => Promise<unknown>> = {}) {
+async function loadClient(platformOs: "android" | "ios" | "web", rpcOverrides: Record<string, (input: Record<string, unknown>) => Promise<unknown>> = {},
+  options: { reduceMotion?: boolean } = {}) {
   const rpcCalls: RpcCall[] = [];
+  // Native Animated loops the bundle starts and stops (web pulses are CSS).
+  const animation = { started: 0, stopped: 0 };
   const runtime = createRuntime();
   const component = (name: string) => name;
   const reactNative = new Proxy({}, {
@@ -313,11 +321,14 @@ async function loadClient(platformOs: "android" | "ios" | "web", rpcOverrides: R
       if (key === "Platform") return { OS: platformOs, select: (options: Record<string, unknown>) => options[platformOs] ?? options.default };
       if (key === "useWindowDimensions") return () => ({ width: 390, height: 844 });
       if (key === "StyleSheet") return { create: (styles: unknown) => styles, hairlineWidth: 1 };
+      if (key === "AccessibilityInfo" && options.reduceMotion !== undefined) {
+        return { isReduceMotionEnabled: async () => options.reduceMotion, addEventListener: () => ({ remove() {} }) };
+      }
       if (key === "Animated") {
         return {
           Value: function Value(this: Record<string, unknown>) { this.setValue = () => {}; this.stopAnimation = () => {}; },
           View: "Animated.View",
-          loop: () => ({ start() {}, stop() {} }),
+          loop: () => ({ start() { animation.started += 1; }, stop() { animation.stopped += 1; } }),
           sequence: () => ({}),
           timing: () => ({}),
         };
@@ -398,8 +409,29 @@ async function loadClient(platformOs: "android" | "ios" | "web", rpcOverrides: R
   };
   const cleanup = exports.default(client);
   for (let tick = 0; tick < 5 && !pill; tick += 1) await new Promise((done) => setTimeout(done, 0));
-  return { runtime, captured, commands, transformers, pill: () => pill, cleanup, rpcCalls };
+  return { runtime, captured, commands, transformers, pill: () => pill, cleanup, rpcCalls, animation };
 }
+
+test("a native running indicator stays static under the reduce-motion setting", async () => {
+  const history = () => Promise.resolve({ available: true, truncated: false, nextCursor: null, nextAssignmentCursor: null,
+    assignments: [{ taskId: "t_1", id: "wa_1", assignmentRef: "ref1", nodeKey: "n1", title: "Fix it", role: "debugger", status: "running",
+      attempts: [{ id: "xa_1", attemptNo: 1, status: "running", failureReason: null, events: [], openIssues: 0 }] }] });
+  const { runtime, captured, cleanup, animation } = await loadClient("android", { "cortex.worker-history.read": history }, { reduceMotion: true });
+  try {
+    await runtime.mount(() => ({ type: captured["worker-row"].Component, props: {
+      theme, host: { id: "h1", label: "Local" }, layout: { compact: true, platform: "android" }, agentId: "a1",
+      item: { id: "worker-row:worker:ref1", kind: "worker-row", version: 1, data: { callId: "worker:ref1", assignmentRef: "ref1", title: "Worker: debugger — Fix it", status: "running" } },
+    } }), { press: false });
+    assert.deepEqual(runtime.pulses(), [true, true], "still executing");
+    // Effects ran with the setting already read: any loop started before it
+    // landed has been stopped, and none is left running.
+    assert.equal(animation.started - animation.stopped, 0);
+    assert.match(runtime.text(), /Working/);
+  } finally {
+    runtime.unmountAll();
+    cleanup();
+  }
+});
 
 // The coordinator timeline card's props, from the worker items the provider
 // emits (server/provider-worker-steer.test.ts drives the real bridge): a
@@ -485,7 +517,10 @@ for (const platformOs of ["android", "web"] as const) {
         assert.match(text, /1 open issue · details in the worker tab/);
         assert.match(text, /claude · Opus 5\.5 · high/);
         assert.match(text, /Context 33%, 330k \/ 1M tokens/);
-        assert.match(text, /Open worker/);
+        // The visible Open worker action was removed; the whole card opens the
+        // worker, and only its accessible name still says so.
+        assert.doesNotMatch(text, /^Open worker$/m);
+        assert.match(text, /Open worker$/m);
         assert.ok(text.includes("Very long task title ".repeat(40).trim()), "the accessible name keeps the full title");
         // Only the compact card read, never the worker tab's full read or the
         // retired per-card result fetch.
@@ -496,6 +531,64 @@ for (const platformOs of ["android", "web"] as const) {
           assert.equal(call.input.limit, 1);
         }
       }
+    } finally {
+      runtime.unmountAll();
+      cleanup();
+    }
+  });
+
+  test(`only an executing worker's indicators pulse, and a settled or unmounted card stops (${platformOs})`, async () => {
+    let durable = "running";
+    const history = (input: Record<string, unknown>) => Promise.resolve({
+      available: true, truncated: false, nextCursor: null, nextAssignmentCursor: null,
+      assignments: [{ taskId: "t_1", id: "wa_1", assignmentRef: "ref1", nodeKey: "n1", title: "Fix it", role: "debugger", status: durable,
+        attempts: [{ id: "xa_1", attemptNo: 1, status: durable, failureReason: null, context: { used: 1000, size: 100000 },
+          events: input.compact ? [] : [{ id: 1, type: "worker_activity", createdAt: "2026-10-21T00:00:00Z", text: "ACTIVITY ROW" }],
+          ...(input.compact ? { openIssues: 0 } : {}) }] }],
+    });
+    const { runtime, captured, cleanup, animation } = await loadClient(platformOs, { "cortex.worker-history.read": history });
+    const host = { theme, host: { id: "h1", label: "Local" }, layout: { compact: platformOs !== "web", platform: platformOs } };
+    const title = "Worker: debugger · claude · Opus 5.5 · high — Fix it";
+    const card = (status: string) => () => ({ type: captured["worker-row"].Component, props: {
+      ...host, agentId: "a1", item: { id: "worker-row:worker:ref1", kind: "worker-row", version: 1, data: { callId: "worker:ref1", assignmentRef: "ref1", title, status } },
+    } });
+    try {
+      await runtime.mount(card("running"), { press: false });
+      // The worker marker and the status icon, nothing else on the card.
+      assert.deepEqual(runtime.pulses(), [true, true]);
+      assert.match(runtime.text(), /Working/);
+      if (platformOs !== "web") assert.equal(animation.started - animation.stopped, 2, "one native loop per indicator");
+
+      // A durable attempt still provisioning is a wait, not work.
+      durable = "provisioning";
+      await runtime.mount(card("running"), { press: false });
+      assert.deepEqual(runtime.pulses(), [false, false]);
+      assert.match(runtime.text(), /Working/);
+
+      // Settled: no pulse, and every loop started was stopped.
+      for (const [status, final] of [["completed", "completed"], ["failed", "failed"], ["canceled", "cancelled"], ["running", "interrupted"]] as const) {
+        durable = final;
+        await runtime.mount(card(status), { press: false });
+        assert.deepEqual(runtime.pulses(), [false, false], `${status}/${final}`);
+      }
+      runtime.unmountAll();
+      assert.equal(animation.started, animation.stopped, "no animation outlives its card");
+
+      // The worker tab's selected-attempt status icon pulses while executing.
+      // (The tab restores its saved view, so open the attempt only when the
+      // list is showing.)
+      const openTab = async () => {
+        await runtime.mount(() => ({ type: captured.workers.Component, props: { ...host, workspaceId: "ws1", agentId: "a1", context: "agent" } }), { press: false });
+        if (!runtime.text().includes("All workers")) await runtime.press(/^Open worker /);
+      };
+      durable = "running";
+      await openTab();
+      assert.deepEqual(runtime.pulses(), [true]);
+      durable = "completed";
+      await openTab();
+      assert.deepEqual(runtime.pulses(), [false]);
+      runtime.unmountAll();
+      assert.equal(animation.started, animation.stopped);
     } finally {
       runtime.unmountAll();
       cleanup();
@@ -727,6 +820,56 @@ for (const platformOs of ["android", "web"] as const) {
     }
   });
 }
+
+// The selected attempt's assignment prompt is reachable in the worker tab
+// (collapsed to its state and a preview, full on demand), and the attempt's
+// Result paragraph is not repeated by its identical worker_result row.
+test("worker tab shows the attempt's sent prompt and its result once", async () => {
+  const summary = "RESULT PARAGRAPH reconciled everything.";
+  const brief = JSON.stringify({ objective: "PROMPT OBJECTIVE first line\n\nPROMPT OBJECTIVE DETAIL", scope: ["SCOPE-PATH"], dependency_reports: [], original_goal: "OWNER GOAL", review_evidence: [] });
+  const { runtime, captured, cleanup, rpcCalls } = await loadClient("web", { "cortex.worker-history.read": (input) => Promise.resolve({
+    available: true, truncated: false, nextCursor: null, nextAssignmentCursor: null,
+    assignments: [{ taskId: "t_1", id: "wa_1", assignmentRef: "ref1", nodeKey: "n1", title: "Fix it", role: "debugger", status: "completed",
+      attempts: [{ id: "xa_1", attemptNo: 1, status: "completed", failureReason: null, ...(input.compact ? { openIssues: 0, events: [] } : {
+        summary, checks: [],
+        prompt: { state: "sent", sentAt: "2026-10-21T18:47:05Z", brief, acceptance: "ACCEPTANCE LINE" },
+        events: [
+          { id: 1, type: "worker_result", createdAt: "2026-10-21T00:00:00Z", text: summary },
+          { id: 2, type: "worker_result", createdAt: "2026-10-21T00:00:01Z", text: summary },
+          { id: 3, type: "worker_activity", createdAt: "2026-10-21T00:00:02Z", text: "FINAL RESPONSE ROW" },
+        ] }) }] }],
+  }) });
+  try {
+    await runtime.mount(() => ({ type: captured["worker-row"].Component, props: workerRow({
+      callId: "worker:ref1", assignmentRef: "ref1", title: "Worker: debugger — Fix it", status: "completed", openIssues: 0 }) }), { press: false });
+    const card = runtime.text();
+    for (const hidden of ["PROMPT OBJECTIVE", "ACCEPTANCE LINE", "RESULT PARAGRAPH", "Assignment prompt"]) {
+      assert.ok(!card.includes(hidden), `coordinator card must not render ${hidden}`);
+    }
+    await runtime.press(/Open worker$/);
+    await runtime.mount(() => ({ type: captured.workers.Component, props: { ...panelHost, workspaceId: "ws1", agentId: "a1", context: "agent" } }), { press: false });
+    const collapsed = runtime.text();
+    assert.match(collapsed, /Assignment prompt/);
+    assert.match(collapsed, /Sent to this attempt · 2026-10-21T18:47:05Z/);
+    assert.match(collapsed, /PROMPT OBJECTIVE first line/);
+    assert.ok(!collapsed.includes("PROMPT OBJECTIVE DETAIL"), "collapsed until opened");
+    assert.equal(collapsed.split("RESULT PARAGRAPH").length - 1, 1, "the result paragraph is shown once");
+    assert.match(collapsed, /FINAL RESPONSE ROW/);
+    await runtime.press("Show assignment prompt");
+    const open = runtime.text();
+    for (const shown of ["PROMPT OBJECTIVE DETAIL", "SCOPE-PATH", "OWNER GOAL", "ACCEPTANCE LINE", "Hide assignment prompt"]) {
+      assert.ok(open.includes(shown), `opened prompt shows ${shown}`);
+    }
+    // Prompt before Result before activity.
+    assert.ok(open.indexOf("ACCEPTANCE LINE") < open.indexOf("RESULT PARAGRAPH"));
+    assert.ok(open.indexOf("RESULT PARAGRAPH") < open.indexOf("FINAL RESPONSE ROW"));
+    assert.equal(open.split("RESULT PARAGRAPH").length - 1, 1);
+    assert.ok(rpcCalls.some((call) => call.input.assignmentRef === "ref1" && call.input.compact === undefined));
+  } finally {
+    runtime.unmountAll();
+    cleanup();
+  }
+});
 
 test("the error boundary is a real class component and renders its fallback", async () => {
   const { runtime, captured, cleanup } = await loadClient("android");

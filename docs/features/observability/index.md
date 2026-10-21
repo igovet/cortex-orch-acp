@@ -153,8 +153,16 @@ card shows the role, status (icon and text), task title, the actual
 engine · model · effort route without route-selection provenance, at most one
 fixed attention category (for example "Failure details in the worker tab";
 never any part of a failure or cancellation reason), labelled context/token
-usage ("Usage unavailable" when nothing was reported) and one whole-card
-**Open worker** action. A hidden polite live region outside the card's button
+usage ("Usage unavailable" when nothing was reported), and the whole card is
+the one action that opens the worker; it has no visible **Open worker** label
+(its accessible name still ends with "Open worker"), and a disabled card says
+"Worker unavailable". While the worker is executing (the host's `running`
+until the compact read lands, then an executing durable attempt status), only
+its marker and status icon pulse: a slow CSS opacity animation on web, a
+native-driver loop elsewhere, static under a reduced-motion preference and
+stopped once the card settles or unmounts; the selected attempt's status icon
+in the Workers tab does the same (`integrations/paseo/client/working-pulse.tsx`).
+A hidden polite live region outside the card's button
 announces each real status or issue-count transition once with the worker's
 role and title; mounting or replaying a card, its first reconciling read and
 usage polls announce nothing. Its only
@@ -170,6 +178,17 @@ to add a second, identical card. The plugin's provider therefore emits each
 worker card as a provider plugin item `worker-row:<callId>` of plugin
 `cortex-acp`, which the host merges by that identity across turns and replays,
 replacing its data in place (`integrations/paseo/shared/worker-card-item.ts`).
+Paseo 0.12.0 flushes its text row even for an update to an existing plugin item.
+The provider therefore holds worker-card display events while a logical
+coordinator message streams and releases them, in arrival order, at the next
+message/timeline boundary, turn end, completed load, cancellation, error or close
+(`integrations/paseo/server/worker-card-order.ts`). Text is never buffered,
+trimmed or reconstructed. Worker-card creation no longer rotates the runtime
+message id; real coordinator tools still do. This applies to new live output and
+ACP replay, not repair of old split identities or already persisted host rows.
+Focused no-paid tests include token-sized text, card updates, multiple workers,
+flush paths and the installed client's stream reducer; they are not rendered
+Desktop evidence.
 The client transformer keeps the same compact projection for `tool_call`
 worker items an older plugin persisted; such a legacy item and a new plugin
 item for the same worker in one session can still show twice. A cancelled
@@ -199,11 +218,14 @@ the coordinator. Scripted runtime/bridge/client regressions establish these
 projections, not paid-model obedience or rendered Desktop behavior.
 
 Each coloured text on the card (role, route and usage in `foregroundMuted`,
-status, attention line and the **Open worker** action in its status or accent
-token) uses the theme's own token when it reaches 4.5:1 on every card
+status and attention line in their status token) uses the theme's own token when it reaches 4.5:1 on every card
 background (surface0/1/2: normal, focus, hover, pressed), else the least blend
-toward `foreground` that does (`client/card-contrast.ts`); the focus outline
-uses the action colour. The installed light theme's muted text (4.40:1 on
+toward `foreground` that does (`client/card-contrast.ts`). The card's neutral
+1-unit border is identical in every state: there is no focus, selected,
+pressed or status outline or perimeter, and on web the browser's own focus
+ring is suppressed on the card (`cardFrameStyle` in
+`client/worker-card-model.ts`). Keyboard focus instead underlines the
+**Open worker** label in the action colour. The installed light theme's muted text (4.40:1 on
 hover) and default dark theme's accent (about 2.5:1) are lifted this way; the
 host theme itself is never changed. Space on
 the focused card opens the worker on release: in a recorded Paseo 0.12.0
@@ -229,7 +251,31 @@ keeps the selection and any retained history, shows a safe reason (marking
 retained content as possibly out of date) and a **Retry** action; it never
 reads as an empty list or a failed worker. A worker opened from a failed card
 whose history has no attempt shows the card's host-provided reason there.
-Coverage is
+An Activity row of that attempt's own `worker_result` whose text equals the
+shown Result summary (whitespace aside) is not repeated below it; differing
+result text, the final response and other prose stay, and stored history is
+unchanged (`withoutShownResult` in `client/worker-panel-events.ts`).
+
+Above the Result, an **Assignment prompt** section shows the task text the
+runtime sent to the selected attempt, collapsed to its state and a one-line
+preview with a Show/Hide control. Its content is that attempt's own
+`delegation_requested` request (the optional title block, the brief and its
+acceptance line, scrubbed by the history reader), rendered as objective
+Markdown, scope, dependency report references, original goal and review
+evidence; runtime system, role and catalogue text is never included. Just
+before the engine prompt that carries this text, the runtime records a
+non-meaningful `progress` row of kind `worker_brief_sent` per execution
+attempt (a route fallback is a new one) with only the attempt identities and
+the SHA-256 and length of exactly that text. The reader shows "Sent to this
+attempt" with that time only when a record matches the request; otherwise it
+says queued (active, not yet recorded as sent), unrecorded (older history, or
+ended before its first prompt; the dispatched text is shown), or withholds
+the text on mismatch, and says when no request text is retained. It never
+uses current, possibly re-planned, node text. Only worker-tab reads that
+select a worker carry it; compact card and catalogue reads do not. The prompt
+section, the single Result and the borderless focus state are covered by
+no-paid runtime, history, model and client-bundle render-walk tests only.
+Coverage of the earlier card and tab behavior is
 no-paid provider, history, model and client-bundle render-walk tests plus a
 react-native-web fixture rendering; it is not Paseo Desktop evidence.
 

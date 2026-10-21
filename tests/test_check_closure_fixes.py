@@ -1,5 +1,6 @@
 """Explicit invocation retractions preserve failure evidence; outside reruns bind."""
 import json
+import sys
 from unittest.mock import patch
 
 import pytest
@@ -389,7 +390,8 @@ def test_cross_operation_exact_closure(tmp_path, monkeypatch, first, second, cas
 ])
 def test_expectation_retraction_never_weakens_product_checks(tmp_path, bad, good):
     store, _, worker, _ = _fixture(tmp_path, "unsafe-expectation")
-    failed, passed = pair(store, worker, ["python3", "-B", "-c", bad], ["python3", "-B", "-c", good])
+    # The test interpreter, so `import pytest` resolves like the other imports.
+    failed, passed = pair(store, worker, [sys.executable, "-B", "-c", bad], [sys.executable, "-B", "-c", good])
     with pytest.raises(StoreError, match="invalid_check_retraction"):
         mcp_tools.dispatch(store, worker, "result_submit", dict(
             report="# Result\nObserved.", summary="Observed", checks=checks(failed, passed), request_key="result"))

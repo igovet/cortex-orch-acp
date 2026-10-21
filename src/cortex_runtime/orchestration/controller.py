@@ -191,13 +191,17 @@ def _verification_command(root, scratch, argv):
     without a write grant (``sandbox.readonly_command``):
     the host and HOME read-only except the explicit tool-cache allowlist, a
     private TMPDIR and /var/tmp, its own PID namespace, the protected control
-    plane read-only. Only the project's git-ignored directories (caches,
-    builds, node_modules) are writable, so sources stay untouched and the
-    revision (which skips ignored paths) cannot drift. pytest's cache goes
-    to the scratch directory."""
-    from .sandbox import readonly_command, with_umask, readonly_test_cache
+    plane read-only. The project's git-ignored directories (caches, builds,
+    node_modules) are writable in place; any other project write (a tracked
+    file a tool regenerates, such as ``next-env.d.ts``) goes to a private
+    overlay discarded when the check ends (``sandbox.discard_project_writes``;
+    plain read-only where the host cannot overlay), so sources stay untouched
+    and the revision cannot drift. pytest's cache goes to the scratch
+    directory."""
+    from .sandbox import discard_project_writes, readonly_command, with_umask, readonly_test_cache
     scopes = [path + '/**' for path in revision.ignored_directories(str(root))]
     with readonly_command(root, scratch, with_umask(argv), environ=os.environ, scopes=scopes) as (command, fds):
+        discard_project_writes(command, root)
         readonly_test_cache(command, scratch, os.environ)
         yield command, fds
 
@@ -205,10 +209,11 @@ def _verification_command(root, scratch, argv):
 def _verification_observation(runtime, task_id, context, expected, emit_tool_call, cancel, run_id):
     """Run retained literal argv commands to completion with complete output.
 
-    The project is read-only outside its git-ignored directories and the
-    rest of the host is read-only except tool caches and private temp, in
-    every access mode (``_verification_command``), so a mode switch during a
-    check changes nothing about it. The real runtime store is inaccessible.
+    Project writes outside its git-ignored directories are discarded with
+    the check (or refused where the host cannot overlay) and the rest of the
+    host is read-only except tool caches and private temp, in every access
+    mode (``_verification_command``), so a mode switch or a user's consent
+    changes nothing about it. The real runtime store is inaccessible.
     Missing OS isolation is a failure, never an unsandboxed fallback.
     """
     root = Path(runtime._task_workspace_root(task_id))
@@ -235,9 +240,10 @@ def _verification_observation(runtime, task_id, context, expected, emit_tool_cal
             # The owner's toolchain (npm, node in their home), as a worker's
             # command_run has it: a bare /usr/bin sandbox made every npm check
             # fail. Only directories the project ignores (caches, builds,
-            # node_modules) are writable, so sources stay untouched and the
-            # revision (which skips ignored paths) cannot drift. No access to
-            # the real private store, even from an interpreter.
+            # node_modules) are writable in place; other project writes are
+            # discarded with the check, so sources stay untouched and the
+            # revision cannot drift. No access to the real private store,
+            # even from an interpreter.
             from ..configuration.access_mode import READ_ONLY_COMMAND_PROFILE
             profile = READ_ONLY_COMMAND_PROFILE
             try:
@@ -1250,7 +1256,8 @@ def _verification_repair_request(context):
     return ('The runtime verification FAILED; context.verification has each command, exit code and output tail. '
             'Find how to run the check correctly in this project (read its docs, Makefile, package.json, its virtualenvs; '
             'a missing interpreter or tool is a wrong command, not a reason to stop) and submit verification_submit with '
-            'corrected commands. If the code itself is wrong, submit a new plan that fixes it. ')
+            'corrected commands. If the code itself is wrong, submit a new plan that fixes it. '
+            'Runtime verification runs in one fixed sandbox in every access mode; project writes outside git-ignored directories are discarded when it ends (refused where the host cannot overlay), and no user consent, permission or mode change alters that sandbox, so never ask the user to authorize it. ')
 
 
 def _direct_answer_request(runtime, task_id):

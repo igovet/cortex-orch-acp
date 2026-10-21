@@ -23,6 +23,7 @@ import {
 } from "../shared/question-marker.ts";
 import { WORKER_CARD_OUTCOME_KEY, workerCardOutcome } from "../shared/worker-card-outcome.ts";
 import { WorkerCardFence } from "./worker-card-fence.ts";
+import { WorkerCardOrder } from "./worker-card-order.ts";
 import { isWorkerCardCallId, workerCardPluginItem } from "../shared/worker-card-item.ts";
 import {
   COMMAND_STOP_ACK_TIMEOUT_MS,
@@ -1143,6 +1144,7 @@ export function wrapCortexConnection(
   const bufferedTimeline = new Map<string, ReplaySpool>();
   const listeners = new Set<(event: ProviderEvent) => void>();
   let unsubscribe: (() => void) | undefined;
+  const workerCardOrder = new WorkerCardOrder();
   // The bridge settles a turn's open tool calls itself, then reports the
   // turn's end in the same synchronous step (see worker-card-fence.ts). A
   // worker card it settles while Cortex still reports the worker running is
@@ -1310,13 +1312,16 @@ export function wrapCortexConnection(
       heldWorkerCards.clear();
       for (const spool of bufferedTimeline.values()) spool.close();
       bufferedTimeline.clear();
+      for (const event of workerCardOrder.close()) listeners.forEach(callback => callback(event));
       listeners.clear();
       unsubscribe?.();
       return connection.close();
     },
     onEvent(subscriber) {
       listeners.add(subscriber);
-      const listener = (event: ProviderEvent) => listeners.forEach(callback => callback(event));
+      const listener = (event: ProviderEvent) => {
+        for (const ordered of workerCardOrder.accept(event)) listeners.forEach(callback => callback(ordered));
+      };
       const handle = (event: ProviderEvent) => {
         if (!visibleTimeline(event)) return;
         if ((event.type === "request.completed" || event.type === "request.failed")

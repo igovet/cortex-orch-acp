@@ -164,7 +164,7 @@ NATIVE_SKILLS["disallowedTools"] = [
 def test_session_new_meta_for_pinned_engines_builds_a_payload():
     from cortex_runtime.engine.unified_system_prompt import cortex_system_prompt
 
-    base = cortex_system_prompt('worker', None)
+    base = cortex_system_prompt('worker', None, code_mode=True)
     assert _session_new_meta_for('codex-acp','1.12.0','Be helpful.') == {
         'systemPrompt':_with_cheat_sheet('worker','Be helpful.'),'cortexRole':'worker','cortexBaseInstructions':base,'cortexNativeContext':False}
     assert _session_new_meta_for('claude-agent-acp','0.78.0','Be helpful.') == dict(
@@ -343,7 +343,7 @@ def test_each_pinned_adapter_gets_its_own_session_new_meta(tmp_path):
         "coordinator", str(tmp_path), environ=environ, native_tools=False
     ).rstrip() + "\n\nYou are a backend developer.\n\n" + inventory
     assert meta_codex["cortexBaseInstructions"] == cortex_system_prompt(
-        "coordinator", str(tmp_path), environ=environ_codex, native_tools=True
+        "coordinator", str(tmp_path), environ=environ_codex, native_tools=True, code_mode=True
     )
 
 

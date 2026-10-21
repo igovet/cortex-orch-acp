@@ -81,6 +81,10 @@ binding matrix with fresh scratch outside every repository; see
 
 ## The non-paid default command
 
+The ordinary command automatically uses `-n auto --dist loadgroup` when the
+optional pytest-xdist plugin is loaded and no worker/distribution choice was given.
+Without xdist it runs serially, without unknown-option errors:
+
 ```
 PYTHONDONTWRITEBYTECODE=1 python3 -B -m pytest -q
 ```
@@ -117,7 +121,8 @@ real containment evidence. See [verification](verification.md#running-the-suite-
 ### Parallel run
 
 With [pytest-xdist](https://pypi.org/project/pytest-xdist/) installed
-(`pip install --user pytest-xdist`), the same suite runs across all cores:
+(`pip install --user pytest-xdist`), the default suite runs across all cores.
+The equivalent explicit invocation is:
 
 ```
 PYTHONDONTWRITEBYTECODE=1 python3 -B -m pytest -q -n auto --dist loadgroup
@@ -126,8 +131,42 @@ PYTHONDONTWRITEBYTECODE=1 python3 -B -m pytest -q -n auto --dist loadgroup
 Use `--dist loadgroup`. It spreads tests one by one and keeps tests marked
 `xdist_group` on one worker. `tests/test_emission_scale.py` uses those marks
 so each module-scoped scale run happens once per session, not once per
-worker. On a 20-thread workstation the serial run takes about 6 minutes and
-the parallel run about 65 seconds. The two commands select the same tests.
+worker. The default and explicit commands select the same tests.
+
+For serial debugging, use `CORTEX_PYTEST_SERIAL=1` (works with or without xdist):
+
+```
+CORTEX_PYTEST_SERIAL=1 PYTHONDONTWRITEBYTECODE=1 python3 -B -m pytest -q
+```
+
+With xdist installed, `-n 0` is also an explicit serial escape. Explicit `-n`
+choices, distribution options and `-p no:xdist` are preserved, including options
+from ini `addopts` and `PYTEST_ADDOPTS`. Collection-only runs remain serial.
+`tests/conftest.py` marks the running parent with `CORTEX_PYTEST_CHILD=1`;
+inherited nested pytest invocations and xdist workers never auto-spawn workers.
+An explicit child `-n` remains an explicit choice; the existing launcher children
+use no such flags. The parent marker is restored after pytest returns.
+
+A 2026-10-21 baseline on a 20-CPU workstation (Python 3.12.13, pytest 9.0.2,
+pytest-xdist 3.8.0) measured 560.120 s serially and 100.026 s in parallel,
+including pytest shutdown and temporary-directory cleanup. Both runs reported
+8,057 passed and 133 skipped (8,190 collected). The measurement used fresh
+HOME/XDG roots outside Git repositories, `-p no:cacheprovider --durations=20`,
+and the repository's `.venv/bin/python -B` with `PYTHONDONTWRITEBYTECODE=1`.
+On 2026-10-22, after the URL-redaction prefilter, the exit-aware command wait
+and the concurrent launcher matrices, the plain default command took about
+62 s on the same workstation (four runs, 61.2–62.2 s, 20 or 16 workers alike).
+These are development measurements, not release qualification or a timing SLA.
+Benchmark before/after runs only on a stable checkout: concurrent source edits
+can change test selection and invalidate package stamps as well as comparisons.
+
+The isolated-launcher regression runs its two complete qualification-binding
+matrices concurrently, each with separate private HOME/XDG/TMPDIR directories.
+It still checks both startup forms, the pass/fail exit-propagation canaries, and
+both real child exit codes; each child remains serial with its existing timeout.
+Do not put unconditional xdist flags in ini `addopts`: that breaks the optional
+plugin fallback and can multiply workers inside nested pytest subprocesses.
+
 Without pytest-xdist, the serial command still works and the `xdist_group`
 marker has no effect.
 

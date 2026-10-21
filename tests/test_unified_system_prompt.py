@@ -42,7 +42,7 @@ def test_both_engines_receive_policy_specific_prompt_before_the_same_role_text(t
     assert codex["systemPrompt"].split("\n\n# Cortex tool cheat sheet")[0] == "Role text."
     assert codex["cortexNativeContext"] is False
     assert claude["systemPrompt"] == cortex_system_prompt(role, str(tmp_path), native_tools=False).rstrip() + "\n\nRole text."
-    assert codex["cortexBaseInstructions"] == cortex_system_prompt(role, str(tmp_path))
+    assert codex["cortexBaseInstructions"] == cortex_system_prompt(role, str(tmp_path), code_mode=True)
 
 
 def _skill(base, rel, name, description=None):
@@ -351,8 +351,9 @@ def test_session_metadata_selects_access_class_and_native_policy(tmp_path, engin
                                                                 native, role_id, access_class):
     meta = _session_new_meta_for(engine, version, "Role text.", role="worker",
                                 role_id=role_id, project_root=str(tmp_path), environ={})
+    # Only Codex runs in code mode; ``native`` marks the Codex row here.
     base = cortex_system_prompt("worker", str(tmp_path), environ={}, access_class=access_class,
-                                native_tools=native)
+                                native_tools=native, code_mode=native)
     assert meta[key] == (base.rstrip() + "\n\nRole text." if not native else base)
 
 
@@ -572,7 +573,8 @@ def test_session_metadata_carries_the_selected_edition(tmp_path, edition, role):
     expected = int(edition)
     assert claude["systemPrompt"].startswith(cortex_system_prompt(
         role, str(tmp_path), environ={}, native_tools=False, edition=expected).rstrip())
-    assert codex["cortexBaseInstructions"] == cortex_system_prompt(role, str(tmp_path), environ={}, edition=expected)
+    assert codex["cortexBaseInstructions"] == cortex_system_prompt(role, str(tmp_path), environ={}, edition=expected,
+                                                                   code_mode=True)
     assert sent_prompt_edition(claude) == sent_prompt_edition(codex) == expected
     from cortex_runtime.engine.opencode_adapter_acp import build_agent_prompt
 
@@ -589,3 +591,77 @@ def test_native_base_prompt_metadata_records_no_edition(tmp_path):
     assert sent_prompt_edition(None) is None and sent_prompt_edition({"systemPrompt": {"append": "x"}}) is None
     assert rendered_prompt_edition("# Cortex session\n\nIntro.\n\n# Unknown\n") is None
     assert rendered_prompt_edition("Role text.\n\n# How to work\n") is None
+
+
+#: The rules every engine receives in both editions: Claude kept to them
+#: unprompted, Codex did not once its own base prompt was replaced.
+_SHARED_ECONOMY_RULES = (
+    "Act once you know enough for the next step.",
+    "Do not re-read a file, report page or skill you already read in this session unless it may have changed",
+    "A trigger matches when your next action is the one it names, not when a skill's topic merely looks related",
+    "Reading a matching skill is part of the work, not an optional extra.",
+    "Compaction does not end the work: continue from the summarized state without redoing completed steps.",
+    "Do not add approval steps, warnings or checklists for hypothetical risks.",
+)
+_CODE_MODE_ONLY = ("`ALL_TOOLS`", "Promise.allSettled", "Cortex tool cheat sheet")
+
+
+@pytest.mark.parametrize("edition", [1, 2])
+@pytest.mark.parametrize("role,access_class", _VARIANTS)
+@pytest.mark.parametrize("native_tools,code_mode", [(False, False), (True, False), (True, True)])
+def test_every_engine_gets_the_shared_working_economy_rules(edition, role, access_class, native_tools, code_mode):
+    text = cortex_system_prompt(role, None, environ={}, access_class=access_class, native_tools=native_tools,
+                                edition=edition, code_mode=code_mode)
+    for rule in _SHARED_ECONOMY_RULES:
+        assert rule in text, rule
+    assert "make routine" in text.lower()
+    assert "record the assumption" in text or "state each assumption" in text
+    assert ("Orient only as far as the plan needs" in text) == (role == "coordinator")
+    assert ("Do not add tests for low-impact, reversible changes" in text) == (role == "worker" and access_class == "write")
+    assert "Afterwards, recover the exact assignment" not in text
+    for marker in _CODE_MODE_ONLY:
+        assert (marker in text) == code_mode, marker
+
+
+@pytest.mark.parametrize("edition", [1, 2])
+@pytest.mark.parametrize("role,access_class", _VARIANTS)
+def test_code_mode_swaps_only_the_schema_tool_search_and_parallel_lines(edition, role, access_class):
+    plain = cortex_system_prompt(role, None, environ={}, access_class=access_class, edition=edition)
+    code = cortex_system_prompt(role, None, environ={}, access_class=access_class, edition=edition, code_mode=True)
+    assert "read its full advertised description and argument schema" in plain
+    assert "read its full advertised description and argument schema" not in code
+    assert "engine's tool search" not in code
+    assert "If a call fails validation, correct the arguments from the error once." in code
+    assert "Put independent calls in one `exec` with `await Promise.allSettled([...])`" in code
+    plain_lines = set(plain.splitlines())
+    code_lines = set(code.splitlines())
+    changed = {line for line in plain_lines ^ code_lines}
+    swapped = ("Before the first call to any tool", "If a tool you need is not in your list", "Code mode lists",
+               "Put independent calls in one `exec`")
+    assert all(line.startswith(tuple("- " + prefix for prefix in swapped)) for line in changed), changed
+
+
+@pytest.mark.parametrize("engine,version,key", [
+    ("claude-agent-acp", "0.78.0", "systemPrompt"),
+    ("codex-acp", "1.13.0", "cortexBaseInstructions"),
+])
+def test_only_codex_sessions_receive_the_code_mode_lines(tmp_path, engine, version, key):
+    meta = _session_new_meta_for(engine, version, "Role text.", role="worker", project_root=str(tmp_path),
+                                 environ={})
+    for marker in ("`ALL_TOOLS`", "Promise.allSettled"):
+        assert (marker in meta[key]) == (engine == "codex-acp")
+    from cortex_runtime.engine.opencode_adapter_acp import build_agent_prompt
+
+    agent_prompt = build_agent_prompt("Role text.", role="worker", project_root=str(tmp_path), environ={})
+    assert "`ALL_TOOLS`" not in agent_prompt and "Promise.allSettled" not in agent_prompt
+    assert "Compaction does not end the work" in agent_prompt
+
+
+def test_code_mode_attached_server_section_drops_the_tool_search_line():
+    servers = [{"name": "codebase-memory-mcp",
+                "allowed_tools": ["list_projects", "search_graph", "trace_path", "get_code_snippet"]}]
+    plain = attached_servers_section(servers, "/workspace/project")
+    code = attached_servers_section(servers, "/workspace/project", code_mode=True)
+    assert "engine's tool search" in plain
+    assert "engine's tool search" not in code
+    assert code == plain.split("\n\nIf a tool of an attached server")[0]

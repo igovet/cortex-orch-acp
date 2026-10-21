@@ -456,6 +456,16 @@ This is an instruction and advertised
 contract, not proof that either model complies in a live turn. See the
 [role delivery contract](docs/features/roles-and-delegation/index.md#instruction-delivery).
 
+Every engine's prompt also carries the working-economy rules that Codex's own
+base prompt states and Claude follows unprompted: act once you know enough,
+do not re-read material already read or repeat a successful call, read a
+matching skill once per session, continue after a compaction without redoing
+work, make routine choices yourself, and keep a writing worker's tests to the
+change. Codex sessions additionally get code-mode lines (batch independent
+calls in one `exec`, take arguments from the schema-derived cheat sheet, which
+now covers every offered Cortex tool, instead of querying `ALL_TOOLS`). See
+[working economy and code mode](docs/features/unified-system-prompt/index.md#working-economy-and-code-mode).
+
 ## Install
 
 ### Paseo
@@ -506,7 +516,13 @@ Git installs run their declared preparation hook. Local directory installs use t
 
 The Paseo plugin shows per-worker context and token usage on worker cards. It does not add a separate provider plan-usage button.
 
-In Paseo's coordinator conversation, worker cards stay compact: role, status, task title, the actual engine · model · effort route, at most one fixed attention category (never the failure text itself), labelled usage and an **Open worker** action, with a uniform outline and no animation; a status transition is announced once with the worker's identity. A worker's terminal summary and its checks (dispositions, blockers, weak-evidence markers) appear only in the opened Workers tab for that exact attempt; the coordinator card keeps just the verdict and open-issue count, including when an older saved session is replayed. A failed assignment remains Failed even after publishing a report or later replan/Stop cleanup; successful work with unresolved checks reads Completed with issues; clean success stays Completed and cancellation stays Cancelled. Coverage is no-paid automated tests and a fixture rendering, not Paseo Desktop evidence. See [bounded ACP event projections](docs/features/observability/index.md#bounded-acp-event-projections).
+Asynchronous worker cards do not break coordinator prose into separate rows.
+Text streams immediately, unchanged; card insertions and updates arriving during
+one logical message wait until its next timeline/message boundary or turn end.
+Cancellation, errors and completed history loads also release pending cards in
+arrival order. Previously saved split message identities are not rewritten.
+
+In Paseo's coordinator conversation, worker cards stay compact: role, status, task title, the actual engine · model · effort route, at most one fixed attention category (never the failure text itself), labelled usage and an **Open worker** action, with a neutral border that no state highlights (keyboard focus underlines **Open worker** instead); while a worker is executing only its small marker and status icon pulse gently (static under reduced motion, and the card itself never animates); a status transition is announced once with the worker's identity. A worker's terminal summary and its checks (dispositions, blockers, weak-evidence markers) appear only in the opened Workers tab for that exact attempt; the coordinator card keeps just the verdict and open-issue count, including when an older saved session is replayed. A failed assignment remains Failed even after publishing a report or later replan/Stop cleanup; successful work with unresolved checks reads Completed with issues; clean success stays Completed and cancellation stays Cancelled. The Workers tab also shows, collapsed above the Result, the assignment prompt the runtime sent to the selected attempt (its dispatched brief and acceptance line, never system instructions), marked sent only when the runtime's per-attempt sent record matches that exact text and otherwise labelled queued, unrecorded, withheld or unavailable; the Result paragraph is no longer repeated by its identical activity row. Coverage is no-paid automated tests and, for the earlier card and tab behavior, a fixture rendering, not Paseo Desktop evidence. See [bounded ACP event projections](docs/features/observability/index.md#bounded-acp-event-projections).
 Post-result releases with no reported tokens use existing usage-record columns,
 so existing stores need no schema migration. Paseo omits their false token alarm;
 genuine unknown/failed calls remain visible. Missing usage is not zero/free.

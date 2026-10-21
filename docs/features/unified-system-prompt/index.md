@@ -104,10 +104,56 @@ substance of the inlined `tool-discipline`, `code-and-evidence` and
 unchanged.
 
 Rendered on one Linux host with no working directory and no project skills,
-edition 1 is 6,151 to 7,703 characters and edition 2 is 7,185 to 9,568
-characters, depending on role and native-tool policy. Size ceilings for edition 1 are in `tests/test_prompt_drift.py`; for
+edition 1 is 6,779 to 8,915 characters and edition 2 is 7,767 to 10,249
+characters, depending on role and native-tool policy; the Codex code-mode
+variant is 7,300 to 9,168 and 8,320 to 10,533. Size ceilings for edition 1 are in `tests/test_prompt_drift.py`; for
 edition 2 they are in `tests/test_first_prompt_size_and_dedup.py`. Real-model
 behavior with edition 2 has not been observed in a paid live check.
+
+## Working economy and code mode
+
+Both editions give every engine and role the same working-economy rules:
+
+- act once you know enough for the next step; do not re-read a file, report
+  page or skill already read in the session unless it may have changed, and do
+  not repeat a call that already succeeded;
+- a conditional skill's trigger matches when the next action is the one it
+  names, not when the skill's topic merely looks related; reading a matching
+  skill stays part of the work, once per session and again only after a
+  compaction;
+- compaction does not end the work: continue from the summarized state without
+  redoing completed steps, and recover from the runtime only an exact
+  assignment detail or evidence the summary lacks;
+- no approval steps, warnings or checklists for hypothetical risks (the
+  authorization rules themselves are unchanged);
+- routine choices are made and recorded rather than asked about, and the
+  coordinator orients only as far as the plan needs, reconciling worker reports
+  instead of repeating their work;
+- a writing worker widens testing only when new changes, failures or doubts
+  justify it, and adds no tests for low-impact, reversible changes or tests that
+  only restate the implementation.
+
+Codex's own base prompt states these and Claude kept to them without being
+told; once Cortex replaced the Codex prompt, Codex sessions did not. Retained
+project-local stores read on 2026-10-22 showed, on the same seeded tasks,
+1.9 times as many tool calls for Codex as for Claude (10.6 against 5.5 per
+attempt), and over all current-prompt attempts 3.9 times the skill reads per
+attempt, 121 `context-compaction` skill reads against 19 observed compactions,
+and Codex coordinators reading 3.5 times the reports. The same Codex failed-call
+rate (2.6% against Claude's 3.4%) shows argument guessing was not the main cost.
+Whether these rules reduce live Codex actions has not been observed in a paid
+live check.
+
+Codex sessions render with `code_mode=True`, which swaps three tool lines and
+changes nothing else. Code mode lists each nested tool by name and description,
+and its `ALL_TOOLS` array returns only those two fields; in 150 retained Codex
+rollouts 10% of `exec` calls only queried it, 57% carried at most one tool call
+and 9% used `Promise.all`. The code-mode lines therefore say not to query
+`ALL_TOOLS` for a listed tool, to take Cortex arguments from the
+[tool cheat sheet](../codex-engine/index.md#mcp-bridge) and correct a failed
+validation once from the error, and to put independent calls in one `exec` with
+`await Promise.allSettled([...])`; the generic "read the full schema first" and
+tool-search lines are omitted. Claude and OpenCode prompts never contain them.
 
 ## Why
 
@@ -288,7 +334,8 @@ search operations). Use a tool only from the server that advertises it; do not
 invent a Cortex search tool or assume a tool belongs to another server. The
 prompt names the `mcp__<server>__<tool>` form when the engine exposes that
 naming convention, and directs workers to use engine tool search for an attached
-server tool absent from their available list.
+server tool absent from their available list. Codex code mode already lists
+every attached tool, so its sessions do not receive that line.
 
 For structural code questions (definitions, callers, dependencies, impact and
 architecture), use an available code index first and inspect the pointed-to

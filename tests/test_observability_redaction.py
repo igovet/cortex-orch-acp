@@ -30,6 +30,43 @@ def _isolated_environ(tmp_path):
     return dict(XDG_STATE_HOME=str(state), HOME=str(home))
 
 
+@pytest.mark.parametrize("text", [
+    "", "ordinary prose", "@" + "a" * 10_000, "a" * 10_000,
+    "a" * 10_000 + "://host", "a" * 10_000 + "://user:pass@host",
+    "https://user:pass@example.com/a",
+    "HTTPS://user:pass@host ftp://other:pass@host",
+    "1suffix+.-://user:pass@host",
+    "https://host/path@tail", "https://user name@host",
+    "://user:pass@host", "https:/user:pass@host",
+    "https://user:pass@host\nhttps://next:pass@host",
+    "https://[REDACTED]@host", "secret=example-private-value",
+], ids=["empty", "prose", "long-at-only", "long-ordinary", "long-scheme-only",
+        "long-url", "userinfo", "multiple-schemes", "suffix-scheme", "path-at",
+        "userinfo-space", "missing-scheme", "missing-slash", "multiline",
+        "redacted", "other-credential"])
+def test_url_prefilter_is_identical_to_unconditional_regex(text):
+    expected = redact._URL_CREDENTIALS.sub(r"\1[REDACTED]@", text)
+    assert redact._scrub_url_credentials(text) == expected
+    assert redact._scrub_url_credentials(expected) == expected
+
+
+@pytest.mark.parametrize("scrubber", [redact.scrub_text, redact.scrub_display_text])
+@pytest.mark.parametrize("text", ["a" * 100_000, "a" * 100_000 + "@",
+                                  "a" * 100_000 + "://host"],
+                         ids=["ordinary-long", "at-only-long", "scheme-only-long"])
+def test_url_prefilter_skips_only_url_pass_without_both_markers(monkeypatch, scrubber, text):
+    class NoURLMatch:
+        def sub(self, *args):
+            pytest.fail("URL regex cannot match without both required markers")
+    monkeypatch.setattr(redact, "_URL_CREDENTIALS", NoURLMatch())
+    # Other credential rules and truncation must still run on the fast path.
+    value = text + " secret=example-private-value"
+    result = scrubber(value, max_chars=len(value))
+    assert "example-private-value" not in result
+    assert "[REDACTED]" in result
+    assert "truncated_from" in scrubber(value, max_chars=40)
+
+
 def test_scrub_text_redacts_url_bearer_and_long_secret_but_keeps_short_ids():
     text = f"connecting to {FAKE_URL} using {FAKE_BEARER} secret={FAKE_SECRET} task_id=t_1234567890ab status=ok"
     scrubbed = redact.scrub_text(text)

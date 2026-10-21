@@ -867,7 +867,8 @@ class EngineSessionManager:
                 role_id=self._mcp_role_id,
                 code_index_project=None,
                 native_search=self._record.engine != "claude-agent-acp",
-                worker_servers=self._host_mcp_servers)
+                worker_servers=self._host_mcp_servers,
+                code_mode=self._record.engine == "codex-acp")
         with self._lock:
             result = self._client.call("session/new", params, timeout=self._call_timeout)
             wire_session_id = result.get("sessionId")

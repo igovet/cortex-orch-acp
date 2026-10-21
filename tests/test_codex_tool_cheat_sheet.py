@@ -12,6 +12,7 @@ import json
 
 import pytest
 
+from cortex_runtime.channeled_tools import channeled_base_tools
 from cortex_runtime.delegation import codex_tool_cheat_sheet as cheat_sheet_module
 from cortex_runtime.delegation import mcp_tools
 from cortex_runtime.delegation.codex_tool_cheat_sheet import (
@@ -25,7 +26,7 @@ def test_cheat_sheet_renders_required_fields_and_example_call():
     text = codex_tool_cheat_sheet("worker")
     assert text is not None
     assert "result_submit" in text
-    assert "await cortex.result_submit(" in text
+    assert "await tools.mcp__cortex__result_submit(" in text
     # result_submit's required fields (report, summary, checks, request_key)
     # must all appear in its rendered entry.
     for field in ("report", "summary", "checks", "request_key"):
@@ -44,12 +45,15 @@ def test_cheat_sheet_matches_stage_scoped_result_schema(stage, unified):
     text = codex_tool_cheat_sheet("worker", role_id=role_id, stage=stage)
     assert text is not None
     assert len(text) <= CHEAT_SHEET_BUDGET_CHARS
-    assert "- result_submit: required=" + ", ".join(schema["required"]) in text
+    entry = next(line for line in text.splitlines() if line.startswith("- result_submit: required="))
+    required_part = entry.removeprefix("- result_submit: required=").split("; optional: ")[0]
+    positions = [required_part.index(field) for field in schema["required"]]
+    assert positions == sorted(positions)
     example_line = next(
         line.strip() for line in text.splitlines()
-        if line.strip().startswith("await cortex.result_submit(")
+        if line.strip().startswith("await tools.mcp__cortex__result_submit(")
     )
-    example = json.loads(example_line.removeprefix("await cortex.result_submit(").removesuffix(");"))
+    example = json.loads(example_line.removeprefix("await tools.mcp__cortex__result_submit(").removesuffix(");"))
     assert set(example) == set(schema["required"])
     assert ("verdict" in example) == (stage == "review")
     if stage == "review":
@@ -100,10 +104,11 @@ def test_cheat_sheet_records_an_explicit_omission_note_when_truncated():
     # A tight budget still records an explicit omission count rather than
     # silently dropping tools out of the render.
     full = codex_tool_cheat_sheet("worker")
-    tight = codex_tool_cheat_sheet("worker", budget_chars=600)
+    # The header alone is about 570 characters; leave room for a few entries.
+    tight = codex_tool_cheat_sheet("worker", budget_chars=900)
     assert tight is not None
     assert len(tight) < len(full)
-    assert len(tight) <= 600
+    assert len(tight) <= 900
     assert "truncated" in tight or "omitted" in tight
 
 
@@ -111,13 +116,13 @@ def test_only_codex_acp_sessions_receive_the_cheat_sheet_marker():
     codex_meta = _session_new_meta_for("codex-acp", "1.12.0", "Be helpful.")
     assert codex_meta is not None
     assert "Cortex tool cheat sheet" in codex_meta["systemPrompt"]
-    assert "await cortex." in codex_meta["systemPrompt"]
+    assert "await tools.mcp__cortex__" in codex_meta["systemPrompt"]
 
     claude_meta = _session_new_meta_for("claude-agent-acp", "0.78.0", "Be helpful.")
     assert claude_meta is not None
     claude_system_prompt = claude_meta["systemPrompt"]
     assert "Cortex tool cheat sheet" not in claude_system_prompt
-    assert "await cortex." not in claude_system_prompt
+    assert "await tools.mcp__cortex__" not in claude_system_prompt
 
 
 def test_cheat_sheet_absent_from_claude_native_switch_disabled_variant():
@@ -127,4 +132,46 @@ def test_cheat_sheet_absent_from_claude_native_switch_disabled_variant():
     rendered = claude_meta["systemPrompt"]
     rendered_text = rendered if isinstance(rendered, str) else str(rendered)
     assert "Cortex tool cheat sheet" not in rendered_text
-    assert "await cortex." not in rendered_text
+    assert "await tools.mcp__cortex__" not in rendered_text
+
+
+@pytest.mark.parametrize("role_kind,role_id,stage", [
+    ("coordinator", None, None),
+    ("worker", "worker-backend-dev", None),
+    ("worker", "worker-backend-dev", "review"),
+    ("worker", "worker-explorer", None),
+    ("worker", "worker-senior-consultant", None),
+])
+def test_cheat_sheet_covers_the_whole_channel_catalogue(role_kind, role_id, stage):
+    """Every tool the channel's tools/list serves gets a line, with its
+    optional fields, so code mode never has to guess or query ALL_TOOLS."""
+    catalogue = list(channeled_base_tools()) + mcp_tools.tool_definitions(role_kind, role_id=role_id, stage=stage)
+    text = codex_tool_cheat_sheet(role_kind, role_id=role_id, stage=stage)
+    assert text is not None
+    assert len(text) <= CHEAT_SHEET_BUDGET_CHARS
+    assert "truncated" not in text
+    lines = {line.split(":", 1)[0].removeprefix("- "): line for line in text.splitlines() if line.startswith("- ")}
+    assert set(lines) == {tool["name"] for tool in catalogue}
+    for tool in catalogue:
+        schema = tool.get("inputSchema") or {}
+        optional = [field for field in schema.get("properties") or {} if field not in (schema.get("required") or [])]
+        if optional:
+            tail = lines[tool["name"]].split("; optional: ", 1)[1]
+            assert all(field in tail for field in optional), tool["name"]
+    examples = [line for line in text.splitlines() if line.startswith("  await tools.mcp__cortex__")]
+    assert len(examples) == min(6, len(catalogue))
+
+
+def test_cheat_sheet_renders_enums_and_array_item_fields():
+    text = codex_tool_cheat_sheet("worker", role_id="worker-backend-dev")
+    assert text is not None
+    assert "- project_git: required=kind=status|diff, request_key" in text
+    assert "edits[{old_string, new_string, replace_all?: boolean}]" in text
+    # checks[].command is an argv array; a name-only line let a live Codex
+    # worker send it as a string (refused, 2026-10-22).
+    assert "command?: string[]" in text
+    assert "- command_run: required=argv: string[], request_key; optional: cwd, timeout_seconds: integer" in text
+    schema = next(tool["inputSchema"] for tool in mcp_tools.tool_definitions("worker", role_id="worker-backend-dev")
+                  if tool["name"] == "result_submit")
+    outcomes = schema["properties"]["checks"]["items"]["properties"]["outcome"]["enum"]
+    assert "outcome=" + "|".join(outcomes) in text

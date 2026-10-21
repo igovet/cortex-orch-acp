@@ -547,7 +547,12 @@ def _run_command_process(store, channel, launch, fds, output, effects, limit, *,
                     failure = 'authority_revoked'; break
                 if policy and _command_policy(db, channel.task_id) != policy:
                     failure = 'execution_policy_changed'; break
-            time.sleep(.05)
+            # Wake promptly on exit, but recheck stop/authority/policy at the
+            # same bounded interval as before for a still-running child.
+            try:
+                proc.wait(timeout=.05)
+            except subprocess.TimeoutExpired:
+                pass
     finally:
         # Includes launch-transaction/observation failure after Popen succeeded.
         if proc is not None:

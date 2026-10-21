@@ -7,7 +7,7 @@
 1. Worker marker and role; one status icon plus full status label.
 2. Task title, with up to two lines at standard size.
 3. Actual engine · model route, wrapping as needed; missing route reads “Route unavailable”.
-4. Measured usage, explicitly labeled, and visible **Open worker ›** action.
+4. Measured usage, explicitly labeled. The whole card opens the worker; there is no visible **Open worker ›** label.
 5. At most one short category/action prompt for an attention state.
 
 Show only the exact issue count when complete data is already available. Usage must communicate partial/unknown coverage. Do not show summary text, check rows/names, evidence-gap explanations, blockers copied from individual checks, receipts, commands, transcript, full failureReason or route-selection provenance. No inline expansion or hover popover may reveal those details.
@@ -18,11 +18,11 @@ Show only the exact issue count when complete data is already available. Usage m
 - Map only authoritative assignment state. Use “Needs input” only for a proven user-input wait; otherwise use “Waiting”. Unknown status remains “Status unavailable”; a failed read does not mean failed worker.
 - Terminal state wins over obsolete active/wait markers for that identity. Completed-with-issues, cancelled and interrupted remain distinct.
 - Disabled card says “Worker unavailable” and exposes disabled semantics while remaining readable.
-- Hover/pressed use surface2 without movement; keyboard focus has a visible outline. No pulse or loop.
+- Hover/pressed use surface2 without movement. Keyboard focus uses the same surface2 fill as hover, never a card outline, ring or colored perimeter; no state highlights the card's border. While the worker is executing, only the worker marker and status icon pulse gently; the card, its text and border stay still, waits and settled states are static, and reduced motion shows a static indicator.
 - Missing context/tokens are not zero: show “Usage unavailable” only if neither is known. Context occupancy is labeled “Context”, never task progress or provider-plan usage.
 
 **Layout and accessibility**
-Use a uniform neutral 1-unit border and radius 8, no colored left stripe or status-colored fill. Respect host theme. Wrap and stack groups at narrow widths; keep full status/action labels visible and avoid horizontal scrolling. Keep one card action (no nested buttons). Accessible name includes full retained task title, role, status and “Open worker”. Keep visual, reading and focus order aligned, preserve user text scaling, and do not move focus during refresh. Meet measured 4.5:1 text and 3:1 meaningful icon/focus contrast in both themes.
+Use a uniform neutral 1-unit border and radius 8 that never changes color or width with focus, selection, press or status; no colored left stripe, status-colored fill or highlighted perimeter. Respect host theme. Wrap and stack groups at narrow widths; keep full status labels visible and avoid horizontal scrolling. Keep one card action (no nested buttons). Accessible name includes full retained task title, role, status and “Open worker”. Keep visual, reading and focus order aligned, preserve user text scaling, and do not move focus during refresh. Meet measured 4.5:1 text and 3:1 meaningful icon/focus contrast in both themes.
 
 ## Workers workspace tab: selected worker details
 **Purpose:** Provide the complete available result and retained activity for the exact selected assignment and attempt.
@@ -31,9 +31,10 @@ Use a uniform neutral 1-unit border and radius 8, no colored left stripe or stat
 1. Full retained assignment title.
 2. Role, actual engine/model route and authoritative status.
 3. Honest usage snapshot and explicit attempt selector.
-4. Terminal Result section, when a result exists.
-5. Checks section, when a result exists.
-6. Retained Activity/transcript with existing paging.
+4. Assignment prompt sent to the selected attempt, collapsed with a Show/Hide control.
+5. Terminal Result section, when a result exists.
+6. Checks section, when a result exists.
+7. Retained Activity/transcript with existing paging.
 
 **States and behavior**
 - No recorded assignments: “No worker assignments recorded yet.”
@@ -41,6 +42,8 @@ Use a uniform neutral 1-unit border and radius 8, no colored left stripe or stat
 - Read failure/unavailable permission: safe reason and retry-read action; do not show false empty success.
 - Failed refresh with retained content: keep history and mark it stale/read-failed.
 - Active attempt: show incremental activity; omit terminal sections until a result exists.
+- The assignment prompt is bound to the selected attempt: “Sent to this attempt” only when the runtime's sent record matches its exact text; otherwise it says queued, unrecorded (older history or no first prompt), withheld on mismatch, or unavailable. It shows the dispatched task text only, never runtime system instructions or current re-planned node text.
+- The Result paragraph is shown once; an identical `worker_result` Activity row of the same attempt is not repeated.
 - Result/check data is bound to the selected attempt. Do not attach a latest assignment summary to an older attempt or parse a truncated failureReason as checks.
 - Distinguish every check outcome, resolved-history marker, weak-evidence warning and blocker. A known empty list says “No checks reported”; absent check data says “Check details unavailable”.
 - Preserve cursor paging and “Load more history”; append without losing expansion/scroll. Do not auto-jump while the reader inspects older entries. Ignore out-of-order responses for a no-longer-selected attempt.

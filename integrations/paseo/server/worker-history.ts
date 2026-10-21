@@ -65,7 +65,7 @@ def usage_fallback_refs(db, task_id, execution_refs):
 `;
 
 const PYTHON = String.raw`
-import json, os, sqlite3, sys
+import hashlib, json, os, sqlite3, sys
 from urllib.parse import quote
 import re
 root, task_id, attempt_id, cursor, limit, assignment_cursor, assignment_ref = sys.argv[1], sys.argv[2], sys.argv[3] or None, int(sys.argv[4] or 0), min(max(int(sys.argv[5] or 200), 1), 200), sys.argv[6] or '', sys.argv[7] or None
@@ -74,6 +74,9 @@ root, task_id, attempt_id, cursor, limit, assignment_cursor, assignment_ref = sy
 compact = len(sys.argv) > 8 and sys.argv[8] == '1'
 # Worker-tab bound for one attempt's own summary text.
 SUMMARY_MAX_CHARS = 16000
+# Worker-tab bound for the assignment brief sent to one attempt. Runtime
+# dispatch already bounds it (16,000 characters); this guards older rows.
+PROMPT_MAX_CHARS = 32000
 db_path = root + '/.cortex/cortex.sqlite3'
 ${STORE_PYTHON_HELPERS}def process_identity_absent(row):
     """Return True only when the durable worker identity is provably gone."""
@@ -139,6 +142,87 @@ def project_checks(checks, legacy=False):
         **({'claimedOutcome': check['claimed_outcome']} if isinstance(check.get('claimed_outcome'), str) and check['claimed_outcome'].strip() else {}),
         **({'evidenceGap': check['evidence_gap']} if isinstance(check.get('evidence_gap'), str) and check['evidence_gap'].strip() else {})}
         for check in checks]
+def assignment_parts(request):
+    """(title block, brief, acceptance) exactly as the runtime composed the
+    assignment text of a worker's first prompt from its delegation_requested
+    payload (acp/orchestrating_runtime.py _provision_and_prompt_inner), or
+    None when the request does not carry that text."""
+    brief, acceptance, title = request.get('brief'), request.get('acceptance'), request.get('title')
+    if not isinstance(brief, str) or not brief or not isinstance(acceptance, str):
+        return None
+    title_block = title + '\n\n' if isinstance(title, str) and title and title not in brief else ''
+    return title_block, brief, acceptance
+def scrub_leaves(value):
+    if isinstance(value, str):
+        return scrub(value)
+    if isinstance(value, list):
+        return [scrub_leaves(item) for item in value]
+    if isinstance(value, dict):
+        return {key: scrub_leaves(item) for key, item in value.items()}
+    return value
+def scrub_brief(brief):
+    """A runtime brief is a JSON object: scrub its string values, not the
+    encoded text, so a redaction never breaks the structure the client
+    renders. Any other brief is scrubbed as plain text."""
+    try:
+        parsed = json.loads(brief)
+    except (TypeError, ValueError):
+        return scrub(brief)
+    if not isinstance(parsed, dict):
+        return scrub(brief)
+    return json.dumps(scrub_leaves(parsed), ensure_ascii=False)
+def attempt_prompt(db, task_id, attempt_row, request_rows, refs, active):
+    """The assignment text sent to one work attempt, bound by the runtime's
+    worker_brief_sent marker (SHA-256 of that exact text) for this attempt's
+    own refs. Content always comes from the immutable dispatch request,
+    never from current (possibly re-planned) node text. States: sent (a
+    marker matches), queued (no marker yet, attempt active), unrecorded (no
+    marker; older history or the attempt ended before its first prompt),
+    mismatch (markers exist but none matches; content withheld), unavailable
+    (no retained request text for this attempt)."""
+    candidates = []
+    for request_ref, payload in request_rows:
+        if payload.get('work_attempt_ref') == attempt_row['attempt_id'] or (
+                attempt_row['attempt_no'] == 1 and not payload.get('work_attempt_ref')):
+            parts = assignment_parts(payload)
+            if parts is not None:
+                candidates.append(parts)
+    if not candidates:
+        return {'state': 'unavailable'}
+    placeholders = ','.join('?' for _ in refs)
+    markers = []
+    for row in db.execute(f'''select payload_json,created_at from task_events where task_id=? and event_type='progress' and assignment_ref in ({placeholders}) and json_valid(payload_json) and json_extract(payload_json,'$.kind')='worker_brief_sent' order by id''', (task_id, *refs)):
+        try:
+            marker = json.loads(row['payload_json'])
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(marker, dict) or not isinstance(marker.get('assignment_sha256'), str):
+            continue
+        if marker.get('work_attempt_ref') not in (None, attempt_row['attempt_id']):
+            continue
+        markers.append((marker['assignment_sha256'], row['created_at']))
+    digest = lambda parts: hashlib.sha256(''.join((parts[0], parts[1], '\n\nAcceptance: ', parts[2])).encode('utf-8', 'surrogatepass')).hexdigest()
+    chosen, sent_at = None, None
+    for sha, created_at in markers:
+        chosen = next((parts for parts in candidates if digest(parts) == sha), None)
+        if chosen is not None:
+            sent_at = created_at
+            break
+    if markers and chosen is None:
+        return {'state': 'mismatch'}
+    if chosen is None:
+        chosen = candidates[-1]
+    title_block, brief, acceptance = chosen
+    brief = scrub_brief(brief)
+    out = {'state': 'sent' if sent_at else ('queued' if active else 'unrecorded'), 'brief': brief, 'acceptance': scrub(acceptance)}
+    if sent_at:
+        out['sentAt'] = sent_at
+    if title_block:
+        out['title'] = scrub(title_block.strip())
+    if len(brief) > PROMPT_MAX_CHARS:
+        out['brief'] = brief[:PROMPT_MAX_CHARS - 1] + '…'
+        out['truncated'] = True
+    return out
 try:
     db = sqlite3.connect('file:' + quote(db_path, safe='/') + '?mode=ro', uri=True)
     db.row_factory = sqlite3.Row
@@ -542,6 +626,20 @@ try:
                     attempt_result['completedAt'] = completed_at
                 if attempt_route is not None:
                     attempt_result['route'] = attempt_route
+                # The assignment text this exact attempt was sent: only for a
+                # read that selects a worker in the worker tab, never for a
+                # compact card read or the all-workers catalogue.
+                if not compact and (attempt_id or assignment_ref):
+                    request_rows = []
+                    for request_row in title_rows:
+                        try:
+                            request_payload = json.loads(request_row['payload_json'])
+                        except (TypeError, ValueError):
+                            continue
+                        if isinstance(request_payload, dict):
+                            request_rows.append((request_row['assignment_ref'], request_payload))
+                    active = str(attempt_result['status']).lower() in ('planned', 'pending', 'queued', 'running', 'in_progress', 'working', 'ready', 'provisioning', 'starting')
+                    attempt_result['prompt'] = attempt_prompt(db, task['id'], at, request_rows, refs, active)
                 attempt_out.append(attempt_result)
             # An exact assignment lookup can race delegate: the durable
             # assignment row is present before its first attempt is bound.

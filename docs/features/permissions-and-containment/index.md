@@ -169,9 +169,20 @@ work, and whether a deletion waits for the user.
 | `outside_command` (no sandbox) | consent card | consent card | runtime answers the card itself |
 | Declared deletion (`project_delete`, `command_delete`, native delete) | consent card | consent card | runtime answers the card itself |
 | Read-only/reviewer `command_run` (every read-only role, every mode) | read-only profile (`read_only`); cwd inside the task tree | read-only profile (`read_only`); any existing cwd | same as Development |
-| Automatic runtime verification | read-only profile (`read_only`); project read-only, git-ignored directories writable | same read-only profile | same read-only profile |
+| Automatic runtime verification | read-only profile (`read_only`); git-ignored directories writable, other project writes discarded with the check | same read-only profile | same read-only profile |
 | Engine jail and worker mode floor | unchanged | unchanged | jail unchanged; most permissive offered worker mode |
 | Channel, role, revocation, owner deny, review and completion gates | retained | retained | retained |
+
+Automatic runtime verification mounts the project as a private `--tmp-overlay` over its
+pinned read-only source (`sandbox.discard_project_writes`), with the git-ignored directories,
+private-name masks and git metadata guards bound on top as before. A check may therefore run a
+tool that rewrites a tracked file on every run (`next typegen` rewrites `next-env.d.ts`); the write
+lands in the overlay and is gone when the check ends, so the reviewed sources and revision never
+change. Observed on 2026-10-21: before this, such a check failed with `EROFS` in every access mode
+and after the user's consent. Support is probed once per process (bubblewrap 0.10+ with
+unprivileged overlayfs); without it the project mount stays plain read-only and the write is
+refused. No access mode, permission or user consent changes the verification profile, and the
+`verification_submit` contract tells the coordinator not to ask the user to authorize it.
 
 The read-only profile (receipts name it `read_only`; the Guarded writer profile is `restricted`
 and the host-writable Development/Auto profile is `development`) mounts the whole host read-only.

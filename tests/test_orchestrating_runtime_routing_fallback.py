@@ -285,6 +285,88 @@ def test_fallback_worker_prompt_rebuilds_project_docs_catalog(tmp_path):
         runtime.shutdown()
 
 
+def test_each_execution_attempt_records_the_exact_assignment_text_it_was_sent(tmp_path):
+    """The Workers tab binds the shown assignment prompt to an attempt only
+    through this record: written before the engine prompt, one per execution
+    attempt (a fallback is a new one), hashing exactly the title block, the
+    dispatch request's brief and its acceptance line inside that prompt."""
+    import hashlib
+    import json
+
+    store, task_id, connections, _entry_a, _entry_b = _setup_two_route_task(tmp_path)
+    prompts = []
+    seen_before_prompt = []
+
+    def coordinator_behavior(store, channel, session_ref, message, call_index):
+        context = mcp_tools.dispatch(store, channel, 'task_get_context', {})
+        if context['state'] == 'PLANNING':
+            mcp_tools.dispatch(store, channel, 'plan_submit', dict(plan=dict(tasks=[dict(
+                id='A', role='backend-dev', objective='Build **A** in Markdown', dependencies=[], scope=['.'], model='auto')],
+                verification=[['true']]), request_key='plan'))
+        else:
+            mcp_tools.dispatch(store, channel, 'synthesis_submit', dict(text='Reviewed and verified.'))
+        return PromptOutcome(StopReason.END_TURN, 'Visible coordinator text')
+
+    def markers():
+        with store.connection() as db:
+            rows = db.execute(
+                "SELECT assignment_ref, payload_json, consumed_by FROM task_events WHERE task_id=? "
+                "AND event_type='progress' AND payload_json LIKE '%worker_brief_sent%' ORDER BY id", (task_id,),
+            ).fetchall()
+        return [(row['assignment_ref'], json.loads(row['payload_json'])) for row in rows]
+
+    def record(channel, message):
+        prompts.append(message)
+        seen_before_prompt.append(any(payload['attempt_id'] == channel.attempt_id for _ref, payload in markers()))
+
+    def failed_worker(store, channel, session_ref, message, call_index):
+        record(channel, message)
+        raise EngineTurnFailed("transport_eof")
+
+    def fallback_worker(store, channel, session_ref, message, call_index):
+        record(channel, message)
+        _publish(store, channel, _assignment_title(store, channel), call_index)
+        return PromptOutcome(StopReason.END_TURN, "")
+
+    def router(store, channel, session_ref, launch, instructions):
+        if channel is None:
+            return None
+        if channel.role == "coordinator":
+            return coordinator_behavior
+        if launch.get('role_id') == 'worker-code-reviewer':
+            return fallback_worker
+        return fallback_worker if launch.get("route_override") is not None else failed_worker
+
+    runtime, engine = _make_runtime(store, router, connections)
+    try:
+        assert runtime.start_prompt(task_id, "s1", "Build A.", lambda update: None, threading.Event()) == StopReason.END_TURN
+        assert len(prompts) == 3
+        assert seen_before_prompt == [True, True, True]
+        recorded = markers()
+        assert len(recorded) == 3
+        assert len({payload['attempt_id'] for _ref, payload in recorded}) == 3
+        with store.connection() as db:
+            for assignment_ref, payload in recorded:
+                assert payload['kind'] == 'worker_brief_sent'
+                assert not delegation_events.is_meaningful(delegation_events.TaskEvent(
+                    0, task_id, 'progress', assignment_ref, '', payload, 'runtime', '', None, False))
+                request = json.loads(db.execute(
+                    "SELECT payload_json FROM task_events WHERE task_id=? AND event_type='delegation_requested' "
+                    "AND assignment_ref=?", (task_id, assignment_ref)).fetchone()['payload_json'])
+                title = request.get('title') or ''
+                text = (f"{title}\n\n" if title and title not in request['brief'] else '') \
+                    + request['brief'] + "\n\nAcceptance: " + request['acceptance']
+                assert payload['assignment_sha256'] == hashlib.sha256(text.encode('utf-8')).hexdigest()
+                assert payload['assignment_characters'] == len(text)
+                assert payload['work_attempt_ref'] == request['work_attempt_ref']
+                assert any(text in prompt for prompt in prompts)
+        # The failed attempt and its fallback were sent the same assignment.
+        assert recorded[0][0] == recorded[1][0]
+        assert recorded[0][1]['assignment_sha256'] == recorded[1][1]['assignment_sha256']
+    finally:
+        runtime.shutdown()
+
+
 def test_refusal_never_triggers_fallback_and_reports_explicitly(tmp_path):
     store, task_id, connections, entry_a, entry_b = _setup_two_route_task(tmp_path)
 

@@ -20,8 +20,8 @@ propose plans, analyze evidence and submit reports/results. Keep tool argument
 contracts in advertised schemas and property descriptions, never in skills or
 profile instructions. One narrow exception: the `codex-acp` tool cheat sheet
 (`src/cortex_runtime/delegation/codex_tool_cheat_sheet.py`) may restate required
-fields and an example call, because it is rendered mechanically from the live
-`tool_definitions()` schemas at session start and appended only to `codex-acp`
+and optional fields, enum values, array item fields and an example call, because it is rendered mechanically from the live
+channel tool schemas (`channeled_base_tools()` plus `tool_definitions()`) at session start and appended only to `codex-acp`
 sessions, whose code mode lists nested tools by name and description only. It
 is derived output, not authored prose: never hand-edit contract text into it,
 and it does not reintroduce model-driven delegation. Preserve all 23 profiles (22 specialists and the consultant)

@@ -7,7 +7,7 @@ import { readWorkerHistory, type WorkerHistory } from "../shared/worker-history.
 import { savedWorkerView, saveWorkerView, selectedWorker, selectedWorkerDetail, subscribeWorkerSelection } from "./worker-selection.js";
 import { workerSection } from "./worker-panel-status.js";
 import { historyCursor, mergeWorkerHistory, shouldPollWorkerHistory, shouldShowWorkerHistoryLoader, WORKER_HISTORY_POLL_MS } from "./worker-panel-refresh.js";
-import { groupWorkerEvents, type WorkerEvent } from "./worker-panel-events.js";
+import { groupWorkerEvents, withoutShownResult, type WorkerEvent } from "./worker-panel-events.js";
 import { presentTool } from "./worker-panel-tool.js";
 import { diffBlocks, diffLines, type DiffRow } from "./worker-panel-diff.js";
 import { chatToolIcon, groupToolRuns, isToolEvent, nativeRow, toolSemantics, type TranscriptItem } from "./worker-panel-groups.ts";
@@ -18,7 +18,11 @@ import { UsageMeter } from "./usage-meter.tsx";
 import { MarkdownText } from "./markdown-text.tsx";
 import { RunningCommands } from "./command-stop-panel.tsx";
 import { WorkerAttemptResult } from "./worker-result.tsx";
+import { attemptResultView } from "./worker-attempt-result.ts";
+import { WorkerAttemptPrompt } from "./worker-prompt.tsx";
 import { stoppedCommand } from "./command-stop.ts";
+import { isWorkerExecutingStatus } from "./worker-card-pulse.ts";
+import { WorkingPulse } from "./working-pulse.tsx";
 
 const styles = {
   title: { fontSize: 18, lineHeight: 24, fontWeight: "600" as const },
@@ -451,7 +455,10 @@ export function WorkerPanel({ theme, host, layout, workspaceId, agentId, navigat
       {attempt && assignment.attempts.length > 1 && <Text style={[styles.muted, { color: theme.colors.foregroundMuted }]}>Attempt {attempt.attemptNo} · {assignment.attempts.length} attempts</Text>}
     </Pressable>;
   };
-  const transcript = selectedAttempt ? groupWorkerEvents(selectedAttempt.events) : [];
+  // The Result section already shows this attempt's summary; its identical
+  // worker_result row is not repeated in the activity below.
+  const shownSummary = attemptResultView(selectedAttempt)?.summary ?? null;
+  const transcript = selectedAttempt ? groupWorkerEvents(withoutShownResult(selectedAttempt.events, shownSummary)) : [];
   const route = selectedAttempt?.route ?? selectedAssignment?.route;
   const selectedTerminal = workerTerminalState(selectedAssignment ? workerPopoverStatus(selectedAssignment) : selectedAttempt?.status, selectedAttempt?.checks);
   // A worker opened from its card whose durable history has no attempt yet
@@ -499,7 +506,11 @@ export function WorkerPanel({ theme, host, layout, workspaceId, agentId, navigat
           <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 7, alignItems: "center" }}>
             <Text style={[styles.muted, { color: selectedStatusColor }]}>{selectedAssignment ? workerDisplayName(selectedAssignment) : "worker"}</Text>
             {route && <><Text style={[styles.muted, { color: theme.colors.foregroundMuted }]}>·</Text><Text style={[styles.muted, { color: theme.colors.foregroundMuted }]}>{route.provider}</Text><Text style={[styles.muted, { color: theme.colors.foregroundMuted }]}>·</Text><Text style={[styles.muted, { color: theme.colors.foregroundMuted }]}>{workerModelDisplay(route)}</Text>{route.effort && <><Text style={[styles.muted, { color: theme.colors.foregroundMuted }]}>·</Text><Text style={[styles.muted, { color: theme.colors.foregroundMuted }]}>{route.effort} effort</Text></>}</>}
-            <Icon name={selectedTerminal.icon} size={13} color={selectedStatusColor} />
+            {/* Keyed by attempt: switching the selection remounts the
+                indicator, so a previous attempt's pulse never carries over. */}
+            <WorkingPulse key={selectedAttempt.id} active={selectedTerminal.label === "working" && isWorkerExecutingStatus(selectedAttempt.status)}>
+              <Icon name={selectedTerminal.icon} size={13} color={selectedStatusColor} />
+            </WorkingPulse>
             <Text style={[styles.muted, { color: selectedStatusColor }]}>· {selectedTerminal.label}{selectedTerminal.issueCount > 0 ? ` · ${selectedTerminal.issueCount} issue${selectedTerminal.issueCount === 1 ? "" : "s"}` : ""}</Text>
           </View>
           <UsageMeter context={selectedAttempt.context} tokens={selectedAttempt.tokens} theme={theme} />
@@ -518,6 +529,8 @@ export function WorkerPanel({ theme, host, layout, workspaceId, agentId, navigat
           && <RunningCommands theme={theme} workspaceId={workspaceId} agentId={agentId} assignmentRef={selectedAssignment.assignmentRef}
             active={workerSection(selectedAttempt.status, selectedAttempt.events.length) === "active"} />}
         {readNotice}
+        {/* The assignment text the runtime sent to this exact attempt. */}
+        <WorkerAttemptPrompt key={selectedAttempt.id} prompt={selectedAttempt.prompt} theme={theme} />
         {/* The terminal result and every check of this exact attempt: the
             detail the coordinator card no longer carries. */}
         <WorkerAttemptResult attempt={selectedAttempt} theme={theme} />

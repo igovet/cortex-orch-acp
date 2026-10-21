@@ -1315,10 +1315,10 @@ class Agent:
             if (cancel_event.is_set() and not outlives_turn) or self.transport is None:
                 return False
             if update.get("new"):
-                # A tool card is a timeline boundary.  Text emitted after a
-                # new tool call must receive a fresh messageId so Paseo never
-                # merges coordinator prose on either side of the tool.
-                if on_message_boundary is not None:
+                # Only a coordinator tool is a prose boundary. Worker cards
+                # arrive asynchronously and must not split its current message.
+                # Paseo's provider places those cards after the message.
+                if on_message_boundary is not None and not outlives_turn:
                     on_message_boundary()
                 notif = protocol.tool_call(
                     session_id, tool_call_id, update.get("title") or "Worker assignment",

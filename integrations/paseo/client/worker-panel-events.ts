@@ -50,6 +50,21 @@ function finalResponseRemainder(body: string, segments: string[]): string {
   return body.slice(offset).trimStart();
 }
 
+function sameProse(a: string, b: string): boolean {
+  return a.trim().replace(/\s+/g, " ") === b.trim().replace(/\s+/g, " ");
+}
+
+/** Activity without the `worker_result` rows whose text is exactly the
+ * summary the attempt's Result section already shows (whitespace aside).
+ * Only that one durable event type is considered and only an exact match is
+ * dropped, so any differing result text, the final response and other prose
+ * stay; repeated identical rows (live, replay or refresh) all collapse into
+ * the one Result. Stored history is never changed. */
+export function withoutShownResult(events: WorkerEvent[], shownSummary: string | null | undefined): WorkerEvent[] {
+  if (!shownSummary?.trim()) return events;
+  return events.filter((event) => !(event.type === "worker_result" && sameProse(event.text, shownSummary)));
+}
+
 /** One visible row per exact durable activity ref, at its first occurrence.
  * Unkeyed events stay separate: a matching tool name is not an identity. */
 export function groupWorkerEvents(events: WorkerEvent[]): TranscriptEntry[] {

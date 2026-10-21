@@ -24,17 +24,23 @@ def test_paseo_worker_timeline_row_uses_supported_agent_context_and_panel_naviga
     assert 'workerCardIdentity(item.data.title)' in source
     # The coordinator card is compact: no terminal summary or check list (the
     # worker tab shows them), no per-card result fetch, no status stripe and
-    # no pulse animation.
+    # no whole-card animation: only the executing indicator pulses
+    # (client/working-pulse.tsx), never the card, its text or its border.
     assert 'WorkerResultDetail' not in source
     assert 'useFallbackWorkerResult' not in source
     assert 'item.data.result' not in source
     assert 'borderLeftWidth' not in source
     assert 'setWorkerCardPulse' not in source and 'Animated' not in source
+    assert 'const pulsing = workerCardPulseActive(resolvedStatus, usage?.status);' in source
+    assert source.count('<WorkingPulse active={pulsing}>') == 2
     usage = (Path(__file__).parents[1] / "integrations" / "paseo" / "client" / "usage-meter.tsx").read_text(encoding="utf-8")
     assert 'limit: 1, compact: true' in usage
     display = (Path(__file__).parents[1] / "integrations" / "paseo" / "client" / "worker-display.ts").read_text(encoding="utf-8")
     assert 'return "cancelled"' in display and 'return "working"' in display
-    assert '{identity.title}' in source and '"Open worker"' in source
+    # The owner removed the visible Open worker label; the whole card opens
+    # the worker and only its accessible name (cardAccessibilityLabel) says so.
+    assert '{identity.title}' in source and '"Open worker"' not in source
+    assert 'cardAccessibilityLabel(' in source
     assert 'Open Workers' not in source
     assert 'routeParts.slice(1)' in display
     assert 'useAgent(props.agentId, (agent) => agent.workspaceId)' in source

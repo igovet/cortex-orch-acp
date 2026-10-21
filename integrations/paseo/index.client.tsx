@@ -12,11 +12,13 @@ import { resolveDurableWorkerCardStatus, workerCardIdentity, workerStatusPresent
 import { coalesced } from "./client/coalesce.ts";
 import { UsageMeter, useWorkerUsage } from "./client/usage-meter.tsx";
 import { isWorkerCardCallId, WORKER_ROW_KIND, WORKER_ROW_VERSION, workerRowData, workerRowId } from "./shared/worker-card-item.ts";
-import { cardAccessibilityLabel, cardAttention, cardIssueCount, cardStatusAnnouncement, cardStatusKey, shouldAnnounceCardStatus, type CardStatusSnapshot } from "./client/worker-card-model.ts";
+import { cardAccessibilityLabel, cardAttention, cardFrameStyle, cardIssueCount, cardStatusAnnouncement, cardStatusKey, shouldAnnounceCardStatus, type CardStatusSnapshot } from "./client/worker-card-model.ts";
 import { useEffect, useRef, useState } from "react";
 import { PluginErrorBoundary } from "./client/plugin-error-boundary.tsx";
 import { readableTextColor } from "./client/card-contrast.ts";
 import { createActivationGuard, createSpaceActivation } from "./client/card-keyboard.ts";
+import { workerCardPulseActive } from "./client/worker-card-pulse.ts";
+import { WorkingPulse } from "./client/working-pulse.tsx";
 
 const workerTimelineSchema = z.object({
   callId: z.string(),
@@ -69,6 +71,9 @@ function WorkerTimelineRow({ theme, layout, agentId, item, workspaceId, onOpen }
   const { usage, loaded } = useWorkerUsage(workspaceId, agentId, item.data.assignmentRef, hostWorking);
   const resolvedStatus = resolveDurableWorkerCardStatus(item.data.title, item.data.status, usage?.status, usage?.openIssues ?? item.data.openIssues, item.data.outcomeStatus);
   const presentation = workerStatusPresentation(resolvedStatus);
+  // Only the worker marker and status icon breathe, and only while the
+  // worker is executing; the card, its text and its border never animate.
+  const pulsing = workerCardPulseActive(resolvedStatus, usage?.status);
   const identity = workerCardIdentity(item.data.title);
   const issueCount = cardIssueCount(presentation.label, usage?.openIssues, item.data.openIssues);
   const attention = cardAttention(presentation.label, issueCount, item.data.failureReason);
@@ -80,7 +85,6 @@ function WorkerTimelineRow({ theme, layout, agentId, item, workspaceId, onOpen }
   const muted = readableTextColor(theme.colors.foregroundMuted, theme.colors.foreground, surfaces);
   const statusColor = presentation.tone === "muted" ? muted
     : readableTextColor(statusToneColor(presentation.tone, theme.colors), theme.colors.foreground, surfaces);
-  const actionColor = readableTextColor(theme.colors.accent, theme.colors.foreground, surfaces);
   const statusText = presentation.label.charAt(0).toUpperCase() + presentation.label.slice(1);
   const disabled = !workspaceId;
   const open = () => {
@@ -125,8 +129,10 @@ function WorkerTimelineRow({ theme, layout, agentId, item, workspaceId, onOpen }
   }, [statusKey, loaded]);
 
   // A worker is its own compact block in the coordinator's timeline: one
-  // whole-card action that opens the worker tab, a uniform neutral outline
-  // (no status stripe), status as icon + text, no result body, no motion.
+  // whole-card action that opens the worker tab, a fixed neutral 1-unit
+  // boundary that never changes colour or width in any state (no status
+  // stripe, no focus/selected/pressed perimeter), status as icon + text, no
+  // result body; the only motion is the executing indicator's pulse.
   return (
     <View style={{ alignSelf: "stretch" }}>
     <Pressable
@@ -136,23 +142,24 @@ function WorkerTimelineRow({ theme, layout, agentId, item, workspaceId, onOpen }
       accessibilityState={{ disabled }}
       disabled={disabled}
       onPress={() => { activateOnce(); }}
-      style={(state: PressableState) => ({ alignSelf: "stretch", marginVertical: layout.compact ? 6 : 8, borderWidth: 1, borderColor: theme.colors.border, borderRadius: 8,
-        backgroundColor: !disabled && (state.pressed || state.hovered) ? theme.colors.surface2 : theme.colors.surface1,
-        paddingHorizontal: 12, paddingVertical: layout.compact ? 8 : 10, gap: 6,
-        // Keyboard focus: an outline drawn outside the border, so the
-        // layout never shifts (react-native-web passes `focused`).
-        ...(state.focused ? { outlineWidth: 2, outlineStyle: "solid", outlineColor: actionColor, outlineOffset: 1 } : {}) }) as never}
+      // No focus ring or outline around the card, ours or the browser's:
+      // focus shows as the hover fill (the owner removed the card outline
+      // and the visible Open worker action).
+      style={(state: PressableState) => cardFrameStyle(state, { disabled, web: Platform.OS === "web", compact: layout.compact,
+        border: theme.colors.border, surface: theme.colors.surface1, hoverSurface: theme.colors.surface2 }) as never}
     >
       <View style={{ flexDirection: "row", flexWrap: "wrap", alignItems: "center", justifyContent: "space-between", columnGap: 8, rowGap: 4 }}>
         <View style={{ flexDirection: "row", alignItems: "center", gap: 6, flexShrink: 1, minWidth: 0 }}>
-          <View style={{ width: 20, height: 20, borderRadius: 6, alignItems: "center", justifyContent: "center", backgroundColor: theme.colors.surface2 }}>
-            <Icon name="Bot" size={14} color={muted} />
-          </View>
+          <WorkingPulse active={pulsing}>
+            <View style={{ width: 20, height: 20, borderRadius: 6, alignItems: "center", justifyContent: "center", backgroundColor: theme.colors.surface2 }}>
+              <Icon name="Bot" size={14} color={muted} />
+            </View>
+          </WorkingPulse>
           <Text numberOfLines={1} style={{ color: muted, fontSize: 12, lineHeight: 18, flexShrink: 1, minWidth: 0 }}>{identity.role}</Text>
         </View>
         {/* Colour plus an icon and a text label, so status is never carried by colour alone. */}
         <View style={{ flexDirection: "row", alignItems: "center", gap: 4, paddingHorizontal: 8, paddingVertical: 2, borderRadius: 999, borderWidth: 1, borderColor: theme.colors.border, backgroundColor: theme.colors.surface0 }}>
-          <Icon name={presentation.icon} size={12} color={statusColor} />
+          <WorkingPulse active={pulsing}><Icon name={presentation.icon} size={12} color={statusColor} /></WorkingPulse>
           <Text style={{ color: statusColor, fontSize: 12, lineHeight: 18, fontWeight: "600" }}>{statusText}{issueCount ? ` · ${issueCount}` : ""}</Text>
         </View>
       </View>
@@ -162,15 +169,10 @@ function WorkerTimelineRow({ theme, layout, agentId, item, workspaceId, onOpen }
         <View style={{ flexShrink: 0 }}><Icon name="CircleAlert" size={12} color={statusColor} /></View>
         <Text numberOfLines={1} ellipsizeMode="tail" style={{ color: statusColor, fontSize: 12, lineHeight: 18, flexShrink: 1, minWidth: 0 }}>{attention}</Text>
       </View>}
-      <View style={{ flexDirection: "row", flexWrap: "wrap", alignItems: "center", justifyContent: "space-between", columnGap: 12, rowGap: 4 }}>
-        <View style={{ flexShrink: 1, minWidth: 0 }}>
-          <UsageMeter context={usage?.context} tokens={usage?.tokens} theme={theme} mutedColor={muted} unavailableText={loaded ? "Usage unavailable" : undefined} />
-        </View>
-        <View style={{ flexDirection: "row", alignItems: "center", gap: 2, marginLeft: "auto" }}>
-          <Text style={{ color: disabled ? muted : actionColor, fontSize: 12, lineHeight: 18, fontWeight: "600" }}>{disabled ? "Worker unavailable" : "Open worker"}</Text>
-          {!disabled && <Icon name="ChevronRight" size={12} color={actionColor} />}
-        </View>
+      <View style={{ flexShrink: 1, minWidth: 0 }}>
+        <UsageMeter context={usage?.context} tokens={usage?.tokens} theme={theme} mutedColor={muted} unavailableText={loaded ? "Usage unavailable" : undefined} />
       </View>
+      {disabled && <Text style={{ color: muted, fontSize: 12, lineHeight: 18 }}>Worker unavailable</Text>}
     </Pressable>
     {/* Visually hidden but still in the accessibility tree: clipped to one
         pixel, never zero opacity, off-screen or display:none. */}

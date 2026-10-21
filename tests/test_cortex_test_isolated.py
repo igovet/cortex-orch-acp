@@ -1,4 +1,5 @@
 """Isolated launcher regressions; only fresh scratch and existing dependencies."""
+from concurrent.futures import ThreadPoolExecutor
 import json
 import os
 from pathlib import Path
@@ -82,9 +83,11 @@ def test_invalid_paths_modules_and_interpreters_refuse_before_subprocess(launch_
     if isinstance(error.value, SystemExit): assert error.value.code == 2
 
 
-def test_actual_fresh_python_startup_imports_and_pytest_exit_propagation(tmp_path):
+def test_actual_fresh_python_startup_imports_and_pytest_exit_propagation(tmp_path, pytestconfig):
     child = os.environ.get('CORTEX_TEST_LAUNCHER_CHILD')
     if child:
+        assert not hasattr(pytestconfig, "workerinput")
+        assert getattr(pytestconfig.option, "numprocesses", None) in (None, 0)
         import tempfile
         import cortex_runtime.storage.inspection as inspection
         expected = json.loads(os.environ['CORTEX_TEST_LAUNCHER_EXPECTED'])
@@ -121,8 +124,16 @@ def test_actual_fresh_python_startup_imports_and_pytest_exit_propagation(tmp_pat
     assert not list(scratch.rglob('*.pyc'))
 
     # Ordinary pytest adds checkout imports in-process via conftest; unlike the
-    # launcher it does not export them to children. Exercise both real startups.
-    for form in ('ordinary', 'isolated'):
+    # launcher it does not export them to children. Exercise both complete real
+    # startups concurrently, never sharing HOME/XDG/TMPDIR or mutable stores.
+    # Each child stays serial: no nested xdist worker fan-out.
+    def binding_matrix(form):
+        scratch = tmp_path / f'binding-{form}'
+        scratch.mkdir(mode=0o700)
+        expected = {}
+        for key, name in [('HOME','home'), ('XDG_CONFIG_HOME','config'), ('XDG_STATE_HOME','state'),
+                          ('XDG_CACHE_HOME','cache'), ('TMPDIR','tmp')]:
+            path = scratch/name; path.mkdir(mode=0o700); expected[key] = str(path)
         env = os.environ.copy()
         env.pop('PYTHONHOME', None)
         env.update(expected, PYTHONPATH=str(deps), PYTHONDONTWRITEBYTECODE='1', PYTEST_ADDOPTS='')
@@ -136,3 +147,10 @@ def test_actual_fresh_python_startup_imports_and_pytest_exit_propagation(tmp_pat
         assert result.returncode == 0, (f'{form} binding matrix exit={result.returncode}\n'
                                        + result.stdout + result.stderr)
         assert '[100%]' in result.stdout and 'failed' not in result.stdout and 'error' not in result.stdout
+        assert 'bringing up nodes' not in result.stdout
+        assert not list(scratch.rglob('*.pyc'))
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        matrices = [pool.submit(binding_matrix, form) for form in ('ordinary', 'isolated')]
+        for matrix in matrices:
+            matrix.result()  # Propagate either child's failure before this test can pass.

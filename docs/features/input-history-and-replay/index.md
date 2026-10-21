@@ -96,11 +96,19 @@ reconcilable durable ledger.
 
 Each coordinator prompt turn gets one assistant `messageId`. Every streamed
 `agent_message_chunk` for that turn carries the same id, so clients can append
-the chunks into one visible message. When a new tool call starts, Cortex rotates
-the id before sending later prose; a later continuation turn also receives a
-fresh id. This prevents Paseo from merging text across tool boundaries or
-separate turns. Worker-card replay preserves an already recorded terminal
-status; a later contradictory frame does not replace it. If replay finds an
+the chunks into one visible message. When a new coordinator tool call starts,
+Cortex rotates the id before sending later prose; a later continuation turn also
+receives a fresh id. Asynchronous worker cards, including their creation, are not
+coordinator prose boundaries and do not rotate it. The Paseo provider holds their
+insertions and updates until the current logical message ends at the next
+message/timeline boundary, turn end, load completion, cancellation, error or
+close. Text continues streaming immediately with its exact whitespace and Markdown;
+all held card events are then released in arrival order. The same projection runs
+on ACP history loads, including items received before session.opened. The durable
+journal is not reordered, and older split message identities or already persisted
+host rows are not heuristically joined. This prevents new worker-card splits
+without merging prose across real coordinator tool boundaries or separate turns.
+Worker-card replay preserves an already recorded terminal status; a later contradictory frame does not replace it. If replay finds an
 existing worker card still in progress, `session/load` corrects it only from
 durable assignment or process evidence, never from task status alone. Because
 chunks of one id are concatenated verbatim, a

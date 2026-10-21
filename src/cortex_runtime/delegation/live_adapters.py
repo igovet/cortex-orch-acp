@@ -401,7 +401,7 @@ def _session_new_meta_for(
 
             base_instructions = cortex_system_prompt(
                 role, project_root, environ=environ, consultant=consultant,
-                access_class=prompt_access_class(role, role_id), native_tools=True)
+                access_class=prompt_access_class(role, role_id), native_tools=True, code_mode=True)
         # Codex's code mode hides each tool's full argument schema behind
         # exec, showing only name+description; append a small, mechanically
         # schema-derived cheat sheet of required fields + an example call

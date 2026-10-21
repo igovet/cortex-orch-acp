@@ -13,7 +13,7 @@ Fresh ACP sessions durably initialize Development in the project store. The
 host-side MCP broker gives a writing worker's brokered `command_run` in a Development or
 Auto task host-writable mounts, with retained cwd/profile/policy receipts. Read-only roles and
 automatic verification always get the read-only host profile, so their project stays read-only
-(verification may write only git-ignored directories). Engine
+(verification writes git-ignored directories in place and discards its other project writes). Engine
 processes keep their existing jails. This is a
 trusted-local-development boundary, not adversarial containment from Docker or
 arbitrary owner code. Legacy/missing/unreadable state stays Guarded; explicit

@@ -86,6 +86,11 @@ EOF/SIGTERM, cancellation and transaction boundaries.
 PYTHONDONTWRITEBYTECODE=1 python3 -B -m pytest -q
 ```
 
+- The default automatically uses xdist's `-n auto --dist loadgroup` when the
+  optional plugin is loaded, otherwise it falls back to serial. For serial
+  debugging set `CORTEX_PYTEST_SERIAL=1`, or pass `-n 0` when xdist is installed.
+  Explicit worker/distribution options are preserved; inherited child pytest
+  invocations do not auto-parallelize. See [parallel policy](test-matrix.md#parallel-run).
 - `PYTHONDONTWRITEBYTECODE=1` is required; subprocesses do not inherit `-B`.
 - `HOME` and `TMPDIR` must lie outside every git repository (ancestors
   included), or storage guards produce false failures.

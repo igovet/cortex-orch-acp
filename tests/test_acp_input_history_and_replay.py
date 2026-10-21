@@ -958,6 +958,60 @@ def test_final_disclosure_is_emitted_once_and_replayed_without_recomposition(tmp
     assert before == _row_counts(store, session['task_id'])
 
 
+@pytest.mark.parametrize("ending", ["completed", "cancelled", "error"])
+def test_async_worker_cards_do_not_rotate_streamed_message_identity(tmp_path, ending):
+    prose = "Сверяю **результаты** и завершаю проверку.\n\n- точный текст  \n"
+
+    class StreamingRuntime(_CountingFakeRuntime):
+        def start_prompt(self, task_id, session_id, content, emit_update, cancel_event, *, emit_tool_call):
+            for index, token in enumerate(prose):
+                assert emit_update(token)
+                # Text is visible immediately, not held until completion.
+                assert transport.notifications[-1]["params"]["update"]["content"]["text"] == token
+                if index in (3, 21):
+                    assert emit_tool_call(dict(tool_call_id=f"worker:{index}", new=True,
+                                               title="Worker", status="in_progress"))
+                if index == 24:
+                    assert emit_tool_call(dict(tool_call_id="worker:3", new=False, status="completed"))
+            assert emit_tool_call(dict(tool_call_id="worker:21", new=False, status="completed"))
+            assert emit_tool_call(dict(tool_call_id="call:coordinator:read", new=True,
+                                       title="Read", kind="read", status="completed"))
+            assert emit_update("After the real tool.")
+            if ending == "error":
+                raise RuntimeError("fixture failure")
+            if ending == "cancelled":
+                cancel_event.set()
+                return StopReason.CANCELLED
+            return StopReason.END_TURN
+
+    agent = Agent(StreamingRuntime(), environ=_isolated_environ())
+    transport = _RecordingTransport()
+    agent.bind_transport(transport)
+    agent.initialized = True
+    sid = agent._session_new(dict(cwd=str(tmp_path), mcpServers=[]))["sessionId"]
+    agent._run_prompt(1, sid, agent.sessions[sid], "Start", threading.Event())
+
+    def messages(recording):
+        return [n["params"]["update"] for n in recording.notifications
+                if n["params"]["update"]["sessionUpdate"] == "agent_message_chunk"]
+
+    live = messages(transport)
+    assert "".join(u["content"]["text"] for u in live[:-1]) == prose
+    assert len({u["messageId"] for u in live[:-1]}) == 1
+    assert live[-1]["messageId"] != live[0]["messageId"], "real tool calls still separate prose"
+    loader = Agent(_CountingFakeRuntime(), environ=agent.environ)
+    replayed = _RecordingTransport()
+    loader.bind_transport(replayed)
+    loader.initialized = True
+    loader._session_load(42, dict(sessionId=sid, cwd=str(tmp_path), mcpServers=[]))
+    saved = messages(replayed)
+    assert "".join(u["content"]["text"] for u in saved) == prose + "After the real tool."
+    assert list(dict.fromkeys(u["messageId"] for u in saved)) == [
+        live[0]["messageId"], live[-1]["messageId"]]
+    assert loader.runtime.start_prompt_calls == []
+    assert "error" not in replayed.response_for(42)
+
+
 def test_session_load_replays_durable_structured_worker_cards(tmp_path):
     """A reconnect restores worker/tool cards as ACP updates, in order.
 

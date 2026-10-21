@@ -248,11 +248,11 @@ def main():
                             print(json.dumps(reply,ensure_ascii=False),flush=True)
                             break
                     except (StoreError,OSError,ValueError) as error:
-                        if identifier is not None:
-                            print(json.dumps(dict(jsonrpc='2.0',id=identifier,error=dict(code=-32001,message=str(error) if isinstance(error,StoreError) else 'external_mcp_transport_failure'))),flush=True)
                         # Observability only: server, tool and error code -- never
-                        # arguments or reply content. A failure here must never
-                        # mask or replace the error already reported above.
+                        # arguments or reply content. Recorded before the reply, like
+                        # every other outcome here, so a client that sees the error
+                        # can already read its row. A failure here must never mask
+                        # or replace the error reported below.
                         error_code=str(error) if isinstance(error,StoreError) else type(error).__name__
                         try:
                             from cortex_runtime.observability.events import append_event
@@ -262,6 +262,8 @@ def main():
                                          detail=dict(server=config['name'],tool=tool,error=error_code))
                         except Exception:
                             pass
+                        if identifier is not None:
+                            print(json.dumps(dict(jsonrpc='2.0',id=identifier,error=dict(code=-32001,message=str(error) if isinstance(error,StoreError) else 'external_mcp_transport_failure'))),flush=True)
                         if isinstance(error, OSError) or str(error) in {'external_mcp_timeout','external_mcp_write_timeout','external_mcp_frame_too_large','external_mcp_response_identity_mismatch'}:
                             if child.poll() is None: child.kill()
                             break

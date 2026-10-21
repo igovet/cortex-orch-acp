@@ -441,13 +441,22 @@ def _scrub_credentials(text: str) -> str:
     return text
 
 
+def _scrub_url_credentials(text: str) -> str:
+    # Every match needs both markers. Avoid the unanchored scheme regex's
+    # quadratic no-match search on long ordinary words, without skipping any
+    # of the other credential rules.
+    if "://" not in text or "@" not in text:
+        return text
+    return _URL_CREDENTIALS.sub(r"\1[REDACTED]@", text)
+
+
 def scrub_text(value: Any, *, max_chars: int = MAX_TEXT_CHARS) -> str:
     """Redact credential-shaped substrings from one free-text value and
     bound its length. Idempotent: scrubbing already-scrubbed text is a
     no-op (the redaction markers themselves are not secret-shaped)."""
     text = value if isinstance(value, str) else str(value)
     original_len = len(text)
-    text = _URL_CREDENTIALS.sub(r"\1[REDACTED]@", text)
+    text = _scrub_url_credentials(text)
     text = _scrub_credentials(text)
     text = _LONG_OPAQUE_TOKEN.sub(lambda m: f"[HIDDEN_SECRET:{_digest(m.group(0))}]", text)
     if len(text) > max_chars:
@@ -479,7 +488,7 @@ def scrub_display_text(value: Any, *, max_chars: int = MAX_TEXT_CHARS) -> str:
     """
     text = value if isinstance(value, str) else str(value)
     original_len = len(text)
-    text = _URL_CREDENTIALS.sub(r"\1[REDACTED]@", text)
+    text = _scrub_url_credentials(text)
     text = _scrub_credentials(text)
 
     pieces: list[str] = []

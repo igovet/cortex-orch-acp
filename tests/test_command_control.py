@@ -299,6 +299,40 @@ def test_exit_race_is_missed_not_falsely_stopped(development, monkeypatch, tmp_p
         assert control._event(db, worker.task_id, "COMMAND_STOPPED", ref) is None
 
 
+@pytest.mark.parametrize("exit_code", [0, 7])
+def test_short_command_waits_for_real_exit_without_fixed_sleep(development, monkeypatch, tmp_path, exit_code):
+    _, store, worker, _ = development
+    popen = subprocess.Popen
+    timed_waits = []
+    release = tmp_path / "release"
+
+    class ObservedProcess:
+        def __init__(self, *args, **kwargs):
+            self.process = popen(*args, **kwargs)
+
+        def __getattr__(self, name):
+            return getattr(self.process, name)
+
+        def wait(self, timeout=None):
+            if timeout is not None:
+                timed_waits.append(timeout)
+                release.touch()
+            return self.process.wait(timeout=timeout)
+
+    monkeypatch.setattr(gateway.subprocess, "Popen", ObservedProcess)
+    with (tmp_path / "output").open("w+b") as output:
+        code, failure = gateway._run_command_process(
+            store, worker,
+            [sys.executable, "-B", "-c",
+             f"import os, time\nwhile not os.path.exists({str(release)!r}): time.sleep(.001)\n"
+             f"print('complete'); raise SystemExit({exit_code})"],
+            (), output, {}, 5)
+        output.seek(0)
+        assert output.read() == b"complete\n"
+    assert code == exit_code and failure is None
+    assert timed_waits and all(timeout == .05 for timeout in timed_waits)
+
+
 def test_running_request_key_retry_is_fenced(development):
     _, store, worker, _ = development
     with running(development) as (ref, args, _):

@@ -501,24 +501,37 @@ now reads descriptions first has not been observed yet.
 Each `codex-acp` session's role instructions also end with a generated tool
 cheat sheet (`delegation/codex_tool_cheat_sheet.py`). When instruction
 delivery is qualified, `live_adapters._session_new_meta_for` renders it at
-session creation from the live `mcp_tools.tool_definitions()` for that role
-kind, role id and the plan node's latest stage (resolved by task and attempt),
+session creation from the same catalogue the channel's `tools/list` serves
+(`channeled_base_tools()` plus `mcp_tools.tool_definitions()` for that role
+kind, role id and the plan node's latest stage, resolved by task and attempt),
 and appends it to the instructions before
 `build_codex_session_new_meta` turns them into `_meta.systemPrompt`. Claude
-and OpenCode sessions never receive it. For at most six tools (`result_submit`,
-`command_run`, `access_request`, `ask_question`, `project_edit` and
-`read_report` when the role is offered them, then other offered tools in name
-order) it lists the schema's required fields and one TS-style example call,
-`await cortex.<tool>({...})`, with placeholder values for those fields only;
-optional fields and descriptions stay in the advertised schema. The text is
-bounded to 8,000 characters: a tool whose entry would exceed the budget is
-omitted together with the rest, and an explicit note states how many were
-omitted. Because it is rendered from the schemas rather than written by hand,
-it cannot drift from the advertised contract;
-`tests/test_codex_tool_cheat_sheet.py` checks the budget, the codex-only
-delivery, that a schema change changes the rendered text, and that review-stage
-required fields and example calls include `verdict`. Whether live Codex
-workers make fewer invalid first calls with it has not been observed.
+and OpenCode sessions never receive it. Every offered Cortex tool gets one line
+with its required fields, then its `optional:` fields; enum values follow `=`
+(at most six, the rest counted), an array of objects shows its item fields one
+level deep, `?` marking an optional one, and every field that is not a string
+carries a `: type` suffix (`edits[{old_string, new_string, replace_all?:
+boolean}]`, `command?: string[]`). The type suffix was added after a live
+2026-10-22 Codex worker sent the argv-array `checks[].command`, then shown by
+name only, as a string and was refused. The first six tools in a fixed order (`result_submit`,
+`command_run`, `project_read`, `project_edit`, `plan_submit`,
+`synthesis_submit`, `access_request`, `ask_question`, `read_report`,
+`read_skill` when offered, then the rest in name order) also get one example
+call in code mode's own shape, `await tools.mcp__cortex__<tool>({...})`, with
+placeholder values for the required fields only. Field descriptions stay in the
+advertised schema. Rendered sheets are 2,900 to 3,700 characters; the text is
+bounded to 8,000: a tool whose entry would exceed the budget is omitted
+together with the rest, and an explicit note states how many were omitted.
+Because it is rendered from the schemas rather than written by hand, it cannot
+drift from the advertised contract; `tests/test_codex_tool_cheat_sheet.py`
+checks the budget, the codex-only delivery, coverage of the whole channel
+catalogue with optional fields, enum and item-field rendering, that a schema
+change changes the rendered text, and that review-stage required fields and
+example calls include `verdict`. The Codex base prompt tells the model to take
+Cortex arguments from this sheet instead of querying `ALL_TOOLS` (see
+[working economy and code mode](../unified-system-prompt/index.md#working-economy-and-code-mode)).
+Whether live Codex workers make fewer calls with it has not been observed in a
+paid live check.
 
 What code mode shows of a nested tool is a TypeScript declaration Codex derives
 from the MCP `inputSchema` (Codex 0.159.1 `code-mode-protocol`

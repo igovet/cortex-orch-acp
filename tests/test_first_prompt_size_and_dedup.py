@@ -242,7 +242,7 @@ def test_a_capsule_without_the_brief_in_its_message_keeps_the_full_brief():
 
 # Edition-2 base prompt ceilings, the analogue of the edition-1 ceilings in
 # ``test_prompt_drift.test_s3_rendered_size_ceilings_and_shared_report_ownership``
-# (21,900 coordinator / 17,000 consultant / 27,050 other workers for base +
+# (22,900 coordinator / 17,000 consultant / 28,300 other workers for base +
 # composed role text). Edition 2 adds its new sections without yet removing the
 # skill text they overlap, so its ceilings are higher. Measured on 2026-10-15
 # (base prompt rendered with no project skills and today=2026-10-04):
@@ -251,8 +251,11 @@ def test_a_capsule_without_the_brief_in_its_message_keeps_the_full_brief():
 # External investigation adds 787 coordinator / 1,208 worker characters.
 # Measured totals: 23,009 coordinator / 28,866 largest ordinary worker;
 # consultant and base ceilings are unchanged.
-_EDITION_2_TOTAL_BUDGET = {'coordinator': 23_250, 'consultant': 17_600, 'worker': 29_150}
-_EDITION_2_BASE_BUDGET = {'coordinator': 7_900, 'consultant': 7_500, 'worker': 9_800}
+# The shared working-economy, autonomy, compaction and test-scope rules
+# (2026-10-22) measure 23,866 coordinator (8,404 base), 17,925 consultant
+# (7,900 base) and 29,586 largest ordinary worker (10,249 base).
+_EDITION_2_TOTAL_BUDGET = {'coordinator': 23_900, 'consultant': 17_950, 'worker': 29_650}
+_EDITION_2_BASE_BUDGET = {'coordinator': 8_450, 'consultant': 7_950, 'worker': 10_300}
 
 
 def test_edition_2_rendered_size_ceilings():

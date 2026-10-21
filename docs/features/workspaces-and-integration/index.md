@@ -41,7 +41,9 @@ code, outside aliases or Docker. A project digest does not cover outside resourc
 Writing-worker commands in Development and Auto use host-writable mounts through the
 broker; Guarded keeps them restricted. Read-only and reviewer commands and automatic
 verification use the read-only host profile in every mode. Their project is read-only, except
-that an automatic verification check may write the project's git-ignored directories. Command environments filter Cortex/credential variables but
+that an automatic verification check may write the project's git-ignored directories in place,
+and its other project writes (a tracked file a tool regenerates) go to a private overlay
+discarded when the check ends (refused where the host cannot overlay). Command environments filter Cortex/credential variables but
 use owner toolchains, validated SSH-agent access and shared network. Ordinary
 commands have no default deadline; exceptional outside commands default to 600
 seconds. Declared scope is coordination, not the writing worker's whole-project

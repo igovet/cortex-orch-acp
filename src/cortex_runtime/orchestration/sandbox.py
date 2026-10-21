@@ -249,25 +249,25 @@ def compact_argv(command, fds):
     # bwrap takes only options from --args; the command stays on argv.
     split = command.index('--')
     payload = b''.join(arg.encode('utf-8', 'surrogateescape') + b'\0' for arg in command[1:split])
-    fd = _args_fd()
+    fd = _anonymous_fd('cortex-bwrap-args')
     os.write(fd, payload)
     os.lseek(fd, 0, os.SEEK_SET)
     return [command[0], '--args', str(fd), *command[split:]], (*fds, fd)
 
 
-def _args_fd():
-    """An inheritable, writable, seekable fd with no path of its own, for
-    ``compact_argv``'s payload. ``memfd_create`` (Linux) when the running
-    kernel/libc exposes it; otherwise a temp file unlinked right after
-    opening gives the same anonymous-fd semantics on any POSIX host."""
+def _anonymous_fd(name):
+    """A writable, seekable fd with no path of its own, for data handed to
+    bwrap by fd. ``memfd_create`` (Linux) when the running kernel/libc
+    exposes it; otherwise a temp file unlinked right after opening gives the
+    same anonymous-fd semantics on any POSIX host."""
     create = getattr(os, 'memfd_create', None)
     if create is not None:
         try:
-            return create('cortex-bwrap-args')
+            return create(name)
         except OSError:
             pass
     import tempfile
-    fd, path = tempfile.mkstemp(prefix='cortex-bwrap-args-')
+    fd, path = tempfile.mkstemp(prefix=f'{name}-')
     os.unlink(path)
     return fd
 
@@ -1103,6 +1103,53 @@ def _project_mount(command, root) -> int:
                 and command[i + 1].startswith('/proc/self/fd/'))
 
 
+_TMP_OVERLAY_SUPPORTED: bool | None = None
+
+
+def tmp_overlay_supported() -> bool:
+    """Whether this host's bubblewrap can lay a private, discarded tmpfs
+    overlay over a directory (``--tmp-overlay``, bubblewrap 0.10+, with
+    unprivileged overlayfs). Probed once per process on a scratch directory."""
+    global _TMP_OVERLAY_SUPPORTED
+    if _TMP_OVERLAY_SUPPORTED is None:
+        import subprocess
+        import tempfile
+        binary = shutil.which('bwrap')
+        supported = False
+        if binary is not None:
+            with tempfile.TemporaryDirectory(prefix='cortex-overlay-probe-') as probe:
+                try:
+                    supported = subprocess.run(
+                        [binary, '--die-with-parent', '--ro-bind', '/', '/', '--dev', '/dev',
+                         '--overlay-src', probe, '--tmp-overlay', probe, '--', 'true'],
+                        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                        timeout=10).returncode == 0
+                except (OSError, subprocess.SubprocessError):
+                    supported = False
+        _TMP_OVERLAY_SUPPORTED = supported
+    return _TMP_OVERLAY_SUPPORTED
+
+
+def discard_project_writes(command, root) -> bool:
+    """Turn ``readonly_command``'s pinned read-only project mount into a
+    private tmpfs overlay over the same pinned source, in place.
+
+    A runtime verification check may then write files the project tracks
+    (``next typegen`` rewrites ``next-env.d.ts`` on every run, observed
+    2026-10-21) without changing them: every such write lands in the overlay
+    and is gone when the command ends, so the reviewed sources and revision
+    stay exactly as they were. The mounts after it (the writable git-ignored
+    directories, private-name masks, git metadata guards) still apply on top.
+    Returns False and leaves the read-only mount when the host cannot
+    overlay (``tmp_overlay_supported``)."""
+    if not tmp_overlay_supported():
+        return False
+    root = Path(root).resolve(strict=True)
+    at = _project_mount(command, root)
+    command[at:at + 3] = ['--overlay-src', command[at + 1], '--tmp-overlay', str(root)]
+    return True
+
+
 @contextmanager
 def readonly_command(root, scratch, argv, *, environ, scopes=(), readonly=(), git_guard=None):
     """The command profile of every role without a write grant (reviewer,
@@ -1251,7 +1298,7 @@ def engine_jail(root, scratch, argv, scopes, *, env, state_dirs=None, writable=(
         data_fds = []
         try:
             for destination, content in (data_files or {}).items():
-                fd = os.memfd_create('cortex-engine-data')
+                fd = _anonymous_fd('cortex-engine-data')
                 data_fds.append(fd)
                 view = memoryview(bytes(content))
                 while view:

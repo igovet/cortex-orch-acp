@@ -14,6 +14,27 @@ export type CardUsage = {
   openIssues?: number;
 };
 
+/**
+ * The card's outer frame for one interaction state. Its boundary is the
+ * same neutral 1-unit border in every state: no focus, selected, pressed or
+ * status perimeter or outline (and on web none of the browser's own focus
+ * ring). Hover, pressed and keyboard focus only change the fill to the hover
+ * surface; the owner removed the visible Open worker action that used to
+ * carry the focus underline.
+ */
+export function cardFrameStyle(
+  state: { pressed: boolean; hovered?: boolean; focused?: boolean },
+  options: { disabled: boolean; web: boolean; compact: boolean; border: string; surface: string; hoverSurface: string },
+): Record<string, unknown> {
+  return {
+    alignSelf: "stretch", marginVertical: options.compact ? 6 : 8,
+    borderWidth: 1, borderColor: options.border, borderRadius: 8,
+    backgroundColor: !options.disabled && (state.pressed || state.hovered || state.focused) ? options.hoverSurface : options.surface,
+    paddingHorizontal: 12, paddingVertical: options.compact ? 8 : 10, gap: 6,
+    ...(options.web ? { outlineWidth: 0, outlineStyle: "none" } : {}),
+  };
+}
+
 export function cardUsageSnapshot(attempt: Pick<Attempt, "status" | "context" | "tokens" | "openIssues">): CardUsage {
   return {
     status: attempt.status,

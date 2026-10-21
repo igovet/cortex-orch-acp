@@ -4192,6 +4192,41 @@ class OrchestratingRuntime:
             return True
         except Exception:  # noqa: BLE001 - panel history must not break work
             return False
+
+    def _record_worker_brief_sent(
+        self, task_id: str, assignment_ref: str, attempt_id: str | None,
+        work_attempt_ref: Any, assignment_text: str,
+    ) -> None:
+        """Record that this execution attempt's prompt carrying the
+        dispatched assignment text is being handed to its engine session.
+
+        Written immediately before the engine prompt call, once per execution
+        attempt (a route fallback is a new attempt). The payload holds only
+        identities and the SHA-256/length of the exact assignment text (the
+        optional title block, the ``delegation_requested`` brief and its
+        acceptance line); the text itself stays in that request event. The
+        Workers tab uses it to show which retained assignment text this
+        attempt was sent, never inferring delivery from current node text.
+        ``progress`` is non-meaningful: it never wakes the coordinator.
+        """
+        if self._store is None or not attempt_id or not isinstance(assignment_text, str):
+            return
+        payload: dict[str, Any] = {
+            "kind": "worker_brief_sent",
+            "attempt_id": str(attempt_id),
+            "assignment_sha256": hashlib.sha256(assignment_text.encode("utf-8", "surrogatepass")).hexdigest(),
+            "assignment_characters": len(assignment_text),
+        }
+        if isinstance(work_attempt_ref, str) and work_attempt_ref:
+            payload["work_attempt_ref"] = work_attempt_ref
+        try:
+            delegation_events.append_event(
+                self._store, task_id, "progress", f"worker_brief_sent:{attempt_id}",
+                payload, "runtime", assignment_ref=assignment_ref,
+            )
+        except Exception:  # noqa: BLE001 - a display record must not break work
+            pass
+
     def _worker_card_emitter(self, task_id: str, assignment_ref: str):
         """Return the feed that created this assignment's card.
 
@@ -5789,6 +5824,9 @@ class OrchestratingRuntime:
                 # against current project docs while keeping the assignment
                 # brief fixed; neither an old catalog nor an earlier capsule
                 # is silently carried into the replacement session.
+                # Only a turn built from ``brief`` (not a follow-up or an
+                # answer turn) carries the assignment text to the worker.
+                brief_turn = recovery_prompt is None
                 worker_prompt = recovery_prompt or (
                     f"{render_worker_catalog(self._task_workspace_root(task_id))}\n\n---\n\n{brief}"
                 )
@@ -6164,6 +6202,11 @@ class OrchestratingRuntime:
                                 self._worker_turns_in_flight.discard(assignment_ref)
                             return
                 worker_outcome = None
+                if brief_turn:
+                    self._record_worker_brief_sent(
+                        task_id, assignment_ref, getattr(result, "attempt_id", None),
+                        payload.get("work_attempt_ref"), brief,
+                    )
                 try:
                     worker_prompt_started = True
                     worker_outcome = self._engine.prompt(

@@ -136,7 +136,11 @@ def test_automatic_verification_can_inspect_git_but_cannot_write(tmp_path, repo,
     common = repo / '.git'
     script = (
         'from pathlib import Path\n'
-        f'for name in {["a.txt", str(common / "HEAD"), ".cortex/private"]!r}:\n'
+        # a.txt goes to the discarded overlay; git metadata and the store stay refused.
+        'from pathlib import Path as P\n'
+        'try: P("a.txt").write_text("discarded")\n'
+        'except OSError: pass\n'
+        f'for name in {[str(common / "HEAD"), ".cortex/private"]!r}:\n'
         '    try: Path(name).write_text("forbidden")\n'
         '    except OSError: pass\n'
         '    else: raise AssertionError(name)\n')
@@ -182,7 +186,7 @@ def test_automatic_verification_is_read_only_in_every_mode(tmp_path, repo, monke
     script = (
         'from pathlib import Path\n'
         f'Path({str(activity)!r}).write_text("now")\n'
-        f'for name in ("a.txt", {str(home / ".bashrc")!r}, {str(home / "new")!r}):\n'
+        f'for name in ({str(home / ".bashrc")!r}, {str(home / "new")!r}):\n'
         '    try: Path(name).write_text("forbidden")\n'
         '    except OSError: pass\n'
         '    else: raise AssertionError(name)\n')
@@ -198,6 +202,7 @@ def test_automatic_verification_is_read_only_in_every_mode(tmp_path, repo, monke
     [check] = recorded[0][1]
     assert check['exit_code'] == 0 and check['complete'] and check['profile'] == profile, check
     assert activity.read_text() == 'now'
+    assert (repo / 'a.txt').read_text() == 'one\n'
     assert (home / '.bashrc').read_text() == '# owner\n' and not (home / 'new').exists()
     assert (repo / 'a.txt').read_text() == 'one\n'
     with store.connection() as db:

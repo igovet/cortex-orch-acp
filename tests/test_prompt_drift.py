@@ -36,7 +36,10 @@ ROLE_REFERENCE_LINK = re.compile(r"\]\(references/([a-z0-9-]+)\.md\)")
 
 # External-source discovery guidance: 21,764 rendered coordinator characters
 # (6,433 base + 15,331 role); retain a bounded margin, not an open-ended ceiling.
-COORDINATOR_PROMPT_BUDGET_CHARS = 21_900
+# The shared working-economy, autonomy, compaction and test-scope rules
+# (2026-10-22) add 956 coordinator / 1,212 worker base characters: measured
+# 22,851 coordinator and 28,252 largest ordinary worker.
+COORDINATOR_PROMPT_BUDGET_CHARS = 22_900
 
 
 def test_intake_and_design_sources_preserve_evidence_and_ownership_rules():
@@ -310,7 +313,7 @@ def test_s3_rendered_size_ceilings_and_shared_report_ownership():
         # Markdown link in another report; this raises its budget.
         # External investigation adds 787 coordinator / 1,208 ordinary-worker
         # characters; consultant and base prompt budgets are unchanged.
-        budget = COORDINATOR_PROMPT_BUDGET_CHARS if kind == "coordinator" else 17_000 if role_id == "worker-senior-consultant" else 27_050
+        budget = COORDINATOR_PROMPT_BUDGET_CHARS if kind == "coordinator" else 17_000 if role_id == "worker-senior-consultant" else 28_300
         assert len(role) + len(base) <= budget, (role_id, len(role) + len(base))
     for profile in profiles:
         if profile["access_class"] != "consultant":

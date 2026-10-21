@@ -123,8 +123,10 @@ because its license could not be established. See
 Read-only roles (reviewer, auditor, explorer, architect and the other read-only
 profiles) run `command_run` in the read-only profile (receipts name it `read_only`) in every
 access mode: HOME is read-only except an explicit tool-cache allowlist, and the command runs in
-a private PID namespace. Automatic runtime verification uses the same profile in every mode, and
-inside a check only the project's git-ignored directories are writable. Writing workers keep
+a private PID namespace. Automatic runtime verification uses the same profile in every mode;
+inside a check the project's git-ignored directories are writable in place, and any other project write (a tracked file a tool regenerates, such as `next-env.d.ts`) goes to a private overlay discarded when the check ends (refused where the host's bubblewrap cannot overlay).
+The reviewed sources and revision therefore never change, and no access mode, permission or user
+consent alters this profile. Writing workers keep
 the access-mode profile. Cache writes are allowed, so a read-only command can poison a cache
 that a later run reads. The read-only profile does not mask the host `/tmp`, the session D-Bus and
 systemd user manager under `/run/user`, the host `/dev`, or a Docker socket if one exists, so a
@@ -514,6 +516,14 @@ A later non-terminal frame cannot reopen a settled card, and a
 failed prompt keeps the bridge's failure. This is display integrity only: it does not
 change task state, permissions, results or verification.
 
+Asynchronous worker cards no longer rotate the coordinator's message identity.
+The Paseo provider delays only their display events while that message streams,
+then releases every event in arrival order at the next message/timeline boundary,
+turn end, load completion, cancellation, failure or close. Text is neither buffered
+nor rewritten. Durable journals keep the original event order and text; this
+presentation ordering grants no execution authority and changes no evidence.
+Previously recorded split identities and host-persisted rows are not repaired.
+
 The Paseo provider also reduces a worker card's terminal result to its
 open-issue count before the host persists the item, and the client reduces
 older saved items the same way, so worker summaries, check names, blockers and
@@ -528,6 +538,19 @@ failed history read shows a fixed message, never the transport error. This
 changes presentation and what the host timeline stores, not task state,
 permissions, evidence or verification; the full result remains in the project
 store and published reports.
+
+The Workers tab's assignment prompt is read the same way, only for a read that
+selects a worker (never by a compact card or catalogue read). It shows the
+selected attempt's own `delegation_requested` brief, title and acceptance line
+through the same display scrubber, not the runtime's worker framing, role
+instructions, recovery capsule, documentation catalogue or report bodies
+(dependency reports appear only as references). The runtime's
+`worker_brief_sent` record adds only attempt identities and a SHA-256/length
+of that text; it is non-meaningful `progress` that never wakes the
+coordinator. A record that does not match the retained text withholds it. The
+scrubber is pattern-based, so a brief can still contain whatever project or
+user text the coordinator put in it; this is presentation of an existing
+retained request, not a new disclosure boundary.
 
 The Paseo client wraps its rendered panels, composer popover, and timeline card in per-surface error boundaries. If reading or coercing a thrown value fails while formatting the fallback, it uses `unknown error`. This is a UI recovery boundary, not an execution sandbox or a root-cause diagnosis.
 
@@ -851,8 +874,9 @@ card merely for crossing the project boundary. The mode decides
 the host for writing workers: Development and Auto give them the host-writable profile (a
 `docker build` check can record its builder state in `~/.docker/buildx`), and Guarded keeps
 them restricted. Read-only roles, reviewers and automatic verification always get the
-read-only profile (`read_only`), while their project stays read-only -- verification may write only
-git-ignored directories, and a check whose project digest changes is incomplete. A mode switch
+read-only profile (`read_only`), while their project stays read-only -- verification writes
+git-ignored directories in place and every other project write to a discarded overlay (refused
+without host overlay support), and a check whose project digest changes is incomplete. A mode switch
 does not stop a read-only command or a verification check. Only a host-writable (Development or
 Auto) writing-worker command is stopped by a mode switch or a denial change. Engines themselves stay jailed.
 

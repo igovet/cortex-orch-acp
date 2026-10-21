@@ -80,6 +80,20 @@ for (const [first, opposite] of [["failed", "completed"], ["completed", "failed"
 const dir = mkdtempSync(join(tmpdir(), "cortex-worker-steer-"));
 const fixture = join(dir, "agent.py");
 writeFileSync(join(dir, "outcomes.json"), JSON.stringify(runtimeOutcomes));
+const streamedProse = "Сверяю **результаты** и завершаю проверку.\n\n- exact  \n";
+const streamedUpdates: Record<string, unknown>[] = [];
+for (const [index, token] of [...streamedProse].entries()) {
+  streamedUpdates.push({ sessionUpdate: "agent_message_chunk", messageId: "prose", content: { type: "text", text: token } });
+  if (index === 3 || index === 21) streamedUpdates.push({
+    sessionUpdate: "tool_call", toolCallId: `worker:prose-${index}`, title: "Worker: qa-engineer",
+    kind: "other", status: "in_progress",
+  });
+  if (index === 25) streamedUpdates.push({
+    sessionUpdate: "tool_call_update", toolCallId: "worker:prose-3", status: "completed",
+  });
+}
+streamedUpdates.push({ sessionUpdate: "tool_call_update", toolCallId: "worker:prose-21", status: "completed" });
+writeFileSync(join(dir, "stream.json"), JSON.stringify(streamedUpdates));
 writeFileSync(fixture, String.raw`
 import json, os, sys
 if os.environ.get("CORTEX_MODEL_EFFORTS") == "1":
@@ -94,6 +108,7 @@ def card(cid, title, *rest):
 
 JOURNALS = {"runtime-" + case: record["replay"] for case, record in
             json.load(open(os.path.join(os.path.dirname(__file__), "outcomes.json"))).items()}
+JOURNALS["journal-prose"] = json.load(open(os.path.join(os.path.dirname(__file__), "stream.json")))
 JOURNALS.update({
     "journal-running": card("worker:w5", "Worker: explorer — Running at reload",
         {"sessionUpdate": "tool_call_update", "toolCallId": "worker:w5", "status": "in_progress"}),
@@ -215,6 +230,26 @@ const progress = (callId: string, text: string): Step =>
   ["update", { sessionUpdate: "tool_call_update", toolCallId: callId, content: [{ type: "content", content: { type: "text", text } }] }];
 
 try {
+  // Token-sized wire deltas through the real bridge and replay connector.
+  // Cards follow the complete message, in both live and cold session/load.
+  for (const replay of [false, true]) {
+    const session = await connect(replay ? { native: "journal-prose" } : {});
+    try {
+      if (!replay) {
+        await session.prompt("prose", [...streamedUpdates.map((update): Step => ["update", update]), ["end", "end_turn"]]);
+        await waitFor(() => session.turnEnded("acp:prose", "completed"), "streamed prose turn");
+      }
+      const items = session.events.flatMap(event => event.type === "timeline.item" ? [event.item] : []);
+      const text = items.filter(item => item.type === "assistant_message");
+      assert.equal(text.at(-1)?.text, streamedProse, "bridge preserves every token and Markdown byte");
+      assert.equal(new Set(text.map(item => item.id)).size, 1);
+      const firstCard = items.findIndex(item => item.type === "plugin");
+      const lastText = items.map(item => item.type).lastIndexOf("assistant_message");
+      assert.ok(firstCard > lastText, "no new or updated card between text snapshots");
+      for (const id of ["worker:prose-3", "worker:prose-21"])
+        assert.equal(session.cards(id).at(-1)?.status, "completed");
+    } finally { await session.connection.close(); }
+  }
   // Actual runtime -> ACP -> installed bridge -> provider plugin -> client,
   // live and session/load, including old falsely-completed persisted cards.
   for (const [caseName, fixture] of Object.entries(runtimeOutcomes)) {

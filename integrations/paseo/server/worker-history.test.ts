@@ -561,4 +561,93 @@ function makeHostLossFixture(): { root: string; cleanup: () => void } {
   }
 }
 
+// The worker tab's assignment prompt: the dispatch request's exact text,
+// bound to the selected attempt by the runtime's worker_brief_sent marker
+// (SHA-256 of title block + brief + acceptance line, as the runtime composes
+// the worker's first prompt). Queued, older and mismatched cases say so;
+// card and catalogue reads never carry it; a retry shows its own brief.
+{
+  const { root, cleanup } = makeInterruptFixture();
+  const { createHash } = await import("node:crypto");
+  const brief = (objective: string) => JSON.stringify({ objective, scope: ["."], dependency_reports: [], original_goal: "Goal", review_evidence: [] });
+  const acceptance = "Publish a truthful immutable report and structured result. Complete the assigned objective.";
+  const sha = (title: string, text: string) => createHash("sha256").update(`${title && !text.includes(title) ? `${title}\n\n` : ""}${text}\n\nAcceptance: ${acceptance}`).digest("hex");
+  const request = (ref: string, attempt: string, title: string, text: string | null) => sqlValues([TASK_ID, "delegation_requested", ref,
+    JSON.stringify({ title, role: "worker-fullstack-dev", work_attempt_ref: attempt, ...(text === null ? {} : { brief: text, acceptance }) }), "2026-01-01T00:00:00Z"]);
+  const marker = (ref: string, exec: string, digest: string) => sqlValues([TASK_ID, "progress", ref,
+    JSON.stringify({ kind: "worker_brief_sent", attempt_id: exec, assignment_sha256: digest, assignment_characters: 1 }), "2026-01-01T00:01:00Z"]);
+  const provisioning = (ref: string, assignment: string, exec: string) => sqlValues([ref, TASK_ID, assignment, exec, "worker-fullstack-dev", "execution", "provisioned", 1, "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z"]);
+  const first = brief("Fix **the** card at /home/someone/private/repo");
+  const retry = brief("Retry: fix the card again");
+  try {
+    execSqlite(join(root, ".cortex", "cortex.sqlite3"), `
+      insert into work_assignments (assignment_id, task_id, node_key, idempotency_key, status) values ${sqlValues(["wa_prompt", TASK_ID, "node-prompt", "idem-prompt", "running"])};
+      insert into work_assignment_attempts (attempt_id, assignment_id, attempt_no, status, failure_reason) values ${sqlValues(["xa_prompt_1", "wa_prompt", 1, "failed", "Engine exited"])};
+      insert into work_assignment_attempts (attempt_id, assignment_id, attempt_no, status, failure_reason) values ${sqlValues(["xa_prompt_2", "wa_prompt", 2, "running", null])};
+      insert into task_events (task_id, event_type, assignment_ref, payload_json, created_at) values ${request("req-prompt-1", "xa_prompt_1", "Fix **the** card", first)};
+      insert into task_events (task_id, event_type, assignment_ref, payload_json, created_at) values ${request("req-prompt-2", "xa_prompt_2", "Prompt worker", retry)};
+      insert into delegation_provisioning (idempotency_key, task_id, assignment_id, attempt_id, role_id, step, status, owner_epoch, created_at, updated_at) values ${provisioning("req-prompt-1", "wa_prompt", "exec-prompt-1")};
+      insert into delegation_provisioning (idempotency_key, task_id, assignment_id, attempt_id, role_id, step, status, owner_epoch, created_at, updated_at) values ${provisioning("req-prompt-2", "wa_prompt", "exec-prompt-2")};
+      insert into task_events (task_id, event_type, assignment_ref, payload_json, created_at) values ${marker("req-prompt-1", "exec-prompt-1", sha("Fix **the** card", first))};
+
+      insert into work_assignments (assignment_id, task_id, node_key, idempotency_key, status) values ${sqlValues(["wa_mismatch", TASK_ID, "node-mismatch", "idem-mismatch", "completed"])};
+      insert into work_assignment_attempts (attempt_id, assignment_id, attempt_no, status, failure_reason) values ${sqlValues(["xa_mismatch", "wa_mismatch", 1, "completed", null])};
+      insert into task_events (task_id, event_type, assignment_ref, payload_json, created_at) values ${request("req-mismatch", "xa_mismatch", "Mismatch worker", brief("Current text"))};
+      insert into delegation_provisioning (idempotency_key, task_id, assignment_id, attempt_id, role_id, step, status, owner_epoch, created_at, updated_at) values ${provisioning("req-mismatch", "wa_mismatch", "exec-mismatch")};
+      insert into task_events (task_id, event_type, assignment_ref, payload_json, created_at) values ${marker("req-mismatch", "exec-mismatch", sha("Mismatch worker", brief("What was really sent")))};
+
+      insert into work_assignments (assignment_id, task_id, node_key, idempotency_key, status) values ${sqlValues(["wa_legacy", TASK_ID, "node-legacy", "idem-legacy", "completed"])};
+      insert into work_assignment_attempts (attempt_id, assignment_id, attempt_no, status, failure_reason) values ${sqlValues(["xa_legacy", "wa_legacy", 1, "completed", null])};
+      insert into task_events (task_id, event_type, assignment_ref, payload_json, created_at) values ${request("req-legacy", "xa_legacy", "Legacy worker", brief("Older dispatch"))};
+      insert into delegation_provisioning (idempotency_key, task_id, assignment_id, attempt_id, role_id, step, status, owner_epoch, created_at, updated_at) values ${provisioning("req-legacy", "wa_legacy", "exec-legacy")};
+
+      insert into work_assignments (assignment_id, task_id, node_key, idempotency_key, status) values ${sqlValues(["wa_nobrief", TASK_ID, "node-nobrief", "idem-nobrief", "completed"])};
+      insert into work_assignment_attempts (attempt_id, assignment_id, attempt_no, status, failure_reason) values ${sqlValues(["xa_nobrief", "wa_nobrief", 1, "completed", null])};
+      insert into task_events (task_id, event_type, assignment_ref, payload_json, created_at) values ${request("req-nobrief", "xa_nobrief", "No brief worker", null)};
+      insert into delegation_provisioning (idempotency_key, task_id, assignment_id, attempt_id, role_id, step, status, owner_epoch, created_at, updated_at) values ${provisioning("req-nobrief", "wa_nobrief", "exec-nobrief")};
+    `);
+    const context = mockContext(WORKSPACE_ID, AGENT_ID, root, SESSION_ID);
+    const read = async (input: Record<string, unknown>) => (await getWorkerHistory({ workspaceId: WORKSPACE_ID, agentId: AGENT_ID, ...input }, context));
+
+    // Attempt 1: sent, its own text (scrubbed), with the sent time.
+    const sent = (await read({ attemptId: "xa_prompt_1" })).assignments[0].attempts.at(-1)!;
+    assert.equal(sent.id, "xa_prompt_1");
+    assert.equal(sent.prompt?.state, "sent");
+    assert.equal(sent.prompt?.sentAt, "2026-01-01T00:01:00Z");
+    assert.equal(sent.prompt?.title, undefined, "a title already inside the brief was not repeated to the worker");
+    assert.equal(sent.prompt?.acceptance, acceptance);
+    // String values are scrubbed inside the JSON brief, which stays parseable.
+    assert.deepEqual(JSON.parse(sent.prompt?.brief ?? "null"), { objective: "Fix **the** card at [private path]", scope: ["."], dependency_reports: [], original_goal: "Goal", review_evidence: [] });
+    assert.doesNotMatch(JSON.stringify(sent), /someone/);
+
+    // Attempt 2 (the retry): its own brief, not yet recorded as sent.
+    const queued = (await read({ attemptId: "xa_prompt_2" })).assignments[0].attempts.at(-1)!;
+    assert.equal(queued.prompt?.state, "queued");
+    assert.equal(queued.prompt?.title, "Prompt worker");
+    assert.match(queued.prompt?.brief ?? "", /Retry: fix the card again/);
+    assert.doesNotMatch(queued.prompt?.brief ?? "", /Fix \*\*the\*\*/);
+    // Opening the assignment from its card carries every attempt's own prompt.
+    const byRef = (await read({ assignmentRef: "req-prompt-2" })).assignments[0].attempts;
+    assert.equal(byRef.at(-1)?.prompt?.state, "queued");
+
+    const mismatch = (await read({ attemptId: "xa_mismatch" })).assignments[0].attempts[0];
+    assert.deepEqual(mismatch.prompt, { state: "mismatch" });
+    assert.doesNotMatch(JSON.stringify(mismatch), /Current text|What was really sent/);
+    const legacy = (await read({ attemptId: "xa_legacy" })).assignments[0].attempts[0];
+    assert.equal(legacy.prompt?.state, "unrecorded");
+    assert.match(legacy.prompt?.brief ?? "", /Older dispatch/);
+    const nobrief = (await read({ attemptId: "xa_nobrief" })).assignments[0].attempts[0];
+    assert.deepEqual(nobrief.prompt, { state: "unavailable" });
+
+    // Card (compact) and catalogue reads never carry prompt text.
+    const compact = await read({ assignmentRef: "req-prompt-1", compact: true, limit: 1 });
+    assert.equal(compact.assignments[0].attempts.some((attempt) => "prompt" in attempt), false);
+    const catalogue = await read({});
+    assert.ok(catalogue.assignments.length > 0);
+    assert.doesNotMatch(JSON.stringify(catalogue), /"prompt"|Retry: fix the card/);
+  } finally {
+    cleanup();
+  }
+}
+
 console.log("worker-history: ok");
