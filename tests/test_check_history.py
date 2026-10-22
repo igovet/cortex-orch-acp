@@ -367,6 +367,13 @@ def test_an_exploratory_probe_can_be_withdrawn_with_its_reason(tmp_path):
     assert receipt
     [recorded] = _node(store, task, assignment)['result']['checks']
     assert recorded['outcome'] == 'failed' and recorded['probe_withdrawn'].startswith('Expected 404')
+    # The independent reviewer's runtime facts carry the withdrawal reason.
+    from test_reviewer_handoff import reviewer
+    from cortex_runtime.orchestration.reviewer_handoff import review_runtime_facts
+    _, review_ref = reviewer(store, task, resolve_channel(store, task.channel_id, task.secret))
+    [fact] = review_runtime_facts(store, task.task_id, review_ref, tmp_path)['checks']
+    assert (fact['outcome'], fact['current_outcome'], fact['retracted_by']) == ('failed', 'retracted', 'probe_withdrawn')
+    assert fact['probe_withdrawn'].startswith('Expected 404') and 'invocation_error' not in fact
 
 
 def test_withdrawing_needs_a_real_failed_run(tmp_path):

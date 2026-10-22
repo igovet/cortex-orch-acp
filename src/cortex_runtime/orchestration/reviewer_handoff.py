@@ -115,7 +115,11 @@ def review_runtime_facts(store, task_id, assignment_ref, root, *, observed=None)
                                    receipt_ref=check['tool_call_ref'],
                                    digest_binding='not established for reviewed digest'))
                 if outcome['outcome'] == 'retracted':
-                    checks[-1].update(retracted_by=outcome['retracted_by'], invocation_error=check['invocation_error'])
+                    # Either an invocation-error correction or a withdrawn own
+                    # probe; the reviewer sees whichever reason was given.
+                    checks[-1].update(retracted_by=outcome['retracted_by'],
+                                      **{key: check[key] for key in ('invocation_error', 'probe_withdrawn')
+                                         if key in check})
         verification = json.loads(task['plan_json'] or '{}').get('verification', [])
 
     facts = dict(kind='runtime_verified_facts', revision=task['revision'],
