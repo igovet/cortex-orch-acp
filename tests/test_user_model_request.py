@@ -501,3 +501,55 @@ def test_a_purpose_request_beats_a_pin_on_the_runtime_review_node(tmp_path, monk
     assert choice.model == "claude-sonnet-5" and choice.decision["decided_by"] == "user_request"
     pinned = auto_route.choose("worker-code-reviewer", tmp_path, {"HOME": str(tmp_path)})
     assert pinned.model == "gpt-6-luna"
+
+
+HISTORY = """<chat-history-summary>
+Chat history from a previous Paseo agent.
+[User] Нужно повторить аудит.
+
+В AGENTS.md добавь требование, что бы за audit отвечал opus.
+[Read skill: worker-routing]
+[Assistant] Правило добавлено, но система назначает другую модель вместо Opus.
+[User] Question: Какой моделью выполнить аудит? → Answer: Claude Opus, без замены другой моделью
+[Assistant] Для «security-auditor» была запрошена модель opus, но запущена sol.
+</chat-history-summary>
+Продолжай работу"""
+
+
+def test_imported_history_keeps_only_user_turns():
+    kept = auto_route._user_authored(HISTORY)
+    assert "что бы за audit отвечал opus" in kept and "Claude Opus, без замены другой моделью" in kept
+    assert "вместо Opus" not in kept and "[Assistant]" not in kept and "Какой моделью" not in kept
+    assert kept.endswith("Продолжай работу")
+
+
+def test_an_opus_requirement_in_imported_history_is_honoured(tmp_path):
+    """2026-10-22: an assistant line "вместо Opus" and the user's "без замены"
+    were read as refusals, so the audit ran on Sol again."""
+    store = _two_engines(tmp_path)
+    task = bootstrap_task(store, SourceEvent(origin="test", event_id="history"), HISTORY, "owner")
+    hint = "claude-agent-acp/opus[1m]"
+    assert auto_route.user_model_request(store, task.task_id, hint) is not None
+    assert auto_route.user_purpose_model_request(store, task.task_id, "worker-security-auditor") == hint
+
+
+@pytest.mark.parametrize("text", ["Claude Opus, без замены другой моделью", "Use Opus without substitution.",
+                                  "Opus only, no substitutes."])
+def test_insisting_on_no_substitution_is_not_a_refusal(tmp_path, text):
+    store = _two_engines(tmp_path)
+    task = bootstrap_task(store, SourceEvent(origin="test", event_id="insist"), text, "owner")
+    assert auto_route.user_mentions_model(store, task.task_id, "claude-agent-acp/opus[1m]") is not None
+
+
+def test_split_chto_by_is_a_subjunctive_request():
+    pattern = auto_route.family_pattern("claude-agent-acp/opus[1m]", ("opus", "опус"))
+    assert auto_route.assigns_family("В AGENTS.md добавь требование, что бы за audit отвечал opus.", pattern) == "opus"
+
+
+@pytest.mark.parametrize("reason,claims", [
+    ("The user explicitly requires Claude Opus for every audit.", True),
+    ("Пользователь требует Opus для аудита.", True),
+    ("Deep security analysis.", False), (None, False)])
+def test_a_coordinator_reason_naming_the_user_requirement(reason, claims):
+    from cortex_runtime.orchestration.state import _reason_claims_user_requirement
+    assert _reason_claims_user_requirement(reason) is claims

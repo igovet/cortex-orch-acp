@@ -555,11 +555,27 @@ def attempt_routing(store, task_id, attempt_id):
         # the model the owner asked for this role's purpose still applies,
         # ahead of pins and preferences, as an explicit request does.
         hint = user_purpose_model_request(store, task_id, resolve_role(node['role'])) or hint
+    request = user_model_request(store, task_id, hint) if '/' in hint else None
+    if request is None and '/' in hint and _reason_claims_user_requirement(task.get('model_reason')):
+        # The coordinator states the user requires this model and the user's
+        # own message names it: honoured even when the wording escaped the
+        # request grammar ("что бы за audit отвечал opus" ran on Sol twice,
+        # 2026-10-22). Neither the reason nor a bare mention alone is consent.
+        from ..routing.auto_route import user_mentions_model
+        request = user_mentions_model(store, task_id, hint)
     return AttemptRouting(bool(fix) or retried, task.get('complexity', 'normal'), hint,
                           task.get('model_reason'), prior['engine'] if prior else None,
-                          user_model_request(store, task_id, hint) if '/' in hint else None,
+                          request,
                           user_model_revocation(store, task_id, hint) if '/' in hint else None,
                           task.get('work_kind'))
+
+
+_USER_REQUIREMENT_REASON = re.compile(r"\buser\b|\bowner\b|пользовател|юзер|владел", re.I)
+
+
+def _reason_claims_user_requirement(reason):
+    """Whether a plan task's model_reason says the user/owner asked for it."""
+    return isinstance(reason, str) and bool(_USER_REQUIREMENT_REASON.search(reason))
 
 
 def review_provider_preference(store, task_id, attempt_id):
@@ -1228,6 +1244,9 @@ class TaskMachine:
                            if entry['route'] == model), {})
             # Every exact user-requested route precedes automatic tier selection.
             request = user_model_request(self.store, channel.task_id, model)
+            if request is None and _reason_claims_user_requirement(n.get('model_reason')):
+                from ..routing.auto_route import user_mentions_model
+                request = user_mentions_model(self.store, channel.task_id, model)
             if request is not None:
                 item.update(preview_status='pending_dispatch:user_request', user_request=request['source_ref'])
             elif not any(hint_serves_tier(model.partition('/')[2], tier, role, item['tier_now'], complexity,

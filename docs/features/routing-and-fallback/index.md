@@ -928,6 +928,18 @@ standalone word, so `gpt-6-luna.v2` or `vendor/gpt-6-luna` stay other identities
 audit the owner assigned to Opus once ran on Sol because neither rule existed
 (2026-10-22).
 
+Only the owner's own words are read. In a host-imported `<chat-history-summary>`
+only `[User]` turns count (for a "→ Answer:" line only the answer), so an earlier
+assistant or runtime line such as "запущен Sol вместо Opus" is not a refusal
+(`auto_route._user_authored`). Emphasis that forbids substitution ("без замены другой
+моделью", "without substitution", "no substitutes") is stripped before matching, so it
+confirms the request instead of reading as a negation. The split subjunctive "что бы"
+counts like "чтобы". When the coordinator's `model_reason` says the user or owner
+requires the hinted model and the owner's messages mention that model without refusing
+it, the hint is honoured as a user request (`auto_route.user_mentions_model`, basis
+`mentioned`). A security audit the owner assigned to Opus that way ran on another model
+until these rules existed (2026-10-22).
+
 When the router still ignores a coordinator's model hint, the runtime says so once per
 attempt in the chat: which model was asked for, which runs and why
 (`orchestration.route_notices`, recorded as `MODEL_HINT_IGNORED_SHOWN`).

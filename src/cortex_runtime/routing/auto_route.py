@@ -1701,9 +1701,40 @@ def assigns_family(text: str, pattern: re.Pattern) -> str | None:
             continue
         if any(_RESPONSIBILITY_PRESENT.fullmatch(word) for word in words):
             return match.group(0)
-        if (any(_RESPONSIBILITY_PAST.fullmatch(word) for word in words)
-                and any(word.casefold() in _RESPONSIBILITY_SUBJUNCTIVE for word in sentence_before)):
+        lowered = [word.casefold() for word in sentence_before]
+        # "чтобы" is often written "что бы" (the owner's own wording, 2026-10-22).
+        subjunctive = (any(word in _RESPONSIBILITY_SUBJUNCTIVE for word in lowered)
+                       or any(a == "что" and b == "бы" for a, b in zip(lowered, lowered[1:])))
+        if any(_RESPONSIBILITY_PAST.fullmatch(word) for word in words) and subjunctive:
             return match.group(0)
+    return None
+
+
+def user_mentions_model(store, task_id: str, model_hint: str) -> dict | None:
+    """The newest user message that names ``model_hint`` (its id, configured
+    or derived label) without refusing it, as ``dict(source_ref, family,
+    matched, basis='mentioned')``; ``None`` otherwise. Used only together
+    with a coordinator's stated reason that the user requires the model
+    (``orchestration.state``): neither alone is consent."""
+    family = family_of(model_hint or "")
+    if family is None:
+        return None
+    overrides = load_overrides(getattr(store, "project_root", None))
+    identities = _enabled_model_identities(overrides)
+    engine, _, model = model_hint.partition("/")
+    names = model_policy.policy_for(engine, model, overrides).request_names or derived_request_names(
+        model_hint, identities, overrides)
+    pattern = re.compile(_source_request_pattern(family, names, identities).pattern + (
+        "|" + "|".join(rf"(?<![^\s\"'«“(]){re.escape(n)}(?=[.,!?;:)»”\"']?(?:\s|$))" for n in names)
+        if names else ""), re.IGNORECASE)
+    with store.connection() as db:
+        for source_ref, text in _user_texts(store, db, task_id):
+            text = _effort_source_text(text, identities)
+            if refuses_family(text, family, names, pattern=pattern) is not None:
+                return None
+            for match in pattern.finditer(text):
+                if not _refused_mention(_mention_context(text, match)):
+                    return dict(source_ref=source_ref, family=family, matched=match.group(0), basis="mentioned")
     return None
 
 
@@ -1786,7 +1817,47 @@ def _user_texts(store, db, task_id: str) -> Iterator[tuple[str, str]]:
             texts.append((_timestamp_key(answer.get("answered_at")), answer["source_ref"], answer["answer_text"]))
     # Stable: equal times keep sources before answers, each newest first.
     for _time, source_ref, text in sorted(texts, key=lambda item: item[0], reverse=True):
-        yield source_ref, text
+        yield source_ref, _without_substitution_emphasis(_user_authored(text))
+
+
+_HISTORY = re.compile(r"<chat-history-summary>(.*?)(?:</chat-history-summary>|\Z)", re.S)
+_HISTORY_TAG = re.compile(r"^\[([^\]]+)\]\s?(.*)$")
+
+
+def _user_authored(text: str) -> str:
+    """Only what the user wrote. A host's imported chat history (Paseo's
+    ``<chat-history-summary>``) also carries the assistant's replies, tool
+    lines and runtime notices; "назначает другую модель вместо Opus" there
+    was read as the user refusing Opus (2026-10-22). Inside it only ``[User]``
+    turns are kept (of a "Question: ... → Answer: ..." turn, the answer)."""
+    def users(block: str) -> str:
+        kept, current = [], None
+        for line in block.splitlines():
+            tag = _HISTORY_TAG.match(line)
+            if tag:
+                current = [] if tag.group(1) == "User" else None
+                if current is not None:
+                    body = tag.group(2)
+                    if "→ Answer:" in body:
+                        body = body.split("→ Answer:", 1)[1].strip()
+                    current.append(body)
+                    kept.append(current)
+            elif current is not None:
+                current.append(line)
+        return "\n\n".join("\n".join(turn).strip() for turn in kept if "\n".join(turn).strip())
+    return _HISTORY.sub(lambda match: users(match.group(1)), text)
+
+
+# "без замены другой моделью" / "without substitution" insists on the model;
+# its substitution word must not read as a refusal of it.
+_SUBSTITUTION_EMPHASIS = re.compile(
+    r"\bбез\s+(?:какой-?(?:либо|нибудь)\s+)?(?:замен\w*|подмен\w*)(?:\s+(?:на\s+)?(?:друг\w*|ин\w*)\s+модел\w*)?"
+    r"|\bwithout\s+(?:any\s+)?(?:substitut\w*|replac\w*)(?:\s+(?:by|with)\s+(?:another|other|a\s+different)\s+model)?"
+    r"|\bno\s+(?:substitut\w*|replacement)s?\b", re.IGNORECASE)
+
+
+def _without_substitution_emphasis(text: str) -> str:
+    return _SUBSTITUTION_EMPHASIS.sub("", text)
 
 
 def _reserved_request_word(word: str) -> bool:
