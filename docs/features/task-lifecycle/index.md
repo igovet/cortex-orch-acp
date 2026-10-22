@@ -90,7 +90,9 @@ event. Display uses
 the existing ACP assistant-message path and retained pipeline, not a new host API:
 on completion the stored synthesis -- runtime-composed or the coordinator's
 `synthesis_submit` text with its "Not verified" list -- is sent as an assistant
-message before the completion label, so the chat never ends with the bare label.
+message, and the chat ends on it: a completed task gets no closing label
+("Завершено"/`Runtime: COMPLETED` were removed on the owner's request, 2026-10-22).
+Only a failed, blocked or cancelled task ends with its label and blocker.
 Once coordinator synthesis commits, the controller withholds later engine prose
 for that turn (streamed deltas and final-only text), including paraphrases, rather
 than displaying it alongside the stored synthesis. The commit, not a tool title or

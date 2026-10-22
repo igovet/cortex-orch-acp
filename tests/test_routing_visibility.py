@@ -202,3 +202,10 @@ def test_provisioning_failure_card_title_includes_the_resolved_route(tmp_path):
     assert cards[0]["status"] == "failed"
     assert cards[0]["title"] == "Worker: debugger · claude · Opus 5.5 (1M) · high · deep · hint ignored · by usage · usage 42% — Audit"
     assert "unsafe_storage" in cards[0]["raw_output"]
+
+
+def test_a_route_the_user_asked_for_reads_by_your_request():
+    from cortex_runtime.routing.decision_display import route_decision_summary
+    detail = {"effort": "high", "model_name": "Opus 5.5", "route_decision": {
+        "tier": "flagship", "role_tier": "flagship", "model_hint_status": "honoured", "decided_by": "user_request"}}
+    assert "by your request" in route_decision_summary("claude-agent-acp", "opus[1m]", detail, compact=True)

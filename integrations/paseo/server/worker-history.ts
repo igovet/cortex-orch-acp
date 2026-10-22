@@ -66,7 +66,7 @@ def route_selection(detail):
                 used = float(value)
             break
     return {'tier': tier, 'hint': hint if hint != 'auto' else None,
-            'decidedBy': text(decision.get('decided_by')), 'planUsedPercent': used}
+            'decidedBy': {'user_request': 'your request'}.get(text(decision.get('decided_by')), text(decision.get('decided_by'))), 'planUsedPercent': used}
 def usage_fallback_refs(db, task_id, execution_refs):
     # A routed retry replaces delegation_provisioning.attempt_id. Follow its
     # audited predecessor chain so the worker card still includes real spend

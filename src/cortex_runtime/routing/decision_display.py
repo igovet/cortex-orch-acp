@@ -11,6 +11,8 @@ from ..catalog.labels import engine_short_name
 # it with an ellipsis. The compact route text never exceeds this many
 # characters, so the decision stays readable on a card.
 CARD_SUMMARY_MAX = 80
+# What decided a route, in the owner's words where the id is not plain.
+_DECIDED_BY = {"user_request": "your request"}
 # A model name is never shortened below this many characters plus "…".
 _MIN_MODEL_CHARS = 12
 
@@ -58,7 +60,7 @@ def route_decision_summary(
             parts.append(f"hint {hint.split(':', 1)[0] if compact else hint}")
         decided_by = decision.get("decided_by")
         if decided_by:
-            parts.append(f"by {decided_by}")
+            parts.append(f"by {_DECIDED_BY.get(str(decided_by), decided_by)}")
         parts.append(f"usage {_chosen_usage(decision)}")
     line = " · ".join(parts)
     if not compact or len(line) <= CARD_SUMMARY_MAX:

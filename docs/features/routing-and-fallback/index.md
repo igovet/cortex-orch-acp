@@ -940,6 +940,16 @@ it, the hint is honoured as a user request (`auto_route.user_mentions_model`, ba
 `mentioned`). A security audit the owner assigned to Opus that way ran on another model
 until these rules existed (2026-10-22).
 
+A variant suffix is not part of a model's name: without configured `request_names`,
+"opus" names `opus[1m]` (a one-word id without a suffix, such as `haiku`, is matched as
+itself). "делает/выполняет/проводит" and "does/performs" assign a model to a role or
+stage like "отвечает". A qualified audit ("security-аудит", "аудит безопасности",
+"accessibility audit") names only its specialist, not the code reviewer; an unqualified
+"аудит"/"audit" still covers review and both auditors. All three were found in a live
+desktop check on 2026-10-22, where a dev profile without request names ran the
+owner-assigned Opus audit on Sonnet. A worker card and the worker page show a route the
+owner asked for as "by your request".
+
 When the router still ignores a coordinator's model hint, the runtime says so once per
 attempt in the chat: which model was asked for, which runs and why
 (`orchestration.route_notices`, recorded as `MODEL_HINT_IGNORED_SHOWN`).

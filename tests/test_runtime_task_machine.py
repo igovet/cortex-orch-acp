@@ -761,7 +761,9 @@ def test_composed_runtime_executes_plan_review_verification_synthesis(tmp_path, 
                 assert db.execute("SELECT 1 FROM runtime_events WHERE task_id=? AND type='SYNTHESIS_RUNTIME_COMPOSED'",
                                   (task.task_id,)).fetchone()
         assert calls == expected
-        assert any('COMPLETED' in text for text in output)
+        # A completed task ends on its answer, without a closing label.
+        assert context['state'] == 'COMPLETED', context
+        assert not any('Runtime: COMPLETED' in text for text in output)
     elif scenario in {'synthesis_drift', 'post_review_drift'}:
         # A project that changed under the pipeline is recovered by the
         # coordinator re-planning, not a stop.

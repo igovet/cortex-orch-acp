@@ -626,12 +626,14 @@ def test_controller_skips_reconciliation_only_when_eligible(tmp_path, eligible, 
         assert 'SYNTHESIS_RUNTIME_DECLINED' not in kinds(machine, task)
     if delayed_exit:
         assert kinds(machine, task).index('VERIFICATION_PASSED') < kinds(machine, task).index('TEST_REVIEWER_EXIT')
-    assert any(('# Done' if eligible else 'Runtime: COMPLETED') in m for m in messages)
-    if not eligible:
-        # The coordinator's own synthesis reaches the chat, before the label.
+    # A completed task ends on its answer, with no closing label.
+    assert not any('Runtime: COMPLETED' in m or 'Завершено' in m for m in messages)
+    if eligible:
+        assert any('# Done' in m for m in messages)
+    else:
+        # The coordinator's own synthesis is the chat's last word.
         final = [i for i, m in enumerate(messages) if m.startswith('\n\nCoordinator fallback')]
         assert len(final) == 1 and 'Not verified' in messages[final[0]], messages
-        assert final[0] < max(i for i, m in enumerate(messages) if 'Runtime: COMPLETED' in m)
 
 
 def registry_engine(machine, task, *, terminated=False, alive=False):

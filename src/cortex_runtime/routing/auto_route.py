@@ -1676,7 +1676,8 @@ def refuses_family(text: str, family: str, names: Sequence[str] | None = None,
 
 # "Responsible for" a role or stage, and those roles and stages. A past
 # form ("отвечал") is a request only after "чтобы"/"пусть"; alone it reports.
-_RESPONSIBILITY_PRESENT = re.compile(r"отвеча(?:ет|ют|ть|й|йте)|responsible|charge|owns?|handles?|handle", re.I)
+_RESPONSIBILITY_PRESENT = re.compile(r"отвеча(?:ет|ют|ть|й|йте)|дела(?:ет|ют)|выполня(?:ет|ют)|проводи(?:т|ть)|проводят|"
+                                     r"responsible|charge|owns?|handles?|handle|does|performs?", re.I)
 _RESPONSIBILITY_PAST = re.compile(r"отвечал[аи]?", re.I)
 _RESPONSIBILITY_SUBJUNCTIVE = frozenset({"чтобы", "пусть", "should", "must", "will", "let"})
 _ROLE_OR_STAGE = re.compile(
@@ -1889,10 +1890,12 @@ def derived_request_names(model_hint: str, identities: Sequence[str], overrides:
         parts = [part for part in re.split(r"[-_./]", model) if part.isalpha()]
         return parts[-1].casefold() if parts else None
     own = word(model_hint)
-    bare = model_hint.partition("/")[2].split("[", 1)[0]
-    # A one-word id ("haiku", "opus[1m]") is already matched as itself.
+    # A one-word id ("haiku") is already matched as itself; a variant suffix
+    # is not part of how people name a model, so "opus" still names
+    # "opus[1m]" (a dev profile without request names ran an owner-assigned
+    # Opus audit on Sonnet, 2026-10-22).
     if (model_hint not in identities or not own or own in _GENERIC_MODEL_WORDS or len(own) < 3
-            or own == bare.casefold()):
+            or own == model_hint.partition("/")[2].casefold()):
         return ()
     for identity in identities:
         if identity == model_hint:
@@ -2075,6 +2078,13 @@ _PURPOSE_ROLES = (
 )
 
 
+# A qualified audit names only its specialist: "security-аудит" or "аудит
+# безопасности" also sent the code review to Opus (live, 2026-10-22).
+_QUALIFIED_AUDIT = re.compile(
+    r"(?P<q>security|accessibility|a11y)[\s-]+(?:audit\w*|аудит\w*)|(?:audit\w*|аудит\w*)\s+"
+    r"(?:of\s+)?(?P<p>security|accessibility|безопасност\w*|доступност\w*)", re.I)
+
+
 def _purposes_of(role_id: str) -> list[re.Pattern]:
     return [re.compile(pattern, re.I) for pattern, roles in _PURPOSE_ROLES if role_id in roles]
 
@@ -2102,7 +2112,7 @@ def user_purpose_model_request(store, task_id: str, role_id: str | None) -> str 
     with store.connection() as db:
         for _source_ref, text in _user_texts(store, db, task_id):
             for sentence in reversed(_SENTENCE_END.split(_effort_source_text(text, identities))):
-                words = _plain_words(sentence)
+                words = _plain_words(_QUALIFIED_AUDIT.sub(r"\g<q>\g<p>", sentence))
                 if not any(p.fullmatch(word) for p in purposes for word in words):
                     continue
                 named = set()

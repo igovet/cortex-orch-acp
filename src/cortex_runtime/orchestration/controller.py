@@ -1142,8 +1142,12 @@ def _run(runtime, task_id, session_id, channel, session_ref, content, emit_updat
                 runtime_synthesis_emitted = True
             runtime._set_state(task_id, 'accepted' if state == 'COMPLETED' else state.lower(),
                                wait_reason=context['blocker'])
-            labels = {'COMPLETED':'Завершено','FAILED':'Ошибка выполнения','BLOCKED':'Выполнение заблокировано','CANCELLED':'Отменено'}
-            emit_update('\n\n' + (labels[state] if language == 'ru' else f"Runtime: {state}") + (f" — {context['blocker']}" if context['blocker'] else ''))
+            # A completed task ends on its answer; only an unsuccessful end
+            # gets a closing label (the owner removed "Завершено", 2026-10-22).
+            labels = {'FAILED':'Ошибка выполнения','BLOCKED':'Выполнение заблокировано','CANCELLED':'Отменено'}
+            if state != 'COMPLETED':
+                label = labels[state] if language == 'ru' else f"Runtime: {state}"
+                emit_update('\n\n' + label + (f" — {context['blocker']}" if context['blocker'] else ''))
             return StopReason.CANCELLED if state == 'CANCELLED' else failure_stop_reason
         machine.move(task_id, 'BLOCKED', blocker='recovery_required')
 

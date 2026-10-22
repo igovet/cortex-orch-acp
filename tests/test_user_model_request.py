@@ -399,6 +399,8 @@ def test_message_wide_grant_does_not_cross_user_messages_or_apply_to_labels(task
     ("Добавь в AGENTS.md требование, чтобы за audit отвечал opus.", "opus"),
     ("За аудит отвечает Opus", "Opus"),
     ("Opus is responsible for the security review", "Opus"),
+    ("Security-аудит этой функции делает Claude Opus, без замены другой моделью.", "Opus"),
+    ("Opus performs the security audit", "Opus"),
     ("Let Opus handle the review", "Opus"),
 ])
 def test_a_model_made_responsible_for_a_role_or_stage_is_a_request(text, expected):
@@ -410,6 +412,7 @@ def test_a_model_made_responsible_for_a_role_or_stage_is_a_request(text, expecte
     "Opus wrote the last review.",          # a remark about the past
     "За аудит отвечал Opus.",               # a report, no "чтобы"/"пусть"
     "Opus is fast.",                         # no role or stage
+    "Opus делает это быстро.",               # no role or stage
     "Не нужно, чтобы за аудит отвечал Opus.",  # refused
 ])
 def test_a_remark_about_a_model_assigns_nothing(text):
@@ -425,7 +428,7 @@ def _two_engines(tmp_path, opus_names=("opus", "опус")):
         "models": {
             "claude-agent-acp": {"auto": ["claude-sonnet-5", "opus[1m]"],
                                  "tiers": {"claude-sonnet-5": "standard", "opus[1m]": "deep"},
-                                 "policy": {"claude-sonnet-5": {}, "opus[1m]": {"request_names": list(opus_names)}}},
+                                 "policy": {"claude-sonnet-5": {}, "opus[1m]": {"request_names": list(opus_names) if opus_names else None}}},
             "codex-acp": {"auto": ["gpt-6.1-sol", "gpt-6-luna"], "tiers": {"gpt-6.1-sol": "standard", "gpt-6-luna": "light"},
                           "policy": {"gpt-6.1-sol": {}, "gpt-6-luna": {}}}}})
     return Store(tmp_path / ".cortex", project_root=tmp_path)
@@ -446,6 +449,17 @@ def test_an_owner_naming_a_model_in_plain_words_requests_it(tmp_path, text, iden
     assert grant is not None and grant["matched"] == matched
 
 
+@pytest.mark.parametrize("text", ["В AGENTS.md добавь требование, что бы за security-аудит отвечал opus.",
+                                  "Security-аудит делает Claude Opus, без замены другой моделью."])
+def test_opus_names_opus_1m_without_configured_request_names(tmp_path, text):
+    """A variant suffix is not part of the name: a profile without request
+    names ran an owner-assigned Opus audit on Sonnet (live, 2026-10-22)."""
+    store = _two_engines(tmp_path, opus_names=None)
+    task = bootstrap_task(store, SourceEvent(origin="test", event_id="variant"), text, "owner")
+    grant = auto_route.user_model_request(store, task.task_id, "claude-agent-acp/opus[1m]")
+    assert grant is not None and grant["matched"].casefold() == "opus"
+
+
 @pytest.mark.parametrize("text", ["Use GPT-6-LUNA", "Use vendor/gpt-6-luna", "luna-extended is fine"])
 def test_a_derived_label_never_matches_inside_another_id(tmp_path, text):
     store = _two_engines(tmp_path)
@@ -461,6 +475,10 @@ def test_a_derived_label_never_matches_inside_another_id(tmp_path, text):
     ("Не используй opus для ревью.", "worker-code-reviewer", None),  # refused
     ("Для ревью используй opus или sonnet.", "worker-code-reviewer", None),  # two models
     ("Ревью делай через sonnet.", "worker-backend-dev", None),        # not this role's purpose
+    ("Security-аудит делает Claude Opus.", "worker-code-reviewer", None),      # a qualified audit
+    ("Security-аудит делает Claude Opus.", "worker-security-auditor", "claude-agent-acp/opus[1m]"),
+    ("Аудит безопасности делает opus.", "worker-code-reviewer", None),
+    ("Аудит безопасности делает opus.", "worker-security-auditor", "claude-agent-acp/opus[1m]"),
 ])
 def test_a_model_the_owner_named_for_a_purpose_reaches_unhinted_nodes(tmp_path, text, role, expected):
     """The runtime's review node has no model hint, so "review with Sonnet"
