@@ -119,9 +119,9 @@ export function shouldAnnounceCardStatus(previous: CardStatusSnapshot | null, ne
 }
 
 /** The card's one accessible name: full title, role, status, then the action. */
-export function cardAccessibilityLabel(input: { title: string; role: string; status: string; route: string | null; issueCount: number | null; disabled: boolean }): string {
+export function cardAccessibilityLabel(input: { title: string; role: string; status: string; route: string | null; selection?: string | null; issueCount: number | null; disabled: boolean }): string {
   const issues = input.issueCount ? `, ${input.issueCount} open issue${input.issueCount === 1 ? "" : "s"}` : "";
-  const route = input.route ? `, ${input.route}` : "";
+  const route = (input.route ? `, ${input.route}` : "") + (input.selection ? `, chosen as ${input.selection}` : "");
   const action = input.disabled ? "Worker unavailable" : "Open worker";
   const title = input.title.replace(/[.\s]+$/, "");
   return `${title}. ${input.role}${route}. Status: ${input.status}${issues}. ${action}`;

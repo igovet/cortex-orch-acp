@@ -150,7 +150,10 @@ full `cortexWorkerResult`, to the same count. A replayed session therefore
 never brings the summary, check names, blockers or evidence gaps back into the
 coordinator stream (`integrations/paseo/shared/worker-card-outcome.ts`). The
 card shows the role, status (icon and text), task title, the actual
-engine · model · effort route without route-selection provenance, at most one
+engine · model · effort route, on its own muted line how that route was chosen
+(tier, hint status, `by …` and the chosen plan's usage as `plan usage N%`, from
+the runtime's `routing/decision_display.py` summary; the worker page shows the
+same as "Route choice: …" from the route audit's recorded decision), at most one
 fixed attention category (for example "Failure details in the worker tab";
 never any part of a failure or cancellation reason), labelled context/token
 usage ("Usage unavailable" when nothing was reported), and the whole card is

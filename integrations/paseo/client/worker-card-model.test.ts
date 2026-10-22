@@ -5,13 +5,15 @@ import { resolveDurableWorkerCardStatus, workerCardIdentity, workerStatusPresent
 import { openIssuesOfResult, workerCardOutcome } from "../shared/worker-card-outcome.ts";
 import { attemptResultView } from "./worker-attempt-result.ts";
 
-test("card identity separates role, actual route and title, without route-selection provenance", () => {
+test("card identity separates role, actual route, how the route was chosen and title", () => {
   const identity = workerCardIdentity("Worker: technical-writer · claude · Opus 5.5 · high · flagship · by user_request · usage 25% — Rewrite the audit");
-  assert.deepEqual(identity, { title: "Rewrite the audit", role: "technical-writer", route: "claude · Opus 5.5 · high" });
+  assert.deepEqual(identity, { title: "Rewrite the audit", role: "technical-writer", route: "claude · Opus 5.5 · high",
+    selection: "flagship · by user_request · plan usage 25%" });
   const crossTier = workerCardIdentity("Worker: debugger · codex · gpt (alias) · light→standard · hint ignored · by usage · usage unknown — Fix · Interrupted");
   assert.equal(crossTier.route, "codex · gpt (alias)");
+  assert.equal(crossTier.selection, "light→standard · hint ignored · by usage · plan usage unknown");
   assert.equal(crossTier.title, "Fix");
-  assert.deepEqual(workerCardIdentity("Worker: explorer — Look"), { title: "Look", role: "explorer", route: null });
+  assert.deepEqual(workerCardIdentity("Worker: explorer — Look"), { title: "Look", role: "explorer", route: null, selection: null });
   // A very long title is kept whole (the card clips visually, the accessible name keeps it).
   const long = "x".repeat(3000);
   assert.equal(workerCardIdentity(`Worker: explorer — ${long}`).title, long);

@@ -154,19 +154,39 @@ export function resolveDurableWorkerCardStatus(title: string, status: string, du
 
 /** Route-selection provenance in a card title's route (`flagship`,
  * `light→standard`, `hint …`, `by …`, `usage 42%`, see
- * routing/decision_display.py): kept in pipeline.md and the route audit,
- * never on the compact coordinator card, where `usage` would also read as
- * this worker's own usage. */
+ * routing/decision_display.py). The card shows it on its own line, apart
+ * from the engine · model · effort route. */
 const ROUTE_PROVENANCE = /^(?:by|usage|hint)\s|^(?:light|standard|deep|flagship)(?:\s*→\s*(?:light|standard|deep|flagship))?$/i;
 
-/** The compact coordinator card's identity: task title, role, and the
- * actual engine · model · effort route without selection provenance
- * (`null` when the title carries no route). */
-export function workerCardIdentity(title: string): { title: string; role: string; route: string | null } {
+/** The chosen plan's usage reads `plan usage 42%`, never a bare `usage`
+ * that would look like this worker's own context or token usage. */
+function planUsageLabel(part: string): string {
+  return part.replace(/^usage\s/i, "plan usage ");
+}
+
+/** How the runtime chose a route, one line: `deep · by usage · plan usage 42%`
+ * (`null` without a recorded decision). */
+export function routeSelectionText(selection: {
+  tier?: string | null; hint?: string | null; decidedBy?: string | null; planUsedPercent?: number | null;
+} | null | undefined): string | null {
+  if (!selection) return null;
+  const used = selection.planUsedPercent;
+  const parts = [selection.tier, selection.hint ? `hint ${selection.hint}` : null,
+    selection.decidedBy ? `by ${selection.decidedBy}` : null,
+    `plan usage ${typeof used === "number" && Number.isFinite(used) ? `${Math.round(used)}%` : "unknown"}`];
+  return parts.filter((part): part is string => Boolean(part)).join(" · ");
+}
+
+/** The compact coordinator card's identity: task title, role, the actual
+ * engine · model · effort route, and separately how that route was chosen
+ * (each `null` when the title carries none). */
+export function workerCardIdentity(title: string): { title: string; role: string; route: string | null; selection: string | null } {
   const { name, routeParts } = parseWorkerCardTitle(title);
   const role = (routeParts[0] || "worker").replace(/^worker-/i, "");
   const route = routeParts.slice(1).filter((part) => !ROUTE_PROVENANCE.test(part));
-  return { title: name.trim() || role, role, route: route.length ? route.join(" · ") : null };
+  const selection = routeParts.slice(1).filter((part) => ROUTE_PROVENANCE.test(part)).map(planUsageLabel);
+  return { title: name.trim() || role, role, route: route.length ? route.join(" · ") : null,
+    selection: selection.length ? selection.join(" · ") : null };
 }
 
 export function workerCardMetadata(title: string, status: string) {

@@ -138,7 +138,7 @@ function WorkerTimelineRow({ theme, layout, agentId, item, workspaceId, onOpen }
     <Pressable
       ref={cardRef as never}
       accessibilityRole="button"
-      accessibilityLabel={cardAccessibilityLabel({ title: identity.title, role: identity.role, status: statusText, route: identity.route, issueCount, disabled })}
+      accessibilityLabel={cardAccessibilityLabel({ title: identity.title, role: identity.role, status: statusText, route: identity.route, selection: identity.selection, issueCount, disabled })}
       accessibilityState={{ disabled }}
       disabled={disabled}
       onPress={() => { activateOnce(); }}
@@ -165,6 +165,7 @@ function WorkerTimelineRow({ theme, layout, agentId, item, workspaceId, onOpen }
       </View>
       <Text numberOfLines={2} ellipsizeMode="tail" style={{ color: theme.colors.foreground, fontSize: 14, lineHeight: 20, fontWeight: "600" }}>{identity.title}</Text>
       <Text style={{ color: muted, fontSize: 12, lineHeight: 18 }}>{identity.route ?? "Route unavailable"}</Text>
+      {identity.selection && <Text style={{ color: muted, fontSize: 12, lineHeight: 18 }}>{identity.selection}</Text>}
       {attention && <View style={{ flexDirection: "row", alignItems: "center", gap: 6, minWidth: 0 }}>
         <View style={{ flexShrink: 0 }}><Icon name="CircleAlert" size={12} color={statusColor} /></View>
         <Text numberOfLines={1} ellipsizeMode="tail" style={{ color: statusColor, fontSize: 12, lineHeight: 18, flexShrink: 1, minWidth: 0 }}>{attention}</Text>

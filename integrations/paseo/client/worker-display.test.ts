@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import {
-  contextSummary, resolveDurableWorkerCardStatus, resolveWorkerCardStatus, tokensAccessibilityLabel, tokensSummaryLabel,
+  contextSummary, resolveDurableWorkerCardStatus, routeSelectionText, resolveWorkerCardStatus, tokensAccessibilityLabel, tokensSummaryLabel,
   workerAssignmentLine, workerCardMetadata, workerDisplayName, workerModelDisplay, workerStatusPresentation,
 } from "./worker-display.ts";
 
@@ -144,4 +144,11 @@ assert.equal(
   tokensAccessibilityLabel({ input: 0, output: 0, cachedRead: 0, cachedWrite: 0, knownCalls: 0, unknownCalls: 1 }),
   "Token usage unavailable",
 );
+// The worker page's route choice: the same parts as the card's line, with
+// the chosen plan's usage never shown as a bare `usage`.
+assert.equal(routeSelectionText({ tier: "light→standard", hint: "ignored:pinned", decidedBy: "usage", planUsedPercent: 42.4 }),
+  "light→standard · hint ignored:pinned · by usage · plan usage 42%");
+assert.equal(routeSelectionText({ tier: "deep", hint: null, decidedBy: null, planUsedPercent: null }), "deep · plan usage unknown");
+assert.equal(routeSelectionText(null), null);
+assert.equal(routeSelectionText(undefined), null);
 console.log("usage meter token label tests passed");

@@ -35,6 +35,16 @@ const route = z.object({
   // client then shows `model` explicitly marked as an alias.
   modelName: z.string().min(1).nullable().optional(),
   effort: z.string().min(1).nullable(),
+  // How the runtime chose this route, from the audit's recorded decision
+  // (routing/decision_display.py): the tier (`light→standard` for a
+  // fallback), a model hint's status, what decided it (`usage`) and the
+  // chosen plan's used percent. Absent for a route recorded without one.
+  selection: z.object({
+    tier: z.string().min(1).nullable(),
+    hint: z.string().min(1).nullable(),
+    decidedBy: z.string().min(1).nullable(),
+    planUsedPercent: z.number().nullable(),
+  }).nullable().optional(),
 });
 
 export const tokenTotals = z.object({

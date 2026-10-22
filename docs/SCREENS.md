@@ -10,7 +10,7 @@
 4. Measured usage, explicitly labeled. The whole card opens the worker; there is no visible **Open worker ›** label.
 5. At most one short category/action prompt for an attention state.
 
-Show only the exact issue count when complete data is already available. Usage must communicate partial/unknown coverage. Do not show summary text, check rows/names, evidence-gap explanations, blockers copied from individual checks, receipts, commands, transcript, full failureReason or route-selection provenance. No inline expansion or hover popover may reveal those details.
+Show only the exact issue count when complete data is already available. Usage must communicate partial/unknown coverage. Do not show summary text, check rows/names, evidence-gap explanations, blockers copied from individual checks, receipts, commands, transcript, full failureReason. How the route was chosen (tier, hint status, what decided it, the chosen plan's usage as “plan usage N%”) is shown on its own line under the engine/model route, on the card and on the worker page. No inline expansion or hover popover may reveal those details.
 
 **Navigation and states**
 - Activating the single card action, by click/tap, Enter or Space, selects the exact assignment and opens the existing Workers workspace tab.

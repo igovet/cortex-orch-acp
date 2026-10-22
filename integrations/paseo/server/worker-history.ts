@@ -40,6 +40,33 @@ def sum_tokens(rows):
         else:
             totals['total'] += count('inputTokens') + count('outputTokens') + count('cachedReadTokens') + count('cachedWriteTokens')
     return totals if totals['knownCalls'] or totals['unknownCalls'] else None
+def route_selection(detail):
+    # How the runtime chose a route, from attempt_route_audit's recorded
+    # route_decision; the same fields and tier label as the runtime's own
+    # routing/decision_display.route_decision_summary, kept structured.
+    decision = detail.get('route_decision') if isinstance(detail, dict) else None
+    if not isinstance(decision, dict):
+        return None
+    def text(value):
+        return value if isinstance(value, str) and value else None
+    tier = text(decision.get('tier'))
+    cross_tier = decision.get('cross_tier')
+    role_tier = text(decision.get('role_tier'))
+    if tier and decision.get('chosen_cross_tier') and isinstance(cross_tier, dict) and text(cross_tier.get('from_tier')):
+        tier = tier + '→' + cross_tier['from_tier']
+    elif tier and role_tier and role_tier != tier:
+        tier = role_tier + '→' + tier
+    hint = text(decision.get('model_hint_status'))
+    used = None
+    for candidate in decision.get('candidates') or ():
+        if (isinstance(candidate, dict) and candidate.get('route') == decision.get('chosen')
+                and candidate.get('connection_id') == decision.get('chosen_connection_id')):
+            value = candidate.get('used_percent')
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                used = float(value)
+            break
+    return {'tier': tier, 'hint': hint if hint != 'auto' else None,
+            'decidedBy': text(decision.get('decided_by')), 'planUsedPercent': used}
 def usage_fallback_refs(db, task_id, execution_refs):
     # A routed retry replaces delegation_provisioning.attempt_id. Follow its
     # audited predecessor chain so the worker card still includes real spend
@@ -492,6 +519,9 @@ try:
                             'modelName': model_name if isinstance(model_name, str) and model_name else None,
                             'effort': effort if isinstance(effort, str) and effort else None,
                         }
+                        selection = route_selection(detail)
+                        if selection is not None:
+                            attempt_route['selection'] = selection
                         latest_route = attempt_route
                 failure = at['failure_reason']
                 if isinstance(failure, str):

@@ -150,7 +150,12 @@ def test_embedded_history_query_binds_lifecycle_and_worker_events_to_one_attempt
     db.execute("insert into delegation_provisioning values (?,?,?)", ("a_fixture", task, "exec_revision"))
     db.execute("insert into attempt_route_audit values (?,?,?,?,?,?,?)",
                ("audit_revision", "exec_revision", task, "codex", "model-fixture",
-                json.dumps({"effort": "high", "model_name": "Model Fixture Resolved"}), "7"))
+                json.dumps({"effort": "high", "model_name": "Model Fixture Resolved", "route_decision": {
+                    "tier": "standard", "role_tier": "light", "model_hint_status": "ignored:pinned",
+                    "decided_by": "usage", "chosen": "codex-acp/model-fixture", "chosen_connection_id": "cn_1",
+                    "candidates": [{"route": "codex-acp/other", "connection_id": "cn_1", "used_percent": 90},
+                                   {"route": "codex-acp/model-fixture", "connection_id": "cn_1", "used_percent": 42.4}],
+                }}), "7"))
     db.commit()
     db.close()
 
@@ -169,8 +174,12 @@ def test_embedded_history_query_binds_lifecycle_and_worker_events_to_one_attempt
     assert output["assignments"][0]["title"] == "first"
     assert output["assignments"][0]["status"] == "completed"
     assert output["assignments"][0]["attempts"][0]["status"] == "completed"
+    # How the route was chosen travels with it to the worker page, with the
+    # runtime's own tier label (routing/decision_display.py).
     assert output["assignments"][0]["attempts"][0]["route"] == {
         "provider": "codex", "model": "model-fixture", "modelName": "Model Fixture Resolved", "effort": "high",
+        "selection": {"tier": "light→standard", "hint": "ignored:pinned", "decidedBy": "usage",
+                      "planUsedPercent": 42.4},
     }
     assert output["assignments"][0]["attempts"][0]["completedAt"] == "6"
     assert events[0]["input"] == {"path": "src/app.py"}

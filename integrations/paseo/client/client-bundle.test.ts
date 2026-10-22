@@ -510,9 +510,13 @@ for (const platformOs of ["android", "web"] as const) {
           ...host, agentId: "a1", item: { id: "worker-row:worker:ref1", kind: "worker-row", version: 1, data },
         } }));
         const text = runtime.text();
-        for (const hidden of ["LEGACY", "WORKER SUMMARY BODY", "CHECK-NAME", "EVIDENCE-GAP", "BLOCKER-TEXT", "Runtime did not accept", "flagship", "user_request", "usage 25%"]) {
+        for (const hidden of ["LEGACY", "WORKER SUMMARY BODY", "CHECK-NAME", "EVIDENCE-GAP", "BLOCKER-TEXT", "Runtime did not accept"]) {
           assert.ok(!text.includes(hidden), `coordinator card must not render ${hidden}`);
         }
+        // How the route was chosen is its own line; the plan's usage never
+        // reads as a bare `usage` beside the worker's own context meter.
+        assert.match(text, /^flagship · by user_request · plan usage 25%$/m);
+        assert.doesNotMatch(text, /(?<!plan )usage 25%/);
         assert.match(text, /Completed with issues\n · 1/);
         assert.match(text, /1 open issue · details in the worker tab/);
         assert.match(text, /claude · Opus 5\.5 · high/);
