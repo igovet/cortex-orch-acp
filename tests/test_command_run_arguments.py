@@ -1,8 +1,8 @@
 """command_run's optional timeout_seconds through the real dispatch paths.
 
-timeout_seconds advertises only a minimum: the runtime stays unbounded by
-default (omit the field, or send an enormous value, and the command still
-runs). An out-of-range value below the minimum, or a non-integer, is refused
+timeout_seconds advertises only a minimum. Omitted, it defaults to
+gateway.COMMAND_RUN_DEFAULT_TIMEOUT_SECONDS (30 minutes; outside_command keeps
+600 s); an enormous value still runs. An out-of-range value below the minimum, or a non-integer, is refused
 on the exact field. An enormous in-range value is clamped internally
 (gateway.TIMEOUT_CEILING_SECONDS) so it can never overflow the deadline or
 subprocess-timeout arithmetic after the command already started.
@@ -169,3 +169,80 @@ def test_an_unexpected_exception_is_storage_error_naming_its_class(tmp_path, mon
     assert (error['error'], error['field'], error['received']) == ('storage_error', 'cause', 'KeyError')
     assert 'internal detail' not in reply['content'][0]['text']
     assert "KeyError: 'internal detail'" in capsys.readouterr().err  # the traceback stays in the log
+
+
+def test_omitted_timeout_defaults_to_thirty_minutes(tmp_path, monkeypatch):
+    """A hung command without timeout_seconds held its worker for 30 silent
+    minutes (2026-10-21)."""
+    _, store, channel, secret = _worker(tmp_path)
+    worker = resolve_channel(store, channel, secret)
+    limits = []
+    real = gateway._run_command_process
+
+    def recording(store_, channel_, launch, fds, output, effects, limit, **kwargs):
+        limits.append(limit)
+        return real(store_, channel_, launch, fds, output, effects, limit, **kwargs)
+
+    monkeypatch.setattr(gateway, '_run_command_process', recording)
+    mcp_tools.dispatch(store, worker, 'command_run', dict(argv=['true'], request_key='bare'))
+    mcp_tools.dispatch(store, worker, 'command_run', dict(argv=['true'], request_key='long', timeout_seconds=7200))
+    assert limits == [gateway.COMMAND_RUN_DEFAULT_TIMEOUT_SECONDS, 7200] and limits[0] == 1800
+
+
+def test_a_command_never_shares_the_mcp_servers_stdin(tmp_path):
+    _, store, channel, secret = _worker(tmp_path)
+    worker = resolve_channel(store, channel, secret)
+    receipt = mcp_tools.dispatch(store, worker, 'command_run', dict(
+        argv=[sys.executable, '-B', '-c', "import os; print(os.path.realpath('/proc/self/fd/0'))"],
+        request_key='stdin'))
+    assert receipt['exit_code'] == 0 and receipt['output'].strip() == '/dev/null', receipt
+
+
+def test_a_timeout_stops_a_child_that_left_the_process_group(tmp_path):
+    """Playwright's webServer runs detached; after a timed-out run it kept
+    its port and broke the next run and final verification (2026-10-22)."""
+    import time
+    _, store, channel, secret = _worker(tmp_path)
+    worker = resolve_channel(store, channel, secret)
+    script = ("import subprocess, time\n"
+              "child = subprocess.Popen(['sleep', '300'], start_new_session=True)\n"
+              "print(child.pid, flush=True)\n"
+              "time.sleep(300)\n")
+    receipt = mcp_tools.dispatch(store, worker, 'command_run', dict(
+        argv=[sys.executable, '-B', '-c', script], request_key='detached', timeout_seconds=2))
+    assert receipt['failure'] == 'timeout', receipt
+    detached = int(receipt['output'].split()[0])
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        try:
+            with open(f'/proc/{detached}/stat') as handle:
+                if handle.read().split(')')[-1].split()[0] == 'Z':
+                    break
+        except FileNotFoundError:
+            break
+        time.sleep(0.05)
+    else:
+        pytest.fail(f'detached child {detached} survived the timeout')
+
+
+def test_the_mcp_server_survives_a_non_blocking_stdin():
+    """A SIGKILLed Node child that shared the server's stdin left it
+    O_NONBLOCK; the next empty read ended the server with exit 0, and every
+    later call of that worker failed "Transport closed" (2026-10-22)."""
+    import time
+    src = Path(__file__).resolve().parents[1] / 'src'
+    code = ("import os, sys; sys.path.insert(0, %r); os.set_blocking(0, False)\n"
+            "from cortex_runtime.server import main; main()\n") % str(src)
+    env = {k: v for k, v in os.environ.items() if not k.startswith('CORTEX_CHANNEL')}
+    proc = subprocess.Popen([sys.executable, '-B', '-c', code], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                            stderr=subprocess.DEVNULL, env=env)
+    try:
+        time.sleep(0.5)
+        assert proc.poll() is None, 'server exited on an empty non-blocking read'
+        proc.stdin.write(b'{"jsonrpc":"2.0","id":1,"method":"ping"}\n')
+        proc.stdin.flush()
+        reply = json.loads(proc.stdout.readline())
+        assert reply == {'jsonrpc': '2.0', 'id': 1, 'result': {}}
+    finally:
+        proc.kill()
+        proc.wait()

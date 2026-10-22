@@ -482,6 +482,13 @@ def main():
                           if channel_id and channel_secret and channel_project_root else None)
     server = Server(channel_credentials=channel_credentials)
     while True:
+        # A child that shared this stdin (an older runtime let commands
+        # inherit it) may have left it O_NONBLOCK; an empty read would then
+        # end the server although the engine is still connected.
+        try:
+            os.set_blocking(sys.stdin.fileno(), True)
+        except (OSError, ValueError):
+            pass
         line = sys.stdin.buffer.readline(MAX_REQUEST_BYTES+1)
         if not line:
             break

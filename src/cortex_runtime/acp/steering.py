@@ -157,6 +157,18 @@ def describe_attachments(attachments) -> str | None:
     return "Attachments: " + "; ".join(parts) + " - open with read_source"
 
 
+def busy_acknowledgement(store, task_id: str, language: str) -> str | None:
+    """The line a message gets when it arrives during busy work, or
+    ``None``. Such a message waits for a safe point; it used to wait 13-35
+    minutes with no sign it was received (observed 2026-10-22)."""
+    from . import messages
+    with store.connection() as db:
+        row = db.execute("SELECT state FROM runtime_tasks WHERE task_id=?", (task_id,)).fetchone()
+    if row is None or row["state"] not in {"EXECUTING", "REVIEWING", "VERIFYING"}:
+        return None
+    return messages.render("steering_received", language)
+
+
 def record_steering(store, task_id: str, origin: str, event_id: str, text: str, attachments=None) -> int:
     """Queue one source-identified steer and its revision in one transaction.
 

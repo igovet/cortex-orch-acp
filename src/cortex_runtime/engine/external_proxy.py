@@ -26,6 +26,11 @@ from cortex_runtime.contracts import StoreError
 from cortex_runtime.engine.mcp_bridge import always_load, coordinator_tools, describe_arguments
 
 
+# Discovery listings the gateway answers itself, empty: it grants no
+# resources, resource templates or prompts of an external server.
+_EMPTY_LISTINGS = {'resources/list': 'resources', 'resources/templates/list': 'resourceTemplates',
+                   'prompts/list': 'prompts'}
+
 def _ready(fd, event, timeout):
     """poll, not select: the sandbox pins one descriptor per granted path, so
     the child's pipes routinely sit above select()'s FD_SETSIZE of 1024."""
@@ -182,6 +187,13 @@ def main():
                     method=request.get('method');identifier=request.get('id');tool=None
                     try:
                         with store.connection() as db: authorize(db)
+                        if method in _EMPTY_LISTINGS and identifier is not None:
+                            # The gateway grants no resources or prompts: an
+                            # engine's startup discovery gets an honest empty
+                            # list, not a denial logged on every launch
+                            # (~30 per reviewer session, 2026-10-22).
+                            print(json.dumps(dict(jsonrpc='2.0',id=identifier,result={_EMPTY_LISTINGS[method]: []})),flush=True)
+                            continue
                         if method not in {'initialize','notifications/initialized','ping','tools/list','tools/call','notifications/cancelled'}:
                             raise StoreError('external_mcp_method_denied')
                         tool=request.get('params',{}).get('name')

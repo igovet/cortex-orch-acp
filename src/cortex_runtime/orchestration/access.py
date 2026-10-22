@@ -20,6 +20,19 @@ NEXT = ('End this turn without publishing an incomplete result. The runtime will
 # Delays between runtime checks, not sleeps while holding a database lock.
 RETRY_DELAYS_SECONDS = (1, 2, 4)
 RETRYABLE_REASONS = {'active_writer_conflict'}
+#: What a denied worker can do next. A bare reason code was read as "the
+#: runtime forbids this work" (2026-10-22: an absolute path outside the
+#: project became "access to that site was denied" in four later replies).
+DENIAL_GUIDANCE = {
+    'outside_project': ('access_request reserves project-relative paths only; this path is outside the project. '
+                        'This is not a refusal of the work: a writing worker reaches outside paths with command_run '
+                        'in Development and Auto or with outside_command; a read-only role reports the need.'),
+    'unsafe_path': ('Send each path as one exact project-relative file or directory: no wildcard (* ?), no empty, '
+                    './, // or trailing-slash forms, no private names (.git, .cortex), no symlinked or hardlinked '
+                    'existing file. Correct the path and request again.'),
+    'read_only_role': ('This role is read-only and reserves no project paths; its commands discard project writes. '
+                       'Report what needs changing instead.'),
+}
 def _retry_tx(db, wait, attempt=0):
     from . import worker_waits
     deadline = (datetime.fromisoformat(now()) + timedelta(seconds=RETRY_DELAYS_SECONDS[attempt])).isoformat(
@@ -92,7 +105,7 @@ def _safe_path(root, value):
     """Check the existing chain without following links or creating parents."""
     from .project_paths import permitted_path
     if (not permitted_path(value) or value in {'', '.'} or
-            PurePosixPath(value).as_posix() != value or any(c in value for c in '*?[')):
+            PurePosixPath(value).as_posix() != value or any(c in value for c in '*?')):
         return False
     try:
         fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
@@ -135,6 +148,9 @@ def predicate(db, binding, paths):
     if not node or node['stage'] == 'review' or node['role'] in READ_ONLY:
         return 'read_only_role'
     root = task_workspace.task_root(db, binding['task_id'])
+    if any(isinstance(path, str) and (PurePosixPath(path).is_absolute() or '..' in PurePosixPath(path).parts)
+           for path in paths):
+        return 'outside_project'
     if not all(_safe_path(root, path) for path in paths):
         return 'unsafe_path'
     # Newly requested scope must not outrun a queued owner prohibition.
@@ -220,7 +236,8 @@ def resolve_tx(db, wait, *, reason):
     """Only a runtime policy check decides access; no user answer grants it."""
     from . import worker_waits
     decision = (_grant(db, wait, wait['paths']) if reason is None else
-                dict(status='denied', request_id=wait['request_id'], reason=reason))
+                dict(status='denied', request_id=wait['request_id'], reason=reason,
+                     **({'guidance': DENIAL_GUIDANCE[reason]} if reason in DENIAL_GUIDANCE else {})))
     event(db, wait['task_id'], 'ACCESS_DECIDED', dict(wait_id=wait['wait_id'], **decision), wait['channel_id'])
     return worker_waits._change(db, wait, 'ready', question_id=None, retry_at=None,
                                reason=reason, access_decision=decision)

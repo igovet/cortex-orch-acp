@@ -958,6 +958,15 @@ def current_outcomes(db, task_id: str, attempt_id: str, checks) -> list[dict]:
         ref = _invocation_retraction(db, task_id, index, checks, assessments, outcomes, history)
         if ref:
             outcomes[index] = dict(outcome="retracted", gap=None, closed_by=None, retracted_by=ref)
+    # A worker's own exploratory probe (an expected 404, a throwaway
+    # diagnostic) withdrawn with its reason: retracted history, never passed.
+    # One cited 404 probe once turned an approving review into a failed
+    # assignment that could not be submitted (2026-10-22).
+    for index, check in enumerate(checks):
+        reason = check.get("probe_withdrawn")
+        if (isinstance(reason, str) and reason.strip() and check.get("outcome") == "failed"
+                and outcomes[index]["outcome"] == "failed" and assessments[index]["strength"] == "verified"):
+            outcomes[index] = dict(outcome="retracted", gap=None, closed_by=None, retracted_by="probe_withdrawn")
     return outcomes
 
 

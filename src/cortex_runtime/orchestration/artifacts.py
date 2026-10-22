@@ -80,7 +80,8 @@ def project_git_evidence(store, task_id, owner_scope, root, kind):
     with tempfile.TemporaryDirectory(prefix='cortex-git-read-') as scratch:
         command = _project_git_command(root, scratch, argv, metadata)
         with tempfile.TemporaryFile() as output:
-            proc = subprocess.Popen(command, stdout=output, stderr=subprocess.STDOUT, env={'PATH':'/usr/bin:/bin'})
+            proc = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=output, stderr=subprocess.STDOUT,
+                                    env={'PATH':'/usr/bin:/bin'})
             failure = None
             try:
                 code = proc.wait(timeout=30)

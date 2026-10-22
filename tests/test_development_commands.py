@@ -414,8 +414,10 @@ def test_real_read_only_role_writes_caches_not_host_or_project(development, monk
     sibling.mkdir()
     activity = home / ".docker/buildx/activity"
     activity.mkdir(parents=True)
-    refused = [home / ".bashrc", home / ".profile", home / ".nvm/node", home / "sdk-state",
-               root / "reviewer-wrote"]
+    refused = [home / ".bashrc", home / ".profile", home / ".nvm/node", home / "sdk-state"]
+    # A project write lands in the discarded overlay (refused where the host
+    # cannot overlay); either way the project keeps nothing.
+    discarded = root / "reviewer-wrote"
     # The host /tmp is deliberately writable, including this sibling fixture.
     allowed = [home / ".cache/tool/entry", home / ".npm/_cacache/entry", activity / "default",
                sibling / "planted"]
@@ -427,6 +429,8 @@ def test_real_read_only_role_writes_caches_not_host_or_project(development, monk
         "    else: raise AssertionError('writable: ' + name)\n"
         f"for name in {[str(p) for p in allowed]!r}:\n"
         "    Path(name).parent.mkdir(parents=True, exist_ok=True); Path(name).write_text('ok')\n"
+        f"try: Path({str(discarded)!r}).write_text('discarded')\n"
+        "except OSError: pass\n"
         "with tempfile.NamedTemporaryFile() as handle: handle.write(b'ok')\n"
         # Namespace identity avoids a host PID colliding with an unrelated local PID.
         f"assert os.readlink('/proc/self/ns/pid') != {os.readlink('/proc/self/ns/pid')!r}, 'host PID namespace'\n"
@@ -437,6 +441,7 @@ def test_real_read_only_role_writes_caches_not_host_or_project(development, monk
     assert result["output"].strip() == "read-only host"
     assert (home / ".bashrc").read_text() == "# owner\n"
     assert not any(path.exists() for path in refused[1:])
+    assert not discarded.exists()
     assert all(path.read_text() == "ok" for path in allowed)
 
 
@@ -587,3 +592,24 @@ def test_outside_command_keeps_its_card_in_host_wide_modes(development, monkeypa
     with pytest.raises(StoreError, match="outside_action_not_confirmed"):
         gateway.dispatch(store, worker, "outside_command", dict(argv=["true"], cwd=str(home), request_key="oc"))
     assert asked == ["outside_command"]
+
+
+def test_real_read_only_role_runs_a_suite_that_writes_inside_the_project(development, monkeypatch):
+    """vitest writes node_modules/.vite-temp and Playwright its results; a
+    reviewer's suite failed with EROFS on them (2026-10-21)."""
+    from cortex_runtime.orchestration import sandbox
+    if not sandbox.tmp_overlay_supported():
+        pytest.skip("bubblewrap cannot create a tmp overlay on this host")
+    root, store, worker, _ = development
+    monkeypatch.setattr(gateway, "_authority", lambda db, ch: ([], "read-only"))
+    (root / "node_modules").mkdir()
+    script = ("from pathlib import Path\n"
+              "Path('node_modules/.vite-temp').mkdir()\n"
+              "Path('node_modules/.vite-temp/config.mjs').write_text('x')\n"
+              "Path('test-results').mkdir(); Path('test-results/out.json').write_text('{}')\n"
+              "print('suite ran')\n")
+    result = gateway.dispatch(store, worker, "command_run",
+                              dict(argv=[sys.executable, "-B", "-c", script], request_key="suite"))
+    assert result["exit_code"] == 0 and result["output"].strip() == "suite ran", result
+    assert result["profile"] == "read_only"
+    assert not (root / "node_modules/.vite-temp").exists() and not (root / "test-results").exists()

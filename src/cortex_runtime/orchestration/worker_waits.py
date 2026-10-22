@@ -213,12 +213,13 @@ def claim(store, task_id, assignment_ref, session_ref):
             db.commit()
             return None
         if wait.get('kind') == 'access':
-            from .access import predicate
+            from .access import DENIAL_GUIDANCE, predicate
             decision = wait['access_decision']
             if decision['status'] in {'granted', 'already_covered'}:
                 reason = predicate(db, wait, wait['paths'])
                 if reason:
-                    decision = dict(status='denied', request_id=wait['request_id'], reason=reason)
+                    decision = dict(status='denied', request_id=wait['request_id'], reason=reason,
+                                    **({'guidance': DENIAL_GUIDANCE[reason]} if reason in DENIAL_GUIDANCE else {}))
                     event(db, task_id, 'ACCESS_DECIDED', dict(wait_id=wait['wait_id'], **decision), wait['channel_id'])
                     wait = _change(db, wait, 'ready', access_decision=decision)
             answer_text = encoded(decision)

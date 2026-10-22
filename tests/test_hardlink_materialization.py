@@ -331,3 +331,39 @@ def test_real_writer_recreates_environment_without_changing_cache(tmp_path):
     assert done.returncode == 0, done.stdout + done.stderr
     assert outside.read_text() == "shared"
     assert (env / "new").read_text() == "new\n"
+
+
+def test_a_bulky_ignored_directory_stays_read_only_instead_of_timing_out(tmp_path, monkeypatch):
+    """727 retained verification copies (~1.5 million pnpm links) in a
+    git-ignored directory timed out every writer command (2026-10-21)."""
+    monkeypatch.setattr(sandbox.shutil, "which", lambda name: "/usr/bin/bwrap")
+    root = tmp_path / "project"
+    (root / "scripts/.verification/copy").mkdir(parents=True)
+    (root / "scripts/build.mjs").write_text("export {}\n")
+    subprocess.run(["git", "init", "-q", str(root)], check=True)
+    (root / ".gitignore").write_text("scripts/.verification/\n")
+    outside = tmp_path / "store-file"
+    outside.write_bytes(b"package\n")
+    for index in range(5):
+        (root / "scripts/.verification/copy" / str(index)).hardlink_to(outside)
+    scratch, home = tmp_path / "scratch", tmp_path / "home"
+    scratch.mkdir(); home.mkdir()
+    monkeypatch.setattr(sandbox, "_BULKY_IGNORED_LINKS", 2)
+    monkeypatch.setattr(sandbox, "_materialize_hardlinks",
+                        lambda root_, relatives, before=None: relatives and pytest.fail(f"copied {relatives}"))
+    with sandbox.development_command(root, scratch, ["true"], ["."], environ={"HOME": str(home)}) as (command, _):
+        mounts = [command[i:i + 3] for i in range(len(command) - 2)]
+        bulky = str(root / "scripts/.verification")
+        assert any(m[0] == "--ro-bind" and m[2] == bulky for m in mounts)
+        # One mount for the directory, none per shared file.
+        assert not any(m[0] == "--ro-bind" and m[2].startswith(bulky + "/") for m in mounts)
+    assert (root / "scripts/.verification/copy/0").stat().st_ino == outside.stat().st_ino
+
+
+def test_a_materialization_limit_names_the_directory_to_clean(tree, monkeypatch):
+    monkeypatch.setattr(sandbox, "_MATERIALIZE_BYTES_LIMIT", 1)
+    with pytest.raises(StoreError, match="command_hardlink_materialization_limit") as refused:
+        with prepare(tree):
+            pytest.fail("must not grant writes")
+    assert refused.value.received == ".venv/bin"
+    assert "under .venv/bin" in refused.value.correction and "run the command again" in refused.value.correction

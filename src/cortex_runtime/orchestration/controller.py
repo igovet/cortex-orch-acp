@@ -201,7 +201,7 @@ def _verification_command(root, scratch, argv):
     from .sandbox import discard_project_writes, readonly_command, with_umask, readonly_test_cache
     scopes = [path + '/**' for path in revision.ignored_directories(str(root))]
     with readonly_command(root, scratch, with_umask(argv), environ=os.environ, scopes=scopes) as (command, fds):
-        discard_project_writes(command, root)
+        discard_project_writes(command, root, scratch)
         readonly_test_cache(command, scratch, os.environ)
         yield command, fds
 
@@ -266,7 +266,7 @@ def _verification_observation(runtime, task_id, context, expected, emit_tool_cal
                     started_event_id = db.execute('SELECT last_insert_rowid()').fetchone()[0]
                     db.commit()
                 try:
-                    proc = subprocess.Popen(launch, stdout=output, stderr=subprocess.STDOUT, pass_fds=launch_fds,
+                    proc = subprocess.Popen(launch, stdin=subprocess.DEVNULL, stdout=output, stderr=subprocess.STDOUT, pass_fds=launch_fds,
                                             env={'PATH': '/usr/bin:/bin'}, start_new_session=True)
                 except Exception as error:
                     with runtime._store.connection() as db:
@@ -288,11 +288,21 @@ def _verification_observation(runtime, task_id, context, expected, emit_tool_cal
                 # No time limit, as for a worker's command_run: a project's
                 # full suite runs to completion; only a task stop ends it.
                 interrupted = False
+                started = time.monotonic()
+                shown_minutes = 0
+                total = len(context['plan']['verification'])
                 while proc.poll() is None:
                     if cancel.wait(.1):
                         interrupted = True
                         _kill_verification(proc)
                         break
+                    # A long check stays visibly alive: one card update a
+                    # minute (a full Storybook run was 63 silent minutes).
+                    minutes = int((time.monotonic() - started) // 60)
+                    if emit_tool_call and minutes > shown_minutes:
+                        shown_minutes = minutes
+                        emit_tool_call(dict(tool_call_id=ref, title=f'Verify project · {index + 1}/{total} · {minutes} min',
+                                            kind='execute', status='in_progress', raw_input=dict(argv=argv, cwd=str(root))))
                 code = proc.wait()
                 if trace is not None:
                     # Read the spool separately; retention below still receives
@@ -352,11 +362,10 @@ def _verification_observation(runtime, task_id, context, expected, emit_tool_cal
 
 
 def _kill_verification(proc):
-    # Also stop descendants: discarded checks must not leave cache writers.
-    try:
-        os.killpg(proc.pid, signal.SIGKILL)
-    except ProcessLookupError:
-        pass
+    # Also stop descendants, even one in its own process group: discarded
+    # checks must not leave cache writers or servers holding ports.
+    from .process_tree import kill_process_tree
+    kill_process_tree(proc.pid)
 
 
 def _verification(runtime, task_id, machine, emit_tool_call, cancel):
@@ -659,15 +668,16 @@ def _run(runtime, task_id, session_id, channel, session_ref, content, emit_updat
                        'If changes or substantial delegated work are required, submit a focused structured plan. '
                        'Runtime schedules planned workers, then independent review whenever the project changed, then verification. '
                        + _released_request(runtime, task_id)
+                       + _review_without_findings_request(runtime, task_id)
                        + _unknown_outcome_request(runtime, task_id)
                        + _skill_proposal_request(context)
                        + (_ask_user_request(context) or _verification_repair_request(context)
                           or _failed_worker_request(context))
                        if state == 'PLANNING' else
-                       'Reconcile the retained results and runtime verification. Every changed surface must be verified. '
-                       'If a retained not_run or unverified check, or a changed surface nobody verified, can still be verified '
-                       'with the available environment and the user\'s authorizations, submit replan_request to verify it before synthesis. '
-                       'List in synthesis not_verified only what a real blocker makes impossible, each with that blocker; '
+                       'Reconcile the retained results and runtime verification. '
+                       'Do not submit replan_request only to close retained not_run or unverified checks: list each in '
+                       'synthesis not_verified with its concrete blocker. Replan for verification only when the user asked for '
+                       'that check, or when a changed surface nobody verified puts the requested result itself at real risk. '
                        'Put gap disclosures only in structured not_verified; never author a not-verified section or recap that list in text. Runtime renders it once. '
                        'Write blocker, and description whenever item is an exact retained check name, in this turn\'s selected chat language; item itself stays the exact check name, unchanged by language, whenever it closes a retained gap. '
                        'Runtime decides completion. '
@@ -914,7 +924,12 @@ def _run(runtime, task_id, session_id, channel, session_ref, content, emit_updat
                             raise StoreError('workers_still_live_or_unknown')
                         machine.move(task_id, 'COMPLETED')
                     except StoreError as error:
-                        machine.move(task_id, 'BLOCKED', blocker=str(error))
+                        others = (machine.recheck_after_foreign_change(task_id, str(error))
+                                  if str(error) == 'completion_project_revision_changed' else None)
+                        if others:
+                            emit_update(_own_paragraph(_foreign_change_notice(others, language)))
+                        else:
+                            machine.move(task_id, 'BLOCKED', blocker=str(error))
             continue
         if state == 'PLAN_READY':
             with _execution_lock(task_id):
@@ -939,6 +954,11 @@ def _run(runtime, task_id, session_id, channel, session_ref, content, emit_updat
             # scheduler, at most MAX_WORKERS_PER_SESSION at once.
             with _execution_lock(task_id):
                 _dispatch_ready(runtime, machine, task_id, channel, context, emit_tool_call)
+            # A model the coordinator asked for but the router did not use is
+            # said in the chat, once per attempt (route_notices).
+            from .route_notices import ignored_hint_notices
+            for line in ignored_hint_notices(runtime._store, task_id, language):
+                emit_update(_own_paragraph(line))
             # A step that cannot start is shown, with what holds it, instead
             # of a silent chat; the card closes when the wait ends.
             if wait_cards or any(n['status'] == 'pending' for n in context['nodes']):
@@ -1224,6 +1244,12 @@ def _stop_question(question, context, language):
 def _ask_user_request(context):
     if not context.get('ask_user_required'):
         return ''
+    if context['ask_user_required'] == 'completion_dropped_failed_check':
+        return ("The revised verification removed a check that had failed, so the task cannot complete without the "
+                "user. Ask the user NOW with user_question_request, in the user's language: name the removed check "
+                "(context.verification output), say why it failed (environment or code) and what was tried, and offer "
+                "options such as keeping the check and fixing what blocks it, or completing without it listed as not "
+                "verified. Do not submit a plan before the answer. ")
     return (f"Automatic handling is exhausted ({context['ask_user_required']}). Ask the user NOW with "
             "user_question_request, in the user's language: say plainly what failed and why (use the verification "
             "output, failed checks and reports in context), what was already tried, and offer 2-4 concrete next "
@@ -1246,6 +1272,16 @@ def _failed_worker_request(context):
             'submit a new plan that fixes what is needed, carrying over the completed work by report id, or -- when the '
             'failure is unrelated to this task or pre-existing -- submit a plan for only what remains and state the gap. '
             'Do not stop the task for it. ')
+
+
+def _foreign_change_notice(others, language):
+    """One plain line when another Cortex task changed the shared project."""
+    tasks = ', '.join(others)
+    if language == 'ru':
+        return (f'Проект за это время изменила другая задача Cortex ({tasks}). Заново проверяю работу '
+                'на текущей версии проекта: ревью и финальная проверка.')
+    return (f'Another Cortex task ({tasks}) changed the project meanwhile. Reviewing and verifying the work '
+            'again on the current project.')
 
 
 def _verification_repair_request(context):
@@ -1285,6 +1321,22 @@ def _direct_answer_request(runtime, task_id):
             'First determine whether the user wants information or changes. For a simple question or project overview, '
             'read only the relevant files yourself and submit a concise direct answer with answer_submit; do not create '
             'workers, reports, code review or verification jobs for an explanation. ')
+
+
+def _review_without_findings_request(runtime, task_id):
+    """Planning guidance after a review requested changes without saying
+    which task to fix (state.TaskMachine.add_fix returned it here)."""
+    with runtime._store.connection() as db:
+        returned = db.execute("SELECT id,payload_json FROM runtime_events WHERE task_id=? "
+                              "AND type='RETURNED_TO_COORDINATOR' ORDER BY id DESC LIMIT 1", (task_id,)).fetchone()
+        if not returned or json.loads(returned['payload_json']).get('reason') != 'review_changes_without_findings':
+            return ''
+        if db.execute("SELECT 1 FROM runtime_events WHERE task_id=? AND type='PLAN_ACCEPTED' AND id>?",
+                      (task_id, returned['id'])).fetchone():
+            return ''
+    return ('The independent review requested changes without naming which task should fix what. Read its report '
+            '(the latest review node result.report_ref, with read_report), then submit a plan whose fixes go to the '
+            'roles that own the affected files, carrying over completed work by report id. ')
 
 
 def _released_request(runtime, task_id):

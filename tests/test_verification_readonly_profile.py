@@ -120,14 +120,17 @@ def test_verification_launch_is_the_read_only_profile(tmp_path, home, project, m
         assert ['--ro-bind', '/', '/'] in windows and ['--bind', '/', '/'] not in windows
         assert ['--ro-bind', str(home), str(home)] in windows
         # Only the explicit caches, scratch and /tmp are writable host paths.
+        query = '/sys/kernel/security/apparmor/.access'
         assert _writable(command) == {str(home / '.cache'), str(home / '.npm'),
-                                      str(home / '.docker/buildx/activity'), str(scratch), '/tmp'}
+                                      str(home / '.docker/buildx/activity'), str(scratch), '/tmp',
+                                      *([query] if Path(query).exists() else [])}
         assert ['--bind', str(scratch / 'var-tmp'), '/var/tmp'] in windows
         # The project is a discarded overlay over its pinned source; only its
         # git-ignored directories are writable in place, on top of it.
         project_at = command.index('--overlay-src')
         assert command[project_at + 1].startswith('/proc/self/fd/')
-        assert command[project_at + 2:project_at + 4] == ['--tmp-overlay', str(project.resolve())]
+        assert command[project_at + 2:project_at + 6] == ['--overlay', str(scratch / 'overlay-upper'),
+                                                          str(scratch / 'overlay-work'), str(project.resolve())]
         assert not any(w[0] == '--ro-bind' and w[2] == str(project.resolve()) for w in windows)
         grants = [w for w in windows[project_at:] if w[0] == '--bind' and w[1].startswith('/proc/self/fd/')]
         assert [w[2] for w in grants] == [str(project / 'build')]
@@ -408,3 +411,23 @@ def test_a_guarded_writer_pass_still_closes_a_gap_in_every_mode(tmp_path, monkey
         access_mode.switch(state.store, channel.task_id, mode, origin='acp_set_mode')
         with state.store.connection() as db:
             assert synthesis_checks(db, channel.task_id, 1)[1] == {}, mode
+
+
+def test_a_long_verification_check_shows_its_progress_every_minute(tmp_path, project, monkeypatch):
+    """A full Storybook run was 63 minutes without a single progress event
+    (2026-10-22); the card now updates once a minute."""
+    runtime, store, task = _runtime(tmp_path, project, 'auto')
+    import time as real_time
+    clock = iter(range(0, 10_000, 45))
+    # Only the controller's clock: revision capture keeps the real one.
+    monkeypatch.setattr(controller, 'time', SimpleNamespace(
+        monotonic=lambda: next(clock), monotonic_ns=real_time.monotonic_ns, time=real_time.time,
+        sleep=real_time.sleep))
+    cards = []
+    context = dict(revision=1, plan=dict(verification=[[sys.executable, '-B', '-c', 'import time; time.sleep(1.5)']]))
+    observed = controller._verification_observation(runtime, task.task_id, context, _digest(project), cards.append,
+                                                    threading.Event(), 7)
+    assert [c['exit_code'] for c in observed['checks']] == [0]
+    progress = [card['title'] for card in cards if str(card.get('title', '')).startswith('Verify project · ')]
+    assert progress and progress[0] == 'Verify project · 1/1 · 1 min'
+    assert len(set(progress)) == len(progress)

@@ -74,6 +74,10 @@ def test_home_is_read_only_except_explicit_caches(layout):
         expected |= {str(moved), str(scratch), '/tmp', str(scratch / 'var-tmp')}
         # var-tmp is bound at /var/tmp, not over itself.
         expected.discard(str(scratch / 'var-tmp'))
+        # AppArmor's world-writable query file, for a private dbus-daemon.
+        query = '/sys/kernel/security/apparmor/.access'
+        if Path(query).exists():
+            expected.add(query)
         assert writable == expected
         # /tmp precedes the read-only HOME mount, so a HOME under /tmp stays read-only.
         assert _windows(command).index(['--bind', '/tmp', '/tmp']) < _windows(command).index(

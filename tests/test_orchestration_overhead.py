@@ -813,7 +813,7 @@ def test_verification_5mb_output_persistence_and_bounded_tool_card(
     monkeypatch.setattr(sandbox, "readonly_command", passthrough_gateway)
     monkeypatch.setattr(sandbox, "gateway_command", passthrough_gateway)
     # A passthrough launch has no pinned project mount to overlay.
-    monkeypatch.setattr(sandbox, "discard_project_writes", lambda *_args: False)
+    monkeypatch.setattr(sandbox, "discard_project_writes", lambda *_args, **_kwargs: False)
     monkeypatch.setattr(sandbox, "with_umask", lambda argv: argv)
     monkeypatch.setattr(sandbox, "as_owner", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(

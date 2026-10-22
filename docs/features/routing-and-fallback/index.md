@@ -19,9 +19,16 @@ and bounded by the configured per-model policy. `list_route_options` is a
 read-only snapshot for coordinators; dispatch validates current eligibility
 again.
 
-The runtime-created mandatory review node is not a covered exact-route node.
-It has no plan hint, so a user model request never applies to it
-(`orchestration.state.attempt_routing`). Its route comes from:
+The runtime-created mandatory review node has no plan hint. When a user message
+names a model for review or audit ("Ревью делай через sonnet", "за аудит отвечает
+Opus"), that model is its hint and routes as an explicit user request, ahead of pins
+and preferences (`auto_route.user_purpose_model_request`, applied in
+`orchestration.state.attempt_routing` to every node without an exact hint, by the
+role's purpose: review/audit, design/UI/UX, tests/QA, docs, security, accessibility,
+backend, frontend, devops/deploy, debugging, architecture, refactoring, planning). The
+newest user sentence naming that purpose decides; a refusal there, or two models for
+it, applies nothing. Before this the review node could never get the owner's model,
+which then lost to pins (2026-10-22). Without such a request its route comes from:
 
 1. an owner pin for `worker-code-reviewer`, its alias, or `*`;
 2. failing that, automatic ranking with the cross-provider review preference.
@@ -906,6 +913,24 @@ plan's usage (`usage 42%` or `usage unknown`). On a card the line is at most
 80 characters (`CARD_SUMMARY_MAX`): the alias marker, then the hint, then
 part of the model name are dropped before anything is clipped;
 `pipeline.md` keeps the full line. Count balance is never shown.
+
+### Owner model requests in plain words
+
+Besides the request grammar above, a model made responsible for a role or stage in an
+owner message is a request: "за аудит отвечает Opus", "чтобы за audit отвечал opus",
+"Opus is responsible for the security review" (`auto_route.assigns_family`). A past form
+("отвечал") counts only after "чтобы"/"пусть"; a remark ("Opus wrote the last review")
+and a refused or negated mention assign nothing. An enabled model without configured
+`request_names` gets its unique last id word as a label (`claude-sonnet-5` → `sonnet`,
+`gpt-6.1-sol` → `sol`, `gpt-6-luna` → `luna`; `auto_route.derived_request_names`) when no
+other enabled model shares it and it is not a generic word; it matches only as a
+standalone word, so `gpt-6-luna.v2` or `vendor/gpt-6-luna` stay other identities. An
+audit the owner assigned to Opus once ran on Sol because neither rule existed
+(2026-10-22).
+
+When the router still ignores a coordinator's model hint, the runtime says so once per
+attempt in the chat: which model was asked for, which runs and why
+(`orchestration.route_notices`, recorded as `MODEL_HINT_IGNORED_SHOWN`).
 
 ## Automatic worker routing: unavailable routes
 

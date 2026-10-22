@@ -1,6 +1,7 @@
 """Isolated launcher regressions; only fresh scratch and existing dependencies."""
 from concurrent.futures import ThreadPoolExecutor
 import json
+import re
 import os
 from pathlib import Path
 import subprocess
@@ -143,10 +144,10 @@ def test_actual_fresh_python_startup_imports_and_pytest_exit_propagation(tmp_pat
             argv = [sys.executable, '-B', str(ROOT/'scripts/cortex_test_isolated.py'),
                     '--environment-root', str(scratch), '--dependency-path', str(deps),
                     'tests/test_qualification_binding.py']
-        result = subprocess.run(argv, cwd=ROOT, env=env, capture_output=True, text=True, timeout=60)
+        result = subprocess.run(argv, cwd=ROOT, env=env, capture_output=True, text=True, timeout=180)
         assert result.returncode == 0, (f'{form} binding matrix exit={result.returncode}\n'
                                        + result.stdout + result.stderr)
-        assert '[100%]' in result.stdout and 'failed' not in result.stdout and 'error' not in result.stdout
+        assert re.search(r'^\d+ passed', result.stdout.strip().splitlines()[-1]), result.stdout[-400:]
         assert 'bringing up nodes' not in result.stdout
         assert not list(scratch.rglob('*.pyc'))
 

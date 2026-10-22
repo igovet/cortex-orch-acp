@@ -308,6 +308,24 @@ evidence is reported as a limitation. Exact quotes and explicitly requested
 project-artifact languages are preserved. This is model instruction, not automatic translation or a claim
 that arbitrary model output can be deterministically language-validated.
 
+## Stopping from a question and acknowledging steering
+
+Every coordinator or worker question with options also offers the runtime's own
+"Stop the task" ("Остановить задачу"). Choosing it, or answering any question with a
+plain stop ("стоп", "stop", "остановить задачу", "stop the task"), stops the task through
+the same path as `/cortex-stop` (`force_finish`), keeping finished work and never
+certifying unfinished work. The runtime stop question keeps its own Finish option.
+Two plain "stop" answers once failed to stop a task because only the coordinator
+interpreted them (2026-10-22).
+
+A message that arrives while workers, review or verification run is queued for the
+next safe point and acknowledged at once ("Got it. I will take this into account after
+the current step."); it used to wait 13-35 minutes with no sign it was received.
+
+A long runtime verification command updates its tool card once a minute with its
+position and elapsed time (`Verify project · 2/4 · 12 min`); a full Storybook run was
+63 minutes without a progress event.
+
 ## Worker cards across steering
 
 A worker's coordinator-timeline card is one ACP tool call (`worker:<assignment>`)

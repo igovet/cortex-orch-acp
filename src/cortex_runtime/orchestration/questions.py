@@ -13,6 +13,9 @@ FORCE_FINISH_ANSWERS = frozenset({
     'закрыть как есть', 'завершить задачу', 'заверши задачу',
     'закрыть задачу', 'закрой задачу',
     'finish the task', 'close the task', 'close as is', 'finish now',
+    # A plain "stop" answer, and the runtime's own "Stop the task" option
+    # (acp.messages question_option_stop_task) offered with every question.
+    'стоп', 'остановить', 'остановить задачу', 'останови задачу', 'stop', 'stop the task',
 })
 
 

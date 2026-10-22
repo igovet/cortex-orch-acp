@@ -1674,6 +1674,39 @@ def refuses_family(text: str, family: str, names: Sequence[str] | None = None,
     return None
 
 
+# "Responsible for" a role or stage, and those roles and stages. A past
+# form ("отвечал") is a request only after "чтобы"/"пусть"; alone it reports.
+_RESPONSIBILITY_PRESENT = re.compile(r"отвеча(?:ет|ют|ть|й|йте)|responsible|charge|owns?|handles?|handle", re.I)
+_RESPONSIBILITY_PAST = re.compile(r"отвечал[аи]?", re.I)
+_RESPONSIBILITY_SUBJUNCTIVE = frozenset({"чтобы", "пусть", "should", "must", "will", "let"})
+_ROLE_OR_STAGE = re.compile(
+    r"(?:audit|аудит|review|ревью|code|код|design|дизайн|frontend|фронт|backend|бэк|test|тест|qa|plan|план|"
+    r"docs?|документ|security|безопасност|accessibility|доступност|architect|архитект|debug|отладк|"
+    r"verification|проверк|implementation|реализац|refactor|рефактор|research|исследован)\w*", re.I)
+
+
+def assigns_family(text: str, pattern: re.Pattern) -> str | None:
+    """The first mention of the family made responsible for a role or stage
+    in its sentence ("за аудит отвечает opus", "чтобы за audit отвечал opus",
+    "opus is responsible for the review") and not refused or negated, else
+    ``None``. A remark ("Astra wrote the last review") assigns nothing."""
+    for match in pattern.finditer(text):
+        context = _mention_context(text, match)
+        if _refused_mention(context):
+            continue
+        sentence_before = context["sentence_words"]
+        after = _plain_words(_SENTENCE_END.split(text[match.end():])[0])
+        words = [*sentence_before, *after]
+        if not any(_ROLE_OR_STAGE.fullmatch(word) for word in words):
+            continue
+        if any(_RESPONSIBILITY_PRESENT.fullmatch(word) for word in words):
+            return match.group(0)
+        if (any(_RESPONSIBILITY_PAST.fullmatch(word) for word in words)
+                and any(word.casefold() in _RESPONSIBILITY_SUBJUNCTIVE for word in sentence_before)):
+            return match.group(0)
+    return None
+
+
 def requests_family(text: str, family: str, names: Sequence[str] | None = None,
                     *, pattern: re.Pattern | None = None,
                     exact_pattern: re.Pattern | None = None) -> str | None:
@@ -1769,6 +1802,35 @@ def request_names(model_hint: str, project_root=None, environ: Mapping[str, str]
     engine, _slash, model = (model_hint or "").partition("/")
     overrides = load_overrides(project_root, environ)
     return model_policy.policy_for(engine, model, overrides).request_names
+
+
+# Words a model id ends with that name no particular model.
+_GENERIC_MODEL_WORDS = frozenset({"default", "auto", "latest", "flash", "pro", "mini", "plan", "preview", "chat"})
+
+
+def derived_request_names(model_hint: str, identities: Sequence[str], overrides: Mapping) -> tuple[str, ...]:
+    """For an enabled model the owner gave no request names, the last word
+    of its id ("claude-sonnet-5" -> "sonnet", "gpt-6.1-sol" -> "sol") when
+    no other enabled model's id or configured names share it, else ``()``:
+    "sol" or "luna" in an owner's message could never name those models."""
+    def word(identity):
+        model = identity.partition("/")[2].split("[", 1)[0]
+        parts = [part for part in re.split(r"[-_./]", model) if part.isalpha()]
+        return parts[-1].casefold() if parts else None
+    own = word(model_hint)
+    bare = model_hint.partition("/")[2].split("[", 1)[0]
+    # A one-word id ("haiku", "opus[1m]") is already matched as itself.
+    if (model_hint not in identities or not own or own in _GENERIC_MODEL_WORDS or len(own) < 3
+            or own == bare.casefold()):
+        return ()
+    for identity in identities:
+        if identity == model_hint:
+            continue
+        engine, _, model = identity.partition("/")
+        names = model_policy.policy_for(engine, model, overrides).request_names or ()
+        if word(identity) == own or own in {name.casefold() for name in names}:
+            return ()
+    return (own,)
 
 
 def _enabled_model_identities(overrides: Mapping) -> tuple[str, ...]:
@@ -1875,9 +1937,15 @@ def _user_model_consent(store, task_id: str, model_hint: str,
     configured_names = model_policy.policy_for(engine, model, overrides).request_names
     if names is not None and tuple(names) != configured_names:
         raise _policy_error("model_request_labels_changed", "Request labels must match current owner settings; reread routing.json.")
-    names = configured_names
     identities = _enabled_model_identities(overrides)
+    names = configured_names
     pattern = _source_request_pattern(family, names, identities)
+    derived = () if configured_names else derived_request_names(model_hint, identities, overrides)
+    if derived:
+        # A derived label is a whole standalone word only: "gpt-6-luna.v2",
+        # "vendor/gpt-6-luna" or "GPT-6-LUNA" stay other identities.
+        pattern = re.compile(pattern.pattern + "|" + "|".join(
+            rf"(?<![^\s\"'«“(]){re.escape(label)}(?=[.,!?;:)»”\"']?(?:\s|$))" for label in derived), re.IGNORECASE)
     exact_pattern = _source_request_pattern(family, (), identities) if family in identities else None
     refusal = None
     with store.connection() as db:
@@ -1893,6 +1961,12 @@ def _user_model_consent(store, task_id: str, model_hint: str,
                 continue
             matched = requests_family(text, family, names, pattern=pattern, exact_pattern=exact_pattern)
             if matched is None:
+                # A model made responsible for a role or stage is a request
+                # too: "добавь требование, чтобы за audit отвечал opus" named
+                # Opus for the audit, yet failed the request grammar and the
+                # audit ran on another model (observed 2026-10-22).
+                matched = assigns_family(text, pattern)
+            if matched is None:
                 continue
             if refusal is not None:
                 return None, dict(refusal, reason="revoked_by_user", revoked_source_ref=source_ref)
@@ -1907,6 +1981,77 @@ def _user_model_consent(store, task_id: str, model_hint: str,
                 grant["effort"] = effort
             return grant, None
     return None, None
+
+
+# What a role is for, in the owner's words. A node with no model hint (the
+# runtime's own review node, or a plan task the coordinator left on auto)
+# still gets the model the owner asked for that purpose.
+_PURPOSE_ROLES = (
+    (r"review\w*|ревью|code-review|аудит\w*|audit\w*", {"worker-code-reviewer", "worker-security-auditor",
+                                                        "worker-accessibility-auditor"}),
+    (r"design\w*|дизайн\w*|ui|ux|ui/ux|верстк\w*", {"worker-ux-designer", "worker-frontend-dev"}),
+    (r"test\w*|тест\w*|qa", {"worker-qa-engineer", "worker-build-verification"}),
+    (r"docs?|documentation|документац\w*", {"worker-technical-writer"}),
+    (r"security|безопасност\w*", {"worker-security-auditor"}),
+    (r"accessibility|a11y|доступност\w*", {"worker-accessibility-auditor", "worker-accessibility-fixer"}),
+    (r"backend|бэкенд\w*|бэк", {"worker-backend-dev"}),
+    (r"frontend|фронтенд\w*|фронт", {"worker-frontend-dev"}),
+    (r"devops|deploy\w*|деплой\w*|ci", {"worker-devops-engineer"}),
+    (r"debug\w*|отладк\w*", {"worker-debugger"}),
+    (r"architect\w*|архитектур\w*", {"worker-architect", "worker-database-architect"}),
+    (r"refactor\w*|рефактор\w*", {"worker-refactorer"}),
+    (r"plan\w*|планир\w*", {"worker-planner"}),
+)
+
+
+def _purposes_of(role_id: str) -> list[re.Pattern]:
+    return [re.compile(pattern, re.I) for pattern, roles in _PURPOSE_ROLES if role_id in roles]
+
+
+def user_purpose_model_request(store, task_id: str, role_id: str | None) -> str | None:
+    """The exact enabled identity the owner asked for this role's purpose
+    ("используй sonnet для ревью", "за аудит отвечает Opus", "UI/UX передавай
+    Фейблу"), from the newest user sentence naming both a model request and
+    that purpose; ``None`` when there is none, it is refused or names two
+    models. Only the request grammar of :func:`user_model_request` counts, so
+    the returned identity also grants through it."""
+    purposes = _purposes_of(role_id or "")
+    if not purposes:
+        return None
+    overrides = load_overrides(getattr(store, "project_root", None))
+    identities = _enabled_model_identities(overrides)
+    patterns = {}
+    for identity in identities:
+        engine, _, model = identity.partition("/")
+        names = model_policy.policy_for(engine, model, overrides).request_names or derived_request_names(
+            identity, identities, overrides)
+        patterns[identity] = re.compile(_source_request_pattern(identity, names, identities).pattern + (
+            "|" + "|".join(rf"(?<![^\s\"'«“(]){re.escape(n)}(?=[.,!?;:)»”\"']?(?:\s|$))" for n in names)
+            if names else ""), re.IGNORECASE)
+    with store.connection() as db:
+        for _source_ref, text in _user_texts(store, db, task_id):
+            for sentence in reversed(_SENTENCE_END.split(_effort_source_text(text, identities))):
+                words = _plain_words(sentence)
+                if not any(p.fullmatch(word) for p in purposes for word in words):
+                    continue
+                named = set()
+                refused = False
+                for identity, pattern in patterns.items():
+                    if not pattern.search(sentence):
+                        continue
+                    if refuses_family(sentence, identity, (), pattern=pattern) is not None:
+                        refused = True
+                        continue
+                    if (requests_family(sentence, identity, (), pattern=pattern) is not None
+                            or assigns_family(sentence, pattern) is not None):
+                        named.add(identity)
+                if refused and not named:
+                    return None
+                if len(named) == 1:
+                    return named.pop()
+                if named:
+                    return None
+    return None
 
 
 def user_model_request(store, task_id: str, model_hint: str, *, names: Sequence[str] | None = None) -> dict | None:

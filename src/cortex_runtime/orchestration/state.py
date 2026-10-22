@@ -60,8 +60,10 @@ TRANSITIONS = {
     # observation for the revision (see transition and review_waiver).
     'EXECUTING': {'REVIEWING', 'VERIFYING', 'WAITING_USER'},
     'REVIEWING': {'EXECUTING', 'VERIFYING', 'WAITING_USER'},
-    'VERIFYING': {'RECONCILING', 'PLANNING'},
-    'RECONCILING': {'COMPLETED', 'WAITING_USER'},
+    # -> REVIEWING only when another Cortex task changed the shared project
+    # (TaskMachine._recheck_after_foreign_change_tx).
+    'VERIFYING': {'RECONCILING', 'PLANNING', 'REVIEWING'},
+    'RECONCILING': {'COMPLETED', 'WAITING_USER', 'REVIEWING'},
     # Sessionless recovered workers use the task-global question fallback.
     'WAITING_USER': {'PLANNING', 'RECONCILING', 'EXECUTING', 'REVIEWING'},
     'RECOVERING': {'PLANNING', 'EXECUTING', 'REVIEWING', 'VERIFYING', 'RECONCILING'},
@@ -119,6 +121,46 @@ def event(db, task_id, kind, payload, actor='runtime'):
                      engine_session_id=identity.get("engine_session_id"))
     db.execute('INSERT INTO runtime_events(task_id,type,actor,payload_json,created_at) VALUES(?,?,?,?,?)',
                (task_id, kind, actor, encoded(payload), now()))
+
+
+#: What a writing worker does to a shared project tree.
+_PROJECT_WRITE_OPERATIONS = ('project_write', 'project_edit', 'project_delete', 'project_mkdir',
+                             'project_skill_link', 'command_run', 'outside_command', 'outside_write')
+
+
+def dropped_failed_checks_unacknowledged(db, task_id):
+    """The failed verification commands the latest revision of this plan's
+    verification removed, when the user has not answered since: twice a
+    popup placement check that failed only for environment reasons was
+    dropped and the task completed on lint and unit tests, so the user's
+    "fixed" popup still moved (2026-10-20/22)."""
+    accepted = db.execute("SELECT MAX(id) FROM runtime_events WHERE task_id=? AND type='PLAN_ACCEPTED'",
+                          (task_id,)).fetchone()[0] or 0
+    revised = db.execute("SELECT id,payload_json FROM runtime_events WHERE task_id=? AND type='VERIFICATION_REVISED' "
+                         "AND id>? ORDER BY id DESC LIMIT 1", (task_id, accepted)).fetchone()
+    if revised is None:
+        return []
+    dropped = json.loads(revised['payload_json']).get('dropped_failed') or []
+    if not dropped:
+        return []
+    answered = db.execute("SELECT 1 FROM runtime_events WHERE task_id=? AND type='USER_ANSWER_RECEIVED' AND id>? LIMIT 1",
+                          (task_id, revised['id'])).fetchone()
+    return [] if answered else dropped
+
+
+def foreign_project_writers(db, task_id, since):
+    """Other tasks of this project's store whose writing workers acted on
+    the project at or after ``since`` (read-only roles' commands discard
+    their project writes and are not counted)."""
+    from .contracts import READ_ONLY
+    marks = ','.join('?' * len(_PROJECT_WRITE_OPERATIONS))
+    rows = db.execute(
+        "SELECT DISTINCT e.task_id, p.role_id FROM runtime_events e "
+        "JOIN delegation_provisioning p ON p.channel_id=e.actor AND p.task_id=e.task_id "
+        "WHERE e.task_id!=? AND e.type='TOOL_AUTHORIZED' AND e.created_at>=? "
+        f"AND json_extract(e.payload_json,'$.operation') IN ({marks})",
+        (task_id, since, *_PROJECT_WRITE_OPERATIONS)).fetchall()
+    return sorted({row['task_id'] for row in rows if resolve_role(row['role_id']) not in READ_ONLY})
 
 
 def transition(db, task_id, target, *, blocker=None):
@@ -475,7 +517,7 @@ def attempt_routing(store, task_id, attempt_id):
     with store.connection() as db:
         provision = db.execute('SELECT idempotency_key FROM delegation_provisioning WHERE task_id=? AND attempt_id=?',
                                (task_id, attempt_id)).fetchone()
-        node = provision and db.execute('SELECT node_id,revision FROM runtime_nodes WHERE task_id=? AND assignment_ref=?',
+        node = provision and db.execute('SELECT node_id,revision,role FROM runtime_nodes WHERE task_id=? AND assignment_ref=?',
                                         (task_id, provision['idempotency_key'])).fetchone()
         if not node:
             return AttemptRouting(False, 'normal', 'auto', None, None)
@@ -507,7 +549,12 @@ def attempt_routing(store, task_id, attempt_id):
                   and p.get('failure_class') not in _INFRASTRUCTURE_RETRY_CLASSES
                   for p in (json.loads(r[0]) for r in retries))
     hint = task.get('model') or task.get('provider') or 'auto'
-    from ..routing.auto_route import user_model_request, user_model_revocation
+    from ..routing.auto_route import user_model_request, user_model_revocation, user_purpose_model_request
+    if '/' not in hint:
+        # No exact hint (the runtime's review node, or a task left on auto):
+        # the model the owner asked for this role's purpose still applies,
+        # ahead of pins and preferences, as an explicit request does.
+        hint = user_purpose_model_request(store, task_id, resolve_role(node['role'])) or hint
     return AttemptRouting(bool(fix) or retried, task.get('complexity', 'normal'), hint,
                           task.get('model_reason'), prior['engine'] if prior else None,
                           user_model_request(store, task_id, hint) if '/' in hint else None,
@@ -768,7 +815,7 @@ def disclosed_synthesis(text, not_verified, gaps, language='en'):
     if missing:
         raise StoreError('synthesis_gaps_undisclosed', 'arguments.not_verified', ', '.join(missing)[:160],
                          'every retained not_run or unverified check by its exact name, each with its blocker',
-                         'A gap with a declared command closes after a verified command_run with exactly matching argv or a complete passing runtime final-verification receipt with identical argv, bound to the gap author\'s observed publication or reviewed digest and the current approved project digest, regardless of execution order; a command-less gap may close by a verified same-name pass in its node or later fix. Plan the missing checks (plan_submit while planning, replan_request while reconciling) if they can be verified; otherwise list each exact name in not_verified with its concrete blocker: ' + '; '.join(missing))
+                         'A gap with a declared command closes after a verified command_run with exactly matching argv or a complete passing runtime final-verification receipt with identical argv, bound to the gap author\'s observed publication or reviewed digest and the current approved project digest, regardless of execution order; a command-less gap may close by a verified same-name pass in its node or later fix. List each exact name in not_verified with its concrete blocker (do not plan new work only to close a gap): ' + '; '.join(missing))
     if not not_verified:
         return text
     from ..acp import messages as localized_messages
@@ -784,9 +831,14 @@ def disclosed_synthesis(text, not_verified, gaps, language='en'):
         description = (item.get('description') or '').strip()
         return description if description else item['item']
 
+    # One line per distinct blocker: the same device/assistive-technology
+    # limit was listed about ten times in one final answer (2026-10-22).
+    groups = {}
+    for item in not_verified:
+        groups.setdefault(normalized(item['blocker']), [item['blocker'], []])[1].append(rendered_item(item))
     return (
         text.rstrip() + f'\n\n## {heading}\n\n' +
-        '\n'.join(f"- {rendered_item(item)} — {label}: {item['blocker']}" for item in not_verified)
+        '\n'.join(f"- {'; '.join(names)} — {label}: {blocker}" for blocker, names in groups.values())
     )
 
 
@@ -1573,6 +1625,11 @@ class TaskMachine:
         if binding['revision_digest'] == observed['dirty_digest']:
             return observed['dirty_digest']
         rebinds = len(bindings) - 1
+        bound_at = db.execute("SELECT MAX(created_at) FROM runtime_events WHERE task_id=? AND type='REVIEW_STARTED'",
+                              (task_id,)).fetchone()[0]
+        others = foreign_project_writers(db, task_id, bound_at) if bound_at else []
+        source = (f' The change came from another Cortex task in this project ({", ".join(others)}).'
+                  if others else '')
         if rebinds >= MAX_REVIEW_REBINDS:
             raise StoreError('review_project_revision_unstable')
         event(db, task_id, 'REVIEW_STARTED', dict(
@@ -1589,7 +1646,8 @@ class TaskMachine:
         raise StoreError('review_project_revision_changed', 'project revision', binding['revision_digest'],
                          'the project revision this review is bound to',
                          'The project changed while you reviewed it; the review is now bound to the current revision. '
-                         'Re-check what changed (project_git diff), then submit your verdict again with a new request_key.' + refreshed)
+                         'Re-check what changed (project_git diff), then submit your verdict again with a new request_key.'
+                         + source + refreshed)
 
     def record_result(self, task_id, assignment_ref, result, request_key=None):
         # Only a review result binds to an observed project revision.
@@ -1689,6 +1747,51 @@ class TaskMachine:
             observation.update(observed)
         return observed['dirty_digest']
 
+    def recheck_after_foreign_change(self, task_id, reason):
+        """The task ids of other Cortex tasks whose writers changed this
+        task's project, after starting a new review cycle on the current
+        revision; ``None`` (nothing changed) when the change cannot be
+        attributed to another task or the review cycle limit is reached."""
+        with observed_project(self.store, task_id), self.store.connection() as db:
+            db.execute('BEGIN IMMEDIATE')
+            others = self._recheck_after_foreign_change_tx(db, task_id, reason)
+            db.commit()
+        return others
+
+    def _recheck_after_foreign_change_tx(self, db, task_id, reason):
+        """Two tasks working in one project invalidated each other's
+        verified completion, and the user was asked what to do while the
+        runtime's own store named the writer (observed 2026-10-22). Here the
+        change is attributed and the work is reviewed and verified again on
+        the project as it is now."""
+        task = db.execute('SELECT * FROM runtime_tasks WHERE task_id=?', (task_id,)).fetchone()
+        if task is None or task['state'] not in {'VERIFYING', 'RECONCILING'}:
+            return None
+        if task['review_cycle'] >= MAX_REVIEW_CYCLES:
+            return None
+        bound = db.execute("SELECT MAX(created_at) FROM runtime_events WHERE task_id=? AND type='REVIEW_STARTED'",
+                           (task_id,)).fetchone()[0]
+        if bound is None:
+            return None
+        others = foreign_project_writers(db, task_id, bound)
+        if not others:
+            return None
+        nodes = db.execute("SELECT node_id FROM runtime_nodes WHERE task_id=? AND revision=? AND stage='execution'",
+                           (task_id, task['revision'])).fetchall()
+        cycle = task['review_cycle'] + 1
+        db.execute('INSERT INTO runtime_nodes VALUES(?,?,?,?,?,?,?,?,?,?,?)',
+                   (task_id, task['revision'], f'_review_{cycle}', 'worker-code-reviewer',
+                    'Independently review the original objective, implementation and retained reports on the '
+                    'current project, which another Cortex task also changed. Submit an explicit review verdict.',
+                    encoded([n['node_id'] for n in nodes]), encoded(['**']), 'review', 'pending', None, None))
+        # The synthesis described the earlier verified project; it is written
+        # again after this review and verification.
+        db.execute('UPDATE runtime_tasks SET review_cycle=?,synthesis=NULL WHERE task_id=?', (cycle, task_id))
+        event(db, task_id, 'PROJECT_CHANGED_BY_OTHER_TASK',
+              dict(tasks=others, revision=task['revision'], reason=reason, review_cycle=cycle))
+        transition(db, task_id, 'REVIEWING')
+        return others
+
     def add_review(self, task_id):
         with observed_project(self.store, task_id), self.store.connection() as db:
             db.execute('BEGIN IMMEDIATE')
@@ -1717,6 +1820,23 @@ class TaskMachine:
             db.commit()
 
     def add_fix(self, task_id, review):
+        # A request for changes without structured findings names no task to
+        # fix: the coordinator, who reads the review report, plans the fix.
+        # Every original task used to get a blind fix, and a devops task got
+        # an application-code fix it could not make (2026-10-22).
+        if not review['result'].get('findings'):
+            with self.store.connection() as db:
+                task = db.execute('SELECT revision FROM runtime_tasks WHERE task_id=?', (task_id,)).fetchone()
+                implementers = db.execute("SELECT COUNT(*) FROM runtime_nodes WHERE task_id=? AND revision=? "
+                                          "AND stage='execution' AND node_id NOT LIKE '\\_%' ESCAPE '\\'",
+                                          (task_id, task['revision'] if task else -1)).fetchone()[0]
+            if implementers > 1 and self.return_to_coordinator(task_id, 'review_changes_without_findings'):
+                with self.store.connection() as db:
+                    db.execute('BEGIN IMMEDIATE')
+                    event(db, task_id, 'REVIEW_CHANGES_REQUESTED', dict(
+                        review=review['node_id'], fixes=[], targeted=False, fallback='no_findings', returned=True))
+                    db.commit()
+                return
         with self.store.connection() as db:
             db.execute('BEGIN IMMEDIATE')
             task = db.execute('SELECT * FROM runtime_tasks WHERE task_id=?', (task_id,)).fetchone()
@@ -1803,7 +1923,8 @@ class TaskMachine:
             if not task or task['state'] != 'VERIFYING':
                 raise StoreError('verification_not_expected')
             if reviewed_digest(db, task_id, task['revision']) != revision_digest:
-                transition(db, task_id, 'BLOCKED', blocker='verification_review_revision_changed')
+                if self._recheck_after_foreign_change_tx(db, task_id, 'verification_review_revision_changed') is None:
+                    transition(db, task_id, 'BLOCKED', blocker='verification_review_revision_changed')
                 db.commit()
                 return False
             commands = json.loads(task['plan_json'])['verification']
@@ -1878,9 +1999,22 @@ class TaskMachine:
                     or not nodes or any(n['status'] != 'completed' for n in nodes)):
                 raise StoreError('verification_repair_not_expected')
             plan = json.loads(task['plan_json'])
+            failed = db.execute("SELECT payload_json FROM runtime_events WHERE task_id=? AND type='VERIFICATION_FAILED' "
+                                "ORDER BY id DESC LIMIT 1", (channel.task_id,)).fetchone()
+            failed_argv = [check.get('argv') for check in json.loads(failed[0]).get('checks', [])
+                           if check.get('exit_code') != 0] if failed else []
+            # A check that failed and is now gone: the runtime asks the user
+            # before completing (TaskMachine._work_invariants), so a
+            # behavioral check is never silently replaced by lint and units.
+            # Correcting a command one for one (the repair the runtime asks
+            # for) is not a removal; a shorter list that lost a failed command is.
+            previous = plan.get('verification') or []
+            dropped = ([argv for argv in failed_argv if argv and argv not in verification]
+                       if len(verification) < len(previous) else [])
             plan['verification'] = verification
             db.execute('UPDATE runtime_tasks SET plan_json=? WHERE task_id=?', (encoded(plan), channel.task_id))
-            event(db, channel.task_id, 'VERIFICATION_REVISED', dict(verification=verification), channel.channel_id)
+            event(db, channel.task_id, 'VERIFICATION_REVISED', dict(verification=verification, dropped_failed=dropped),
+                  channel.channel_id)
             transition(db, channel.task_id, 'VERIFYING')
             receipt = dict(recorded=True, state='VERIFYING')
             db.execute('INSERT INTO runtime_requests VALUES(?,?,?,?,?,?)',
@@ -1936,6 +2070,8 @@ class TaskMachine:
             raise StoreError('completion_verification_missing')
         if reviewed_digest(db, task_id, task['revision']) != json.loads(evidence['payload_json'])['revision_digest']:
             raise StoreError('completion_review_missing')
+        if dropped_failed_checks_unacknowledged(db, task_id):
+            raise StoreError('completion_dropped_failed_check')
         from ..delegation.revision import capture_revision
         observed = capture_revision(task_workspace.task_root(db, task_id))
         if observed['kind'] != 'observed' or observed['dirty_digest'] != json.loads(evidence['payload_json'])['revision_digest']:

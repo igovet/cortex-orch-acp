@@ -123,7 +123,11 @@ because its license could not be established. See
 Read-only roles (reviewer, auditor, explorer, architect and the other read-only
 profiles) run `command_run` in the read-only profile (receipts name it `read_only`) in every
 access mode: HOME is read-only except an explicit tool-cache allowlist, and the command runs in
-a private PID namespace. Automatic runtime verification uses the same profile in every mode;
+a private PID namespace. A read-only role's project writes go to a private overlay discarded when
+the command ends (refused where the host cannot overlay), so it can run a suite that writes
+temporary output while the project keeps nothing. AppArmor's world-writable query file
+`/sys/kernel/security/apparmor/.access` is writable in this profile so a private `dbus-daemon`
+can accept connections; it is a query interface and grants no policy change. Automatic runtime verification uses the same profile in every mode;
 inside a check the project's git-ignored directories are writable in place, and any other project write (a tracked file a tool regenerates, such as `next-env.d.ts`) goes to a private overlay discarded when the check ends (refused where the host's bubblewrap cannot overlay).
 The reviewed sources and revision therefore never change, and no access mode, permission or user
 consent alters this profile. Writing workers keep
@@ -644,8 +648,11 @@ write boundary. The gateway enforces assignment/role authority, user-protected
 paths, private-path restrictions and path safety, but does not compare ordinary
 writes with the declared work area. An `access_request` reserves additional
 work for coordination; it does not remount or widen the OS jail. A directory path with one
-trailing slash (`.next/`) is that directory, not an unsafe path; generated build/test output
-needs no request. Writer conflicts
+trailing slash (`.next/`) is that directory, `[`/`]` are literal path characters, and an
+absolute or `..` path is refused as `outside_project` with guidance; generated build/test
+output needs no request. `command_run` defaults to a 30-minute limit; on a timeout or stop
+the command and every process it started are killed, including children in their own process
+group, and commands never inherit the MCP server's stdin. Writer conflicts
 receive bounded delayed runtime rechecks (1/2/4 seconds), then a runtime grant or
 denial without a user question. Private, unsafe, deny-write and read-only refusals
 are immediate runtime decisions. Retained old access cards are cancelled; late

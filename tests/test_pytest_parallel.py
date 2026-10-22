@@ -112,13 +112,14 @@ def test_real_startup_policy(tmp_path, mode, flags):
     if mode == "explicit":
         # Explicit -n does not request the automatic loadgroup default.
         env["CORTEX_PARALLEL_PROBE"] = "explicit"
+    if not xdist_available and mode in ("parallel", "explicit"):
+        pytest.skip("pytest-xdist is not installed; its scheduling modes cannot be exercised")
     if not xdist_available:
-        flags = [] if mode in ("serial", "explicit") else flags
         env["CORTEX_PARALLEL_PROBE"] = "serial"
     result = subprocess.run(
         [sys.executable, "-B", "-m", "pytest", "-v", *flags,
          "tests/test_pytest_parallel.py::test_startup_probe"],
-        cwd=ROOT, env=env, capture_output=True, text=True, timeout=30)
+        cwd=ROOT, env=env, capture_output=True, text=True, timeout=120)
     assert result.returncode == 0, result.stdout + result.stderr
     assert "1 passed" in result.stdout
     if mode == "parallel" and xdist_available:

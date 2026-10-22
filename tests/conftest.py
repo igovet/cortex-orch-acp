@@ -25,6 +25,11 @@ def _auto_parallel(config, environ):
             or config.option.tx or config.option.collectonly
             or getattr(config.option, "looponfail", False)):
         return False
+    # Interactive debugging (-s, --capture=no, --trace, --setup-show, a
+    # breakpoint) needs the terminal of one serial process.
+    if (getattr(config.option, "capture", "fd") == "no" or getattr(config.option, "trace", False)
+            or getattr(config.option, "setupshow", False) or getattr(config.option, "usepdb", False)):
+        return False
     # Respect explicit distribution choices, including --dist=no, in all three
     # sources of pytest arguments. Parsed numprocesses above handles every -n form.
     import shlex

@@ -220,7 +220,10 @@ def _runtime_flow(tmp_path, *, questions=1, elicitor=True, early=False, sibling=
                 assert sibling_done.wait(10), 'sibling was blocked by the partial batch'
             assert questions_store.answer(store, second['question_id'], 'custom format', 'elicitation', session_id=session_id)
         def elicit(self, session_id, shown_question, shown_options):
-            assert shown_question == question and shown_options == options
+            # The runtime's own "Stop the task" choice follows the worker's options.
+            from cortex_runtime.acp import messages
+            assert shown_question == question
+            assert shown_options == [*options, messages.render('question_option_stop_task', language)]
             card_entered.set()
             if sibling:
                 assert sibling_done.wait(10), 'scheduler was blocked by the question card'

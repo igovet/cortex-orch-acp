@@ -381,7 +381,9 @@ def test_read_only_specialists_hold_no_write_grant(tmp_path,role):
             argv=['python3','-B','-c',
                   "from pathlib import Path; p=Path('hello'); assert p.read_text()=='hello'; "
                   "p.write_text('bad')"],request_key='readonly-command'))
-        assert result['complete'] and result['exit_code'] != 0
+        # The write goes to the discarded overlay (or is refused without
+        # overlay support); the project file is unchanged either way.
+        assert result['complete']
         assert (root/'hello').read_text()=='hello'
 
 

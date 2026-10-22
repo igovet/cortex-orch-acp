@@ -466,6 +466,17 @@ calls in one `exec`, take arguments from the schema-derived cheat sheet, which
 now covers every offered Cortex tool, instead of querying `ALL_TOOLS`). See
 [working economy and code mode](docs/features/unified-system-prompt/index.md#working-economy-and-code-mode).
 
+Runtime safeguards from real sessions: `command_run` stops after 30 minutes by default
+and stops everything a command started; read-only roles can run suites whose project
+writes are discarded; a change by another Cortex task in the same project triggers a new
+review and verification instead of a question; every question offers "Stop the task";
+a failed verification check removed before completion needs the user's answer; and a
+model the owner named for a role is used, or the chat says why not. See
+[orchestration](docs/features/orchestration/index.md),
+[permissions and containment](docs/features/permissions-and-containment/index.md),
+[steering and questions](docs/features/steering-and-questions/index.md) and
+[routing](docs/features/routing-and-fallback/index.md#owner-model-requests-in-plain-words).
+
 ## Install
 
 ### Paseo

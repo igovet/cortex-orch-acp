@@ -204,7 +204,9 @@ named (for example, "paid live check not requested by the owner", or its
 equivalent written in the task's selected chat language).
 
 For coordinator-submitted synthesis and direct answers, structured `not_verified`
-is the sole source of the runtime's disclosure section. When that list is nonempty,
+is the sole source of the runtime's disclosure section. Items with the same blocker
+render as one line (`check one; check two — Blocker: …`); the structured list keeps
+every item (one device limit was listed about ten times in one answer, 2026-10-22). When that list is nonempty,
 `orchestration/state.py:disclosed_synthesis` refuses an authored disclosure heading
 in `text` with `synthesis_disclosure_in_text`, before storing or delivering the
 answer. The caller must move gap disclosures into the structured list and keep

@@ -212,7 +212,8 @@ def dispatch(store, channel, operation, args):
                                      "a presented failure stays part of this attempt and is never dropped. Cite each "
                                      "again as a failed check with the same tool_call_ref, then close it with a passed "
                                      "check citing a verified later rerun of exactly the same argv, retract a supported "
-                                     "own Python probe error with invocation_error, or send assignment_outcome=\"failed\". "
+                                     "own Python probe error with invocation_error, withdraw your own exploratory probe "
+                                     "with probe_withdrawn, or send assignment_outcome=\"failed\". "
                                      "Relabelling it not_run or unverified, or a different argv, does not count. No "
                                      "result was recorded or published; your channel remains active and the same "
                                      "request_key may be reused.")
@@ -237,7 +238,9 @@ def dispatch(store, channel, operation, args):
                                          f"This check remains failed: {diagnosis}. {correction}"
                                          + (f" {others} later check(s) of this result also remain failed." if others else '')
                                          + " A supported standalone Python probe syntax/regex invocation error may "
-                                         "instead be retracted with invocation_error (corrected_by and reason). No "
+                                         "instead be retracted with invocation_error (corrected_by and reason); your own "
+                                         "exploratory probe whose failure was expected may be withdrawn with probe_withdrawn "
+                                         "and its reason (never a project test, lint, type check or build). No "
                                          "result was recorded or published; a cited failed receipt stays part of this "
                                          "attempt, your channel remains active and the same request_key may be reused.")
                 # A supplied argv on a completed check is descriptive, never

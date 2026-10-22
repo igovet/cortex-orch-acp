@@ -90,7 +90,10 @@ unavailable or partial, never as zero.
 - **`external_refusal` and `external_error`** (`engine/external_proxy.py`). A
   denied external MCP tool (`external_refusal`), or a denied method, timeout,
   closed pipe, oversized frame or response mismatch (`external_error`). `detail`
-  holds `server`, `tool` and `error` only.
+  holds `server`, `tool` and `error` only. An engine's startup discovery
+  (`resources/list`, `resources/templates/list`, `prompts/list`) is answered with an
+  empty list by the proxy itself, since the gateway grants no resources or prompts;
+  it used to be logged as about 30 denials per reviewer session.
 - **Write size.** The `TOOL_COMPLETED` result of `project_write` and
   `project_edit` also carries `changed_bytes` and `changed_lines`, computed from
   the common prefix and suffix of the old and new content. Creation gives

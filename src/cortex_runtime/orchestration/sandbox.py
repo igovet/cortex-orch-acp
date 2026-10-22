@@ -28,6 +28,11 @@ _HARDLINK_DIR_LIMIT = 256
 # Logical bytes (even on reflink-capable filesystems), per writer launch.
 _MATERIALIZE_BYTES_LIMIT = 2 * 1024 ** 3
 _MATERIALIZE_SECONDS_LIMIT = 60.0
+# A git-ignored directory with more shared links than this is not detached
+# but kept read-only as a whole: far beyond any dependency tree a writer
+# reinstalls (.venv, node_modules stay detached), well below the ~1.5 million
+# retained verification copies that timed out every writer command.
+_BULKY_IGNORED_LINKS = 100_000
 
 
 def _dev_index(command) -> int:
@@ -536,6 +541,41 @@ SCAN_REPORT_AFTER_SECONDS = 3.0
 SCAN_REPORT_EVERY_SECONDS = 5.0
 
 
+def _owning_directory(relative, directories):
+    """The deepest of ``directories`` containing ``relative``, if any."""
+    return next((directory for directory in sorted(directories, key=len, reverse=True)
+                 if relative == directory or relative.startswith(directory + '/')), None)
+
+
+def _bulky_ignored_directories(root, relatives):
+    """Git-ignored directories holding more than ``_BULKY_IGNORED_LINKS`` of
+    ``relatives`` (files with links outside the project)."""
+    if len(relatives) <= _BULKY_IGNORED_LINKS:
+        return set()
+    from ..delegation.revision import ignored_directories
+    ignored = ignored_directories(str(root))
+    counts = {}
+    for relative in relatives:
+        owner = _owning_directory(relative, ignored)
+        if owner is not None:
+            counts[owner] = counts.get(owner, 0) + 1
+    return {owner for owner, count in counts.items() if count > _BULKY_IGNORED_LINKS}
+
+
+def _materialization_refusal(code, relatives):
+    """Name the directory that holds most of the shared links, so the
+    refusal is actionable instead of "restore the environment"."""
+    counts = {}
+    for relative in relatives:
+        top = '/'.join(relative.split('/')[:2]) if '/' in relative else relative
+        counts[top] = counts.get(top, 0) + 1
+    top, count = max(counts.items(), key=lambda item: item[1]) if counts else ('', 0)
+    return StoreError(code, 'argv', top or None, 'a project whose writable files are not hardlinked outside it',
+                      f'{len(relatives)} project files share their data with files outside the project; '
+                      f'{count} of them are under {top}. Remove or regenerate those copies (or add a '
+                      f'disposable directory to .gitignore so it stays read-only), then run the command again.')
+
+
 def _materialize_hardlinks(root, relatives, before_write=None):
     """Detach project aliases, never write the shared inode.
 
@@ -686,9 +726,10 @@ def gateway_command(root, scratch, argv, scopes, reveal=frozenset(), system_root
             _parts(scope)
             if scope in {'.','**','**/*'}:
                 candidates.add('.')
-            elif scope.endswith('/**') and not any(c in scope[:-3] for c in '*?['):
+            # ``[`` is literal here: Next.js routes are named ``[locale]``.
+            elif scope.endswith('/**') and not any(c in scope[:-3] for c in '*?'):
                 candidates.add(scope[:-3])
-            elif not any(c in scope for c in '*?['):
+            elif not any(c in scope for c in '*?'):
                 candidates.add(scope)
         visited=0
         linked=[]
@@ -774,6 +815,7 @@ def gateway_command(root, scratch, argv, scopes, reveal=frozenset(), system_root
             entries=link_entries.get(key,{})
             return (link_counts.get(key) is not None and len(entries)==link_counts[key]
                     and not any(owner in excluded for owner in entries.values()))
+        bulky_ignored=set()
         if materialize_hardlinks:
             # Only Development/Auto writers opt in. A denied alias is never
             # detached, even when its parent has a whole-project grant.
@@ -783,10 +825,23 @@ def gateway_command(root, scratch, argv, scopes, reveal=frozenset(), system_root
                       if not internal(key) and not (readonly and _matches(relative, readonly))
                       and not any(target == root / relative or target in (root / relative).parents
                                   for target in private_targets)]
+            # A git-ignored directory full of shared links (a pnpm store's
+            # node_modules, a verification script's retained workspace
+            # copies) is disposable output: keep it read-only as a whole
+            # instead of copying it. 727 retained copies (~1.5 million links)
+            # made every writer command time out here (2026-10-21).
+            bulky_ignored = _bulky_ignored_directories(root, detach)
+            if bulky_ignored:
+                detach = [relative for relative in detach if _owning_directory(relative, bulky_ignored) is None]
+                linked = [entry for entry in linked if _owning_directory(entry[0], bulky_ignored) is None]
             try:
                 _materialize_hardlinks(root, detach, before_materialize)
             except OSError as error:
                 raise StoreError('command_hardlink_materialization_failed') from error
+            except StoreError as error:
+                if str(error) in {'command_hardlink_materialization_timeout', 'command_hardlink_materialization_limit'}:
+                    raise _materialization_refusal(str(error), detach) from error
+                raise
             detached = set(detach)
             candidates |= {relative for relative, owner, _ in linked
                            if relative in detached and owner is None}
@@ -810,7 +865,7 @@ def gateway_command(root, scratch, argv, scopes, reveal=frozenset(), system_root
         candidates|={relative for relative,owner,key in kept if owner is None and internal(key,demoted)}
         # Read-only on top of the writable binds: demoted directories and the
         # user's deny-write paths.
-        overlays=sorted(demoted|{path for path in denied_exact if path and (root/path).exists()}|set(denied_found))
+        overlays=sorted(demoted|bulky_ignored|{path for path in denied_exact if path and (root/path).exists()}|set(denied_found))
         for relative in sorted(candidates,key=lambda p:(len(PurePath(p).parts),p)):
             path=root/relative
             if not path.exists(): continue
@@ -1107,8 +1162,8 @@ _TMP_OVERLAY_SUPPORTED: bool | None = None
 
 
 def tmp_overlay_supported() -> bool:
-    """Whether this host's bubblewrap can lay a private, discarded tmpfs
-    overlay over a directory (``--tmp-overlay``, bubblewrap 0.10+, with
+    """Whether this host's bubblewrap can lay a private overlay over a
+    directory (``--overlay-src``/``--overlay``, bubblewrap 0.10+, with
     unprivileged overlayfs). Probed once per process on a scratch directory."""
     global _TMP_OVERLAY_SUPPORTED
     if _TMP_OVERLAY_SUPPORTED is None:
@@ -1118,21 +1173,30 @@ def tmp_overlay_supported() -> bool:
         supported = False
         if binary is not None:
             with tempfile.TemporaryDirectory(prefix='cortex-overlay-probe-') as probe:
+                lower, upper, work = (os.path.join(probe, name) for name in ('lower', 'upper', 'work'))
+                for path in (lower, upper, work):
+                    os.mkdir(path)
                 try:
                     supported = subprocess.run(
                         [binary, '--die-with-parent', '--ro-bind', '/', '/', '--dev', '/dev',
-                         '--overlay-src', probe, '--tmp-overlay', probe, '--', 'true'],
+                         '--overlay-src', lower, '--overlay', upper, work, lower, '--', 'true'],
                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                         timeout=10).returncode == 0
                 except (OSError, subprocess.SubprocessError):
                     supported = False
+        if not supported:
+            logging.getLogger(__name__).warning(
+                'bubblewrap overlay unavailable: verification and read-only commands refuse project writes')
         _TMP_OVERLAY_SUPPORTED = supported
     return _TMP_OVERLAY_SUPPORTED
 
 
-def discard_project_writes(command, root) -> bool:
+def discard_project_writes(command, root, scratch) -> bool:
     """Turn ``readonly_command``'s pinned read-only project mount into a
-    private tmpfs overlay over the same pinned source, in place.
+    private overlay over the same pinned source, in place. Its upper layer
+    is on disk in the command's own ``scratch`` (removed with it), never a
+    RAM-backed tmpfs: a check writing large build output into tracked paths
+    must not exhaust memory.
 
     A runtime verification check may then write files the project tracks
     (``next typegen`` rewrites ``next-env.d.ts`` on every run, observed
@@ -1145,8 +1209,11 @@ def discard_project_writes(command, root) -> bool:
     if not tmp_overlay_supported():
         return False
     root = Path(root).resolve(strict=True)
+    upper, work = Path(scratch) / 'overlay-upper', Path(scratch) / 'overlay-work'
+    upper.mkdir(mode=0o700, exist_ok=True)
+    work.mkdir(mode=0o700, exist_ok=True)
     at = _project_mount(command, root)
-    command[at:at + 3] = ['--overlay-src', command[at + 1], '--tmp-overlay', str(root)]
+    command[at:at + 3] = ['--overlay-src', command[at + 1], '--overlay', str(upper), str(work), str(root)]
     return True
 
 
@@ -1184,6 +1251,14 @@ def readonly_command(root, scratch, argv, *, environ, scopes=(), readonly=(), gi
         command[at:at] = overlays
         at = command.index('--die-with-parent') + 1
         command[at:at] = ['--unshare-pid']
+        # A private dbus-daemon (dbus-run-session, a nested GNOME Shell) asks
+        # AppArmor about each peer by writing a query to this world-writable
+        # file; read-only it refused every connection, and a desktop
+        # placement check failed only in verification (2026-10-22).
+        query = Path('/sys/kernel/security/apparmor/.access')
+        if query.exists():
+            at = command.index('--chdir')
+            command[at:at] = ['--bind', str(query), str(query)]
         yield command, fds
 
 

@@ -392,3 +392,112 @@ def test_message_wide_grant_does_not_cross_user_messages_or_apply_to_labels(task
     assert auto_route.user_model_request(store,task_id,'codex-acp/gpt-6-luna') is None
     append_source_event(store,SourceEvent(origin='test',event_id='label'),'Astra. Use the default model.',task_id)
     assert auto_route.user_model_request(store,task_id,'codex-acp/gpt-6-astra') is None
+
+
+@pytest.mark.parametrize("text,expected", [
+    # The owner's request that routed an audit to another model (2026-10-22).
+    ("Добавь в AGENTS.md требование, чтобы за audit отвечал opus.", "opus"),
+    ("За аудит отвечает Opus", "Opus"),
+    ("Opus is responsible for the security review", "Opus"),
+    ("Let Opus handle the review", "Opus"),
+])
+def test_a_model_made_responsible_for_a_role_or_stage_is_a_request(text, expected):
+    pattern = auto_route.family_pattern("claude-agent-acp/opus[1m]", ("opus", "опус"))
+    assert auto_route.assigns_family(text, pattern) == expected
+
+
+@pytest.mark.parametrize("text", [
+    "Opus wrote the last review.",          # a remark about the past
+    "За аудит отвечал Opus.",               # a report, no "чтобы"/"пусть"
+    "Opus is fast.",                         # no role or stage
+    "Не нужно, чтобы за аудит отвечал Opus.",  # refused
+])
+def test_a_remark_about_a_model_assigns_nothing(text):
+    pattern = auto_route.family_pattern("claude-agent-acp/opus[1m]", ("opus", "опус"))
+    assert auto_route.assigns_family(text, pattern) is None
+
+
+def _two_engines(tmp_path, opus_names=("opus", "опус")):
+    from test_settings_only_routing import install
+    install(tmp_path, {
+        "model_policy_version": 2,
+        "enabled": {"claude-agent-acp": ["claude-sonnet-5", "opus[1m]"], "codex-acp": ["gpt-6.1-sol", "gpt-6-luna"]},
+        "models": {
+            "claude-agent-acp": {"auto": ["claude-sonnet-5", "opus[1m]"],
+                                 "tiers": {"claude-sonnet-5": "standard", "opus[1m]": "deep"},
+                                 "policy": {"claude-sonnet-5": {}, "opus[1m]": {"request_names": list(opus_names)}}},
+            "codex-acp": {"auto": ["gpt-6.1-sol", "gpt-6-luna"], "tiers": {"gpt-6.1-sol": "standard", "gpt-6-luna": "light"},
+                          "policy": {"gpt-6.1-sol": {}, "gpt-6-luna": {}}}}})
+    return Store(tmp_path / ".cortex", project_root=tmp_path)
+
+
+@pytest.mark.parametrize("text,identity,matched", [
+    ("Используй sonnet для ревью", "claude-agent-acp/claude-sonnet-5", "sonnet"),
+    ("Run the implementation on sol.", "codex-acp/gpt-6.1-sol", "sol"),
+    ("Добавь в AGENTS.md требование, чтобы за audit отвечал opus.", "claude-agent-acp/opus[1m]", "opus"),
+])
+def test_an_owner_naming_a_model_in_plain_words_requests_it(tmp_path, text, identity, matched):
+    """Unnamed models get their unique last id word as a label, and a model
+    made responsible for a role or stage is requested (owner decision
+    2026-10-22, after an audit asked for Opus ran on Sol)."""
+    store = _two_engines(tmp_path)
+    task = bootstrap_task(store, SourceEvent(origin="test", event_id="plain"), text, "owner")
+    grant = auto_route.user_model_request(store, task.task_id, identity)
+    assert grant is not None and grant["matched"] == matched
+
+
+@pytest.mark.parametrize("text", ["Use GPT-6-LUNA", "Use vendor/gpt-6-luna", "luna-extended is fine"])
+def test_a_derived_label_never_matches_inside_another_id(tmp_path, text):
+    store = _two_engines(tmp_path)
+    task = bootstrap_task(store, SourceEvent(origin="test", event_id="inside"), text, "owner")
+    assert auto_route.user_model_request(store, task.task_id, "codex-acp/gpt-6-luna") is None
+
+
+@pytest.mark.parametrize("text,role,expected", [
+    ("Ревью делай через sonnet.", "worker-code-reviewer", "claude-agent-acp/claude-sonnet-5"),
+    ("За аудит отвечает Opus.", "worker-code-reviewer", "claude-agent-acp/opus[1m]"),
+    ("Use luna for the tests.", "worker-qa-engineer", "codex-acp/gpt-6-luna"),
+    ("Дизайн делай через opus.", "worker-code-reviewer", None),      # another purpose
+    ("Не используй opus для ревью.", "worker-code-reviewer", None),  # refused
+    ("Для ревью используй opus или sonnet.", "worker-code-reviewer", None),  # two models
+    ("Ревью делай через sonnet.", "worker-backend-dev", None),        # not this role's purpose
+])
+def test_a_model_the_owner_named_for_a_purpose_reaches_unhinted_nodes(tmp_path, text, role, expected):
+    """The runtime's review node has no model hint, so "review with Sonnet"
+    never reached it and the owner's choice lost to pins (2026-10-22)."""
+    store = _two_engines(tmp_path)
+    task = bootstrap_task(store, SourceEvent(origin="test", event_id="purpose"), text, "owner")
+    found = auto_route.user_purpose_model_request(store, task.task_id, role)
+    assert found == expected
+    if expected:
+        # It grants through the explicit-request path, which precedes pins.
+        assert auto_route.user_model_request(store, task.task_id, expected) is not None
+
+
+def test_the_newest_purpose_request_wins(tmp_path):
+    store = _two_engines(tmp_path)
+    task = bootstrap_task(store, SourceEvent(origin="test", event_id="older"), "Ревью делай через sonnet.", "owner")
+    append_source_event(store, SourceEvent(origin="test", event_id="newer"), "Теперь ревью делай через opus.",
+                        task.task_id)
+    assert auto_route.user_purpose_model_request(store, task.task_id, "worker-code-reviewer") == \
+        "claude-agent-acp/opus[1m]"
+
+
+def test_a_purpose_request_beats_a_pin_on_the_runtime_review_node(tmp_path, monkeypatch):
+    """End to end through choose(): the owner's "review with Sonnet" wins over
+    a '*' pin to Luna for the runtime-created review node."""
+    from test_model_settings_template import entry
+    from test_settings_only_routing import fake_catalog
+    fake_catalog(monkeypatch, [entry("claude-agent-acp", "claude-sonnet-5"), entry("claude-agent-acp", "opus[1m]"),
+                               entry("codex-acp", "gpt-6.1-sol"), entry("codex-acp", "gpt-6-luna")])
+    store = _two_engines(tmp_path)
+    routing = json.loads((tmp_path / ".cortex" / "routing.json").read_text())
+    routing["pin"] = {"*": "codex-acp/gpt-6-luna"}
+    (tmp_path / ".cortex" / "routing.json").write_text(json.dumps(routing))
+    task = bootstrap_task(store, SourceEvent(origin="test", event_id="pin"), "Ревью делай через sonnet.", "owner")
+    hint = auto_route.user_purpose_model_request(store, task.task_id, "worker-code-reviewer")
+    choice = auto_route.choose("worker-code-reviewer", tmp_path, {"HOME": str(tmp_path)}, model_hint=hint,
+                               user_request=auto_route.user_model_request(store, task.task_id, hint))
+    assert choice.model == "claude-sonnet-5" and choice.decision["decided_by"] == "user_request"
+    pinned = auto_route.choose("worker-code-reviewer", tmp_path, {"HOME": str(tmp_path)})
+    assert pinned.model == "gpt-6-luna"

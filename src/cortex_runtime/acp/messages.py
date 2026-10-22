@@ -193,6 +193,16 @@ _CATALOG: dict[str, dict[str, str]] = {
         "en": "The task stopped: {reason}.{details}\n\nWhat should happen next? You can also reply in your own words.",
         "ru": "Задача остановилась: {reason}.{details}\n\nЧто делать дальше? Можно ответить своими словами.",
     },
+    # Appended to every coordinator/worker question with options; choosing it
+    # stops the task like /cortex-stop, keeping the work done so far.
+    "steering_received": {
+        "en": "Got it. I will take this into account after the current step.",
+        "ru": "Принято. Учту это после текущего шага.",
+    },
+    "question_option_stop_task": {
+        "en": "Stop the task",
+        "ru": "Остановить задачу",
+    },
     "stop_option_continue": {
         "en": "Continue: let the coordinator decide how to proceed",
         "ru": "Продолжить: пусть координатор решит, как быть дальше",
@@ -205,6 +215,10 @@ _CATALOG: dict[str, dict[str, str]] = {
     "stop_reason.worker_failed": {
         "en": "a worker finished, but not all of its checks passed",
         "ru": "исполнитель закончил работу, но не все его проверки пройдены",
+    },
+    "stop_reason.completion_dropped_failed_check": {
+        "en": "a verification check that had failed was removed before completion",
+        "ru": "перед завершением убрали проверку, которая не прошла",
     },
     "stop_reason.verification_failed": {
         "en": "the final verification commands failed",

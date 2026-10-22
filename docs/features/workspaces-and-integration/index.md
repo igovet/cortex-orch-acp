@@ -44,9 +44,13 @@ verification use the read-only host profile in every mode. Their project is read
 that an automatic verification check may write the project's git-ignored directories in place,
 and its other project writes (a tracked file a tool regenerates) go to a private overlay
 discarded when the check ends (refused where the host cannot overlay). Command environments filter Cortex/credential variables but
-use owner toolchains, validated SSH-agent access and shared network. Ordinary
-commands have no default deadline; exceptional outside commands default to 600
-seconds. Declared scope is coordination, not the writing worker's whole-project
+use owner toolchains, validated SSH-agent access and shared network. `command_run`
+defaults to 1800 seconds (30 minutes; `timeout_seconds` sets more); outside commands
+default to 600 seconds. On a timeout, stop or authority loss the command and every
+process it started are stopped, including a child in its own process group (Playwright's
+detached `webServer` once kept its port after a timed-out run). A command's stdin is
+`/dev/null`: a killed Node child once left the shared MCP-server stdin non-blocking and
+every later Cortex call of that worker failed with "Transport closed" (2026-10-22). Declared scope is coordination, not the writing worker's whole-project
 OS grant. See [access modes and limitations](../permissions-and-containment/index.md#access-mode-development-guarded-and-auto). Ambiguous effects retain
 an unresolved receipt and cannot be replayed as though nothing happened.
 

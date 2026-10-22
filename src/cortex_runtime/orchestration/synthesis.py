@@ -104,7 +104,11 @@ def _decline_reasons(db, task):
     if not node_ok:
         reasons.append(dict(code='node_incomplete'))
     reviews = [n for n in nodes if n['stage'] == 'review']
-    if not reviews or json.loads(reviews[-1]['result_json'] or '{}').get('verdict') != 'APPROVE':
+    from .state import current_review_waiver
+    if (reviews and json.loads(reviews[-1]['result_json'] or '{}').get('verdict') != 'APPROVE') or (
+            not reviews and not current_review_waiver(db, task_id)):
+        # A review the runtime waived (no project change since an approved
+        # review) is not a missing approval.
         reasons.append(dict(code='review_not_approved'))
     if verified_runtime_runs(db, task_id, revision) is None:
         reasons.append(dict(code='verification_not_passed'))

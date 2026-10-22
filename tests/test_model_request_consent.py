@@ -50,7 +50,9 @@ def _add(store, task_id, text, event_id):
     ("Use the default route. codex-acp/gpt-astra is unavailable.", None),
     ("codex-acp/gpt-astra слишком дорогая, не используй её. Используй codex-acp/gpt-6-luna.", LUNA),
     ("Use codex-acp/gpt-6-luna, codex-acp/gpt-astra is too expensive.", LUNA),
-    ("Please review whether gpt-astra output was correct and use luna.", None),
+    # "luna" names gpt-6-luna: an enabled model's unique last id word is a
+    # request label even without configured names (owner decision 2026-10-22).
+    ("Please review whether gpt-astra output was correct and use luna.", LUNA),
     ("Do not use codex-acp/gpt-astra.", None),
     # Negation after the mention, in its own clause.
     ("codex-acp/gpt-astra should not be used here.", None),

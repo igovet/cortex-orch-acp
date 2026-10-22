@@ -42,6 +42,11 @@ def integer(description, maximum):
 TIMEOUT_CEILING_SECONDS = 2 ** 31 - 1
 
 
+# A command_run without timeout_seconds used to run until it exited: a hung
+# CDP script held its worker for 30 silent minutes (observed 2026-10-21).
+COMMAND_RUN_DEFAULT_TIMEOUT_SECONDS = 1800
+
+
 def clamp_timeout(value):
     if value is None:
         return None
@@ -100,7 +105,7 @@ SCHEMAS = {
     'command_run': obj(dict(argv=array(text('Literal command argument. Only scoped workers may run commands; coordinators and consultants cannot execute them. No implicit shell.',16384),
                                        'Command as argv, run without a shell. Only scoped workers may run commands. Read-only/Guarded commands have private scratch /var/tmp; FileNotFoundError there is not proof of host absence. Authorized host-only inspection requires an offered outside_command and consent, never a refusal bypass. For the current reviewer, exact plan verification argv at the same project digest reuses a runtime-produced receipt; an in-flight run is awaited for at most five seconds (or the shorter requested timeout). Otherwise the command executes normally.', maximum=128, minimum=1),
                             cwd=text('Absolute existing working directory. Omitted: task working tree. Outside-tree cwd requires a writing worker in Development or Auto; private and protected targets are refused, never retried outside the sandbox.',4096),
-                            timeout_seconds=timeout('Optional maximum runtime in seconds, including child processes. Omit to run until the command exits.'),
+                            timeout_seconds=timeout('Optional maximum runtime in seconds, including child processes; default 1800 (30 minutes). Set a larger value for a longer build or suite. On timeout the command and every process it started are stopped.'),
                             request_key=text('Unique action identity; ambiguous interrupted calls are never re-executed automatically.',128)), required=['argv','request_key']),
     'outside_write': obj(dict(path=text('Absolute path OUTSIDE the project (inside it, write with your own tools). In Guarded the user confirms first; in Development or Auto only protected control-plane paths ask. The parent directory must exist.',4096),
                               content=text('Complete new UTF-8 file content.',1000000),
@@ -516,7 +521,12 @@ def _run_command_process(store, channel, launch, fds, output, effects, limit, *,
             actual, actual_fds = compact_argv(launch, fds)
             effects['possible'] = True
             try:
-                proc = subprocess.Popen(actual, stdout=output, stderr=subprocess.STDOUT,
+                # Never the MCP server's own stdin: a Node child switches an
+                # inherited stdin to O_NONBLOCK, and after a SIGKILL it stays so;
+                # the server's next read then returned b'' and it exited, so
+                # every later Cortex call of the worker failed "Transport
+                # closed" (observed 2026-10-22, reproduced).
+                proc = subprocess.Popen(actual, stdin=subprocess.DEVNULL, stdout=output, stderr=subprocess.STDOUT,
                                         pass_fds=actual_fds, env=env or {'PATH':'/usr/bin:/bin'},
                                         cwd=cwd, start_new_session=True)
             except OSError:
@@ -557,12 +567,9 @@ def _run_command_process(store, channel, launch, fds, output, effects, limit, *,
         # Includes launch-transaction/observation failure after Popen succeeded.
         if proc is not None:
             if proc.poll() is None:
-                import signal
-                try:
-                    os.killpg(proc.pid, signal.SIGKILL)
-                    stopped = stop is not None
-                except ProcessLookupError:
-                    pass
+                from .process_tree import kill_process_tree
+                kill_process_tree(proc.pid)
+                stopped = stop is not None
             proc.wait()
             if stopped:
                 failure = 'stopped_by_user'
@@ -647,7 +654,13 @@ def _command(store,channel,root,scopes,args,ref,owner,effects):
                 as_owner(command,os.environ)
             command[command.index('--chdir') + 1] = cwd
             if not scopes:
-                from .sandbox import readonly_test_cache
+                from .sandbox import discard_project_writes, readonly_test_cache
+                # A read-only role's test run may write temp/output inside the
+                # project (vitest's node_modules/.vite-temp, Playwright's
+                # results): those writes go to a discarded overlay, so the
+                # project stays unchanged and the suite still runs. Its
+                # reviewers' suites used to fail with EROFS (2026-10-21).
+                discard_project_writes(command, root, scratch)
                 readonly_test_cache(command, scratch, os.environ)
             # Opt-in: ssh asks for a password in a desktop dialog.
             ssh_askpass.apply(command,os.environ,Path(askpass_dir))
@@ -657,7 +670,7 @@ def _command(store,channel,root,scopes,args,ref,owner,effects):
                 raise StoreError('gateway_command_cwd_changed')
             code, failure = _run_command_process(
                 store, channel, command, (*fds, cwd_fd), output, effects,
-                clamp_timeout(args.get('timeout_seconds')),
+                clamp_timeout(args.get('timeout_seconds')) or COMMAND_RUN_DEFAULT_TIMEOUT_SECONDS,
                 # A mode switch ends a writing worker's host-wide command; a
                 # read-only command's profile does not depend on the mode, so
                 # a switch never kills it.

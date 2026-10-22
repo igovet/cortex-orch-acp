@@ -244,6 +244,25 @@ request_key. The refused request_key never records a verdict
 (`review_resubmit_required`). After `MAX_REVIEW_REBINDS` (3) re-bindings, a further
 change is refused as `review_project_revision_unstable`. Before this, the binding
 was never refreshed, so one change refused every later submission of that review.
+The refusal names the other Cortex task when one of that project's writing workers
+made the change.
+
+When the project changed after the review and the change came from another Cortex
+task's writer in the same project (`state.foreign_project_writers`: a write
+operation or command of a non-read-only role since the review bound its revision),
+verification or completion no longer stops for the user. The runtime records
+`PROJECT_CHANGED_BY_OTHER_TASK` (the other task ids), clears the synthesis, adds a
+new review cycle on the current revision and says so in one chat line; review and
+verification then run again. An unattributed change, or one past
+`MAX_REVIEW_CYCLES`, still stops with `verification_review_revision_changed` or
+`completion_project_revision_changed` (observed 2026-10-22: one task's edit
+invalidated another's verified completion three seconds before it finished).
+
+A review that requests changes without structured findings, on a plan with more than
+one implementing task, goes back to the coordinator (`RETURNED_TO_COORDINATOR`,
+`review_changes_without_findings`) instead of a blind fix of every task; the planning
+prompt tells it to read the review report and plan fixes by the roles that own the
+affected files. Blind fixes once sent application code to a devops task.
 APPROVE proceeds
 to verification; REQUEST_CHANGES creates fix nodes followed by a fresh reviewer;
 BLOCK stops acceptance. Three unsuccessful review cycles block further automatic
@@ -597,6 +616,7 @@ matches nothing. A run the gateway rejected before executing it
   assignment. Commands never cited as checks (an incidental search that exited 1),
   and foreign, unknown or non-command references, are not retained.
   `open_failure` also re-derives the omission when a result is recorded.
+- **An own exploratory probe can be withdrawn.** A failed check of the worker's own probe whose failure was expected or uninformative (a 404 for a resource that should not exist, a throwaway diagnostic) may carry `probe_withdrawn: <reason>`. It must cite its real nonzero, verified receipt; the submitted outcome stays `failed` as history, the current outcome is `retracted` with `retracted_by: probe_withdrawn`, never `passed`, and reviewers see the reason. A project test, lint, type check or build failure must never be withdrawn. One cited 404 probe once turned an approving review into a failed assignment (2026-10-22).
 - **An own-probe invocation error can be retracted.** A standalone `python` or `python3 -c` probe that the worker wrote, with only `-B`, `-I` or `-S` flags, may fail with a Python syntax error, a regex or assertion error from a literal `re` pattern, or a statically provable wrong literal-data expectation. Its complete retained output must show that error, and the probe must not import `pytest` or `unittest`. Such a failed check may carry `invocation_error: {corrected_by, reason}`. `corrected_by` must name a `passed` check of the same result with the same name, a verified receipt of the same attempt, the same operation, cwd and profile, a different argv, and a later order than the failure. No later run may be unrecorded, or be of the failed identity and not pass, and each correction is cited by exactly one check. A syntax correction may change the probe freely if it still parses. A regex correction may change exactly one pattern literal; every other assertion and product call must stay the same. A literal-data correction may change exactly one expected literal in an equality assertion, with the rest of the AST unchanged. The original comparison must be statically false, all corrected comparisons true, and complete output must show a `<string>` `AssertionError`. This shape allows only single-assignment bindings, literal values, earlier bindings and unary `len`, `sorted`, `sum`, `min`, `max`, `all`, `any`, `abs`; no imports, IO, product calls or dynamic execution. Probes are bounded to 8,192 source characters and this literal-data shape to 256 AST nodes. Other languages and unprovable expectations remain ineligible, rather than trusting the worker to waive a failure. The submitted outcome stays `failed` as history, the receipt carries the runtime-derived `retracted_by`, and the current outcome is `retracted`, never `passed`. A retracted check does not fail the node, and both receipts stay in the command history. The reason is an attributed claim for independent review; the runtime does not judge whether the product is correct. Test, lint, build and other project-command failures, and runtime verification, cannot be retracted. A submission whose `invocation_error` is not eligible is refused with `invalid_check_retraction` before anything is recorded.
 - **Ambiguity keeps it open.** A rerun with a different `argv` or `cwd`, a
   weak or uncited pass, a failure without its own verified receipt, a later
@@ -687,7 +707,23 @@ no shell); `plan_submit` needs at least one task and at least one verification c
 Submission rejects shell syntax before any work starts. The coordinator may call
 `verification_submit` only after a runtime verification failed and the work itself is
 correct: it replaces the verification commands and verifies again without redoing the
-reviewed work. Wrong code requires a new plan.
+reviewed work. Wrong code requires a new plan. A revision that is shorter than the
+failed run and no longer contains a command that failed records it in
+`VERIFICATION_REVISED.dropped_failed`; completion then needs a user answer given after
+that revision (`completion_dropped_failed_check`, and the planning prompt tells the
+coordinator to ask which way to go). A one-for-one corrected command is not a removal.
+Twice a desktop placement check that failed only for environment reasons was removed
+and the task completed on lint and unit tests while the popup it should have checked
+still moved (2026-10-20/22). Runtime verification runs in one fixed sandbox; the
+`verification_submit` contract tells the coordinator that no user consent, permission or
+mode changes it.
+
+Reconciliation no longer asks for `replan_request` only to close retained `not_run` or
+`unverified` checks; the coordinator lists each in `not_verified` with its blocker and
+replans for verification only when the user asked for that check or an unverified changed
+surface puts the requested result at real risk. Evidence-only replans made one task take
+8 revisions (2026-10-22). The `SYNTHESIS_RUNTIME_DECLINED` diagnostic no longer reports
+`review_not_approved` when the runtime waived review for an unchanged project.
 
 Completion of planned work requires current completed nodes, an approving review
 (or the runtime's `REVIEW_NOT_REQUIRED` record for an unchanged project), complete passing

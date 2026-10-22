@@ -84,6 +84,22 @@ def test_safe_extension_is_atomic_replayable_and_visible_not_a_fake_remount(boun
     assert capsule['sections']['pipeline_and_assignments']['runtime']['nodes'][0]['access']['declared_scope_revision'] == 1
 
 
+def test_next_js_dynamic_route_paths_are_ordinary_project_paths(bound):
+    """``[locale]``/``[slug]`` are literal directory names, not globs: they
+    were always refused as ``unsafe_path`` (2026-10-21), and a placeholder
+    fix in such a route shipped unresolved."""
+    store, _, _, workers = bound
+    route = Path(store.project_root) / 'src/app/[locale]/insights/[slug]'
+    route.mkdir(parents=True)
+    (route / 'page.tsx').write_text('export default 1\n')
+    receipt = _request(store, workers[0], ['src/app/[locale]/insights/[slug]/page.tsx', 'src/app/[locale]/new.tsx'])
+    assert receipt['status'] == 'granted' and receipt['complete'], receipt
+    assert receipt['added_paths'] == ['src/app/[locale]/insights/[slug]/page.tsx', 'src/app/[locale]/new.tsx']
+    mcp_tools.dispatch(store, workers[0], 'project_write', dict(
+        path='src/app/[locale]/new.tsx', content='export default 2\n', expected_sha256='absent', request_key='route'))
+    assert (Path(store.project_root) / 'src/app/[locale]/new.tsx').read_text() == 'export default 2\n'
+
+
 def test_a_directory_with_a_trailing_slash_is_that_directory(bound):
     """A 2026-10-21 worker asked for ``.next/`` and ``test-results/`` and
     stopped on the resulting ``unsafe_path`` refusal."""
@@ -95,18 +111,22 @@ def test_a_directory_with_a_trailing_slash_is_that_directory(bound):
     assert _request(store, workers[0], ['dir//'], key='double')['reason'] == 'unsafe_path'
 
 
-@pytest.mark.parametrize('path', ['../escape', '/absolute', '.cortex/private', '.git/config',
-                                  'nested/.cortex/x', '.', 'dir//file', 'dir/./file',
-                                  'glob/*', 'back\\slash', 'bad\x00path'])
-def test_unsafe_request_is_runtime_denial_without_node_failure(bound, path):
+@pytest.mark.parametrize('path,reason', [
+    ('../escape', 'outside_project'), ('/absolute', 'outside_project'),
+    ('.cortex/private', 'unsafe_path'), ('.git/config', 'unsafe_path'), ('nested/.cortex/x', 'unsafe_path'),
+    ('.', 'unsafe_path'), ('dir//file', 'unsafe_path'), ('dir/./file', 'unsafe_path'),
+    ('glob/*', 'unsafe_path'), ('glob?', 'unsafe_path'), ('back\\slash', 'unsafe_path'), ('bad\x00path', 'unsafe_path')])
+def test_unsafe_request_is_runtime_denial_without_node_failure(bound, path, reason):
     store, machine, coordinator, workers = bound
     receipt = _request(store, workers[0], [path])
-    assert receipt['status'] == 'pending' and receipt['reason'] == 'unsafe_path'
+    assert receipt['status'] == 'pending' and receipt['reason'] == reason
     wait = _wait(store, coordinator)
     assert wait['status'] == 'ready' and wait['question_id'] is None
     assert not questions_store.list_open(store, coordinator.task_id)
     decision = json.loads(_claim(store, coordinator)[1])
-    assert decision['status'] == 'denied' and decision['reason'] == 'unsafe_path'
+    assert decision['status'] == 'denied' and decision['reason'] == reason
+    # The denial says what to do next, so it never reads as "the work is forbidden".
+    assert decision['guidance']
     assert machine.context(coordinator.task_id)['state'] == 'EXECUTING'
     assert all(n['status'] == 'running' for n in machine.context(coordinator.task_id)['nodes'])
     mcp_tools.dispatch(store, workers[0], 'project_write',

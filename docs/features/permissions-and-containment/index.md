@@ -173,7 +173,8 @@ work, and whether a deletion waits for the user.
 | Engine jail and worker mode floor | unchanged | unchanged | jail unchanged; most permissive offered worker mode |
 | Channel, role, revocation, owner deny, review and completion gates | retained | retained | retained |
 
-Automatic runtime verification mounts the project as a private `--tmp-overlay` over its
+Automatic runtime verification mounts the project as a private overlay (upper layer on disk in
+the command's own scratch directory, never RAM-backed, removed with it) over its
 pinned read-only source (`sandbox.discard_project_writes`), with the git-ignored directories,
 private-name masks and git metadata guards bound on top as before. A check may therefore run a
 tool that rewrites a tracked file on every run (`next typegen` rewrites `next-env.d.ts`); the write
@@ -188,8 +189,15 @@ The read-only profile (receipts name it `read_only`; the Guarded writer profile 
 and the host-writable Development/Auto profile is `development`) mounts the whole host read-only.
 HOME is read-only except an explicit allowlist of tool caches (for example `.cache`, `.npm`,
 and the Docker buildx activity records). Scratch is private, and the command runs in its own
-PID namespace. Through these mounts a read-only role's command cannot write the project tree,
-HOME startup files outside the cache allowlist, or other host files, in any access mode. The
+PID namespace. Through these mounts a read-only role's command cannot change the project tree,
+HOME startup files outside the cache allowlist, or other host files, in any access mode. Its
+project writes (vitest's `node_modules/.vite-temp`, Playwright results) land in a private
+disk-backed overlay discarded when the command ends (`sandbox.discard_project_writes`; refused
+where the host cannot overlay), so a reviewer's suite runs and the project keeps nothing.
+AppArmor's world-writable query file `/sys/kernel/security/apparmor/.access` is bound
+writable so a private `dbus-daemon` (`dbus-run-session`, a nested desktop shell) can accept
+connections; read-only, it refused them and a desktop placement check failed only in
+verification (2026-10-22). The
 following paths are exceptions: they stay writable or reachable from a read-only command:
 
 - the host `/tmp`, bound writable, so files and sibling projects under `/tmp` can be written;
@@ -285,8 +293,11 @@ Writing workers receive project-wide gateway write authority, except private and
 user-protected paths; a declared assignment scope is a coordination work area,
 not an enforced project-path boundary. Writers reserve additional paths with
 `access_request` before changing them so parallel assignments remain coordinated. A directory
-path with one trailing slash (`.next/`) names that directory; other non-canonical forms
-(`dir//`, `dir/./x`) remain `unsafe_path`. Generated build/test output (build and cache
+path with one trailing slash (`.next/`) names that directory, and `[`/`]` are literal path
+characters (Next.js routes such as `[locale]/[slug]` were always refused before); `*` and `?`
+and other non-canonical forms (`dir//`, `dir/./x`) remain `unsafe_path`. An absolute path or
+one with `..` is `outside_project`. Every denial carries `guidance` on what to do next, so a
+reason code is not read as "the work is forbidden". Generated build/test output (build and cache
 directories, test reports, a regenerated type stub such as `next-env.d.ts`) needs no request:
 a writer's `command_run` already writes it in Development and Auto, and runtime verification
 discards its own generated writes. On 2026-10-21 a worker asked in advance for `.next/` and
@@ -588,6 +599,14 @@ available, otherwise a bounded streaming copy. Ownership, modes (including
 executability), timestamps and extended attributes are retained. This is persistent
 project-local preparation, not a change to the cache, tool configuration or other
 projects. Read-only roles, verification and engines never opt into it.
+
+A git-ignored directory holding more than 100,000 such shared files is not detached
+but bound read-only as a whole (one mount): retained verification workspace copies
+(about 1.5 million pnpm links) made every writer command time out here
+(`command_hardlink_materialization_timeout`, 2026-10-21). A materialization that still
+exceeds its byte or time limit is refused with the directory holding most shared
+files and what to do (remove or regenerate those copies, or git-ignore a disposable
+directory), instead of a bare code.
 
 Preparation preflights at most **2 GiB of logical file bytes per command** (counting
 each alias separately, even for reflinks), with a **60 s cooperative copy deadline**.

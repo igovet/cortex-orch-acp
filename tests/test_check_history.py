@@ -13,6 +13,7 @@ import pytest
 
 pytestmark = pytest.mark.usefixtures('unjailed_gateway_command')
 from cortex_runtime.bootstrap import bootstrap_task
+from cortex_runtime.contracts import StoreError
 from cortex_runtime.portable.identity import SourceEvent
 from cortex_runtime.store import Store
 from cortex_runtime.trusted_channel import resolve_channel
@@ -346,3 +347,30 @@ def test_a_presented_mistyped_failure_is_never_closed_by_a_different_argv_or_dro
     receipt = _submit(store, worker, cited, assignment_outcome='failed')
     assert receipt['checks'][0] == dict(name='profile check', outcome='failed')
     assert receipt['node_status'] == _node(store, task, assignment)['status'] == 'failed'
+
+
+PROBE = ['python3', '-B', '-c', "import sys; print('GET /protection/restrictions -> 404'); sys.exit(1)"]
+
+
+def test_an_exploratory_probe_can_be_withdrawn_with_its_reason(tmp_path):
+    """A reviewer cited an expected 404 probe as failed and could then never
+    submit its approving verdict (2026-10-22)."""
+    store, task, worker, assignment = _fixture(tmp_path, 'probe')
+    probe = _run(store, worker, 'probe', PROBE)
+    assert probe['exit_code'] == 1
+    check = dict(name='restrictions endpoint probe', outcome='failed', tool_call_ref=probe['tool_call_ref'])
+    with pytest.raises(StoreError, match='open_failed_check') as refused:
+        _submit(store, worker, [check])
+    assert 'probe_withdrawn' in refused.value.correction
+    receipt = _submit(store, worker, [dict(check, probe_withdrawn='Expected 404: no push restrictions exist; '
+                                                                  'this probe confirmed the absence, not a defect.')])
+    assert receipt
+    [recorded] = _node(store, task, assignment)['result']['checks']
+    assert recorded['outcome'] == 'failed' and recorded['probe_withdrawn'].startswith('Expected 404')
+
+
+def test_withdrawing_needs_a_real_failed_run(tmp_path):
+    store, _, worker, _ = _fixture(tmp_path, 'unrun-probe')
+    with pytest.raises(StoreError):
+        _submit(store, worker, [dict(name='invented probe', outcome='failed', tool_call_ref='gateway:' + '0' * 32,
+                                     probe_withdrawn='made up')])

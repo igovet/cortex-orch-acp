@@ -111,9 +111,23 @@ def test_targeted_fixes_keep_the_plan_order_between_them(machine):
     assert ready == ['_fix_1_api']
 
 
+@pytest.mark.parametrize('findings', [None, []])
+def test_changes_requested_without_findings_go_back_to_the_coordinator(machine, findings):
+    """A request for changes names no task to fix: blind fixes of every
+    task once sent application code to a devops task (2026-10-22)."""
+    state, channel, tmp_path = machine
+    review = _review(state, channel, tmp_path, findings)
+    state.add_fix(channel.task_id, review)
+    assert _fixes(state, channel.task_id) == {}
+    (requested,) = _requested(state, channel.task_id)
+    assert requested['fallback'] == 'no_findings' and requested['returned'] is True
+    with state.store.connection() as db:
+        returned = db.execute("SELECT payload_json FROM runtime_events WHERE task_id=? "
+                              "AND type='RETURNED_TO_COORDINATOR'", (channel.task_id,)).fetchone()
+    assert 'review_changes_without_findings' in returned[0]
+
+
 @pytest.mark.parametrize('findings, reason', [
-    (None, 'no_findings'),
-    ([], 'no_findings'),
     ([finding('missing', ['src/api/x.py'])], 'unknown_node'),
     ([finding('_review_1', ['src/api/x.py'])], 'unknown_node'),
     ([finding('api', ['src/api/x.py']), finding('service', ['src/service/x.py'], cross_cutting=True)], 'cross_cutting'),

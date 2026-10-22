@@ -2920,6 +2920,9 @@ class OrchestratingRuntime:
             acp_steering.record_steering(
                 self._store, task_id, source_origin or session_id, source_event_id or dedup_key, content,
             )
+            acknowledgement = acp_steering.busy_acknowledgement(self._store, task_id, language)
+            if acknowledgement:
+                emit_update("\n\n" + acknowledgement + "\n\n")
         return self._continuation_loop(
             task_id, session_id, channel, session_ref, answer_text, emit_update, cancel_event, language, host_elicitor,
             emit_tool_call=emit_tool_call,
@@ -5004,6 +5007,15 @@ class OrchestratingRuntime:
             return question.status == "answered"
         if decision.get('batch_id'):
             return self._handle_question_batch(task_id, session_id, emit_update, language, decision, elicitor)
+        options = decision.get("options")
+        if isinstance(options, list) and options and not decision.get("blocker"):
+            # Every question offers a runtime "Stop the task" choice: two
+            # plain "stop" answers once failed to stop a task, because only
+            # the coordinator interpreted them (2026-10-22). The runtime
+            # stop question already offers Finish.
+            stop = acp_messages.render("question_option_stop_task", language)
+            if stop not in options:
+                decision = dict(decision, options=[*options, stop])
         shown_body = False
         if elicitor is not None:
             set_cancelled = getattr(elicitor, "set_question_cancelled", None)

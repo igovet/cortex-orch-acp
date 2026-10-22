@@ -124,7 +124,11 @@ def test_denied_method_records_one_transport_error_row(proxy):
     store, task, start = proxy; proc = start()
     try:
         assert 'result' in call(proc, 1, 'initialize')
-        response = call(proc, 2, 'resources/list')
+        # Startup discovery listings are answered empty, never logged as denials.
+        assert call(proc, 3, 'resources/list')['result'] == {'resources': []}
+        assert call(proc, 4, 'prompts/list')['result'] == {'prompts': []}
+        assert list_events(store, task.task_id, category='external_error') == []
+        response = call(proc, 2, 'resources/read')
         assert 'error' in response
         events = list_events(store, task.task_id, category='external_error')
         assert len(events) == 1
