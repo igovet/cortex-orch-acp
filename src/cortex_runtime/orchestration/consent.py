@@ -100,7 +100,8 @@ def _ask(runtime, task_id, row, language) -> None:
     template = _TITLES.get(row['kind'], {}).get(language) or _TITLES.get(row['kind'], {}).get('en') or '{subject}'
     params = dict(
         toolCall=dict(toolCallId=f"cortex-consent:{row['id']}", kind='delete' if row['kind'] in {'project_delete','command_delete'} else 'other',
-                      title=template.format(subject=row['subject'][:600]),
+                      title=template.format(subject=(row["subject"] if len(row["subject"]) <= 600 else
+                                                    row["subject"][:600] + f" … [{len(row['subject']) - 600} more characters; see rawInput]")),
                       rawInput=dict(kind=row['kind'], subject=row['subject'])),
         options=[dict(optionId='allow', name='Allow' if language != 'ru' else 'Разрешить', kind='allow_once'),
                  dict(optionId='deny', name='Deny' if language != 'ru' else 'Запретить', kind='reject_once')],
@@ -116,5 +117,5 @@ def _ask(runtime, task_id, row, language) -> None:
 
 def subject_of(kind: str, args: dict) -> str:
     if kind in {'outside_command','command_delete'}:
-        return ' '.join(json.dumps(a) if ' ' in a else a for a in args['argv']) + (f"  (cwd {args['cwd']})" if args.get('cwd') else '')
+        return ' '.join(json.dumps(a) if not a or any(c.isspace() or not c.isprintable() for c in a) else a for a in args['argv']) + (f"  (cwd {args['cwd']})" if args.get('cwd') else '')
     return args['path']

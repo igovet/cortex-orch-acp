@@ -13,10 +13,17 @@ marked unavailable. The packet appears as `dependency_reports` in the consultant
 The packet is bounded: artifact lists shrink first, then trailing reports are counted as
 omitted. The consultant reads anything beyond the packet through `read_report`.
 
-The consultant works only from its consultation packet and retained reports.
+The consultant works only from its consultation packet, the task's current
+pipeline and retained reports. It communicates in English; its turn wrapper
+carries no question-language exception because it has no question tool. Whether
+to request another consultation is the escalator's decision, recorded in the
+coordinator's `senior-consultation` reference.
 Its Cortex tool offer includes report/source-packet reads, `read_skill`, owned
 draft/publication and result submission; it is not offered `ask_question` or
-`access_request` (dispatch refuses both), and it is not offered `project_read`, `project_git`, `command_run` or external MCP servers.
+`access_request`, `replan_request`, `scope_request` or `escalation_request`
+(dispatch refuses all five). It cannot stop work, consume the replan budget or
+request another consultation. It is not offered `project_read`, `project_git`,
+`command_run` or external MCP servers.
 Those Cortex project-source routes are also refused by the gateway with
 `gateway_read_denied`. Claude's consultant session disallows native file/search/edit
 tools. **Residual limitation:** Codex may still perform auto-approved native reads

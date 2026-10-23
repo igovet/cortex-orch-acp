@@ -137,6 +137,7 @@ try {
     const { readWorkerResults } = await loadServerModuleForTest<typeof import("../shared/worker-results.ts")>(resolve("shared/worker-results.ts"));
     assert.deepEqual(names, [
       readWorkerHistory.name, readPipeline.name, readWorkerResults.name,
+      "cortex.commands.running", "cortex.commands.stop",
       "cortex.config.read", "cortex.config.update", "cortex.config.opencode.discover", "cortex.config.opencode.onboard",
       "cortex.config.catalog.refresh",
     ]);

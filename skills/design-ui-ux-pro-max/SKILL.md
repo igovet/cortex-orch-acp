@@ -59,7 +59,7 @@ Read only needed tables; do not assume the whole set is loaded in context.
 
 ## Rules
 
-- Apply `design-workflow`'s [banned AI-tell patterns](../design-workflow/references/DESIGN.md#banned-ai-tell-patterns): never add a one-sided accent stripe or decorative leading dot/meta-chip; only a spec-required semantic status indicator is allowed, and a dot cannot be its only signal.
+- Apply the banned AI-tell patterns (read_skill id `design-banned-patterns`): never add a one-sided accent stripe or decorative leading dot/meta-chip; only a spec-required semantic status indicator is allowed, and a dot cannot be its only signal.
 
 - Table rows are starting points, not mandates. The brief and the project's
   design direction win.

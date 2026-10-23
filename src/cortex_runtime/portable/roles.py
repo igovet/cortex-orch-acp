@@ -1,13 +1,12 @@
 """Portable role instruction loading.
 
 Loads a :class:`RoleInstructionSet` per role from the shipped canonical
-per-role Markdown sources under ``skills/`` -- the same files the plugin
-manifest declares and a host engine actually loads at runtime (see the
-T001 baseline report's code-area map). ``agent-sources/*.md`` (the shared
-per-role protocol templates) are hand-maintained parallel sources with
-``{{placeholder}}`` sections that one adapter-specific generator renders,
-into canonical ``skills/worker-*/SKILL.md`` files; this module reads
-those already-rendered, actually-loaded artifacts.
+per-role Markdown sources under ``skills/`` -- the files the runtime delivers
+to engine sessions. ``agent-sources/*.md`` (the shared per-role protocol
+templates and specializations) are the hand-maintained sources that
+``scripts/generate_agent_profiles.py`` renders into the canonical
+``skills/worker-*/SKILL.md`` files; this module reads those rendered
+artifacts.
 
 Native-only (single-adapter-only) passages are marked in the source
 Markdown with a ``<!--cortex:native ADAPTER-->`` ... ``<!--/cortex:native-->``
@@ -112,6 +111,11 @@ DESIGN_SKILL_ROLES: dict[str, frozenset[str]] = {
 }
 
 
+#: Procedures that exist only to change project files; a read-only role
+#: (``orchestration.contracts.READ_ONLY``) is neither named nor offered them.
+MUTATION_ONLY_SHARED_ROLE_IDS = frozenset({"skill-authoring", "knowledge-harvest"})
+
+
 def shared_skill_ids(role_kind: str, role_id: str | None = None) -> frozenset[str]:
     """One allowlist for delivery, read_skill authorization and its schema."""
     if role_kind == "coordinator":
@@ -120,6 +124,11 @@ def shared_skill_ids(role_kind: str, role_id: str | None = None) -> frozenset[st
     ids -= frozenset(skill for skill, roles in DESIGN_SKILL_ROLES.items() if role_id not in roles)
     if role_id == CONSULTANT_ROLE_ID:
         ids -= WORKER_ONLY_SHARED_ROLE_IDS
+    elif role_id is not None:
+        from ..orchestration.contracts import READ_ONLY
+
+        if role_id in READ_ONLY:
+            ids -= MUTATION_ONLY_SHARED_ROLE_IDS
     return ids
 
 
@@ -314,7 +323,7 @@ WORKER_REFERENCE_IDS = frozenset({
 })
 COORDINATOR_REFERENCE_IDS = frozenset({
     "cortex-release", "governance", "host-compatibility", "incident",
-    "live-qualification", "pipeline-publication", "recovery",
+    "live-qualification", "pipeline-publication",
     "senior-consultation", "verification-coverage", "worker-routing",
     "question-banks", "agreed-spec", "design-intake",
     "PRODUCT", "DESIGN", "SCREENS", "visual-review",
@@ -345,6 +354,10 @@ DESIGN_REFERENCE_PATHS = {
     "design-critique": ("design-impeccable", "references/critique.md"),
     "design-refinement": ("design-impeccable", "references/refinement.md"),
     "design-defect-checklist": ("design-visual-qa", "references/defect-checklist.md"),
+    # Worker-readable copy of the coordinator-only DESIGN template's
+    # "Banned AI-tell patterns" section; every design role may read
+    # design-visual-qa, and a test keeps the two texts identical.
+    "design-banned-patterns": ("design-visual-qa", "references/banned-patterns.md"),
 }
 
 
@@ -459,7 +472,7 @@ NAMED_SKILLS: dict[str, tuple[str, ...]] = {
                     # through a Markdown link in another report, not from its own
                     # instructions or tool schema.
                     "cortex-release", "governance", "host-compatibility", "incident",
-                    "live-qualification", "pipeline-publication", "recovery",
+                    "live-qualification", "pipeline-publication",
                     "senior-consultation", "verification-coverage", "worker-routing"),
     "worker": ("tool-discipline", "tool-discipline-worker", "content-safety", "report-publication", "code-and-evidence",
                "interactive-resources", "index", "context-compaction", "documentation-sync",
@@ -488,15 +501,12 @@ CONSULTANT_EXCLUDED_NAMED_SKILLS = frozenset({
 #: Why a model would reach for each one. Named with its occasion, because
 #: "load these skills" is a ritual and a model that performs it spends its
 #: context on text that did not apply to its assignment.
+#: Always-inlined skills (``INLINED_SKILLS``) have no trigger: they are
+#: never named for a later read.
 _SKILL_TRIGGERS = {
-    "tool-discipline": "a tool refused you, an argument is a guess, a result was truncated, "
-                       "or you will edit the runtime's draft",
-    "content-safety": "private data, a secret, a raw host log or someone else's content "
-                      "may enter an artifact",
     "context-compaction": "before continuing after context is compacted or runs out mid-work",
-    "coordinator-communication": "you write to the user and the wording matters",
     "documentation-sync": "before assessing documentation impact for a plan or updating docs affected by a behavior or contract change",
-    "knowledge-harvest": "before collecting what a codebase already knows into project knowledge",
+    "knowledge-harvest": "before work on an explicit /harvest or /harvest-refresh assignment",
     "knowledge-harvest-scope": "before scoping an explicit harvest or harvest-refresh request",
     "skill-authoring": "before creating, revising or importing an authorized project skill",
     "requirements-intake": "before planning a new request whose goal lacks information that would materially change the result",
@@ -508,8 +518,6 @@ _SKILL_TRIGGERS = {
     "design-visual-qa": "you capture or judge a rendered UI across target viewports",
     "skill-management": "the user invoked /skill-management or approved a skill proposal, or retained reports repeat a procedure",
     "cortex-control": "the user asks about /cortex-clear chat retention or the manual retention CLI",
-    "report-publication": "you draft and publish your report and result",
-    "code-and-evidence": "you locate code (code index first) or need saved report detail",
     "interactive-resources": "before starting or using a browser, device, port or server session",
     "index": "you want a full-report example",
     # Triggers for the coordinator's own reference skills
@@ -520,8 +528,7 @@ _SKILL_TRIGGERS = {
     "host-compatibility": "before describing what the installed ACP client or engine actually supports",
     "incident": "the user reports a live incident or defect to diagnose and repair",
     "live-qualification": "before planning or reporting a live/real-client qualification check",
-    "pipeline-publication": "before writing the pipeline or declaring task completion",
-    "recovery": "before continuing after context loss, or on a recovery/continuation turn",
+    "pipeline-publication": "before submitting the final synthesis",
     "senior-consultation": "before requesting a senior consultation (escalation_request) for a material uncertainty",
     "verification-coverage": "before choosing or writing the plan's required verification commands",
     "worker-routing": "before proposing assignment nodes, roles, dependencies or scopes in a plan",

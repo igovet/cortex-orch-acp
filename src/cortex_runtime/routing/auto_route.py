@@ -1676,9 +1676,6 @@ def refuses_family(text: str, family: str, names: Sequence[str] | None = None,
 
 # "Responsible for" a role or stage, and those roles and stages. A past
 # form ("отвечал") is a request only after "чтобы"/"пусть"; alone it reports.
-_RESPONSIBILITY_PRESENT = re.compile(r"отвеча(?:ет|ют|ть|й|йте)|дела(?:ет|ют)|выполня(?:ет|ют)|проводи(?:т|ть)|проводят|"
-                                     r"responsible|charge|owns?|handles?|handle|does|performs?", re.I)
-_RESPONSIBILITY_PAST = re.compile(r"отвечал[аи]?", re.I)
 _RESPONSIBILITY_SUBJUNCTIVE = frozenset({"чтобы", "пусть", "should", "must", "will", "let"})
 _ROLE_OR_STAGE = re.compile(
     r"(?:audit|аудит|review|ревью|code|код|design|дизайн|frontend|фронт|backend|бэк|test|тест|qa|plan|план|"
@@ -1687,55 +1684,42 @@ _ROLE_OR_STAGE = re.compile(
 
 
 def assigns_family(text: str, pattern: re.Pattern) -> str | None:
-    """The first mention of the family made responsible for a role or stage
-    in its sentence ("за аудит отвечает opus", "чтобы за audit отвечал opus",
-    "opus is responsible for the review") and not refused or negated, else
-    ``None``. A remark ("Astra wrote the last review") assigns nothing."""
+    """A model explicitly made responsible for a role object, not a remark.
+
+    Match the construction next to this mention, never responsibility assigned
+    to a different model elsewhere in the clause. Past forms require a request
+    mood ("чтобы за audit отвечал opus"); generic "does/handles" assign nothing.
+    """
+    role = _ROLE_OR_STAGE.pattern
+    object_role = rf"(?:\w+\s+){{0,2}}{role}\b"
+    label_lead = r"(?:claude\s*)?"
+    historical = {"was", "were", "previously", "last", "раньше", "ранее", "вчера", "прошлый"}
     for match in pattern.finditer(text):
         context = _mention_context(text, match)
         if _refused_mention(context):
             continue
-        sentence_before = context["sentence_words"]
-        after = _plain_words(_SENTENCE_END.split(text[match.end():])[0])
-        words = [*sentence_before, *after]
-        if not any(_ROLE_OR_STAGE.fullmatch(word) for word in words):
+        before = _plain_words(_REQUEST_CLAUSE_BREAK.split(
+            _SENTENCE_END.split(text[:match.start()])[-1])[-1])
+        after = _plain_words(_REQUEST_CLAUSE_BREAK.split(
+            _SENTENCE_END.split(text[match.end():])[0])[0])
+        if any(word in historical for word in [*before, *after]):
             continue
-        if any(_RESPONSIBILITY_PRESENT.fullmatch(word) for word in words):
+        lead, follow = " ".join(before), " ".join(after)
+        if (re.search(rf"\bза\s+{object_role}\s+отвеча(?:ет|ют|ть|й|йте)\s*{label_lead}$", lead)
+                or re.match(rf"отвеча(?:ет|ют|ть|й|йте)\s+за\s+{object_role}", follow)
+                or re.match(rf"(?:(?:is|be)\s+)?(?:responsible\s+for|in\s+charge\s+of)\s+{object_role}", follow)):
             return match.group(0)
-        lowered = [word.casefold() for word in sentence_before]
-        # "чтобы" is often written "что бы" (the owner's own wording, 2026-10-22).
-        subjunctive = (any(word in _RESPONSIBILITY_SUBJUNCTIVE for word in lowered)
-                       or any(a == "что" and b == "бы" for a, b in zip(lowered, lowered[1:])))
-        if any(_RESPONSIBILITY_PAST.fullmatch(word) for word in words) and subjunctive:
+        # "чтобы" is also written "что бы".
+        subjunctive = (any(word in _RESPONSIBILITY_SUBJUNCTIVE for word in before)
+                       or any(a == "что" and b == "бы" for a, b in zip(before, before[1:])))
+        if subjunctive and (
+                re.search(rf"\bза\s+{object_role}\s+отвечал[аи]?\s*{label_lead}$", lead)
+                or re.match(rf"отвечал[аи]?\s+за\s+{object_role}", follow)):
             return match.group(0)
-    return None
-
-
-def user_mentions_model(store, task_id: str, model_hint: str) -> dict | None:
-    """The newest user message that names ``model_hint`` (its id, configured
-    or derived label) without refusing it, as ``dict(source_ref, family,
-    matched, basis='mentioned')``; ``None`` otherwise. Used only together
-    with a coordinator's stated reason that the user requires the model
-    (``orchestration.state``): neither alone is consent."""
-    family = family_of(model_hint or "")
-    if family is None:
-        return None
-    overrides = load_overrides(getattr(store, "project_root", None))
-    identities = _enabled_model_identities(overrides)
-    engine, _, model = model_hint.partition("/")
-    names = model_policy.policy_for(engine, model, overrides).request_names or derived_request_names(
-        model_hint, identities, overrides)
-    pattern = re.compile(_source_request_pattern(family, names, identities).pattern + (
-        "|" + "|".join(rf"(?<![^\s\"'«“(]){re.escape(n)}(?=[.,!?;:)»”\"']?(?:\s|$))" for n in names)
-        if names else ""), re.IGNORECASE)
-    with store.connection() as db:
-        for source_ref, text in _user_texts(store, db, task_id):
-            text = _effort_source_text(text, identities)
-            if refuses_family(text, family, names, pattern=pattern) is not None:
-                return None
-            for match in pattern.finditer(text):
-                if not _refused_mention(_mention_context(text, match)):
-                    return dict(source_ref=source_ref, family=family, matched=match.group(0), basis="mentioned")
+        if ((re.search(rf"\blet\s*{label_lead}$", lead)
+             and re.match(rf"(?:handle|perform)\s+{object_role}", follow))
+                or re.match(rf"(?:should|must)\s+(?:handle|perform)\s+{object_role}", follow)):
+            return match.group(0)
     return None
 
 
@@ -1795,11 +1779,13 @@ def _timestamp_key(value) -> float:
     return (parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)).timestamp()
 
 
-def _user_texts(store, db, task_id: str) -> Iterator[tuple[str, str]]:
+def _user_texts(store, db, task_id: str) -> Iterator[tuple[str, str | None]]:
     """``(source_ref, text)`` of every user-authored source of the task,
     newest first: source revisions (by publication time) and answered
     questions' answers (by answer time), interleaved so the latest user
-    message comes first."""
+    message comes first. ``None`` is an attribution barrier after current
+    user text surrounding an ambiguous imported summary; older grants cannot
+    survive it unless a newer direct user request reauthorizes them."""
     from ..acp import questions_store
 
     rows = db.execute(
@@ -1819,34 +1805,23 @@ def _user_texts(store, db, task_id: str) -> Iterator[tuple[str, str]]:
     # Stable: equal times keep sources before answers, each newest first.
     for _time, source_ref, text in sorted(texts, key=lambda item: item[0], reverse=True):
         yield source_ref, _without_substitution_emphasis(_user_authored(text))
+        if _HISTORY.search(text):
+            yield source_ref, None
 
 
-_HISTORY = re.compile(r"<chat-history-summary>(.*?)(?:</chat-history-summary>|\Z)", re.S)
-_HISTORY_TAG = re.compile(r"^\[([^\]]+)\]\s?(.*)$")
+_HISTORY = re.compile(r"<chat-history-summary>.*?</chat-history-summary>", re.S)
 
 
 def _user_authored(text: str) -> str:
-    """Only what the user wrote. A host's imported chat history (Paseo's
-    ``<chat-history-summary>``) also carries the assistant's replies, tool
-    lines and runtime notices; "назначает другую модель вместо Opus" there
-    was read as the user refusing Opus (2026-10-22). Inside it only ``[User]``
-    turns are kept (of a "Question: ... → Answer: ..." turn, the answer)."""
-    def users(block: str) -> str:
-        kept, current = [], None
-        for line in block.splitlines():
-            tag = _HISTORY_TAG.match(line)
-            if tag:
-                current = [] if tag.group(1) == "User" else None
-                if current is not None:
-                    body = tag.group(2)
-                    if "→ Answer:" in body:
-                        body = body.split("→ Answer:", 1)[1].strip()
-                    current.append(body)
-                    kept.append(current)
-            elif current is not None:
-                current.append(line)
-        return "\n\n".join("\n".join(turn).strip() for turn in kept if "\n".join(turn).strip())
-    return _HISTORY.sub(lambda match: users(match.group(1)), text)
+    """Exclude terminated imported history from model authorization.
+
+    Paseo joins unescaped multiline entries with a newline, so a literal
+    ``[User]`` in assistant/tool output is indistinguishable from a real turn.
+    No text in that lossy summary can safely grant or revoke consent. The
+    owner must restate requests outside it. An unterminated literal tag is
+    ordinary current user text and must not erase a subsequent refusal.
+    """
+    return _HISTORY.sub("", text)
 
 
 # "без замены другой моделью" / "without substitution" insists on the model;
@@ -1946,6 +1921,8 @@ def ambiguous_user_model_request(store, task_id: str, model_hint: str) -> dict |
     pattern = re.compile(_request_token_pattern(model, identities), re.IGNORECASE)
     with store.connection() as db:
         for source_ref, text in _user_texts(store, db, task_id):
+            if text is None:
+                return None
             matched = requests_family(text, family, pattern=pattern, exact_pattern=pattern)
             if matched is not None:
                 return dict(source_ref=source_ref, matched=matched)
@@ -2024,6 +2001,10 @@ def _user_model_consent(store, task_id: str, model_hint: str,
     refusal = None
     with store.connection() as db:
         for source_ref, text in _user_texts(store, db, task_id):
+            if text is None:
+                if refusal is None:
+                    return None, None
+                continue  # retain a newer direct refusal against any older grant
             # Strip only known effort suffixes from exact configured identities,
             # keeping offsets intact for source-bound effort extraction below.
             source_text = text
@@ -2111,6 +2092,8 @@ def user_purpose_model_request(store, task_id: str, role_id: str | None) -> str 
             if names else ""), re.IGNORECASE)
     with store.connection() as db:
         for _source_ref, text in _user_texts(store, db, task_id):
+            if text is None:
+                return None
             for sentence in reversed(_SENTENCE_END.split(_effort_source_text(text, identities))):
                 words = _plain_words(_QUALIFIED_AUDIT.sub(r"\g<q>\g<p>", sentence))
                 if not any(p.fullmatch(word) for p in purposes for word in words):

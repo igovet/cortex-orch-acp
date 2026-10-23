@@ -34,13 +34,13 @@ mutation, in this order:
    worker-scoped cost, never a second mutating coordinator risk); "absent"
    needs no termination call. Either way the assignment is recorded
    ``assignment_failed`` with reason ``recovery_worker_lost`` -- a durable,
-   honest signal the *coordinator* (a model) later decides whether to
-   retry as a fresh delegation, never a silent second attempt at the same
-   ``request_key``.
+   honest signal for runtime reconciliation and its bounded fresh-attempt
+   retry gates, never a silent second attempt at the same ``request_key``.
 """
 from __future__ import annotations
 
 import json
+import sqlite3
 from pathlib import Path
 
 from ..delegation import events as delegation_events
@@ -76,13 +76,12 @@ def _mark_graph_attempt_failed_tx(db, task_id: str, assignment_ref: str, reason:
             "WHERE attempt_id=? AND task_id=? AND status IN ('planned','running')",
             (reason, work_attempt_ref, task_id),
         )
-    except Exception as error:  # noqa: BLE001 - graph is additive to recovery
-        # A pre-graph store, or malformed historical payload, must not prevent
-        # the recovery failure event from being committed.  Do not catch the
-        # surrounding transaction's errors; this helper only protects the
-        # optional graph reconciliation.
-        if getattr(error, "sqlite_errorname", None) not in {"SQLITE_ERROR", "SQLITE_MISUSE"}:
-            return
+    except sqlite3.OperationalError as error:
+        # Only the absent optional graph table is compatible with an older
+        # store. I/O, corrupt payloads and all other failures must abort the
+        # surrounding transaction rather than commit an inconsistent graph.
+        if str(error) != "no such table: work_assignment_attempts":
+            raise
 
 
 def _open_assignment_refs(store, task_id: str) -> list[str]:

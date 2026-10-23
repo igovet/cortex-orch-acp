@@ -119,7 +119,9 @@ A senior consultant is reached only through `escalation_request`. A plan that na
 consultant is refused with `consultant_requires_escalation`. The runtime builds the
 consultant's packet, from the reports the escalation names and then the reports of the
 escalated revision, with each report's SHA-256 and recorded artifact versions. The
-consultant has no `access_request` and no `ask_question` route. It records a missing
+consultant has no `access_request`, `ask_question`, `replan_request`, `scope_request`
+or `escalation_request` route: these are withheld and refused by dispatch. It cannot
+consume the replan budget or request a recursive consultation. It records a missing
 fact as a limitation in its report and asks the user nothing.
 
 ## 2026-10-14 fix-node roles and own-probe retraction

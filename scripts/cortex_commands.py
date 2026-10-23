@@ -32,8 +32,8 @@ def main(argv=None):
     args = parser.parse_args(argv)
     project = args.project_root.resolve()
     try:
-        # Inspection must not initialize or implicitly migrate an owner's store.
-        store = Store(project / ".cortex", project_root=project, initialize=False)
+        # Live command control must share runtime access without repairing schema.
+        store = Store(project / ".cortex", project_root=project, initialize=False, runtime_access=True)
         if args.command == "list":
             result = dict(commands=list_commands(store, args.task_id, assignment_ref=args.assignment_ref))
         else:

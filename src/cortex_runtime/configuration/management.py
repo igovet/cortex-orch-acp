@@ -1502,7 +1502,7 @@ def _open_project_store(project, *, write: bool):
     if not (directory / "cortex.sqlite3").is_file():
         raise _error("project_store_missing", f"{root} has no Cortex project store yet; open a task there first.",
                      field="project")
-    return root, Store(directory, initialize=write, project_root=root)
+    return root, Store(directory, initialize=write, project_root=root, runtime_access=not write)
 
 
 def read_routing_profiles(project_root=None, environ=None):

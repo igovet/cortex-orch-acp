@@ -106,7 +106,7 @@ def main():
     config=json.loads(os.environ.pop('CORTEX_EXTERNAL_SERVER'))
     root=os.environ.pop('CORTEX_CHANNEL_PROJECT_ROOT')
     channel_id=os.environ.pop('CORTEX_CHANNEL_ID');secret=os.environ.pop('CORTEX_CHANNEL_SECRET')
-    store=Store(Path(root)/'.cortex',initialize=False,project_root=root)
+    store=Store(Path(root)/'.cortex',initialize=False,project_root=root,runtime_access=True)
     channel=resolve_channel(store,channel_id,secret)
     allowed=config.get('allowed_tools')
     if not isinstance(allowed,list) or not allowed or any(not isinstance(n,str) or not n for n in allowed):

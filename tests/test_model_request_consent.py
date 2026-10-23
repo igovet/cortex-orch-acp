@@ -11,6 +11,7 @@ from cortex_runtime.routing import auto_route
 from cortex_runtime.store import Store
 from test_model_settings_template import entry
 from test_settings_only_routing import fake_catalog, install
+from test_runtime_task_machine import machine
 
 ASTRA = "codex-acp/gpt-astra"
 LUNA = "codex-acp/gpt-6-luna"
@@ -124,6 +125,10 @@ def test_positive_requests_still_grant(project, text, matched):
     "Для аудита использовать ТОЛЬКО opus.",
     "На opus ты делать должен только аудит, а сам dev paseo запускать на дешевых моделях",
     "Use opus for the audit.",
+    "Use only opus for the review.",
+    "При работе с промптами нужно использовать только opus.",
+    "За аудит отвечает opus.",
+    "Добавь требование, что бы за audit отвечал opus.",
 ])
 def test_owner_opus_requests_still_grant(project, text):
     _root, _env, store = project
@@ -246,3 +251,45 @@ def test_revocation_is_recorded_in_the_routing_decision(project, monkeypatch):
     assert choice.decision["user_model_request"]["status"] == "revoked_by_user"
     assert choice.decision["user_model_request"]["reason"] == "revoked_by_user"
     assert choice.decision["user_model_request"]["source_ref"] == revocation["source_ref"]
+
+
+@pytest.mark.parametrize("text", [
+    "Opus does code reviews badly.",
+    "Opus handles code well, but it is expensive.",
+    "Opus performs the audit.",
+    "Opus owns the review.",
+    "В прошлый раз Opus делает тесты медленно.",
+    "Security-аудит выполняет Opus.",
+    "Opus is responsible for billing, review is tomorrow.",
+])
+def test_remarks_never_grant_direct_or_purpose_consent(project, text):
+    _root, _env, store = project
+    task = _task(store, text)
+    assert auto_route.user_model_request(store, task.task_id, OPUS) is None
+    for role in ("worker-code-reviewer", "worker-security-auditor"):
+        assert auto_route.user_purpose_model_request(store, task.task_id, role) is None
+
+
+@pytest.mark.parametrize("reason", [
+    "Deep review of user-facing flows benefits from a strong model",
+    "The user explicitly requires Claude Opus.",
+    "Пользователь требует Opus.",
+])
+def test_a_model_reason_never_promotes_a_recorded_mention(machine, monkeypatch, reason):
+    from cortex_runtime.orchestration.state import attempt_routing
+    from test_runtime_task_machine import _hint_policy, _provision, plan
+
+    state, channel = machine
+    _hint_policy(state.store)
+    identity = "codex-acp/gpt-6-astra"
+    monkeypatch.setattr(auto_route, "route_menu", lambda *_: {
+        "tiers": {"flagship": [{"route": identity}], "deep": [], "standard": [], "light": []}})
+    _add(state.store, channel.task_id, "Astra does code reviews badly.", "remark")
+    proposal = plan()
+    proposal["tasks"][0].update(model=identity, model_reason=reason)
+    state.submit_plan(channel, proposal, "consent-plan")
+    state.move(channel.task_id, "EXECUTING")
+    state.claim_ready(channel.task_id, channel.channel_id)
+    _provision(state, channel, "N0", "xa_consent")
+    routed = attempt_routing(state.store, channel.task_id, "xa_consent")
+    assert routed.model_hint == identity and routed.user_request is None

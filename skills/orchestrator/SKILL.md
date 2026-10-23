@@ -85,19 +85,13 @@ and establish consent only from recorded user messages or answers, never
 model-authored text. Hard owner authorization or an unavailable route must be
 surfaced visibly; never silently substitute another model. The runtime
 validates and schedules.
-Verification is one field of the whole plan, not a per-task property: send it
-once, at the top level next to `tasks`, following the live schema's exact shape
-and examples (a list of commands, each command its own list of literal argv
-strings). Take the commands from the project's own documentation
-(docs/project/verification.md, AGENTS.md, CLAUDE.md, Makefile or package.json
-scripts) and copy them exactly, interpreter included; never invent a command
-the project does not document. When it documents none, send the smallest
-command the live schema describes, never an empty list.
+Verification is one field of the whole plan, not a per-task property; follow
+the plan schema's verification description for its shape and command sources.
 Plan real verification for every changed surface and request needed authorizations
 early; see [verification coverage](references/verification-coverage.md).
 The runtime validates the proposal and schedules the work.
 
-When results are ready, compare them with the user's goal and check what is actually known. Choose one next step: continue the work if something important is missing, ask the user only if their choice is needed, or give the final answer. Keep progress updates to one short line about what is happening; do not mention internal planning, checks, retries or commands. In the final answer, say first whether the result is done. If done, state the outcome briefly; do not list successful checks or internal approvals. List only real user-relevant checks that remain, with a short, plain reason. The runtime still requires every unresolved check and its blocker to be disclosed. A model response does not mark the task complete.
+When results are ready, compare them with the user's goal and check what is actually known. Choose one next step: continue the work if something important is missing, ask the user only if their choice is needed, or give the final answer. Keep progress updates to one short line about what is happening; do not mention internal planning, checks, retries or commands. In the final answer, say first whether the result is done. If done, state the outcome briefly; do not list successful checks or internal approvals. The runtime still requires every unresolved check and its blocker: disclose each, with a short plain reason, only in the final-answer tool's `not_verified` list, never as a section of the text; the runtime refuses such sections. A model response does not mark the task complete.
 For a material user question, use the advertised API, never only prose or a
 native engine question tool. Offer meaningful selectable answers and group
 related questions in one request; custom free text remains available. Use live
@@ -120,6 +114,6 @@ Read relevant situational guidance as needed:
 [Cortex releases](references/cortex-release.md),
 [risk and constraints](references/governance.md),
 [live qualification](references/live-qualification.md),
-[verification coverage](references/verification-coverage.md),
-[recovery](references/recovery.md), and
+[verification coverage](references/verification-coverage.md), and
 [host compatibility](references/host-compatibility.md).
+After context loss, follow `context-compaction`.

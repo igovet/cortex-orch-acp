@@ -103,11 +103,11 @@ def test_non_native_auth_failures_do_not_spend_auth_allowance(error):
     assert not is_auth_loss(error)
 
 
-def _audit(store, task_id, attempt_id, engine="claude-agent-acp"):
+def _audit(store, task_id, attempt_id, engine="claude-agent-acp", route_basis="auto"):
     routing_store.record_attempt_audit(
         store, attempt_id=attempt_id, task_id=task_id, role="worker-backend-dev", engine=engine,
         connection_id="cn_native", model="native-model", params_fingerprint="params",
-        config_revision_id=None, decision="authorized", detail=dict(effort="high"))
+        config_revision_id=None, decision="authorized", detail=dict(effort="high", route_basis=route_basis))
 
 
 def test_worker_auth_retry_tears_down_then_persists_one_allowance_without_escalation(executing):
@@ -139,11 +139,12 @@ def test_worker_auth_retry_tears_down_then_persists_one_allowance_without_escala
     assert len(rows) == 1 and json.loads(rows[0][0])["auth_retry"]
 
 
-def test_auth_retry_pins_connection_model_and_effort_without_reranking(executing):
+@pytest.mark.parametrize("route_basis", ["auto", "auto:user_request", "auto:pin"])
+def test_auth_retry_pins_connection_model_and_effort_without_reranking(executing, route_basis):
     store, machine, channel, runtime = executing
     node = _running_node(machine, channel)
     _fail(store, channel.task_id, node, "xa_auth", error="authorization_loss", failure_class="authorization_loss")
-    _audit(store, channel.task_id, "xa_auth")
+    _audit(store, channel.task_id, "xa_auth", route_basis=route_basis)
     retry_lost(runtime, channel.task_id, node)
     second = _running_node(machine, channel)
     _fail(store, channel.task_id, second, "xa_next", error="placeholder")
@@ -159,6 +160,7 @@ def test_auth_retry_pins_connection_model_and_effort_without_reranking(executing
     assert launch["resolved_connection_id"] == "cn_native"
     assert launch["resolved_model"] == "native-model" and launch["parameters"]["effort"] == "high"
     assert launch["resolved_route_id"] == "native-route" and "route_override" not in launch
+    assert launch["route_basis"] == route_basis
     adapter._automatic_route_entries = lambda *args: []
     with pytest.raises(StoreError, match="Previous route is no longer authorized"):
         adapter._resolve_runtime_route(launch, store.project_root)

@@ -2069,7 +2069,7 @@ class EngineSessionManagerAdapter:
                 launch.pop('route_override', None)
                 launch.update(resolved_connection_id=previous['connection_id'],
                               resolved_model=previous['model'], resolved_route_id=matches[0].route.id,
-                              route_basis='auto:pin')
+                              route_basis=detail.get('route_basis', 'auth_recovery'))
                 if detail.get('effort'):
                     launch['parameters'] = dict(launch.get('parameters') or {}, effort=detail['effort'])
                     launch['effort_source'] = (detail['effort_source']

@@ -35,8 +35,9 @@ The coordinator may pass already-known source pointers in a **Known locations**
 block (`path:line`, symbol and brief relevance). Workers read those sources
 first and expand discovery only if the hints are insufficient or the task
 affects a contract or documentation. Hints are not freshness proofs; workers
-check current source. The code-index project name is pre-resolved into the prompt
-when available, with `list_projects` retained as fallback. This avoids forwarding
+check current source. The runtime passes no pre-resolved code-index project
+name; the prompt tells workers to call `list_projects` once and select the
+project whose root matches the workspace. This avoids forwarding
 coordinator transcripts. Structured digest-bound locations and discovery-time
 metrics are deferred; prompt delivery alone does not establish a latency or
 quality improvement.

@@ -123,5 +123,8 @@ synthesis, and observed absence of all worker engines. File drift, truncated out
 missing publication or unknown process liveness blocks completion.
 
 Format-11 migration under the exclusive lock retains a private backup; inspection
-opens do not mutate. Historical storage relations can be inspected but do not
-reactivate model-owned delegation, integration or acceptance routes.
+opens do not mutate. Live runtime validation uses shared access and reads committed
+WAL data without migration or schema repair; normal SQLite sidecar housekeeping
+is allowed. See [storage modes](../../project/storage.md). Historical storage
+relations can be inspected but do not reactivate model-owned delegation,
+integration or acceptance routes.

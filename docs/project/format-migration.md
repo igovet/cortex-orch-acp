@@ -38,10 +38,15 @@ tables. Format 10 is also a migration input. Both are upgraded offline to format
 Every later ACP metadata addition remains an independent, self-healing,
 all-or-nothing optional table group on top of format 12:
 
-- Every new `Store()` open runs the complete
+- Every normal writable `Store(..., initialize=True)` open runs the complete
   `CREATE TABLE IF NOT EXISTS ...` schema script —
   a pre-existing store simply gains whichever groups it predates, with
   zero rows, and no version bump is ever required for this.
+  Non-initializing inspection opens never repair schema or backfill rows; see
+  [storage inspection](storage.md). A nonempty WAL is refused, not ignored.
+  Live runtime validation (`initialize=False, runtime_access=True`) instead
+  shares the access lock and reads committed WAL data, allowing SQLite sidecar
+  housekeeping but still never installing schema or migrating a legacy format.
 - `split.py`'s `_validate_format()`/`_expected_layout()` independently
   enumerate optional groups and assert each one is present
   either completely or not at all — this is the same invariant `plan()`

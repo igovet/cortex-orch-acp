@@ -406,8 +406,12 @@ npm --prefix integrations/paseo run typecheck
 npm --prefix integrations/paseo run test:activation # server/plugin-activation.test.ts
 npm --prefix integrations/paseo run test:steer      # steer, steered worker cards through the real installed ACP bridge, and scalar/batch question transport regressions
 npm --prefix integrations/paseo run test:installed-questions -- /absolute/path/to/installed/Metro/index.js # installed question helper/component structure and state (no pixel rendering)
+npm --prefix integrations/paseo run test:native-queue -- /absolute/path/to/installed/Metro/index.js # installed queue/edit/send/retry helpers and provider; no GUI
 npm --prefix integrations/paseo run test:diff      # client/worker-panel-diff.test.ts
 npm --prefix integrations/paseo run test:status    # client/worker-panel-status.test.ts
+npm --prefix integrations/paseo run test:display   # display, assignment prompt and activity deduplication models
+npm --prefix integrations/paseo run test:terminal-status # authoritative terminal outcome projection
+npm --prefix integrations/paseo run test:command-stop # command list/stop RPC and client model
 npm --prefix integrations/paseo run test:worker-card # card model, card contrast/Space activation, and one stable worker-card identity across turns/replay (cancel vs. real failure)
 npm --prefix integrations/paseo run test:replay    # server/replay.test.ts
 npm --prefix integrations/paseo run test:coalesce  # client/coalesce.test.ts
@@ -430,8 +434,14 @@ alongside `test:steer`, not just the mock provider tests. The installed helper
 returns **header-keyed** answers; the tests include colliding topics and
 all-member custom-answer submission. This is no-paid, read-only bundle
 execution with component stand-ins, not a rendered Desktop qualification.
-The script requires an explicit bundle path and does not discover an installation
-itself. On this Linux installation, discover the current file read-only with:
+Both `test:installed-questions` and `test:native-queue` require an explicit
+bundle path and do not discover an installation themselves. Run `test:native-queue`
+for native queue/edit/send/retry or provider-delivery changes, `test:display` for
+worker display/prompt/activity changes, `test:terminal-status` for terminal
+outcome reconciliation, and `test:command-stop` for command-control changes.
+The question harness binds stand-ins by inspected module export shape, not
+import position or a fixed dependency count; missing or ambiguous shapes fail.
+These installed-bundle checks do not launch or modify Paseo. On this Linux installation, discover the current file read-only with:
 
 ```
 find /opt/Paseo/resources/app-dist/_expo/static/js/web -maxdepth 1 -name 'index-*.js' -print

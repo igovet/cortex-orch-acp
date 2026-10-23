@@ -10,6 +10,13 @@ A plan proposes scopes; it cannot grant privileges, choose a model or create a
 session. Coordinator and consultant are read-only. Reviewers cannot edit source.
 Database-architect and performance-engineer are read-only specialists too.
 
+Permission card command subjects JSON-quote empty arguments and arguments
+containing whitespace or control characters, including newlines and tabs.
+A subject longer than 600 characters has an explicit omitted-character count
+in the card title; `rawInput.subject` retains the complete subject. This is a
+display safeguard, not a change to the command or authorization rules
+(`orchestration.consent`).
+
 ## Discovery and bounded read batches
 
 [The additive read API](../tool-discovery-and-read-batch/index.md) requires a
@@ -433,8 +440,9 @@ another tool, shell, channel or worker. A read can itself be denied; stop that
 route rather than reclassifying it as a missing-read precondition.
 The existing digest, coverage and exact-match guards remain authoritative.
 `project_files.require_read` and `gateway._edit` enforce these guards; shared tool
-discipline, both unified-prompt editions and writer recovery capsules distinguish
-this workflow from an authorization refusal. No new error taxonomy or retry
+discipline (for roles that edit files), the writing-worker prompt in both
+unified-prompt editions and writer recovery capsules distinguish this workflow
+from an authorization refusal. No new error taxonomy or retry
 engine is introduced.
 
 Focused regressions: `tests/test_project_read_recovery.py` and

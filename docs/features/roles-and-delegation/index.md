@@ -19,9 +19,12 @@ support and limits](../claude-engine/index.md#current-support-0880-2026-10-08). 
 
 All 23 worker role instructions remain available as canonical skill sources,
 composed from role specializations and the shared report protocol. The redundant
-`agents/*.toml` profile files and generated reference copies have been removed;
-the developer generator renders from canonical `skills/worker-*/SKILL.md`
-sources. Generated YAML frontmatter and footer comments stay in those files for native skill loaders and are removed from the portable body that engines receive. Instructions describe intellectual work and evidence; they are not an
+`agents/*.toml` profile files have been removed. The developer generator
+(`scripts/generate_agent_profiles.py`) renders the `agent-sources/`
+specializations and shared protocols into the canonical `skills/worker-*/SKILL.md`
+files and their `references/` copies; its `check` action asserts the 23 outputs
+and that each `profiles.json` `select_when`/`avoid_when` equals its source's
+"When to use this profile" bullets. Generated YAML frontmatter and footer comments stay in those files for native skill loaders and are removed from the portable body that engines receive. Instructions describe intellectual work and evidence; they are not an
 authorization mechanism. Workers publish immutable Markdown reports and submit
 structured results through their authenticated channel. They receive explicit
 predecessor report references, not an automatic copy of the parent chat. The
@@ -57,8 +60,10 @@ workers read `skill-authoring` for creation, revision, import and guarded links.
 Harvest scope assessment is coordinator-only `knowledge-harvest-scope`, while
 worker-only `knowledge-harvest` owns census and the canonical coverage contract.
 One shared-skill allowlist supplies read authorization and the role's `read_skill`
-enum; coordinators cannot read worker-only procedures, and consultants cannot read
-these project procedures. All 23 profiles and their access classes remain intact.
+enum; coordinators cannot read worker-only procedures, consultants cannot read
+these project procedures, and read-only roles cannot read the file-changing
+`skill-authoring` and `knowledge-harvest` procedures. All 23 profiles and their
+access classes remain intact.
 
 ## Capability-based delegation
 
@@ -148,14 +153,15 @@ They broaden discovery or consult project/feature indexes when the hints are
 insufficient or the change affects a contract or documentation surface. This
 passes specific findings, not coordinator transcripts or engine sessions.
 
-The attached code-index prompt can also provide the pre-resolved indexed-project
-name for the current root; use it directly and list projects only as fallback.
+The attached code-index prompt and the inlined `code-and-evidence` reference both
+tell workers to call `list_projects` once and select the project whose root
+matches the workspace; the runtime passes no pre-resolved project name. Only a
+role granted `index_repository` is told to attempt one bootstrap.
 These prompt-level hand-offs do not validate location freshness, enforce a
 worker's choices, or establish reduced latency or improved model outcomes.
 Structured, digest-bound locations (F3) and discovery-time measurement (F4)
 remain deferred unless the prompt-only approach proves insufficient and the
-measurement is observable. Workers use an already supplied matching code-index
-project directly; project listing is a fallback for absent or ambiguous matches.
+measurement is observable.
 Review reuse is based only on exact assignment, artifact/report revisions and
 check or command-receipt identities actually observed, not a fixed key absent
 from task inputs. A host-injected inactivity nudge is host-authored, an accepted
@@ -195,9 +201,9 @@ ownership and screenshot evidence responsibilities.
 
 Read-only roles (`orchestration.contracts.READ_ONLY`: architect, ux-designer, code-reviewer, senior-consultant, explorer, planner, security-auditor, accessibility-auditor, database-architect, performance-engineer and the runtime-reserved build-verification profile) never change the project, whatever scope a plan requests. `plan_submit` therefore refuses a read-only task whose scope names a literal path (no `*`, `?` or `[`) that does not exist yet (`read_only_scope_not_writable`): with no writer behind it, such a path is an output the worker could never write. On 2026-09-28 a plan gave seven Opus ux-designer tasks an output file each; every worker did the work and then failed to save it against the read-only project. The task returns content in its report and a dependent writing task creates the file. A nonexistent path is accepted when a writing task of the same plan whose scope overlaps it (the scheduler's `orchestration.policy.overlaps`) is ordered with the read-only task, transitively: the read-only task depends on it (a reviewer of the directory its predecessor writer creates), or it depends on the read-only task (the remedy above). An unordered parallel writer does not count, since the read could precede the write. The refusal lists every remaining path in `violations`, so one correction fixes them all. On 2026-10-14 three coordinator plans in one design project were refused on their first attempt for exactly those writer-covered reviewer and art-direction paths.
 
-`INLINED_SKILLS` are delivered in full with the role instructions because their case arises in almost every session: `tool-discipline`, `content-safety` and `coordinator-communication` for the coordinator; `tool-discipline`, `tool-discipline-worker`, `content-safety`, `report-publication` and `code-and-evidence` for ordinary workers (consultants omit project/command discipline). The text is exactly what `read_skill` returns for each id. Naming them was not enough: on 2026-09-28 Claude sessions given the same named list never called `read_skill`, while Codex sessions did. `NAMED_SKILLS` names the remaining situational skills with their triggers; a model requests those through `read_skill`, so they are not pasted into every prompt. `situational_skill_triggers` supplies the same action-bound catalogue to the role text, the `read_skill` tool description, and its `skill` selector description. The model is instructed to call `read_skill` before the matching action, not to pre-load all skills: editing documentation made wrong by a behavior change calls for `documentation-sync`; starting a browser or server session calls for `interactive-resources`. Inlined skills are excluded from this catalogue. The `read_skill.skill` selector advertises an `anyOf`: a role-scoped enum for named Cortex shared/reference skills, plus a separate path branch for an exact project/user `SKILL.md` listed in the current session. The runtime checks that path against the session grant; it is not restricted to the named-skill enum. Enum membership alone is not a trigger. Coordinator channels include the coordinator-only shared skills identified by `COORDINATOR_ONLY_SHARED_ROLE_IDS` (`cortex-control`, `coordinator-communication`, `skill-management`, `knowledge-harvest-scope`, `requirements-intake` and `design-workflow`); worker and consultant channels do not. Consultants are not prompted to load mutation-oriented skills. The runtime does not read situational skills on the model's behalf. Automated prompt/schema tests establish delivery, not model compliance on a true trigger.
+`INLINED_SKILLS` are delivered in full with the role instructions because their case arises in almost every session: `tool-discipline`, `content-safety` and `coordinator-communication` for the coordinator; `tool-discipline`, `tool-discipline-worker`, `content-safety`, `report-publication` and `code-and-evidence` for ordinary workers (consultants omit project/command discipline). The text is exactly what `read_skill` returns for each id. Naming them was not enough: on 2026-09-28 Claude sessions given the same named list never called `read_skill`, while Codex sessions did. `NAMED_SKILLS` names the remaining situational skills with their triggers; a model requests those through `read_skill`, so they are not pasted into every prompt. `situational_skill_triggers` supplies the same action-bound catalogue to the role text, the `read_skill` tool description, and its `skill` selector description. The model is instructed to call `read_skill` before the matching action, not to pre-load all skills: editing documentation made wrong by a behavior change calls for `documentation-sync`; starting a browser or server session calls for `interactive-resources`. Inlined skills are excluded from this catalogue. The `read_skill.skill` selector advertises an `anyOf`: a role-scoped enum for named Cortex shared/reference skills, plus a separate path branch for an exact project/user `SKILL.md` listed in the current session. The runtime checks that path against the session grant; it is not restricted to the named-skill enum. Enum membership alone is not a trigger. Coordinator channels include the coordinator-only shared skills identified by `COORDINATOR_ONLY_SHARED_ROLE_IDS` (`cortex-control`, `coordinator-communication`, `skill-management`, `knowledge-harvest-scope`, `requirements-intake` and `design-workflow`); worker and consultant channels do not. Consultants and read-only roles are neither named nor offered the file-changing `skill-authoring` and `knowledge-harvest` procedures (`portable.roles.MUTATION_ONLY_SHARED_ROLE_IDS`); read-only roles keep `documentation-sync` for impact assessment. Always-inlined skills carry no trigger. The coordinator's `pipeline-publication` reference is named "before submitting the final synthesis", and its former `recovery` reference was folded into `context-compaction`. The runtime does not read situational skills on the model's behalf. Automated prompt/schema tests establish delivery, not model compliance on a true trigger.
 
-Reference ids are scoped separately: workers can read the worker references (`report-publication`, `code-and-evidence`, and `interactive-resources`), each design stage owner can read the design data references of its parent design skill (for example `design-colors`, `design-critique` or `design-defect-checklist`), coordinators can read their coordinator references (including `question-banks`, `agreed-spec`, `design-intake`, the `PRODUCT`, `DESIGN` and `SCREENS` templates and `visual-review`), and both can read the example catalogue (`index` and the `*-example` ids). The runtime checks the channel role and the enum; prompt text only explains when an available skill may be useful and grants no authority. Cortex MCP `read_report`, `read_skill`, draft/publication, `command_run` and result tools are distinct from external code-index MCP tools and native workspace aids; only the Cortex command receipt supports a passed worker check. The `documentation-sync` trigger covers coordinator documentation-impact planning as well as affected edits. The 2026-09-28 live CLI backend worker wrote only code/tests, while a Codex writer handled README updates, so that run did not test Claude worker compliance on a genuine documentation-edit trigger.
+Reference ids are scoped separately: workers can read the worker references (`report-publication`, `code-and-evidence`, and `interactive-resources`), each design stage owner can read the design data references of its parent design skill (for example `design-colors`, `design-critique` or `design-defect-checklist`), and every design role can read `design-banned-patterns`, the worker-readable copy of the coordinator-only `DESIGN` template's "Banned AI-tell patterns" section (a test keeps the two identical), coordinators can read their coordinator references (including `question-banks`, `agreed-spec`, `design-intake`, the `PRODUCT`, `DESIGN` and `SCREENS` templates and `visual-review`), and both can read the example catalogue (`index` and the `*-example` ids). The runtime checks the channel role and the enum; prompt text only explains when an available skill may be useful and grants no authority. Cortex MCP `read_report`, `read_skill`, draft/publication, `command_run` and result tools are distinct from external code-index MCP tools and native workspace aids; only the Cortex command receipt supports a passed worker check. The `documentation-sync` trigger covers coordinator documentation-impact planning as well as affected edits. The 2026-09-28 live CLI backend worker wrote only code/tests, while a Codex writer handled README updates, so that run did not test Claude worker compliance on a genuine documentation-edit trigger.
 
 Recovery capsules derive `allowed_mcp_tools` from the same role/stage-specific offered tool definitions used for the channel's `tools/list`; they do not include a `native_tools_enabled` field because the runtime cannot establish a reliable native-tool inventory. The capsule's environment guidance likewise distinguishes writers, read-only assignments and the senior consultant instead of granting a generic machine-readable writer instruction.
 
@@ -208,13 +214,17 @@ not project source or an attached code index. Its Cortex tool offer retains
 report/source-packet reads (`read_report`, `list_reports`, `list_sources`,
 `read_source`, `read_capsule`, `read_large_output`), skill reads, owned report
 draft/publication and result submission. It is not offered `command_run`, `project_read`,
-`project_git`, `ask_question` or `access_request`, and dispatch refuses the last two; attempts
+`project_git`, `ask_question`, `access_request`, `replan_request`, `scope_request` or
+`escalation_request`. Dispatch refuses the question, access and three lifecycle
+requests, so a consultation cannot cancel workers or recursively escalate; attempts
 to read project source through those routes fail with `gateway_read_denied`. The consultant is
 reached only through `escalation_request`: a plan that names it is refused
 (`consultant_requires_escalation`). The runtime builds its packet from the reports the
 escalation names, then the escalated revision's reports, each with its SHA-256 and recorded
 artifact versions. Missing evidence becomes a limitation in the consultant's report, and the
-consultant asks the user nothing. No external MCP
+consultant asks the user nothing. Its protocol states English-only
+communication, and its turn wrapper omits the question-language exception that
+other worker turns carry. No external MCP
 servers are attached. This is not a complete native-tool sandbox: Claude's
 consultant profile disallows native file/search/edit tools, and Codex's own
 `shell_tool`/`view_image` features are likewise forced off for every Cortex-

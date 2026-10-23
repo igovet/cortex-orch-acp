@@ -2,11 +2,11 @@
 
 A captured user model request covers planned exact-route nodes, their
 retries and their review fixes (``orchestration.state.attempt_routing``).
-The runtime-created mandatory review node has no plan hint, so no user request
-ever covers it; only an owner pin decides its route deterministically
-(``auto_route.choose``: user request, then pin, then ranking). This preflight
-lets a caller refuse a paid run visibly before launch when the review stage
-would not run on the selected route or execution/review effort conflicts with
+A purpose-scoped user request can also cover the runtime-created mandatory
+review node, ahead of owner pins and ranking. This policy-only preflight has
+no task sources and cannot evaluate such requests; it assesses the review
+route in their absence. It lets a caller refuse a paid run before launch when
+review would not run on the selected route or execution/review effort conflicts with
 policy. It does not establish specialist readiness or engine support.
 
 It reads only the owner routing policy (``auto_route.load_overrides``). It never
@@ -29,7 +29,8 @@ from ..portable.errors import PortableError
 REVIEW_ROLE = "worker-code-reviewer"
 _ROUTE = re.compile(r"([a-z0-9-]{1,64})/([A-Za-z0-9_.\[\]-]{1,128})(?::([a-z]{1,16}))?")
 _LIMITS = (
-    "a captured user request covers execution, retries and review fixes only after the user names the route",
+    "captured user requests can cover execution, retries, review fixes and purpose-matched review nodes",
+    "task sources are not read here; review assessment assumes no purpose-scoped user request",
     "connection availability, quota and the task profile/ceiling are re-checked at dispatch",
     "exact execution effort requires a captured model+effort request, not only an editor selection",
     "effort checks here establish policy permission only; live engine support and native confirmation remain required",

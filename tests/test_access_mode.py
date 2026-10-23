@@ -391,3 +391,26 @@ def test_fresh_session_durably_initializes_development(tmp_path, monkeypatch):
     task_id = agent.sessions[session_id]["task_id"]
     assert access_mode.current(store, task_id) == "development"
     assert [row["kind"] for row in access_mode.history(store, task_id)] == ["initialized"]
+
+
+def test_consent_subject_quotes_multiline_tab_control_and_empty_arguments():
+    import json
+    argv = ["python3", "two words", "line\nbreak", "tab\there", "\x01control", "\x80control", ""]
+    subject = consent.subject_of("outside_command", {"argv": argv})
+    assert subject == " ".join([argv[0], *(json.dumps(arg) for arg in argv[1:])])
+    assert "\n" not in subject and "\t" not in subject
+
+
+def test_consent_title_marks_truncation_and_retains_the_full_subject(tmp_path):
+    store, task_id = _store_and_task(tmp_path)
+    asked = []
+    runtime = _runtime(store, {task_id: lambda _session, params, _timeout: asked.append(params)})
+    subject = consent.subject_of("outside_command", {"argv": ["python3", "x" * 900]})
+    with store.connection() as db:
+        consent._ensure(db)
+        db.execute("INSERT INTO consent_requests VALUES(?,?,?,?,?,?,?,NULL)",
+                   ("cr_long", task_id, "xa_1", "outside_command", subject, "asked", "now"))
+    consent._ask(runtime, task_id, dict(id="cr_long", kind="outside_command", subject=subject), "en")
+    card = asked[0]["toolCall"]
+    assert f"{len(subject) - 600} more characters" in card["title"]
+    assert card["rawInput"]["subject"] == subject

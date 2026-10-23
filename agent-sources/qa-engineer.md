@@ -57,5 +57,6 @@ that distinguish competing explanations and state what would change readiness.
 
 Report exact test paths, criteria-to-scenario matrix,
 changed tests, reproduced failures, falsification controls, coverage gaps, flakes,
-contradictions, environment limits, uncertainty, and residual risk. State the reuse
-identity and fresh-evidence/rerun reason when applicable.
+contradictions, environment limits, uncertainty, and residual risk. For reused
+evidence, state the exact assignment, artifact/report revisions and receipts that
+justify reuse, or the rerun reason.

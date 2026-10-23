@@ -11,6 +11,14 @@ from pathlib import PurePosixPath
 PRIVATE = frozenset({'.cortex', '.git'})
 
 
+def canonical_scope(value):
+    """Canonical lexical reservation identity, preserving globs and project root.
+
+    No filesystem lookup or symlink resolution: authority checks remain separate.
+    """
+    return PurePosixPath(value).as_posix()
+
+
 def permitted_path(value):
     path = PurePosixPath(value)
     return not (

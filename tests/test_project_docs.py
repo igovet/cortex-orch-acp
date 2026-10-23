@@ -210,7 +210,9 @@ def _repo_files() -> list[Path]:
         # Do not follow file links or replaced directory links out of the checkout.
         if any((_PROJECT_ROOT / parent).is_symlink() for parent in (relative, *relative.parents)):
             continue
-        paths.append(path)
+        # git ls-files --cached also returns tracked worktree deletions.
+        if path.is_file():
+            paths.append(path)
     return paths
 
 
@@ -291,6 +293,10 @@ def test_repo_file_scan_excludes_ignored_private_generated_and_symlink_files(tmp
     tracked = tmp_path / "README.md"
     tracked.write_text("# Project\n", encoding="utf-8")
     subprocess.run(["git", "add", ".gitignore", "README.md"], cwd=tmp_path, check=True)
+    deleted = tmp_path / "deleted.md"
+    deleted.write_text("# Removed page\n", encoding="utf-8")
+    subprocess.run(["git", "add", "deleted.md"], cwd=tmp_path, check=True)
+    deleted.unlink()
     page = tmp_path / "docs/project/new\npage.md"
     page.parent.mkdir(parents=True)
     page.write_text("# New page\n", encoding="utf-8")

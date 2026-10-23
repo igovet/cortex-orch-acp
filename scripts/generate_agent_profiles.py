@@ -49,6 +49,27 @@ def sections(markdown: str) -> dict[str, str]:
     return result
 
 
+_WHEN_TO_USE_FIELDS = {"Select": "select_when", "Choose another specialist": "avoid_when"}
+
+
+def when_to_use(section: str) -> dict[str, str]:
+    """``select_when``/``avoid_when`` as the specialization states them."""
+    found: dict[str, list[str]] = {}
+    current = None
+    for line in section.splitlines():
+        match = re.match(r"- \*\*(.+?):\*\* (.*)", line)
+        if match:
+            current = _WHEN_TO_USE_FIELDS.get(match.group(1))
+            if current is None or current in found:
+                raise ValueError("invalid or duplicate When to use bullet")
+            found[current] = [match.group(2)]
+        elif current is not None and line.strip():
+            found[current].append(line.strip())
+    if set(found) != set(_WHEN_TO_USE_FIELDS.values()):
+        raise ValueError("When to use must have one Select and one Choose another specialist bullet")
+    return {key: " ".join(" ".join(parts).split()) for key, parts in found.items()}
+
+
 def expected_skills(plugin: Path = PLUGIN) -> dict[Path, bytes]:
     source_root = plugin / "agent-sources"
     template = (source_root / "worker-protocol.md").read_text()
@@ -63,6 +84,9 @@ def expected_skills(plugin: Path = PLUGIN) -> dict[Path, bytes]:
         if report_template not in {"general", "planning", "investigation", "implementation", "verification", "documentation", "synthesis"}:
             raise ValueError(f"invalid report template for {profile['name']}")
         values = sections((source_root / source).read_text())
+        if when_to_use(values["When to use this profile"]) != {
+                key: profile.get(key) for key in _WHEN_TO_USE_FIELDS.values()}:
+            raise ValueError(f"profiles.json select_when/avoid_when differ from {source} When to use")
         selected_template = ((source_root / "consultant-protocol.md").read_text()
                              if access_class == "consultant" else template)
         prompt = selected_template.replace("{{Default report template}}", report_template)

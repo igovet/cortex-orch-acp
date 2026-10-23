@@ -273,8 +273,9 @@ def test_every_profile_selects_its_declared_base_prompt_block(native_tools):
      {"knowledge-harvest", "skill-authoring", "tool-discipline-worker"}),
     ("worker", "worker-backend-dev", {"knowledge-harvest", "skill-authoring", "tool-discipline-worker"},
      {"knowledge-harvest-scope", "skill-management"}),
-    ("worker", "worker-explorer", {"knowledge-harvest", "skill-authoring", "tool-discipline-worker"},
-     {"knowledge-harvest-scope", "skill-management"}),
+    # Read-only roles are neither named nor offered file-changing procedures.
+    ("worker", "worker-explorer", {"tool-discipline-worker", "documentation-sync"},
+     {"knowledge-harvest", "skill-authoring", "knowledge-harvest-scope", "skill-management"}),
     ("worker", "worker-senior-consultant", set(),
      {"knowledge-harvest", "knowledge-harvest-scope", "skill-authoring", "skill-management", "tool-discipline-worker"}),
 ])

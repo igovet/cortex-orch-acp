@@ -7,6 +7,12 @@ Resuming the same logical task from current authoritative state after a
 Cortex process restart, without duplicate work, stale permissions, or two
 mutating coordinators live at once.
 
+Worker-loss reconciliation closes the optional work-graph attempt in the same
+transaction as the failure event. Only a missing `work_assignment_attempts`
+table is tolerated for older stores. I/O errors, invalid historical payloads
+and other SQL faults propagate and abort the transaction rather than commit a
+failure event while leaving the graph running.
+
 ## Sequence
 
 `acp.orchestrating_runtime.OrchestratingRuntime._ensure_coordinator` used

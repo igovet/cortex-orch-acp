@@ -24,9 +24,10 @@ evidence model and completion gate were rewritten for Cortex roles.
 
 | Cortex path | Upstream path | Treatment | SHA-256 |
 |---|---|---|---|
-| `references/defect-checklist.md` | upstream `history-derived-checklist.md` | adapted (see below) | after adaptation: `d858b13404ba0124c49063b4237597f7b4e418a159123176f7c8c42591278aaf`; original: `61ee8f8090c8273f34c1560b9f0d2dc0dc68bd99358388caa73878433273721a` |
+| `references/defect-checklist.md` | upstream `history-derived-checklist.md` | adapted (see below) | after adaptation: `3cf95270771db68950fc0f54ae74a9940d167d281bc2e1b880e221a74e549e11`; original: `61ee8f8090c8273f34c1560b9f0d2dc0dc68bd99358388caa73878433273721a` |
 | `LICENSE` | `LICENSE` | verbatim | `945fb5acb5c4bc9af45b54b9a02be060f5dfca5e0a77244e8aa567de63aed5d1` |
 | `SKILL.md` | `SKILL.md` | distilled and rewritten | not a copy |
+| `references/banned-patterns.md` | none | Cortex-authored copy of the design-workflow DESIGN template's "Banned AI-tell patterns" section | not upstream |
 
 ## Omitted
 
@@ -54,5 +55,6 @@ evidence model and completion gate were rewritten for Cortex roles.
 - `references/defect-checklist.md`: the Playwright documentation link was changed
   to a general pixel-baseline note; sentences that referred to the upstream sweep
   script and its output were changed to refer to any automated or DOM inventory.
-  No other text was changed.
+  A Cortex "Banned AI-tell defects" section was added; it points to the
+  worker-readable `design-banned-patterns` reference. No other text was changed.
 - The upstream section headers and standards-backed checks are otherwise kept.

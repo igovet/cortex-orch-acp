@@ -15,11 +15,16 @@ def test_consultant_is_the_opt_in_twenty_third_generated_profile():
         "exact selected published report IDs",
         "read each explicitly selected report through bounded pages",
         "exact data request, and recommended profile",
-        "never repeat an unchanged packet",
         "do not edit it",
+        "Communicate exclusively in English",
     ):
         assert phrase in skill
     assert "page limit" not in skill
+    # Whether to consult again is the escalator's decision, not the consultant's.
+    assert "never repeat an unchanged packet" not in skill
+    assert "deeper model" not in skill
+    reference = (PLUGIN / "skills/orchestrator/references/senior-consultation.md").read_text()
+    assert "never repeat an unchanged packet" in reference
 
 
 def test_consultant_has_no_general_worker_execution_permissions():

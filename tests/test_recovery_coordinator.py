@@ -6,6 +6,7 @@ than a real subprocess (see ``test_recovery_cross_process.py`` for the real
 pid/boot-id liveness-detection and crash-injection legs)."""
 from __future__ import annotations
 
+import sqlite3
 import threading
 import uuid
 
@@ -564,3 +565,35 @@ def test_large_task_recovery_delivery_is_not_blocked_with_capsule_oversize(tmp_p
     assert [d["state"] for d in deliveries] == ["transmitted"]
     assert all(d["reason"] != "capsule_oversize" for d in deliveries)
     assert not any("capsule" in text.lower() and "cap" in text.lower() for text in seen)
+
+
+@pytest.mark.parametrize("error", [
+    sqlite3.OperationalError("disk I/O error"),
+    sqlite3.OperationalError("no such column: status"),
+    sqlite3.OperationalError("no such table: task_events"),
+    ValueError("invalid historical payload"),
+])
+def test_graph_reconciliation_does_not_swallow_unexpected_errors(error):
+    from cortex_runtime.recovery.worker_reconciliation import _mark_graph_attempt_failed_tx
+
+    class BrokenDB:
+        def execute(self, *_args):
+            raise error
+
+    with pytest.raises(type(error), match=str(error)):
+        _mark_graph_attempt_failed_tx(BrokenDB(), "task", "assignment", "worker_lost")
+
+
+def test_graph_reconciliation_tolerates_only_the_absent_optional_table():
+    import sqlite3
+    from cortex_runtime.recovery.worker_reconciliation import _mark_graph_attempt_failed_tx
+
+    db = sqlite3.connect(":memory:")
+    db.row_factory = sqlite3.Row
+    try:
+        db.execute("CREATE TABLE task_events(id, task_id, assignment_ref, event_type, payload_json)")
+        db.execute("INSERT INTO task_events VALUES(1,'task','assignment','delegation_requested',"
+                   "'{\"work_attempt_ref\":\"attempt\"}')")
+        _mark_graph_attempt_failed_tx(db, "task", "assignment", "worker_lost")
+    finally:
+        db.close()

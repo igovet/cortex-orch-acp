@@ -636,13 +636,20 @@ _WRITE_TOOLS = frozenset({"project_write", "project_edit", "project_mkdir", "pro
                           "outside_write", "outside_command"})
 
 
+# The shared replan/scope/escalation descriptions address the coordinator here;
+# worker offers drop it because plan_submit is never offered to a worker.
+_COORDINATOR_ONLY_CLAUSE = " and do not call plan_submit in the same turn"
+
+
 # What the senior consultant is never offered. Besides project source and
 # commands, it requests no paths and asks the user nothing: missing evidence
 # is a limitation in its report.
-_CONSULTANT_WITHHELD = frozenset({"command_run", "project_read", "project_git", "access_request", "ask_question"})
+_CONSULTANT_WITHHELD = frozenset({"command_run", "project_read", "project_git", "access_request", "ask_question",
+                                 "replan_request", "scope_request", "escalation_request"})
 # Withheld operations this module's dispatch refuses itself; the gateway
 # refuses the others.
-_CONSULTANT_REFUSED = frozenset({"access_request", "ask_question"})
+_CONSULTANT_REFUSED = frozenset({"access_request", "ask_question",
+                               "replan_request", "scope_request", "escalation_request"})
 
 
 def _consultant_channel(store, channel: ChannelContext) -> bool:
@@ -762,6 +769,9 @@ def tool_definitions(role_kind: str, *, role_id: str | None = None, stage: str |
         if name == "read_skill":
             schema = _enumerate_skills(schema, role_kind, role_id)
         description = _OPERATION_DESCRIPTIONS.get(name, f"Delegation operation '{name}'.")
+        if role_kind != "coordinator":
+            # Only the coordinator is ever offered plan_submit.
+            description = description.replace(_COORDINATOR_ONLY_CLAUSE, "")
         if "{gates}" in description:
             from ..orchestration.skill_gate import gate_summary
             description = description.replace("{gates}", gate_summary())

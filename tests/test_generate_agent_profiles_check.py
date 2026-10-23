@@ -53,6 +53,16 @@ def test_check_asserts_exactly_23_profiles(catalogue, tmp_path):
         check(root)
 
 
+def test_check_rejects_select_avoid_drift_from_the_source(catalogue, tmp_path):
+    root, profiles = catalogue
+    drifted = [dict(profile) for profile in profiles]
+    consultant = next(profile for profile in drifted if profile["name"] == "senior_consultant")
+    consultant["avoid_when"] = consultant["avoid_when"].replace("commands, ", "")
+    (root / "profiles.json").write_text(json.dumps({"profiles": drifted}))
+    with pytest.raises(ValueError, match="select_when/avoid_when differ from senior-consultant.md"):
+        check(root)
+
+
 def test_check_passes_with_the_real_catalogue():
     # Exercises the actual shipped sources end to end, including the new
     # exact-count assertion.

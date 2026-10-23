@@ -202,15 +202,16 @@ def _base36(value):
     return result
 
 
-def private_directory(path):
-    """Create a private storage directory without traversing symlinks."""
+def private_directory(path, *, create=True):
+    """Validate private storage without symlinks; create only on writable opens."""
     path=Path(path).expanduser().absolute()
     if ".." in path.parts: raise StoreError("unsafe_storage","storage_path",str(path),"canonical private directory")
     current=Path(path.anchor)
     for part in path.parts[1:]:
         current/=part
-        try: current.mkdir(mode=0o700)
-        except FileExistsError: pass
+        if create:
+            try: current.mkdir(mode=0o700)
+            except FileExistsError: pass
         info=current.lstat()
         if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
             raise StoreError("unsafe_storage","storage_path",str(current),"owned directory without symlinks")
@@ -326,7 +327,7 @@ def sync_directory(path):
 
 
 class Store:
-    def __init__(self,directory,initialize=True,*,project_root=None):
+    def __init__(self,directory,initialize=True,*,project_root=None,runtime_access=False):
         from .trusted_channel import IDENTITY_SCHEMA
         from .catalog.store import CATALOG_SCHEMA
         from .configuration.store import CONFIGURATION_SCHEMA
@@ -353,19 +354,18 @@ class Store:
             raise StoreError('project_storage_mismatch')
         self._file_cache=OrderedDict()
         self._cache_lock=threading.RLock()
-        self.directory=private_directory(directory)
+        self.directory=private_directory(directory,create=initialize)
         self.path=self.directory/"cortex.sqlite3"
         if initialize:
             fd=os.open(self.path,os.O_CREAT|os.O_RDWR|os.O_NOFOLLOW,0o600); os.close(fd)
         regular(self.path)
-        # Format 11 is upgraded on a normal writable runtime open.  A
-        # non-initializing open is also used by inspection/maintenance paths;
-        # keep those paths read-only with respect to format migration so they
-        # retain the explicit migration-required error below.
+        # Only initializing opens migrate or repair schema. Non-initializing
+        # inspection is immutable; live runtime callers explicitly opt into
+        # shared access, including SQLite's normal WAL/SHM housekeeping.
         if initialize:
             from .migrate import auto_migrate_format11
             auto_migrate_format11(self.directory)
-        with self.connection() as db:
+        with self.connection(read_only=not initialize and not runtime_access) as db:
             # A rejected archive must retain its original bytes and journal
             # mode. Validate under the write lock before any persistent pragma.
             if initialize:db.execute("BEGIN IMMEDIATE")
@@ -381,7 +381,7 @@ class Store:
             if initialize:
                 db.execute("PRAGMA journal_mode=WAL")
                 db.executescript("BEGIN IMMEDIATE;\n"+SCHEMA+IDENTITY_SCHEMA+CATALOG_SCHEMA+CONFIGURATION_SCHEMA+ACP_SESSION_SCHEMA+DELEGATION_SCHEMA+WORK_GRAPH_SCHEMA+TASK_EVENTS_SCHEMA+RUNTIME_SCHEMA+CAPACITY_SCHEMA+EVIDENCE_SCHEMA+REPLAY_SCHEMA+PENDING_QUESTIONS_SCHEMA+TASK_LANGUAGE_SCHEMA+TASK_STOPPED_SCHEMA+CONTEXT_GENERATIONS_SCHEMA+LARGE_OUTPUT_SCHEMA+PROCESS_REGISTRY_SCHEMA+WORKSPACE_SCHEMA+INTEGRATION_SCHEMA+ROUTING_SCHEMA+OBSERVABILITY_SCHEMA+f"PRAGMA application_id={APPLICATION_ID};\nCOMMIT;")
-            if app==APPLICATION_ID:
+            if initialize and app==APPLICATION_ID:
                 # T036: add the model-selected requirement type and the
                 # fail-closed legacy assignment state to pre-existing graph
                 # rows.  WorkGraph also performs this check on direct graph
@@ -604,14 +604,14 @@ class Store:
         if any(row[0]!=self.project_root for row in rows):raise StoreError('project_storage_mismatch')
 
     @contextmanager
-    def connection(self, *, exclusive=False):
-        """Use exclusive access only for maintenance that fences other connections."""
+    def connection(self, *, exclusive=False, read_only=False):
+        """Fence maintenance and immutable inspection against runtime connections."""
         for suffix in ("","-wal","-shm"):
             try: regular(Path(str(self.path)+suffix))
             except FileNotFoundError:
                 if not suffix: raise
         lock_path=self.directory/".access.lock"
-        lock_fd=os.open(lock_path,os.O_CREAT|os.O_RDWR|os.O_NOFOLLOW,0o600)
+        lock_fd=os.open(lock_path,(os.O_RDONLY if read_only else os.O_CREAT|os.O_RDWR)|os.O_NOFOLLOW,0o600)
         try:
             regular(lock_path)
             # Exclusive maintenance stays fail-fast. A shared connection waits
@@ -621,7 +621,7 @@ class Store:
             deadline=time.monotonic()+(0 if exclusive else SHARED_ACCESS_WAIT_SECONDS)
             while True:
                 try:
-                    fcntl.flock(lock_fd,(fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)|fcntl.LOCK_NB); break
+                    fcntl.flock(lock_fd,(fcntl.LOCK_EX if exclusive or read_only else fcntl.LOCK_SH)|fcntl.LOCK_NB); break
                 except BlockingIOError:
                     if time.monotonic()>=deadline:raise
                     time.sleep(0.02)
@@ -629,7 +629,16 @@ class Store:
             os.close(lock_fd); raise StoreError("storage_busy") from None
         db=None
         try:
-            db=sqlite3.connect(self.path,timeout=15,isolation_level=None)
+            if read_only:
+                # mode=ro alone can CREATE WAL/SHM sidecars. Immutable reads
+                # never do, but ignore WAL contents, so require a checkpointed
+                # database while the exclusive access lock fences all runtime
+                # writers. Never silently read a stale main-file snapshot.
+                wal=Path(str(self.path)+"-wal")
+                if wal.exists() and wal.stat().st_size:
+                    raise StoreError("storage_inspection_requires_checkpoint")
+            db=sqlite3.connect(self.path.as_uri()+"?mode=ro&immutable=1" if read_only else self.path,
+                               uri=read_only,timeout=15,isolation_level=None)
             db.row_factory=sqlite3.Row
             db.execute("PRAGMA foreign_keys=ON"); db.execute("PRAGMA synchronous=FULL")
             yield db

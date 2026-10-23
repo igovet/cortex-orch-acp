@@ -183,8 +183,10 @@ def test_both_prompt_editions_and_all_profiles_distinguish_read_preconditions(ed
         prompt = cortex_system_prompt("coordinator" if name == "orchestrator" else "worker", None,
                                       access_class=prompt_access_class("coordinator" if name == "orchestrator" else "worker", name),
                                       edition=edition, code_mode=code_mode, environ={})
-        assert "file-read preconditions are different" in prompt
-        assert "Rebuild stale patches; never blindly retry them" in prompt
+        # Only a writing role edits files, so only its base prompt carries the recovery.
+        writes = name != "orchestrator" and prompt_access_class("worker", name) == "write"
+        assert ("file-read preconditions are different" in prompt) == writes
+        assert ("Rebuild stale patches; never blindly retry them" in prompt) == writes
         assert "access, channel, role, scope or policy refusal" in prompt
 
 

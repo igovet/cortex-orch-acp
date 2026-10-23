@@ -24,11 +24,11 @@ They are not files in the target project. Read only the relevant reference.
 
 - **Review (read-only roles, such as `ux_designer` or `accessibility_auditor`):**
   `critique` and `audit`. Produce findings and scores. Do not edit files.
-  Follow `references/critique.md` for `critique`; `audit` reports findings by
+  Follow `design-critique` for `critique`; `audit` reports findings by
   severity, with evidence, for the categories named in the table.
 - **Refinement (write roles, such as `frontend_dev`):** `polish`, `bolder`,
   `quieter`, `distill`, `typeset`, `layout`, `clarify`. Apply the smallest
-  change inside the named target. Follow `references/refinement.md`.
+  change inside the named target. Follow `design-refinement`.
 
 A read-only role that finds a defect reports it with the evidence. A write role
 applies the fix and re-checks the same state.

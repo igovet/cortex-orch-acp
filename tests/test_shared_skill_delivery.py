@@ -36,7 +36,10 @@ def test_coordinator_plain_language_rule_is_in_skill_and_per_turn_directive():
     assert "everyday words" in skill and "avoid jargon" in skill
     assert "Keep progress updates to one short line" in skill
     assert "say first whether the result is done" in skill
-    assert "List only real user-relevant checks" in skill
+    # Unresolved checks go only in the final-answer tools' not_verified list,
+    # which refuses authored disclosure sections in the text.
+    assert "Unresolved checks go only in the final-answer tool's `not_verified` list" in skill
+    assert "List only real user-relevant checks" not in skill
     assert "do not list successful checks or internal approvals" in skill
     assert "short, simple, plain language for an ordinary user" in messages
     assert "do not list successful checks or internal approvals" in messages

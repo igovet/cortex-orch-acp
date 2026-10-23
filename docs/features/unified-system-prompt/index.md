@@ -3,11 +3,14 @@
 > Status: migrated from the former ACP reference. Statements were not re-verified line by line against source in this pass; claims without a source path are unverified until reviewed.
 
 
-Both prompt editions distinguish recognized missing/incomplete/stale file-read
-preconditions from access refusals. They direct a current same-channel read and
-a rebuilt valid edit under existing authority, without an owner question or extra
-approval; actual channel, role, scope and policy denials remain non-bypassable.
-Shared tool discipline and writer recovery capsules carry the same distinction.
+The writing-worker prompt in both editions distinguishes recognized
+missing/incomplete/stale file-read preconditions from access refusals. It directs
+a current same-channel read and a rebuilt valid edit under existing authority,
+without an owner question or extra approval; actual channel, role, scope and
+policy denials remain non-bypassable. Coordinator, read-only and consultant
+prompts edit no files, so they omit that recovery sentence; the shared tool
+discipline states it only for roles that edit files, and writer recovery
+capsules carry the same distinction.
 This is guidance, not deterministic model obedience or a permission grant. See
 [read-precondition recovery](../permissions-and-containment/index.md#read-precondition-recovery).
 
@@ -76,8 +79,9 @@ consultant).
 Edition 2 keeps the role introduction, the project-skills list and the
 environment section unchanged and reorders everything between them into:
 
-1. **How to work**: carry the assignment (or, for the coordinator, the task) to
-   a complete result; make routine choices yourself and record the assumption
+1. **How to work**: carry the assignment to a complete result (the coordinator
+   brings the task to a verified result through plans and the final synthesis,
+   and the runtime decides completion); make routine choices yourself and record the assumption
    in the report; ask the user, request access or request a re-plan only when
    the goal cannot be reached without it. It also holds the runtime-ownership,
    project-rules-file and context-compaction rules.
@@ -111,10 +115,10 @@ substance of the inlined `tool-discipline`, `code-and-evidence` and
 `report-publication` skills and the shared worker protocol; those are
 unchanged.
 
-Rendered on Linux with no working directory or project skills, after compacting
-redundant wording, edition 1 is 5,844 to 7,807 characters and edition 2 is 6,541
-to 8,840, depending on role and native-tool policy. The code-mode variants are
-6,272 to 8,099 and 7,000 to 9,163 respectively. Existing size ceilings are
+Rendered on Linux with no working directory or project skills, edition 1 is
+5,481 to 7,788 characters and edition 2 is 6,178 to 8,821, depending on role and
+native-tool policy. The code-mode variants are 6,069 to 8,240 and 6,797 to 9,304
+respectively (measured with `cortex_system_prompt` on 2026-10-23). Existing size ceilings are
 unchanged: edition 1 is checked in `tests/test_prompt_drift.py`; for
 edition 2 they are in `tests/test_first_prompt_size_and_dedup.py`. Real-model
 behavior with edition 2 has not been observed in a paid live check.
@@ -162,7 +166,12 @@ and 9% used `Promise.all`. The code-mode lines therefore say not to query
 [tool cheat sheet](../codex-engine/index.md#mcp-bridge) and correct a failed
 validation once from the error, and to put independent calls in one `exec` with
 `await Promise.allSettled([...])`; the generic "read the full schema first" and
-tool-search lines are omitted. Claude and OpenCode prompts never contain them.
+tool-search lines are omitted. Because the cheat sheet shows field names, types
+and enums but not bounds or `if`/`then` conditions, the code-mode line adds that
+a session fetches one tool's exact record with `tools_discover`, when offered,
+only when such a constraint matters. The inlined `tool-discipline` skill states
+the same code-mode rule, so it no longer tells Codex to read every schema first.
+Claude and OpenCode prompts never contain these code-mode lines.
 
 ## Why
 
@@ -228,7 +237,12 @@ safety, communication and context, then the project's own skills, and finally
 a runtime-generated environment section (working directory, whether it is a Git
 repository, platform, UTC date). The prompt names no engine or product. Tool
 argument contracts stay in each tool's advertised schema; role duties stay in
-the role instructions that follow the prompt. Refusal routing is role-aware:
+the role instructions that follow the prompt. The authority section ranks project
+rules files below runtime scope, permissions and lifecycle, and the same
+precedence covers anything the host engine adds, whatever its framing (see
+[What each engine still adds](#what-each-engine-still-adds)). The skills
+section points to the project and user skills list only when that list is
+rendered. Refusal routing is role-aware:
 workers use `access_request` first for additional project paths and the question
 tool for decisions reserved to the user; scope/replan requests are for changes
 to the plan itself. Coordinators plan refused work for a worker, ask the user
@@ -265,7 +279,8 @@ required.
 
 Cortex lists bounded `<dir>/<name>/SKILL.md` files from the configured
 project and user skill roots (project roots: `.agents/skills`, `.claude/skills`,
-`.codex/skills`; user roots: `.agents/skills`, `.claude/skills`). Entries are
+`.codex/skills`; user roots: `.agents/skills`, `.claude/skills` and
+`$CODEX_HOME/skills`, default `~/.codex/skills`). Entries are
 filtered to regular, single-link files inside an allowed root; hidden names,
 duplicates and paths beyond the path-length limit are excluded. File size is
 capped at 65,536 bytes, frontmatter inspection at 16 KiB and rendered
@@ -304,11 +319,13 @@ worker route fallback and coordinator recovery issue fresh channels and receive
 their own catalogs. Cross-task/attempt grants, revoked or expired channels and
 superseded persisted generations fail closed.
 
-When `codebase-memory-mcp` is attached and Cortex can resolve the project
-root to a known indexed-project name, the prompt names that project so workers
-can use it directly instead of repeating `list_projects`. If resolution fails or
-the named project is unavailable, workers use the normal project-list fallback;
-no project identity is guessed.
+When `codebase-memory-mcp` is attached, the prompt tells the session to call
+`list_projects` once and take the project whose root path matches the working
+directory. The runtime does not pass a pre-resolved project name
+(`engine.session_manager` sends none), so no project identity is guessed; the
+inlined `code-and-evidence` reference gives the same first step. Only a role
+granted `index_repository` is told to make one bootstrap attempt when no index
+matches; other roles record the missing index as a limitation.
 
 Writing-worker command guidance distinguishes ordinary Development host
 capability from task authorization: deletion, production/shared mutations,
@@ -322,7 +339,10 @@ consultation packet and retained reports, and does not advertise code-index or
 project-source investigation. No external MCP servers are attached to consultant
 sessions; `project_read`, `project_git` and `command_run` are not offered, and
 project-source calls through those gateway routes are refused with
-`gateway_read_denied`. The consultant has no `ask_question` or `access_request` route.
+`gateway_read_denied`. The consultant has no `ask_question`, `access_request`,
+`replan_request`, `scope_request` or `escalation_request` route. Its role text
+states English-only communication, and its turn wrapper omits the
+question-language exception that other worker turns carry.
 Claude's consultant profile disallows native file/search/edit tools. Codex native reads remain available and may run without a permission
 request inside the read-only engine jail, so this is not a complete native-source
 access boundary.
@@ -332,7 +352,7 @@ that the runtime withholds the coordinator's text after its own accepted user
 question in the same turn (see
 [orchestration](../orchestration/index.md#plan-submission-and-coordinator-polling)).
 The coordinator's one role-specific communication rule is to write the details
-once before that question and write nothing after it. This is a presentation boundary, not a claim that either model stops generating interim text. A direct 2026-09-28 re-check counted ten between-tool Claude assistant text blocks and one Codex block; an earlier count of 83 Codex blocks conflated reasoning records with visible messages. Communication guidance also asks for one short progress line, a brief outcome-first final answer, and only unresolved user-relevant checks; successful checks and internal approvals stay out of the final text.
+once before that question and write nothing after it. This is a presentation boundary, not a claim that either model stops generating interim text. A direct 2026-09-28 re-check counted ten between-tool Claude assistant text blocks and one Codex block; an earlier count of 83 Codex blocks conflated reasoning records with visible messages. Communication guidance also asks for one short progress line and a brief outcome-first final answer; unresolved checks go only in the final-answer tool's `not_verified` list, and successful checks and internal approvals stay out of the final text.
 
 The attached-server section renders configured granted tool names under each
 attached MCP server name; it does not prove engine discovery or invocation. Cortex MCP owns lifecycle, report reads/publication, conditional
@@ -361,8 +381,10 @@ The role instructions that follow the prompt carry the everyday Cortex skills in
 full (see [roles and delegation](../roles-and-delegation/index.md)); the prompt tells the
 model to follow them from its first action and, before an action matching a
 situational trigger, to call Cortex MCP `read_skill` with that id. The prompt
-gives concrete examples for documentation-impact planning, affected documentation
-edits and interactive sessions and
+gives role-specific examples: documentation-impact planning and `worker-routing`
+for the coordinator, affected documentation edits and interactive sessions for
+writing workers, documentation-impact assessment and interactive sessions for
+read-only workers, and `context-compaction` and `index` for the consultant. It
 explicitly says not to re-read inlined skills or pre-load unmatched skills. The
 same conditional catalogue is also in the role-scoped `read_skill` tool
 description and `skill` selector description; this makes the trigger visible
@@ -468,6 +490,16 @@ folder. Under both engines the Cortex text reached the model byte-for-byte the
 same. A real engine home can add the user's own rules files, native
 `developer_instructions` and similar configuration, which this stub run did not
 include.
+
+A live claude-agent-acp 0.88.0 worker session on 2026-10-23, run with the
+owner's real home, additionally received: the project's `AGENTS.md` wrapped in
+Claude's own framing that it "OVERRIDE[s] any default behavior", the owner's
+auto-memory index (`MEMORY.md`), a user-account context block, and a list of
+deferred native tools with a web-search usage paragraph. No supported setting to
+turn these off has been verified for that adapter version. The base prompt's
+authority section therefore states that runtime scope, permissions and
+lifecycle take precedence over anything the host engine adds, whatever its
+framing; this is guidance, not enforcement.
 
 ## Not yet verified
 

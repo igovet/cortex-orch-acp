@@ -160,10 +160,18 @@ claim about the deliverable.
 Only an immutable, attempt-owned report and its structured result close a node.
 A reviewer, required whenever the project changed, submits APPROVE, REQUEST_CHANGES or BLOCK. Changes produce
 fix nodes and another review, with a three-cycle ceiling. A fix node never keeps a read-only role: the runtime gives it a writing role chosen from its scope. Structured review findings confine fixes to the
-named plan tasks when the runtime can verify them; otherwise every original plan task receives a fix
+named plan tasks when the runtime can verify them. With no findings and multiple
+implementers, the runtime first returns to the coordinator to plan the remedy
+while its return budget remains; otherwise unconfinable or absent findings give
+every original plan task a fix
 (see [targeted review fixes](../orchestration/index.md#targeted-review-fixes)). Verification is a
 runtime command observation, independent of model review. Nonzero exit, incomplete
-output or project drift prevents a passing verification event.
+output or project drift prevents a passing verification event. A dropped failed
+verification command remains an obligation across later repairs; an unrelated
+worker answer cannot acknowledge it. If a planned-work answer reaches
+`ANSWER_READY` without satisfying this gate, `close_answer` ends it `FAILED`
+with `answer_not_certified:completion_dropped_failed_check`, not a crash loop or
+verified completion.
 
 Every not_run or unverified worker check carries its blocker; result_submit rejects
 one without it. A passed claim the runtime could not verify is recorded unverified

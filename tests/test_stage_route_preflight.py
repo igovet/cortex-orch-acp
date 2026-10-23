@@ -122,6 +122,7 @@ def test_selected_effort_checks_execution_and_review_policy_before_launch(tmp_pa
     file.write_text(json.dumps(routing))
     before = _tree(tmp_path)
     result = preflight(sol + ":medium", None, env)
+    assert any("no purpose-scoped user request" in limit for limit in result["limits"])
     assert result["refusals"] == [
         "execution:selected_effort_conflicts_with_policy",
         "review:selected_effort_conflicts_with_policy",

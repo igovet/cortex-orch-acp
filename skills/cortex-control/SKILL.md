@@ -59,7 +59,9 @@ Preview reports `would_delete_orphan_sessions`; confirmation reports
 SQLite `VACUUM`. A vacuum failure leaves deletion committed and is stated separately.
 
 The bundled [CLI](../../src/cortex_clear.py) remains an alternative the owner
-runs manually in their shell, not something the coordinator executes:
+runs manually in their shell from the Cortex installation directory (its path
+is relative to that directory, not to the target project), not something the
+coordinator executes:
 
 ```
 python3 -B src/cortex_clear.py --project-root <path> --days N [--keep-thread <id>]

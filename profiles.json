@@ -40,8 +40,8 @@
       "name": "build_verification",
       "source": "build-verification.md",
       "description": "Build and test verifier for exact command outcomes and release-readiness proof.",
-      "select_when": "Independent build, test, packaging, installation, or release-readiness evidence is required.",
-      "avoid_when": "A failing check must be diagnosed or repaired.",
+      "select_when": "Runtime-reserved, never planned: independent build, test, packaging, installation, or release-readiness evidence is required.",
+      "avoid_when": "Any planned work, including a failing check that must be diagnosed or repaired.",
       "report_template": "verification",
       "access_class": "read_only"
     },
@@ -184,8 +184,8 @@
       "name": "senior_consultant",
       "source": "senior-consultant.md",
       "description": "Escalation-only senior consultant that answers one bounded question from a runtime-built packet of selected published reports.",
-      "select_when": "Only through escalation_request, when a difficult, ambiguous, contradictory, or deeper decision needs a focused second view; the runtime adds this assignment and a plan never names it.",
-      "avoid_when": "Fresh evidence, implementation, verification, acceptance, or pipeline ownership is needed.",
+      "select_when": "Only through `escalation_request`, when a difficult, ambiguous, contradictory, or deeper decision needs a focused second view; the runtime adds this assignment, and a plan never names it.",
+      "avoid_when": "Fresh evidence, commands, implementation, verification, acceptance, or pipeline ownership is needed.",
       "report_template": "general",
       "access_class": "consultant"
     },

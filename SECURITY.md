@@ -18,6 +18,31 @@ for exact paths, artifact-test limits and the next upstream-fix decision.
 
 ## Current ACP boundary (1.0.0)
 
+Model-route consent requires an actual request in recorded user messages or
+answers. Descriptive model remarks and coordinator `model_reason` text never
+authorize a route. Flattened imported history is not trusted turn provenance;
+restate requests outside it. Unterminated literal history tags cannot erase a
+user refusal. See [request matching](docs/features/routing-and-fallback/index.md#owner-model-requests-in-plain-words).
+
+Non-initializing Store inspection (the default `initialize=False` mode) does not
+create directories, locks, schema, rows or SQLite sidecars. Immutable inspection
+is fenced by the exclusive access lock and refuses nonempty WAL data rather than
+reading a stale snapshot. Live runtime callers, including configuration API project
+reads, explicitly use `runtime_access=True` with `initialize=False`: they share the access lock and read committed WAL data,
+without schema repair or migration, but permit normal SQLite sidecar/checkpoint
+housekeeping. This runtime mode is not non-mutating inspection. Normal initializing
+opens still install additive schema and perform the verified format-11 upgrade.
+See [storage](docs/project/storage.md).
+
+Declared writer reservations and denial comparisons use canonical lexical paths,
+including older stored aliases; this does not resolve symlinks or create OS
+isolation. Removed failed verification commands remain completion obligations
+across repairs. Worker-local answers only reset replanning; they cannot approve
+those removals. Consultant channels are not offered replan, scope or escalation
+requests, and dispatch refuses them without changing task state. See
+[orchestration](docs/features/orchestration/index.md) and
+[consultant boundaries](docs/features/senior-consultant/index.md).
+
 Portable MCP error translation exposes a bounded identifier code, category and
 fixed corrective guidance, not exception-owned remediation, details or arbitrary
 field values. Plan preflight and route-menu reads can establish rejection before

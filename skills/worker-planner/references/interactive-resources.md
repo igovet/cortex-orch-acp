@@ -3,10 +3,9 @@
 Read this reference only when the assignment requires a browser, device, emulator,
 port, server or external application session.
 
-Use only a resource created for or explicitly assigned to this worker. Never inspect
-global processes, ports, tabs or devices to discover another worker's resource. A
-surface owned by another assignment is unavailable unless the coordinator
-establishes isolation or transfers ownership.
+Use only a resource created for or explicitly named by this assignment. Never
+inspect global processes, ports, tabs or devices to discover another worker's
+resource. A surface owned by another assignment is unavailable to you.
 
 Use the live tool state and receipts to select, create or reuse only owned resources.
 Before depending on a service or application, observe that its required state is

@@ -6,14 +6,75 @@ import { batchForm, parseQuestionBatch, batchAnswers } from "../shared/question-
 const path = process.argv[2];
 assert.ok(path, "Supply the currently installed Paseo Metro bundle path");
 const bundle = readFileSync(path, "utf8");
-function load(marker: string, dependencies: any[]) {
-  const at = bundle.indexOf(marker), start = bundle.lastIndexOf("__d(", at), end = bundle.indexOf("\n__d(", at);
-  assert.ok(at >= 0 && start >= 0 && end > at);
+// Discover module identities from the installed registration table, not a
+// version-specific dependency position. Only selected factories execute; the
+// application and its transitive imports never run.
+const modules = new Map<number, string>();
+const starts = [...bundle.matchAll(/(?:^|\n)__d\(/g)].map((match) => match.index + (match[0].startsWith("\n") ? 1 : 0));
+for (let index = 0; index < starts.length; index++) {
+  const source = bundle.slice(starts[index], starts[index + 1] ?? bundle.length).trim();
+  const registration = source.match(/\},(\d+),\[[\d,]*\]\);?$/);
+  if (registration) {
+    const id = Number(registration[1]);
+    assert.ok(!modules.has(id), "Duplicate installed Metro module identity");
+    modules.set(id, source);
+  }
+}
+function moduleAt(marker: string): number {
+  const matches = [...modules].filter(([, source]) => source.includes(marker));
+  assert.equal(matches.length, 1, `Expected one installed module for ${marker}`);
+  return matches[0][0];
+}
+function registered(id: number) {
+  const source = modules.get(id);
+  assert.ok(source, `Missing complete installed Metro module ${id}`);
   let factory: any, ids: number[] = [];
-  runInNewContext(bundle.slice(start, end), { __d(fn: any, _id: number, imports: number[]) { factory = fn; ids = imports; } }, { timeout: 1000 });
-  assert.equal(ids.length, dependencies.length);
+  runInNewContext(source, { __d(fn: any, actualId: number, imports: number[]) {
+    assert.equal(actualId, id);
+    factory = fn; ids = imports;
+  } }, { timeout: 1000 });
+  return { factory, ids };
+}
+function exportNames(id: number, visited = new Set<number>()): Set<string> {
+  assert.ok(!visited.has(id), "Cyclic installed export forwarding");
+  visited.add(id);
+  const { factory, ids } = registered(id);
+  const source = factory.toString();
+  const args = source.slice(source.indexOf("(") + 1, source.indexOf(")")).split(",");
+  const [requireArg, moduleArg, exportArg, depsArg] = [args[1], args[4], args[5], args[6]];
+  // Metro's React/compiler/JSX entry modules forward their sole dependency.
+  if (ids.length === 1 && source.includes(`${moduleArg}.exports=${requireArg}(${depsArg}[0])`)) {
+    return exportNames(ids[0], visited);
+  }
+  const escaped = exportArg.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new Set([
+    ...[...source.matchAll(new RegExp(`\\b${escaped}\\.([\\w$]+)\\s*=`, "g"))].map((match) => match[1]),
+    ...[...source.matchAll(new RegExp(`Object\\.defineProperty\\(${escaped},["']([^"']+)["']`, "g"))].map((match) => match[1]),
+  ]);
+}
+type StandIn = { names: string[]; value: any; exact?: boolean };
+function load(marker: string, standIns: StandIn[]) {
+  const { factory, ids } = registered(moduleAt(marker));
+  const dependencies = new Map<number, any>();
+  for (const standIn of standIns) {
+    const matches = ids.filter((id) => {
+      const names = exportNames(id);
+      names.delete("__esModule");
+      return standIn.names.every((name) => names.has(name)) && (!standIn.exact || names.size === standIn.names.length);
+    });
+    assert.equal(matches.length, 1, `Installed dependency shape changed: ${standIn.names.join(", ")}`);
+    assert.ok(!dependencies.has(matches[0]), "Ambiguous installed dependency stand-in");
+    dependencies.set(matches[0], standIn.value);
+  }
   const exports: any = {};
-  factory({}, (id: number) => dependencies[ids.indexOf(id)], undefined, undefined, {}, exports, ids);
+  factory({}, (id: number) => {
+    assert.ok(ids.includes(id), "Unexpected installed import");
+    // Side-effect-only imports need no stand-in. Any newly used export fails
+    // loudly instead of silently returning an empty object or guessed value.
+    return dependencies.get(id) ?? new Proxy({}, { get(_target, name) {
+      throw new Error(`Unmapped installed dependency ${id} export ${String(name)}`);
+    } });
+  }, undefined, undefined, {}, exports, ids);
   return exports;
 }
 const helper = load("e.parseQuestionFormQuestions=function", []);
@@ -41,11 +102,26 @@ const jsx = (type: any, props: any) => ({ type, props });
 const theme = new Proxy({}, { get: () => "token" });
 const unistyles = { useUnistyles: () => ({ theme: { colors: theme } }), StyleSheet: { create: () => ({}) } };
 let compact = false, responding = false;
+// A missing/changed export must fail closed, not produce a passing empty form.
+assert.throws(() => load("e.QuestionFormCard=function", [
+  { names: ["__cortex_missing_export__"], value: {} },
+]), /Installed dependency shape changed/);
 const component = load("e.QuestionFormCard=function", [
-  { Pressable: "Pressable" }, { Text: "Text" }, { View: "View" },
-  { c: (size: number) => Array(size).fill(Symbol.for("react.memo_cache_sentinel")) }, {}, react,
-  {}, {}, {}, unistyles, { useIsCompactFormFactor: () => compact }, { Check: "Check", X: "X" },
-  { useTranslation: () => ({ t: (key: string) => key }) }, { isWeb: true }, {}, helper, { jsx, jsxs: jsx },
+  { names: ["Pressable"], exact: true, value: { Pressable: "Pressable" } },
+  { names: ["Text"], exact: true, value: { Text: "Text" } },
+  { names: ["View"], exact: true, value: { View: "View" } },
+  { names: ["c"], value: { c: (size: number) => Array(size).fill(Symbol.for("react.memo_cache_sentinel")) } },
+  { names: ["useState", "useRef"], value: react },
+  { names: ["useUnistyles", "StyleSheet"], value: unistyles },
+  { names: ["useIsCompactFormFactor"], value: { useIsCompactFormFactor: () => compact } },
+  { names: ["Check", "X"], value: { Check: "Check", X: "X" } },
+  { names: ["useTranslation"], value: { useTranslation: () => ({ t: (key: string) => key }) } },
+  { names: ["isWeb", "isNative"], value: { isWeb: true } },
+  { names: ["EditingTextInput"], value: { EditingTextInput: "EditingTextInput" } },
+  { names: ["parseQuestionFormQuestions"], value: helper },
+  { names: ["jsx", "jsxs"], value: { jsx, jsxs: jsx } },
+  { names: ["Alert"], value: { Alert: "Alert" } },
+  { names: ["LoadingSpinner"], value: { LoadingSpinner: "LoadingSpinner" } },
 ]);
 const replies: any[] = [];
 function render() {

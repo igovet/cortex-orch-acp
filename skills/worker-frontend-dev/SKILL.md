@@ -55,8 +55,9 @@ approach confirmation. Offer meaningful
 selectable answers, grouped in one request; preserve custom free text. Use the
 live schema for the exact form. The runtime parks only this assignment, then
 delivers a real answer next turn in the same healthy session. End the
-question turn without submitting an incomplete result. A recognized file-read precondition is not missing
-owner input: follow tool discipline to read current content and re-propose safely without a question.
+question turn without submitting an incomplete result. If your role writes, a recognized file-read
+precondition is not missing owner input: follow tool discipline to read current content and re-propose
+safely without a question.
 For additional paths or actual access refusals, follow worker tool discipline.
 
 If your evidence shows the assignment or its plan is wrong, obsolete or cannot
@@ -72,7 +73,7 @@ access metadata. `project_read` is project-only; there is no assumed Cortex outs
 Read-only/Guarded command /var/tmp is private scratch: missing there is not host
 absence. Host-only reads need a granted external reader or the advertised
 outside-command consent route (writing workers only). If unavailable to your
-role, report the capability gap for runtime replan, not read-only escalation.
+role, report the capability gap in your result; do not escalate around it.
 Follow live schemas; `access_request` reserves project paths, not arbitrary external access.
 Never remount, relocate evidence or rerun a permission refusal by another route.
 
@@ -129,13 +130,13 @@ command verification and completion belong to the runtime.
 
 Read the target project's docs/PRODUCT.md, docs/DESIGN.md and docs/SCREENS.md
 when present; implement the approved direction, not a replacement aesthetic.
-Use the `design-workflow` banned AI-tell patterns in the approved DESIGN guidance; do not add one-sided accent stripes or decorative leading dots/meta-chips. Use design-frontend-design when visual choices are needed, design-impeccable
+Apply `design-banned-patterns` and the approved DESIGN guidance; do not add one-sided accent stripes or decorative leading dots/meta-chips. Use design-frontend-design when visual choices are needed, design-impeccable
 for refinement, and design-visual-qa for capture and rendered checks.
 For visual changes capture and open mobile/tablet/desktop screenshots in a
 git-ignored project-local evidence path; report dimensions, states, revision
 and concrete defects, or the exact unavailable capture capability.
 If material inputs remain missing, use your advertised ask_question route;
-do not invent product requirements. Keep one writer per screen.
+do not invent product requirements. Do not edit another assignment's screens.
 
 Preserve existing file identity and unrelated changes, including during a complete
 rewrite. Use the available editing tool's advertised contract. After steering or

@@ -204,7 +204,7 @@ class Server:
             raise StoreError('task_not_bound')
         store = self.stores.get(project)
         if store is None:
-            store = Store(directory, initialize=False, project_root=project)
+            store = Store(directory, initialize=False, project_root=project, runtime_access=True)
             self.stores[project] = store
         self.stores.move_to_end(project)
         while len(self.stores)>16: self.stores.popitem(last=False)
@@ -387,7 +387,7 @@ class Server:
             raise StoreError('task_not_bound')
         store=self.stores.get(project)
         if store is None:
-            store=Store(directory,initialize=False,project_root=project)
+            store=Store(directory,initialize=False,project_root=project,runtime_access=True)
             self.stores[project]=store
         self.stores.move_to_end(project)
         while len(self.stores)>16:self.stores.popitem(last=False)

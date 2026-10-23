@@ -57,8 +57,10 @@ delivery, not complete document coverage or successful underlying command output
 
 ## Authority, cancellation and evidence
 
-These two tools require current channel/owner authority, an active runtime task
-and a resolved running worker assignment. Authority and effective catalogue are
+These two tools require current channel/owner authority and an active runtime
+task; a worker channel additionally needs a resolved running assignment with a
+role and stage (`tool_read_api.effective_catalogue`), while a coordinator channel
+needs none. Authority and effective catalogue are
 rechecked between reads and before delivery, even when the server's original
 channel context is cached. Loss of authority or changed role/stage offers aborts
 the wrapper and withholds all accumulated bodies and references. Existing

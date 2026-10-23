@@ -25,7 +25,10 @@ request is absent, record the concrete policy and missing authorization, such as
 "paid live check not requested by the owner". Do not replan around a prohibition.
 
 While reconciling, request a replan for verification gaps that can be closed in
-an authorized environment. Otherwise name the concrete blocker in the structured
-result and synthesis. Bind observations to exact, complete, non-replayed evidence;
-never infer a pass from a missing or unsupported signal. When every applicable
-check is verified, omit a not-verified list.
+an authorized environment. When the runtime verification failed because a
+command was wrong but the reviewed work is fine, submit corrected verification
+(`verification_submit`); when the work is wrong, submit a new plan. Otherwise
+name each unresolved check and its concrete blocker only in the final-answer
+tool's `not_verified` list. Bind observations to exact, complete, non-replayed
+evidence; never infer a pass from a missing or unsupported signal. When every
+applicable check is verified, there is no gap to disclose.

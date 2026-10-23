@@ -33,8 +33,10 @@ which then lost to pins (2026-10-22). Without such a request its route comes fro
 1. an owner pin for `worker-code-reviewer`, its alias, or `*`;
 2. failing that, automatic ranking with the cross-provider review preference.
 
-To run an entire workload on one selected route, the owner pins the reviewer
-role to it. Review fixes inherit the planned node's hint, so they stay covered.
+For a policy-only guarantee across the workload, the owner pins the reviewer
+role to the selected route. A recorded purpose-scoped request can also select
+that reviewer at dispatch, but this preflight does not read task sources.
+Review fixes inherit the planned node's hint, so they stay covered.
 Before a run, `python3 -B scripts/cortex_paseo_dev.py route-preflight --route
 ENGINE/MODEL[:EFFORT]` reads only the dev profile's routing policy and exits 1
 with a visible refusal for the following policy mismatches:
@@ -75,9 +77,10 @@ Policy/support conflicts raise `user_requested_effort_unavailable` before
 worker launch. Explicit owner effort pins likewise raise
 `pinned_effort_unavailable` rather than clamp; a model-only pin retains its
 automatic effort calculation. Saved automatic settings without an explicit
-selection keep their existing supported-effort narrowing. The mandatory reviewer
-still follows its owner pin/ranking, not a planned-node model request. To require
-the same effort throughout a workload, the reviewer needs a matching owner pin.
+selection keep their existing supported-effort narrowing. A planned-node request
+does not by itself cover mandatory review: review needs a recorded purpose-scoped
+model-and-effort request or a matching owner effort pin. Otherwise it uses its
+own owner pin/ranking.
 
 At dispatch, the audit distinguishes `effort_source=user_request`, `pin` and
 `auto_route`. Auth replacement preserves exact-effort strictness. After
@@ -603,8 +606,9 @@ Explicit new-kind affinity overrides the legacy umbrella.
 ### User-requested flagship route
 
 The historical heading is retained for links; this rule now applies to **every
-configured tier**, not just flagship. The coordinator must name the exact model
-on each covered node. Model-authored text is never consent. Authorization
+configured tier**, not just flagship. Planned exact-route nodes carry the exact
+model hint; a request for a role's purpose can also cover an unhinted node,
+including mandatory review. Model-authored text is never consent. Authorization
 comes only from user-authored text the runtime itself recorded for the same
 task (`routing.auto_route.user_model_request`):
 
@@ -928,27 +932,35 @@ standalone word, so `gpt-6-luna.v2` or `vendor/gpt-6-luna` stay other identities
 audit the owner assigned to Opus once ran on Sol because neither rule existed
 (2026-10-22).
 
-Only the owner's own words are read. In a host-imported `<chat-history-summary>`
-only `[User]` turns count (for a "→ Answer:" line only the answer), so an earlier
-assistant or runtime line such as "запущен Sol вместо Opus" is not a refusal
-(`auto_route._user_authored`). Emphasis that forbids substitution ("без замены другой
-моделью", "without substitution", "no substitutes") is stripped before matching, so it
-confirms the request instead of reading as a negation. The split subjunctive "что бы"
-counts like "чтобы". When the coordinator's `model_reason` says the user or owner
-requires the hinted model and the owner's messages mention that model without refusing
-it, the hint is honoured as a user request (`auto_route.user_mentions_model`, basis
-`mentioned`). A security audit the owner assigned to Opus that way ran on another model
-until these rules existed (2026-10-22).
+Only recorded current user messages and verbatim user answers authorize routes.
+A terminated host-imported `<chat-history-summary>` is excluded from authorization:
+the installed Paseo formatter joins unescaped multiline entries with a newline,
+so a literal `[User]` inside assistant or tool output cannot be distinguished
+from a real turn. The summary is an attribution barrier: older grants cannot
+survive potentially hidden refusals, and no user revocation is invented from
+ambiguous text. Restate a model request or refusal outside that summary.
+An unterminated literal opening tag is ordinary user text, so it cannot erase
+a subsequent refusal (`auto_route._user_authored`). Emphasis that forbids substitution
+("без замены другой моделью", "without substitution", "no substitutes") is
+stripped before matching; it does not itself turn a bare mention into a request.
+The split subjunctive "что бы" counts like "чтобы". Coordinator `model_reason`
+text never participates in authorization, even if it says the user requires the model.
 
 A variant suffix is not part of a model's name: without configured `request_names`,
 "opus" names `opus[1m]` (a one-word id without a suffix, such as `haiku`, is matched as
-itself). "делает/выполняет/проводит" and "does/performs" assign a model to a role or
-stage like "отвечает". A qualified audit ("security-аудит", "аудит безопасности",
-"accessibility audit") names only its specialist, not the code reviewer; an unqualified
-"аудит"/"audit" still covers review and both auditors. All three were found in a live
-desktop check on 2026-10-22, where a dev profile without request names ran the
-owner-assigned Opus audit on Sonnet. A worker card and the worker page show a route the
-owner asked for as "by your request".
+itself). Generic descriptions ("делает/выполняет/проводит", "does/performs",
+"handles/owns") do not assign a route: "Opus does code reviews badly" grants
+nothing. Use a request ("Use only Opus for the audit"), an explicit responsibility
+construction with a role object ("за аудит отвечает Opus", "Opus is responsible
+for the review"), or an imperative ("Let Opus handle the review").
+A qualified audit ("security-аудит", "аудит безопасности",
+"accessibility audit") names only its specialist, not the code reviewer; an
+unqualified "аудит"/"audit" still covers review and both auditors. A worker card
+and the worker page show an authorized user-requested route as "by your request".
+Auth-loss replacement retains the prior audit's route basis rather than
+relabeling automatic or user-requested selection as an owner pin.
+The policy-only stage preflight does not read task sources: its reviewer
+pin assessment assumes no purpose-scoped request and explicitly reports that limit.
 
 ### Ignored model hint notices
 

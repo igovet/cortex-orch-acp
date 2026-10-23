@@ -2,6 +2,13 @@
 
 ## 1.0.0 (unreleased)
 
+Orchestration audit fixes tighten path reservations, dropped-check certification,
+worker-question continuation and consultant access. Model routing now requires
+recorded user consent; storage inspection remains non-mutating and recovery
+failures stay visible. Role guidance and generated profiles are synchronized,
+and cancellation and installed-Paseo regression checks are corrected. These
+changes do not establish live qualification or release readiness.
+
 The default install preset now matches the refreshed production routing values:
 Sol's `preferred_when` is `null`, so its configured work-kind preferences no longer
 need an exact route hint and remain active on quality retries. At equal quota

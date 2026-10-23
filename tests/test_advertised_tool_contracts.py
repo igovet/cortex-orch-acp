@@ -430,6 +430,16 @@ def test_plan_scope_is_a_write_reservation_not_read_access():
     assert 'minItems' in scope and scope['minItems']==1  # existing plan shape is preserved
 
 
+def test_plan_model_states_purpose_scoped_review_routing():
+    # attempt_routing applies user_purpose_model_request to the hint-less
+    # review node ahead of pins, so the schema must not claim pins always win.
+    tools={t['name']:t for t in mcp_tools.tool_definitions('coordinator')}
+    description=tools['plan_submit']['inputSchema']['properties']['plan']['properties']['tasks']['items']['properties']['model']['description']
+    assert 'Mandatory review still follows owner reviewer pins/ranking' not in description
+    assert ('mandatory review has no plan hint: it follows a recorded user model request '
+            'for the review/audit purpose, otherwise owner reviewer pins/ranking') in description
+
+
 def test_project_git_context_only_is_explicit_on_result_check_surfaces():
     tools={t['name']:t for t in mcp_tools.tool_definitions('worker',role_id='worker-backend-dev',stage='execution')}
     assert 'context only, not a check receipt' in tools['project_git']['description']

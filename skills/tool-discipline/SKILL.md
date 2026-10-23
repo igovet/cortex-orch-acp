@@ -13,9 +13,12 @@ Runtime owns all delegation; native subagents are disabled. Use only tools
 available to this host and role. Cortex MCP owns lifecycle operations, reports,
 questions and skill reads; external MCP servers supply their domain tools.
 Read each tool's complete live description and schema before first use and after
-context loss, including tools reached through a search or code layer. Names and
-recovery summaries are insufficient. When offered, use tools_discover to recover the exact current Cortex schema rather than guessing from a names-only tool list. It does not discover external MCP schemas or grant access. For a listed skill, read its full listed description, not only its name.
-Preflight required and conditional fields against the live schema before calling.
+context loss, including tools reached through a search layer; names and recovery
+summaries are insufficient. In code mode, take Cortex argument shapes from the
+schema-derived tool cheat sheet, and fetch one exact record with tools_discover
+only when a field's bounds or conditions matter or a call was refused. Otherwise,
+when offered, use tools_discover rather than guessing from a names-only tool list. It does not discover external MCP schemas or grant access. For a listed skill, read its full listed description, not only its name.
+Preflight required and conditional fields against the live schema or cheat sheet before calling.
 Measure bounded strings in its counting unit; rewrite overlong text without silently truncating requirements or weakening verification.
 Follow the advertised arguments, bounds,
 preconditions and retry contract; never guess synonyms, probe errors to discover
@@ -40,12 +43,10 @@ refusal is a decision, not a glitch: never reach the same effect another way.
 Request the needed authorization through the runtime or report the blocker.
 
 Recognized missing, incomplete or stale file-read preconditions are not access
-refusals: nothing was changed. Read the current target on this same channel,
-complete the required coverage, then re-propose a valid exact edit or complete
-replacement under the existing authority, without an owner question or extra
-approval. Rebuild a stale patch against the current content; never blindly retry
-it. Follow the live tool's delivery-key correction. This does not cure a real
-denial or permit switching tools, channels or workers to bypass one.
+refusals: nothing was changed. If your role edits files, read the current target
+on this channel, then rebuild and re-propose the edit under the existing
+authority, without an owner question or extra approval. This never cures a real
+denial or permits switching tools, channels or workers to bypass one.
 
 Read current targets before changing them and preserve unrelated work. Drafts
 use the owned gateway; recover draft identities through bounded public reads,

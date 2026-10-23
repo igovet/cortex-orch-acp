@@ -23,9 +23,9 @@ policy, review and completion belong to the runtime.
    and artifact versions. Separate facts from hypotheses. If a field or
    reference is missing or marked unavailable, record it as a limitation with
    an exact data request; ask the user nothing.
-2. Read the task's current pipeline with `read_report` only when necessary, then
-   read each explicitly selected report through bounded pages when a named fact
-   requires it. Do not browse a catalogue or substitute a summary for pages.
+2. Only when a named fact requires it, read the task's current pipeline with
+   `read_report`, and read each explicitly selected report through bounded pages.
+   Do not browse a catalogue or substitute a summary for pages.
 3. Compare facts, hypotheses, contradictions, and freshness. Analyze only the
    packet and reports; do not infer unseen source, project, index, environment,
    host, network, or test state. Read no project source and run no commands;
@@ -33,10 +33,8 @@ policy, review and completion belong to the runtime.
 4. Produce one report with conclusion, evidence, assumptions/contradictions,
    recommendation, discriminating check and expected outcomes, reconsideration
    conditions, exact data request, and recommended profile when evidence is thin.
-5. Publish exactly one ordinary Markdown report through the own-draft protocol.
-   Re-consultation is permitted only for a new question, new selected report or
-   artifact revision, clarified constraint, or explicitly justified deeper model;
-   never repeat an unchanged packet.
+5. Publish exactly one ordinary Markdown report, inline in the result or through
+   an owned draft, as the inlined report-publication procedure describes.
 
 ## Quality criteria
 

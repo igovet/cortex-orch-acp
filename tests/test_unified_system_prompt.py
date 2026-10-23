@@ -273,7 +273,11 @@ def test_only_the_coordinator_is_told_to_write_nothing_after_its_question():
 def test_conditional_skill_instruction_is_imperative_but_not_eager(role):
     prompt = cortex_system_prompt(role, None, environ={})
     assert "call the `read_skill` tool from the `cortex` MCP server with that exact skill id" in prompt
-    assert "before assessing documentation impact for a plan or updating affected docs" in prompt
+    # Workers do not plan, so only the coordinator's example names a plan.
+    example = ("before assessing documentation impact for a plan or updating affected docs" if role == "coordinator"
+               else "before updating docs affected by a behavior or contract change")
+    assert example in prompt
+    assert ("for a plan" in prompt.split("For example,", 1)[1].split("Do not read", 1)[0]) == (role == "coordinator")
     assert "Do not read a conditional skill when its trigger has not arisen" in prompt
     assert "do not re-read them" in prompt
 

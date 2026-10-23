@@ -5,6 +5,23 @@
 
 ## Installed Paseo version boundary
 
+> On 2026-10-23, a read-only `/opt/Paseo/resources/bin/paseo --version`
+> check reported installed Paseo **0.12.0**. Through the guarded wrapper,
+> `run --help`, `send --help`, `permit --help`, `wait --help` and
+> `inspect --help` each exited 0: `run` advertises `--no-wait` (not
+> `--background`), `--provider`, `--model`, `--thinking`, `--mode`, `--cwd`
+> and `--json`; `send` advertises `--prompt` and `--no-wait`; `permit` lists
+> `ls`, `allow` and `deny`; `wait` advertises `--timeout`; `inspect`
+> advertises `--json`. The same day, an owner-requested paid `cli`
+> qualification through the isolated `~/.paseo-dev` daemon and a disposable
+> project passed three scenarios: task lifecycle with mandatory independent
+> review and runtime verification; a descriptive model remark that did not
+> change worker routes (model-remark consent); and a user question whose
+> answer resumed the task. This qualifies CLI runtime/protocol behavior on
+> 0.12.0 only. Rendered desktop/GUI behavior was not run, and this note does
+> not requalify the 0.11.x, 0.10.x or 0.9.x observations below. Per-run
+> isolation and route preflights still apply before each live launch.
+
 > On 2026-10-13 the installed CLI reported 0.11.2. Its CLI help still lists
 > `--home`, and its bundle reads `PASEO_HOME` for the daemon home and
 > `PASEO_ELECTRON_USER_DATA_DIR` for the Electron profile; the desktop daemon
@@ -94,6 +111,8 @@ Its `run --help` advertises `--no-wait`, not `--background`, together with
 `--provider`, `--model`, `--thinking`, `--cwd` and `--json`.
 This is command-surface evidence only: it does not requalify bridge/isolation,
 daemon state, model routes or a paid workload. Recheck those before live use.
+The paid `cli` qualification run on 2026-10-23 is recorded separately in
+[Installed Paseo version boundary](#installed-paseo-version-boundary).
 
 `cli` mode drives a Cortex agent headlessly through the guarded wrapper, without
 Electron. Verify that the installed Paseo CLI help supports the commands and flags used here, and check the dev daemon's actual provider/model configuration before use.

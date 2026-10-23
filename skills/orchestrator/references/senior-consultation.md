@@ -9,3 +9,7 @@ the request and the retained reports, runs the read-only consultant before
 the new plan, and hands its report to every task of that plan. The consultant
 supplies analysis; the runtime retains control of execution, review and
 completion.
+
+Request another consultation only for a new question, a newly selected report or
+artifact revision, or a clarified constraint; never repeat an unchanged packet.
+The consultation's model and effort follow runtime routing policy.

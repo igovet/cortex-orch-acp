@@ -15,7 +15,8 @@ Adapted for Cortex from the MIT-licensed `frontend-visual-qa` skill (see
 steps of the upstream skill are replaced by the Cortex roles below.
 
 Read the packaged references/defect-checklist.md through Cortex read_skill with
-the registered id design-defect-checklist, not as a target-project file.
+the registered id design-defect-checklist, and the banned AI-tell patterns with
+the id design-banned-patterns, not as target-project files.
 
 ## Roles in the review
 
@@ -72,7 +73,7 @@ needs the matching subject-matter review; a rendering pass cannot certify it.
 
 For each finding, record: the observable symptom, the region, the viewport, the
 state, the impact on the actor, and how to reproduce it. Use the defect
-catalog in `references/defect-checklist.md` for the usual defect families, including
+catalog in `design-defect-checklist` for the usual defect families, including
 banned one-sided accent stripes and decorative leading-dot/meta-chip patterns
 (clipping, orphan lines, dense-item collisions, broken images, focus
 obstruction, repeated-card density) and its triage table for the evidence each

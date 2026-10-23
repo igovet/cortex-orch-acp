@@ -5843,16 +5843,20 @@ class OrchestratingRuntime:
                     f"{render_worker_catalog(self._task_workspace_root(task_id))}\n\n---\n\n{brief}"
                 )
                 recovery_prompt = None
+                from ..engine.mcp_bridge import is_consultant_role
                 worker_prompt = (
                     'You are a worker, not the user-facing coordinator. Communicate exclusively in English: '
                     'all progress messages, summaries, reports and final responses. '
                     'The original user text and coordinator language below are context, not your response language. '
                     'Preserve exact quoted evidence and any language explicitly required for project artifacts.\n\n'
-                    + worker_prompt + '\n\nWorker response language: English only, including the final response.\n'
-                    + 'user_question_language: ' + self._resolve_language(task_id) + '\n'
-                    + 'Exception: user-facing structured question text and every selectable option use '
-                      'user_question_language as required by the advertised question tool contract, not English '
-                      'when ru is selected. This exception applies on ordinary, recovery and answer turns.'
+                    + worker_prompt + '\n\nWorker response language: English only, including the final response.'
+                    # The senior consultant is offered no question tool, so the
+                    # question-language exception would name a route it lacks.
+                    + ('' if is_consultant_role(payload.get('role')) else (
+                        '\nuser_question_language: ' + self._resolve_language(task_id) + '\n'
+                        'Exception: user-facing structured question text and every selectable option use '
+                        'user_question_language as required by the advertised question tool contract, not English '
+                        'when ru is selected. This exception applies on ordinary, recovery and answer turns.'))
                 )
                 delivered_prompt, generation_delivery_id, delivery_blocked = self._begin_generation_delivery(
                     task_id, result.engine_session_ref, payload["role"], worker_prompt,

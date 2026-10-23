@@ -129,23 +129,34 @@ _PROJECT_WRITE_OPERATIONS = ('project_write', 'project_edit', 'project_delete', 
 
 
 def dropped_failed_checks_unacknowledged(db, task_id):
-    """The failed verification commands the latest revision of this plan's
-    verification removed, when the user has not answered since: twice a
-    popup placement check that failed only for environment reasons was
-    dropped and the task completed on lint and unit tests, so the user's
-    "fixed" popup still moved (2026-10-20/22)."""
+    """Retain this plan's dropped failures across repairs and process recovery.
+
+    Only a complete passing rerun of the exact argv or an answer to a
+    task-global question asked after the removal closes an obligation.
+    Worker-local answers reset replanning, not verification certification.
+    """
     accepted = db.execute("SELECT MAX(id) FROM runtime_events WHERE task_id=? AND type='PLAN_ACCEPTED'",
                           (task_id,)).fetchone()[0] or 0
-    revised = db.execute("SELECT id,payload_json FROM runtime_events WHERE task_id=? AND type='VERIFICATION_REVISED' "
-                         "AND id>? ORDER BY id DESC LIMIT 1", (task_id, accepted)).fetchone()
-    if revised is None:
-        return []
-    dropped = json.loads(revised['payload_json']).get('dropped_failed') or []
-    if not dropped:
-        return []
-    answered = db.execute("SELECT 1 FROM runtime_events WHERE task_id=? AND type='USER_ANSWER_RECEIVED' AND id>? LIMIT 1",
-                          (task_id, revised['id'])).fetchone()
-    return [] if answered else dropped
+    outstanding, questions = {}, {}
+    rows = db.execute(
+        "SELECT id,type,payload_json FROM runtime_events WHERE task_id=? AND id>? "
+        "AND type IN ('VERIFICATION_REVISED','VERIFICATION_PASSED','USER_QUESTION_REQUESTED','USER_ANSWER_RECEIVED') "
+        "ORDER BY id", (task_id, accepted))
+    for row in rows:
+        payload = json.loads(row['payload_json'])
+        if row['type'] == 'VERIFICATION_REVISED':
+            for argv in payload.get('dropped_failed') or []:
+                outstanding[tuple(argv)] = row['id']
+        elif row['type'] == 'VERIFICATION_PASSED':
+            for check in payload.get('checks') or []:
+                if check.get('exit_code') == 0 and check.get('complete') is True:
+                    outstanding.pop(tuple(check.get('argv') or []), None)
+        elif row['type'] == 'USER_QUESTION_REQUESTED':
+            questions[payload.get('question_id')] = row['id']
+        elif row['type'] == 'USER_ANSWER_RECEIVED':
+            asked = questions.get(payload.get('question_id'), 0)
+            outstanding = {argv: removed for argv, removed in outstanding.items() if removed >= asked}
+    return [list(argv) for argv in outstanding]
 
 
 def foreign_project_writers(db, task_id, since):
@@ -480,7 +491,7 @@ def answer_needs_certified_work(db, task):
 # Codes TaskMachine._work_invariants raises: what an uncertified answer lacks.
 WORK_CERTIFICATION_GAPS = frozenset({
     'completion_nodes_incomplete', 'completion_artifact_changed_or_missing', 'completion_review_missing',
-    'completion_verification_missing', 'completion_project_revision_changed',
+    'completion_verification_missing', 'completion_project_revision_changed', 'completion_dropped_failed_check',
 })
 
 
@@ -556,26 +567,11 @@ def attempt_routing(store, task_id, attempt_id):
         # ahead of pins and preferences, as an explicit request does.
         hint = user_purpose_model_request(store, task_id, resolve_role(node['role'])) or hint
     request = user_model_request(store, task_id, hint) if '/' in hint else None
-    if request is None and '/' in hint and _reason_claims_user_requirement(task.get('model_reason')):
-        # The coordinator states the user requires this model and the user's
-        # own message names it: honoured even when the wording escaped the
-        # request grammar ("что бы за audit отвечал opus" ran on Sol twice,
-        # 2026-10-22). Neither the reason nor a bare mention alone is consent.
-        from ..routing.auto_route import user_mentions_model
-        request = user_mentions_model(store, task_id, hint)
     return AttemptRouting(bool(fix) or retried, task.get('complexity', 'normal'), hint,
                           task.get('model_reason'), prior['engine'] if prior else None,
                           request,
                           user_model_revocation(store, task_id, hint) if '/' in hint else None,
                           task.get('work_kind'))
-
-
-_USER_REQUIREMENT_REASON = re.compile(r"\buser\b|\bowner\b|пользовател|юзер|владел", re.I)
-
-
-def _reason_claims_user_requirement(reason):
-    """Whether a plan task's model_reason says the user/owner asked for it."""
-    return isinstance(reason, str) and bool(_USER_REQUIREMENT_REASON.search(reason))
 
 
 def review_provider_preference(store, task_id, attempt_id):
@@ -867,7 +863,8 @@ def validate_scope(scope):
         from .project_paths import permitted_path
         if not permitted_path(value):
             raise StoreError('forbidden_assignment_scope')
-    return scope
+    from .project_paths import canonical_scope
+    return list(dict.fromkeys(canonical_scope(value) for value in scope))
 
 
 def read_only_output_paths(nodes, project_root):
@@ -1242,9 +1239,6 @@ class TaskMachine:
                            if entry['route'] == model), {})
             # Every exact user-requested route precedes automatic tier selection.
             request = user_model_request(self.store, channel.task_id, model)
-            if request is None and _reason_claims_user_requirement(n.get('model_reason')):
-                from ..routing.auto_route import user_mentions_model
-                request = user_mentions_model(self.store, channel.task_id, model)
             if request is not None:
                 item.update(preview_status='pending_dispatch:user_request', user_request=request['source_ref'])
             elif not any(hint_serves_tier(model.partition('/')[2], tier, role, item['tier_now'], complexity,
@@ -1281,6 +1275,9 @@ class TaskMachine:
             task = db.execute('SELECT * FROM runtime_tasks WHERE task_id=?', (channel.task_id,)).fetchone()
             if task is None or task['state'] != 'PLANNING':
                 raise StoreError('plan_not_expected')
+            # Preserve the submitted request identity, including retries of
+            # older accepted spellings; persist only canonical reservations.
+            plan = dict(plan, tasks=[dict(node, scope=validate_scope(node['scope'])) for node in plan['tasks']])
             from ..contracts import PortableToolError
             from ..portable.errors import PortableError
             try:

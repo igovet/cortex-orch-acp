@@ -13,7 +13,9 @@ from types import SimpleNamespace
 
 import pytest
 
+from cortex_runtime.acp import questions_store
 from cortex_runtime.bootstrap import bootstrap_task
+from cortex_runtime.orchestration import questions
 from cortex_runtime.orchestration import controller
 from cortex_runtime.orchestration.state import TaskMachine, dropped_failed_checks_unacknowledged, encoded
 from cortex_runtime.portable.identity import SourceEvent
@@ -56,9 +58,13 @@ def test_removing_a_failed_check_needs_the_users_answer_before_completion(tmp_pa
     with store.connection() as db:
         revised = json.loads(db.execute("SELECT payload_json FROM runtime_events WHERE task_id=? "
                                         "AND type='VERIFICATION_REVISED'", (channel.task_id,)).fetchone()[0])
-        db.execute("INSERT INTO runtime_events(task_id,type,actor,payload_json,created_at) "
-                   "VALUES(?,'USER_ANSWER_RECEIVED','runtime','{}','2026-10-22T01:00:00+00:00')", (channel.task_id,))
+        db.execute("UPDATE runtime_tasks SET state='PLANNING' WHERE task_id=?", (channel.task_id,))
         db.commit()
+    question = questions.request(store, channel, dict(
+        question='Continue without the removed placement check?', options=['Continue', 'Rerun'],
+        request_key='acknowledge-removal'))
+    assert questions_store.answer(store, question['question_id'], 'Continue', 'elicitation')
+    assert questions.resume_answered(store, channel.task_id)
     assert revised['dropped_failed'] == [PLACEMENT]
     assert _unacknowledged(store, channel.task_id) == []
 

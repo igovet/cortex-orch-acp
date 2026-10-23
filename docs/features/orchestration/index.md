@@ -71,6 +71,11 @@ not a read-access list. Reading needs no scope; writing tasks must not list
 read-only dependencies there. Read-only/investigation roles retain the required
 non-empty context scope, but it neither reserves writes nor serializes writers.
 The existing access policy, not scope wording, decides mutation authority.
+Reservations use one lexical canonical form: leading/interior `./`, repeated
+separators and trailing slashes collapse; `.` still denotes the project root
+and glob syntax is preserved. Plan admission, scope requests, access grants and
+comparisons of older stored reservations share that identity. This does not
+resolve symlinks or add a filesystem security boundary.
 
 
 The advertised `plan_submit` contract requires `plan.tasks` to contain 1–64 items and
@@ -257,7 +262,7 @@ made the change.
 When the project changed after the review and the change came from another Cortex
 task's writer in the same project (`state.foreign_project_writers`: a write
 operation or command of a non-read-only role since the review bound its revision),
-verification or completion no longer stops for the user. The runtime records
+verification (including its ordinary preflight) or completion no longer stops for the user. The runtime records
 `PROJECT_CHANGED_BY_OTHER_TASK` (the other task ids), clears the synthesis, adds a
 new review cycle on the current revision and says so in one chat line; review and
 verification then run again. An unattributed change, or one past
@@ -340,10 +345,12 @@ tasks only when every finding names a task of the accepted plan, is
 task's scope (the same path rules and scope matcher as the gateway). Each such
 fix receives only its own findings and the review's `report_ref`, and depends on
 the review plus the fixes of the selected tasks it transitively depended on in
-the plan, so related fixes keep the plan's order. In every other case — no
-findings, an unknown task, a cross-cutting finding, a file outside the scope or
-findings too long for one objective — the runtime keeps the conservative fix of
-every original plan task with the review summary. These broad fallback fixes
+the plan, so related fixes keep the plan's order. When findings are omitted or empty and there are multiple implementing tasks,
+the runtime returns to the coordinator to plan the remedy while its return
+budget remains. Otherwise, absent findings or unconfinable findings (an unknown
+task, a cross-cutting finding, a file outside the scope or findings too long
+for one objective) produce the conservative fix of every original plan task
+with the review summary. These broad fallback fixes
 retain the original plan's direct dependency edges: each fix depends on the
 review and on generated fixes for its direct plan parents. Independent branches
 remain parallel. It never infers a contract change; a reviewer marks one
@@ -733,9 +740,14 @@ Submission rejects shell syntax before any work starts. The coordinator may call
 correct: it replaces the verification commands and verifies again without redoing the
 reviewed work. Wrong code requires a new plan. A revision that is shorter than the
 failed run and no longer contains a command that failed records it in
-`VERIFICATION_REVISED.dropped_failed`; completion then needs a user answer given after
-that revision (`completion_dropped_failed_check`, and the planning prompt tells the
-coordinator to ask which way to go). A one-for-one corrected command is not a removal.
+`VERIFICATION_REVISED.dropped_failed`. The runtime accumulates these obligations
+across later repairs until the next accepted plan. Completion requires either a
+complete passing runtime verification of the exact removed argv or an answer to
+a task-global question asked after that removal (`completion_dropped_failed_check`;
+the planning prompt tells the coordinator to ask which way to go). Answers to
+older questions, unknown questions and worker-local questions do not acknowledge
+removals. A one-for-one corrected command is not a new removal and cannot erase
+an earlier one.
 Twice a desktop placement check that failed only for environment reasons was removed
 and the task completed on lint and unit tests while the popup it should have checked
 still moved (2026-10-20/22). Runtime verification runs in one fixed sandbox; the
@@ -900,15 +912,18 @@ that would not start or confirm the worker's mode) is instead retried on the
 next available route, possibly another provider. Those retries don't count
 against the two ordinary retries and are bounded separately. A routing refusal
 stops the work under its own name and is never retried. See
-[routing and fallback](../routing-and-fallback/index.md#automatic-worker-routing-unavailable-routes). Coordinator, worker and review turns have total
-and idle deadlines. Scope reservations remain occupied until engine termination
+[routing and fallback](../routing-and-fallback/index.md#automatic-worker-routing-unavailable-routes). Coordinator, worker and review turns have no runtime total or idle kill
+deadline; a stalled engine receives an adapter nudge rather than being killed. Scope reservations remain occupied until engine termination
 is observed. A task waiting for another task's capacity remains pending with a
 bounded wait. Senior escalation (`escalation_request`, the only consultant route) inserts a
 read-only consultant routed automatically by the runtime. The runtime builds that
 consultant's packet from the reports the escalation names and the escalated revision's
 reports; a plan that names the consultant is refused. Three accepted automatic replans since the latest user message or
 answer and three review cycles bound the respective loops; exhausted limits require
-user input or a new plan, and any user message or answer restores the replan budget.
+user input or a new plan, and any user message or completed question answer restores
+the replan budget. Worker-local answers emit `WORKER_USER_ANSWER_RECEIVED` in the
+answer transaction; a batch resets the budget only once all its answers are
+recorded. Runtime access decisions never count as user input.
 
 ## Timing diagnostics
 

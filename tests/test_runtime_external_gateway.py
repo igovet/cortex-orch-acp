@@ -61,6 +61,35 @@ def close(proc):
     except subprocess.TimeoutExpired: proc.kill();proc.wait(timeout=3)
 
 
+def test_external_gateway_validates_grants_with_a_held_runtime_connection(proxy, monkeypatch):
+    from cortex_runtime.contracts import StoreError
+    from cortex_runtime.engine import external_proxy
+    store, task, machine, root, _start = proxy
+    monkeypatch.setenv('CORTEX_EXTERNAL_SERVER', json.dumps({'allowed_tools': []}))
+    monkeypatch.setenv('CORTEX_CHANNEL_PROJECT_ROOT', str(root))
+    monkeypatch.setenv('CORTEX_CHANNEL_ID', task.channel_id)
+    monkeypatch.setenv('CORTEX_CHANNEL_SECRET', task.secret)
+    with store.connection() as held:
+        held.execute("CREATE TABLE live_marker(value)")
+        # Stop at grant validation: no external process or namespace is needed
+        # to exercise the relay's real constructor and channel resolution.
+        with pytest.raises(StoreError, match='external_mcp_explicit_tool_grants_required'):
+            external_proxy.main()
+
+
+@pytest.mark.requires_bwrap
+def test_external_gateway_opens_with_a_held_runtime_connection(proxy):
+    store, task, machine, root, start = proxy
+    with store.connection() as held:
+        held.execute("CREATE TABLE live_marker(value)")
+        proc = start()
+        try:
+            assert 'result' in call(proc, 1, 'initialize')
+            assert [t['name'] for t in call(proc, 2, 'tools/list')['result']['tools']] == ['inspect']
+        finally:
+            close(proc)
+
+
 @pytest.mark.requires_bwrap
 def test_external_gateway_grants_filter_containment_replay_and_revocation(proxy):
     store,task,machine,root,start=proxy;proc=start()

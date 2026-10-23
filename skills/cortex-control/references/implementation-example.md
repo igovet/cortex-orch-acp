@@ -1,6 +1,8 @@
 # Implementation report example
 
-Use this as a content guide, not a required structure. Replace placeholders with
+Open the report with the decision brief the publication tools require; the
+example shows the detail that follows it. Use it as a content guide, not a
+required structure. Replace placeholders with
 observed task facts; omit irrelevant sections, add useful ones and change their
 order when helpful. Never copy example placeholders or imply checks were run.
 Every profile uses the common Markdown writer; this file defines no tool arguments.

@@ -22,7 +22,7 @@ def main():
         if not 0<=args.days<=36500:raise ValueError('invalid retention')
         project=canonical_project(args.project_root)
         directory=project_store_directory(project)
-        result=(clear_tasks(Store(directory,initialize=False,project_root=project),project,args.days,args.keep_thread,force=args.force,dry_run=args.dry_run)
+        result=(clear_tasks(Store(directory,initialize=False,project_root=project,runtime_access=True),project,args.days,args.keep_thread,force=args.force,dry_run=args.dry_run)
                 if (directory/'cortex.sqlite3').exists()
                 else dict(deleted_tasks=0,retention_days=args.days,skipped_protected=0,
                           cutoff=(datetime.now(timezone.utc)-timedelta(days=args.days)).isoformat(timespec='microseconds'),

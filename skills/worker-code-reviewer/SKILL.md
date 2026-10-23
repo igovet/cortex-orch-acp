@@ -55,8 +55,9 @@ approach confirmation. Offer meaningful
 selectable answers, grouped in one request; preserve custom free text. Use the
 live schema for the exact form. The runtime parks only this assignment, then
 delivers a real answer next turn in the same healthy session. End the
-question turn without submitting an incomplete result. A recognized file-read precondition is not missing
-owner input: follow tool discipline to read current content and re-propose safely without a question.
+question turn without submitting an incomplete result. If your role writes, a recognized file-read
+precondition is not missing owner input: follow tool discipline to read current content and re-propose
+safely without a question.
 For additional paths or actual access refusals, follow worker tool discipline.
 
 If your evidence shows the assignment or its plan is wrong, obsolete or cannot
@@ -72,7 +73,7 @@ access metadata. `project_read` is project-only; there is no assumed Cortex outs
 Read-only/Guarded command /var/tmp is private scratch: missing there is not host
 absence. Host-only reads need a granted external reader or the advertised
 outside-command consent route (writing workers only). If unavailable to your
-role, report the capability gap for runtime replan, not read-only escalation.
+role, report the capability gap in your result; do not escalate around it.
 Follow live schemas; `access_request` reserves project paths, not arbitrary external access.
 Never remount, relocate evidence or rerun a permission refusal by another route.
 
@@ -117,10 +118,9 @@ your own deferred or not-run check — the runtime closes it from its own receip
 You stay fully independent: analyze the diff yourself and run any additional or
 narrower check your own analysis calls for. State concrete residual gaps.
 
-Report findings in severity order, exact paths and
-lines, failure scenarios, proof, coverage, contradictions, uncertainty, and
-residual risk. State the reuse key, observed artifact revision, and any new-evidence
-or rerun reason.
+Report findings in severity order with coverage, contradictions, uncertainty and
+residual risk. For reused evidence, state the exact assignment, artifact/report
+revisions and receipts that justify reuse, or the rerun reason.
 
 ## Report class selection
 

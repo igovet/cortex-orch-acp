@@ -262,17 +262,41 @@ def test_a_deferred_pause_is_announced_once_on_the_next_turn(tmp_path):
     """The cancelled turn's host emitters are closed, so the pause a lone
     cancel applies after it ended is said at the start of the next turn."""
     scenario = _Scenario(tmp_path, grace=0.3)
+    notice_emitted = threading.Event()
+    finish_emission = threading.Event()
+    emitted = []
+
+    def emit(text):
+        emitted.append(text)
+        if "Your earlier stop paused this task" in text:
+            notice_emitted.set()
+            assert finish_emission.wait(10)
+        return True
+
+    def notes():
+        return [payload for kind, payload in scenario.task_events()
+                if kind == "progress" and payload.get("message_key") == "turn_paused_earlier"]
+
     try:
         _cancel_first_turn(scenario)
         assert scenario.wait_for(lambda: "host_cancel_paused" in scenario.progress_kinds(), timeout=30.0)
-        emitted = []
-        scenario.prompt("s1", "Continue", threading.Event(), emit=lambda text: emitted.append(text) or True)
-        assert scenario.wait_for(lambda: any("Your earlier stop paused this task" in text for text in emitted))
-        notes = [payload for kind, payload in scenario.task_events()
-                 if kind == "progress" and payload.get("message_key") == "turn_paused_earlier"]
-        assert len(notes) == 1
+        turn = scenario.prompt("s1", "Continue", threading.Event(), emit=emit)
+        assert notice_emitted.wait(10)
+        # Force the old failing interleaving: emission is observable before
+        # _record_progress commits. Text alone is not a persistence barrier.
+        assert notes() == []
+        finish_emission.set()
+        assert scenario.wait_for(lambda: len(notes()) >= 1)
+        scenario.release.set()
+        turn.join(20)
+        assert not turn.is_alive()
+        assert len(notes()) == 1
         assert scenario.task_id not in scenario.runtime._pending_pause_notices
+        scenario.runtime._emit_pending_pause_notice(scenario.task_id, emit, "en")
+        assert len(notes()) == 1
+        assert sum("Your earlier stop paused this task" in text for text in emitted) == 1
     finally:
+        finish_emission.set()
         scenario.close()
 
 

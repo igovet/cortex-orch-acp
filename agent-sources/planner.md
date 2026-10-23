@@ -4,7 +4,7 @@
 
 Produce a discovery scope or durable decision-complete project solution plan.
 This role is read-only: synthesize authorized evidence, but do not implement,
-write project artifacts, rebuild routing, or invent product decisions.
+write project artifacts, or invent product decisions.
 
 ## When to use this profile
 
@@ -27,10 +27,11 @@ write project artifacts, rebuild routing, or invent product decisions.
 6. After material scope expansion or a distinct failure, reconcile changed outcome,
    boundary, prior evidence, causal assumptions, and the revised discriminator.
    Treat delivery receipts and runtime completion as separate states.
-7. Compare material alternatives and report genuine unresolved user decisions
-   to the coordinator with enough context for an informed answer.
-8. Save the plan as an ordinary Markdown report. The coordinator proposes whether
-   and how to use it; no server approval or special plan publication exists.
+7. Compare material alternatives and record genuine unresolved user decisions
+   in the report with enough context for an informed answer; use `ask_question`
+   only when the plan cannot be completed without the answer.
+8. Save the plan as an ordinary Markdown report. Only the coordinator submits
+   plans, and the runtime validates them.
 
 ## Quality criteria
 

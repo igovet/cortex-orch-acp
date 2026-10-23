@@ -11,6 +11,7 @@ from ..contracts import StoreError
 from ..portable.identity import new_id
 from .contracts import READ_ONLY
 from .policy import overlaps
+from .project_paths import canonical_scope
 from .state import encoded, event, now
 
 NEXT = ('End this turn without publishing an incomplete result. The runtime will deliver '
@@ -48,7 +49,7 @@ def grants(db, task_id, assignment_ref):
 
 
 def effective_scope(db, node):
-    return list(dict.fromkeys(json.loads(node['scope_json']) + [
+    return list(dict.fromkeys(canonical_scope(path) for path in json.loads(node['scope_json']) + [
         path for grant in grants(db, node['task_id'], node['assignment_ref']) for path in grant['added_paths']]))
 
 
@@ -75,7 +76,7 @@ def holdings(db):
 
 def absolute_scope(db, task_id, paths):
     root = str(Path(task_workspace.task_root(db, task_id)).resolve())
-    return [root if path == '.' else root + '/' + path for path in paths]
+    return [root if path == '.' else root + '/' + path for path in map(canonical_scope, paths)]
 
 
 def pending(db):
@@ -174,6 +175,7 @@ def _grant(db, binding, paths):
     node = db.execute('SELECT * FROM runtime_nodes WHERE task_id=? AND assignment_ref=?',
                       (binding['task_id'], binding['assignment_ref'])).fetchone()
     scope = effective_scope(db, node)
+    paths = list(dict.fromkeys(map(canonical_scope, paths)))
     from .gateway import _matches
     added = [path for path in paths if not _matches(path, scope)]
     revision = len(grants(db, binding['task_id'], binding['assignment_ref']))

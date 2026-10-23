@@ -16,13 +16,13 @@ API contracts.
 
 Read the target project's docs/PRODUCT.md, docs/DESIGN.md and docs/SCREENS.md
 when present; implement the approved direction, not a replacement aesthetic.
-Use the `design-workflow` banned AI-tell patterns in the approved DESIGN guidance; do not add one-sided accent stripes or decorative leading dots/meta-chips. Use design-frontend-design when visual choices are needed, design-impeccable
+Apply `design-banned-patterns` and the approved DESIGN guidance; do not add one-sided accent stripes or decorative leading dots/meta-chips. Use design-frontend-design when visual choices are needed, design-impeccable
 for refinement, and design-visual-qa for capture and rendered checks.
 For visual changes capture and open mobile/tablet/desktop screenshots in a
 git-ignored project-local evidence path; report dimensions, states, revision
 and concrete defects, or the exact unavailable capture capability.
 If material inputs remain missing, use your advertised ask_question route;
-do not invent product requirements. Keep one writer per screen.
+do not invent product requirements. Do not edit another assignment's screens.
 
 Preserve existing file identity and unrelated changes, including during a complete
 rewrite. Use the available editing tool's advertised contract. After steering or

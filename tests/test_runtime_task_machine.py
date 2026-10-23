@@ -587,8 +587,14 @@ def test_composed_runtime_executes_plan_review_verification_synthesis(tmp_path, 
             else:
                 assert 'Communicate exclusively in English' in message
                 assert 'Worker response language: English only, including the final response.' in message
-                assert 'user_question_language: en' in message
-                assert 'Exception: user-facing structured question text' in message
+                with store.connection() as db:
+                    turn_role = db.execute('SELECT role_id FROM delegation_provisioning WHERE attempt_id=?',
+                                           (channel.attempt_id,)).fetchone()['role_id']
+                # The consultant has no question tool, so its turns carry no
+                # question-language exception.
+                asks = turn_role != 'worker-senior-consultant'
+                assert ('user_question_language: en' in message) == asks
+                assert ('Exception: user-facing structured question text' in message) == asks
                 if scenario in {'worker_question','replan','scope','escalation'} and not questions:
                     questions.append('pending')
                     if scenario=='worker_question':

@@ -45,8 +45,8 @@ in `knowledge-harvest-scope`; workers own all harvest repository work.
 ## Shared skills and reporting
 
 Apply skill `tool-discipline` to calls. Draft creator guidance and the worker
-profile supply the report requirements. Load a declared example only for an assigned
-content question; do not read `cortex-control` with `read_skill` merely for ordinary reporting.
+profile supply the report requirements. Load a declared report example (`index`)
+only for an assigned content question.
 After context loss, load skill `context-compaction` and follow its rereading procedure.
 
 ## Post-write evidence
@@ -93,11 +93,12 @@ or verification pages while keeping `index.md` as its canonical entry point.
 ## Delegation reports
 
 Each worker receives its concrete assignment and mandatory requirements
-directly. It lists the report catalogue, selects only relevant materials, and
-reads only needed pages before acting. It publishes a free-form Markdown report
-through the same writer as every other profile. The report states completed
-work and every incomplete or failed check truthfully. The live advertised
-contract alone defines tool arguments. No specific report headings are required.
+directly. It reads the reports its assignment names, lists the catalogue only
+when a needed reference is missing, and reads only needed pages before acting.
+It publishes its Markdown report through the same writer as every other
+profile, opening with the decision brief the publication tools require. The
+report states completed work and every incomplete or failed check truthfully.
+The live advertised contract alone defines tool arguments.
 
 Report IDs are durable evidence references, not proof that work is complete.
 A successor reads only the reports it needs. A partial or failed report can

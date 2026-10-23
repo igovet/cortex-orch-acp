@@ -386,6 +386,9 @@ def _verification(runtime, task_id, machine, emit_tool_call, cancel):
     if cancel.is_set():
         return
     if observed.get('blocker'):
+        if (observed['blocker'] == 'verification_review_revision_changed'
+                and machine.recheck_after_foreign_change(task_id, observed['blocker']) is not None):
+            return
         machine.move(task_id, 'BLOCKED', blocker=observed['blocker'])
     else:
         machine.record_verification(task_id, observed['checks'], observed['digest'])

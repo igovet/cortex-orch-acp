@@ -4,6 +4,28 @@ The canonical store is `<project>/.cortex/cortex.sqlite3`, with task documents,
 reports, drafts and the newest-first `pipeline.md` beside it. A project never
 uses a home-wide Cortex database.
 
+A normal writable `Store(..., initialize=True)` open installs additive schema
+groups and upgrades format 11 to 12 under the migration lock with a verified
+private backup. `Store(..., initialize=False)` does neither: it validates the
+existing directory, database and access lock without creating them, and uses an
+immutable read under the exclusive access lock. A nonempty WAL is refused as
+`storage_inspection_requires_checkpoint`, never ignored or checkpointed by the
+inspection. Close writable runtime connections normally before inspection.
+Missing optional tables remain absent; open normally before using endpoints
+that need those tables. Format 11 still reports
+`legacy_storage_migration_required`; format 10 and unknown formats fail closed.
+This constructor contract does not make later explicitly requested Store
+operations read-only.
+
+Live gateway, external-tool relay, runtime startup, configuration API project reads
+and owner command-control/retention callers use `Store(..., initialize=False, runtime_access=True)` instead.
+This validation-only mode takes the ordinary shared access lock and reads current
+committed WAL data alongside other runtime connections. It never migrates,
+repairs schema or backfills rows, and retains the same format-11 migration-required
+and format-10/unknown rejection rules. It permits normal SQLite WAL/SHM creation
+and checkpoint housekeeping, so it is not a non-mutating inspection surface.
+Exclusive maintenance still fences these shared opens; it is not bypassed.
+
 SQLite records task and requirement revisions, assignments, attempts,
 instruction delivery, candidates, check evidence, resource ownership and
 idempotency keys. Published reports are immutable Markdown files. Bounded cursor

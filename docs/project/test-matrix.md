@@ -79,6 +79,34 @@ Ordinary and isolated Python startup forms both exercise the complete no-paid
 binding matrix with fresh scratch outside every repository; see
 [verification sequencing](verification.md#sequencing).
 
+## Focused Paseo plugin checks
+
+Run these no-paid scripts after the local prerequisites above:
+
+```
+npm --prefix integrations/paseo run test:display
+npm --prefix integrations/paseo run test:terminal-status
+npm --prefix integrations/paseo run test:command-stop
+```
+
+Select `test:display` for worker display, assignment-prompt and activity models;
+`test:terminal-status` for terminal outcome reconciliation; and `test:command-stop`
+for command list/stop RPC and client state. They are not rendered GUI checks.
+
+For native queue/edit/send/retry or provider-delivery changes, discover the
+installed Metro bundle read-only, then supply that exact path:
+
+```
+find /opt/Paseo/resources/app-dist/_expo/static/js/web -maxdepth 1 -name 'index-*.js' -print
+npm --prefix integrations/paseo run test:native-queue -- /absolute/path/from/discovery/index-HASH.js
+```
+
+An absent, ambiguous or incompatible bundle is a blocker, not a skipped pass.
+This executes selected installed helpers with stand-ins and the Cortex provider;
+it does not launch or modify Paseo, prove pixels/focus, or make a paid call.
+See the [complete plugin inventory](verification.md#paseo-plugin-integrationspaseo)
+for the other scripts and the installed-question component check.
+
 ## The non-paid default command
 
 The ordinary command automatically uses `-n auto --dist loadgroup` when the

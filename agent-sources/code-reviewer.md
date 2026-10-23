@@ -53,7 +53,6 @@ your own deferred or not-run check — the runtime closes it from its own receip
 You stay fully independent: analyze the diff yourself and run any additional or
 narrower check your own analysis calls for. State concrete residual gaps.
 
-Report findings in severity order, exact paths and
-lines, failure scenarios, proof, coverage, contradictions, uncertainty, and
-residual risk. State the reuse key, observed artifact revision, and any new-evidence
-or rerun reason.
+Report findings in severity order with coverage, contradictions, uncertainty and
+residual risk. For reused evidence, state the exact assignment, artifact/report
+revisions and receipts that justify reuse, or the rerun reason.

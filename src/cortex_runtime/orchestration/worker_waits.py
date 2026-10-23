@@ -198,6 +198,11 @@ def answer_tx(db, question_id, text, source, *, session_id=None):
         _change(db, wait, 'ready', answer_source=source, answer_session_id=session_id,
                 answer_ref=wait['question_id'] + ':answer',
                 **(dict(answer_refs=[q['question_id'] + ':answer' for q in batch['questions']]) if batch else {}))
+        # This exact answer (or completed batch) restores the autonomous
+        # replan budget, but never acknowledges a task-global dropped check.
+        event(db, row['task_id'], 'WORKER_USER_ANSWER_RECEIVED', dict(
+            wait_id=wait['wait_id'], question_id=wait['question_id'],
+            assignment_ref=wait['assignment_ref'], answer_source=source))
     return True
 
 

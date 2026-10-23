@@ -7,6 +7,7 @@ transfer, the ``project_storage_mismatch`` guard, and (moved in from the
 deleted ``test_no_alternate_storage_root.py``) the single-store-root
 invariant and the rejected-database byte/journal-mode guard.
 """
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from pathlib import Path
 import subprocess
@@ -389,3 +390,127 @@ def test_the_real_launcher_creates_exactly_one_project_store(tmp_path):
     assert cortex_dirs == [project/'.cortex']
     assert legacy_dirs == []
     assert not (project/'.codex').exists()
+
+
+@pytest.mark.parametrize('runtime_access', [False, True])
+def test_inspection_open_does_not_recreate_additive_schema_or_rows(tmp_path, runtime_access):
+    store, task = bootstrap(tmp_path)
+    with store.connection() as db:
+        db.execute("DROP TABLE task_language")
+        db.execute("DROP TABLE attempt_revisions")
+    before = store.path.read_bytes()
+    files_before = {p.name: p.read_bytes() for p in store.directory.iterdir() if p.is_file()}
+    inspected = Store(store.directory, initialize=False, project_root=tmp_path, runtime_access=runtime_access)
+    assert inspected.path.read_bytes() == before
+    assert {p.name: p.read_bytes() for p in store.directory.iterdir() if p.is_file()} == files_before
+    with inspected.connection(read_only=True) as db:
+        assert db.execute("SELECT 1 FROM tasks WHERE id=?", (task.task_id,)).fetchone()
+        assert db.execute("SELECT 1 FROM sqlite_master WHERE name='task_language'").fetchone() is None
+        assert db.execute("SELECT 1 FROM sqlite_master WHERE name='attempt_revisions'").fetchone() is None
+    assert store.path.read_bytes() == before
+    # Only a normal writable runtime open repairs the optional schema.
+    Store(store.directory, project_root=tmp_path)
+    with store.connection() as db:
+        assert db.execute("SELECT 1 FROM sqlite_master WHERE name='task_language'").fetchone()
+        assert db.execute("SELECT 1 FROM sqlite_master WHERE name='attempt_revisions'").fetchone()
+
+
+def test_inspection_open_does_not_create_missing_storage_directory(tmp_path):
+    missing = tmp_path / "missing" / ".cortex"
+    with pytest.raises(FileNotFoundError):
+        Store(missing, initialize=False)
+    assert not missing.parent.exists()
+
+
+def test_read_only_constructor_connection_cannot_write(tmp_path):
+    store, _task = bootstrap(tmp_path)
+    with store.connection(read_only=True) as db:
+        with pytest.raises(sqlite3.OperationalError, match="readonly"):
+            db.execute("CREATE TABLE accidental_write(id)")
+
+
+def test_inspection_rejects_uncheckpointed_wal_without_creating_sidecars(tmp_path):
+    store, _task = bootstrap(tmp_path)
+    # A raw external connection deliberately leaves committed WAL data live.
+    db = sqlite3.connect(store.path)
+    try:
+        db.execute("CREATE TABLE uncheckpointed(id)")
+        db.commit()
+        before = {p.name: p.read_bytes() for p in store.directory.iterdir() if p.is_file()}
+        with pytest.raises(StoreError, match="storage_inspection_requires_checkpoint"):
+            Store(store.directory, initialize=False, project_root=tmp_path)
+        assert {p.name: p.read_bytes() for p in store.directory.iterdir() if p.is_file()} == before
+    finally:
+        db.close()
+    Store(store.directory, initialize=False, project_root=tmp_path)
+
+
+@pytest.mark.parametrize('wal_write', [False, True])
+def test_runtime_open_shares_held_connection_and_reads_current_wal(tmp_path, wal_write):
+    store, _task = bootstrap(tmp_path)
+    with store.connection() as held:
+        if wal_write:
+            held.execute("CREATE TABLE live_marker(value)")
+            held.execute("INSERT INTO live_marker VALUES ('committed')")
+            assert Path(str(store.path) + "-wal").stat().st_size > 0
+        # A writer may hold BEGIN IMMEDIATE longer than the access-lock timeout.
+        # The constructor only validates, so it must not wait for this writer.
+        held.execute("BEGIN IMMEDIATE")
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            opened = pool.submit(
+                Store, store.directory, initialize=False, project_root=tmp_path,
+                runtime_access=True,
+            ).result(timeout=5)
+        with opened.connection() as db:
+            assert db.execute("PRAGMA user_version").fetchone()[0] == 12
+            if wal_write:
+                assert db.execute("SELECT value FROM live_marker").fetchone()[0] == 'committed'
+        held.rollback()
+
+
+def test_runtime_open_still_respects_exclusive_maintenance(tmp_path, monkeypatch):
+    import cortex_runtime.store as store_module
+    store, _task = bootstrap(tmp_path)
+    monkeypatch.setattr(store_module, 'SHARED_ACCESS_WAIT_SECONDS', 0.01)
+    with store.connection(exclusive=True):
+        with pytest.raises(StoreError, match='storage_busy'):
+            Store(store.directory, initialize=False, project_root=tmp_path, runtime_access=True)
+
+
+@pytest.mark.parametrize('method', ['tools/list', 'tools/call'])
+def test_gateway_opens_while_runtime_connection_holds_live_wal(tmp_path, method):
+    from cortex_runtime.orchestration.state import TaskMachine
+    store, task = bootstrap(tmp_path)
+    TaskMachine(store).create(task.task_id, "Concurrent gateway open")
+    server = server_for(tmp_path, task.channel_id, task.secret)
+    with store.connection() as held:
+        held.execute("CREATE TABLE live_marker(value)")
+        # Keep the shared access lock and committed WAL alive through dispatch.
+        reply = server.dispatch(method, {} if method == 'tools/list' else dict(
+            name='list_reports', arguments={}))
+    assert 'error' not in reply, reply
+    assert not reply.get('isError'), reply
+
+
+def test_production_runtime_starts_with_a_held_runtime_connection(tmp_path):
+    from cortex_runtime.acp.production_runtime import ProductionOrchestratingRuntime
+    store, _task = bootstrap(tmp_path)
+    production = ProductionOrchestratingRuntime(environ={})
+    with store.connection() as held:
+        held.execute("CREATE TABLE live_marker(value)")
+        runtime = production._runtime_for_project(str(tmp_path))
+    assert runtime is production._runtime_for_project(str(tmp_path))
+
+
+@pytest.mark.parametrize('runtime_access', [False, True])
+@pytest.mark.parametrize('version', [10, 11, 99])
+def test_non_initializing_modes_refuse_legacy_and_unknown_formats(tmp_path, runtime_access, version):
+    store, _task = bootstrap(tmp_path)
+    with store.connection() as db:
+        db.execute(f"PRAGMA user_version={version}")
+    before = {p.name: p.read_bytes() for p in store.directory.iterdir() if p.is_file()}
+    error = 'legacy_storage_migration_required' if version == 11 else 'unsupported_storage'
+    with pytest.raises(StoreError, match=error):
+        Store(store.directory, initialize=False, project_root=tmp_path, runtime_access=runtime_access)
+    assert {p.name: p.read_bytes() for p in store.directory.iterdir() if p.is_file()} == before
+    assert not (store.directory / ".migration-backups").exists()

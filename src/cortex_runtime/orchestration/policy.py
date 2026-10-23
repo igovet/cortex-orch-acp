@@ -43,8 +43,9 @@ def overlaps(left,right):
     """Conservative overlap: wildcard prefixes cannot justify concurrency
     or override a denial. Exact disjoint directory roots remain parallel.
     """
+    from .project_paths import canonical_scope
     def prefix(value):
-        pieces=re.split(r'[*?\[]',value,1)
+        pieces=re.split(r'[*?\[]',canonical_scope(value),1)
         value=pieces[0].rstrip('/')
         return ('' if value=='.' else value),len(pieces)>1
     (a,aw),(b,bw)=prefix(left),prefix(right)
@@ -179,7 +180,7 @@ def replans_since_user_input(db,task_id):
 
     The limit bounds autonomous replanning; any later user input is the
     user's decision and starts a fresh budget."""
-    spoke=db.execute("SELECT MAX(id) FROM runtime_events WHERE task_id=? AND type IN ('USER_STEERING','USER_ANSWER_RECEIVED')",
+    spoke=db.execute("SELECT MAX(id) FROM runtime_events WHERE task_id=? AND type IN ('USER_STEERING','USER_ANSWER_RECEIVED','WORKER_USER_ANSWER_RECEIVED')",
                      (task_id,)).fetchone()[0] or 0
     return db.execute("SELECT COUNT(*) FROM runtime_events WHERE task_id=? AND type='REPLAN_REQUEST_ACCEPTED' AND id>?",
                       (task_id,spoke)).fetchone()[0]
@@ -199,7 +200,8 @@ def propose_replan(store,channel,operation,args):
             return json.loads(previous['result_json'])
         _authority(db,channel)
         if operation=='scope_request':
-            validate_scope(args['scope']);validate_grants(db,channel.task_id,args['scope'])
+            args = dict(args, scope=validate_scope(args['scope']))
+            validate_grants(db,channel.task_id,args['scope'])
         if replans_since_user_input(db,channel.task_id)>=REPLAN_LIMIT: raise StoreError('replan_limit_requires_user_input')
         transition(db,channel.task_id,'RECOVERING')
         from .worker_waits import cancel_tx

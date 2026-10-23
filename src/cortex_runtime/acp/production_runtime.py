@@ -138,7 +138,7 @@ class ProductionOrchestratingRuntime:
         directory = project_store_directory(project)
         if not (directory / "cortex.sqlite3").exists():
             raise RouteUnresolved("task_not_bound")
-        store = Store(directory, initialize=False, project_root=project)
+        store = Store(directory, initialize=False, project_root=project, runtime_access=True)
         # T019: best-effort, observed crash reconciliation once per project
         # at first use, in addition to the recovery every store call already
         # performs for its own task -- surfaces/quarantines leftovers from a

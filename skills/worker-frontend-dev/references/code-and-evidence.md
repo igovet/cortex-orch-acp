@@ -1,6 +1,6 @@
 # Code and evidence discovery
 
-Read this reference only for structural repository discovery or when saved report
+Apply this procedure for structural repository discovery and when saved report
 detail is needed.
 
 If the assignment brief names `Known locations`, treat them as focused
@@ -16,15 +16,15 @@ for literal text, configuration and non-code files, for paths the index does not
 cover, or when no matching healthy index exists. Discover the needed operation
 names and read their complete advertised schemas.
 
-Use the attached code index's named project directly when it matches the exact
-workspace. Call `list_projects` only if that project is absent or ambiguous; match
-its full root path rather than a similar project or another worktree. If multiple
-entries match, compare `index_status` and relevant `check_index_coverage` results
-to select the healthy index covering the assigned scope. A ready index can still
-exclude the entire subsystem. If no matching index exists, make one initial
-`index_repository` attempt for the authorized exact workspace root. Do not
-substitute the logical repository root for a linked worktree, change ignore rules,
-or retry argument variations after an indexing error.
+Call `list_projects` once and select the project whose full root path matches the
+exact workspace, not a similar project or another worktree; never guess a project
+name from the path. If multiple entries match, compare `index_status` and relevant
+`check_index_coverage` results to select the healthy index covering the assigned
+scope. A ready index can still exclude the entire subsystem. If no matching index
+exists and `index_repository` is among your granted tools, make one initial attempt
+for the authorized exact workspace root; otherwise record the missing index as a
+limitation. Do not substitute the logical repository root for a linked worktree,
+change ignore rules, or retry argument variations after an indexing error.
 
 An indexer can reject an otherwise valid linked worktree. Treat that failed single
 attempt as unavailable for the exact workspace, record the returned error, and use

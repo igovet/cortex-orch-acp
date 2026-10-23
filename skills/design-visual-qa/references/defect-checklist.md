@@ -320,7 +320,8 @@ stripes, pseudo-element bars and equivalent framework utilities (such as Tailwin
 metadata, including inside pills/chips/badges, and decorative pill/eyebrow meta-chips
 used by default. The only exception is a status indicator explicitly required by the
 product spec and carrying real semantic meaning; a dot must not be its only signal.
-Use the canonical [banned AI-tell patterns](../../design-workflow/references/DESIGN.md#banned-ai-tell-patterns) for design alternatives.
+For design alternatives, read the canonical banned AI-tell patterns through Cortex
+read_skill with the registered id design-banned-patterns.
 
 ## Mechanical Finding Triage
 

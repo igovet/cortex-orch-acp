@@ -20,7 +20,12 @@ contacting the ACP client. Supported clients receive the existing elicitation
 form; other clients receive the question and options as ordinary chat text.
 A declined, cancelled or timed-out elicitation leaves the question open.
 Only an answer recorded against that exact question resumes the requesting
-phase. Exact retries preserve the original question identity; changed deliveries
+phase. A completed worker-local question (or complete batch) also restores the
+three-replan budget with a durable `WORKER_USER_ANSWER_RECEIVED` marker in the
+same transaction. Duplicate deliveries, partial batches and runtime access
+decisions do not reset it. This marker never acknowledges a removed failed
+verification command; that requires an answer to a task-global question asked
+after the removal, or an exact complete passing verification rerun. Exact retries preserve the original question identity; changed deliveries
 with the same key fail.
 
 After three planning prompts without a structured proposal, the runtime asks a
@@ -343,7 +348,7 @@ The Paseo ACP bridge settles every tool call that is still `pending` or
 updates that carry no status into that settled status. In `@getpaseo/plugin`
 0.9.1 (this plugin's pinned dev dependency) the settled timeline item is
 `failed` for a cancelled turn and `completed` for a completed one; in the
-bridge bundled with the installed Paseo 0.11.4 application, a cancelled turn's
+bridge bundled with the Paseo 0.11.4 application, a cancelled turn's
 item is `canceled` (its merged snapshot is still `failed`). Under
 cancel-then-prompt steering this showed a still-running worker as Failed
 (`Tool call failed: <title>`) or, on 0.11.4, Canceled.

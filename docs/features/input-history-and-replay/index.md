@@ -12,6 +12,18 @@ preservation, provenance-safe replay, and bounded reads. Covers
 capture path, `acp/orchestrating_runtime.py`'s delivery-identity/crash
 recovery, and `session/load`.
 
+## Imported history and route authorization
+
+Retained input and authorization are different. `routing.auto_route._user_authored`
+excludes terminated `<chat-history-summary>` blocks from model consent:
+Paseo's flattened, unescaped multiline entries cannot establish whether a
+`[User]` line was a real turn or assistant/tool text. This is an attribution
+barrier, not a fabricated user revocation: older grants cannot survive a
+potentially hidden refusal. Restate requests and refusals outside the summary. An unterminated literal opening tag remains
+ordinary current user text, including any subsequent refusal. The original
+source body remains retained unchanged; only routing's authorization view is
+filtered. See [model requests](../routing-and-fallback/index.md#owner-model-requests-in-plain-words).
+
 ## Event identity and deduplication
 
 `source_events (origin, event_id)` (defined in

@@ -24,15 +24,22 @@
   </tr>
 </table>
 
+Writer reservations normalize lexical path aliases before scheduling and policy
+comparison. Removed failed verification checks survive later command repairs;
+only an exact passing verification rerun or an answer to a later task-global
+question clears them. Worker answers restore the replan budget, not verification
+approval. See [orchestration](docs/features/orchestration/index.md).
+
 Cortex offers engine-neutral `tools_discover` for exact current tool schemas
 and `read_batch` for bounded independent evidence pages. Existing tools remain:
 this adds no evaluator, mutation batching or reduced bootstrap catalogue.
 See [tool discovery and read batches](docs/features/tool-discovery-and-read-batch/index.md).
 
 Missing, incomplete or stale gateway file reads are correctable preconditions,
-not permission refusals. Workers read current content on the same channel and
-re-propose a valid edit without an owner question or extra approval; stale patches
-must be rebuilt. Actual access denials remain final and cannot be bypassed.
+not permission refusals. Writing workers read current content on the same channel
+and re-propose a valid edit without an owner question or extra approval; stale
+patches must be rebuilt. Only writing-worker prompts carry this recovery. Actual
+access denials remain final and cannot be bypassed.
 See [read-precondition recovery](docs/features/permissions-and-containment/index.md#read-precondition-recovery).
 
 Native authentication loss gets one bounded engine-process restart on the same
@@ -45,11 +52,21 @@ proven zero-cost refresh-forcing command on a schedule; today it reports
 both Claude Code and Codex CLI `unsupported` because no such command is yet
 proven for either. See [opt-in login keepalive](docs/features/failures-and-cancellation/index.md#opt-in-native-cli-login-keepalive-outside-the-runtime).
 
+Model consent comes only from actual requests in recorded user messages or
+answers, not remarks about a model or coordinator reasons. Imported flattened
+history is not turn provenance; restate requests outside it. Non-initializing
+storage inspection never repairs schema or creates SQLite sidecars, and refuses
+uncheckpointed WAL data. Live runtime opens, including settings-panel project reads,
+use a separate shared-access validation mode that reads committed WAL data without schema repair or migration; SQLite
+sidecar/checkpoint housekeeping remains allowed there. See [routing requests](docs/features/routing-and-fallback/index.md#owner-model-requests-in-plain-words)
+and [storage inspection](docs/project/storage.md).
+
 Explicit model-and-effort requests on covered planned nodes retain the exact
 effort through dispatch, retries and review fixes (for example, ask to use
 `codex-acp/gpt-6.1-sol at medium effort`). Conflicting policy or missing engine
 support refuses before a worker prompt; it never substitutes an automatic effort.
-Mandatory review still uses owner reviewer pins/ranking. An exact reviewer pin
+Mandatory review honors recorded purpose-scoped user requests, otherwise owner
+reviewer pins/ranking. An exact reviewer pin
 also refuses instead of clamping its effort. Editor thinking selection alone does
 not set every worker's effort. See [routing](docs/features/routing-and-fallback/index.md#explicit-effort-preservation).
 
@@ -425,8 +442,9 @@ Plan hints alone cannot promote a flagship. Confirmed requests in recorded
 user messages/answers select that exact model first on covered nodes in every
 tier, including retries/fixes, ahead of pins, preferences and usage ranking.
 Hard policy or unavailable routes refuse visibly rather than substitute.
-The runtime-created mandatory reviewer is not a covered node: owner pins, then
-automatic ranking, decide its route. Before a requested paid CLI run, the
+The runtime-created mandatory reviewer honors a recorded purpose-scoped model
+request; otherwise owner pins, then automatic ranking, decide its route.
+The policy-only preflight assumes no such request. Before a requested paid CLI run, the
 [route preflight](docs/project/dev-environment.md#route-preflight-before-a-paid-cli-run)
 refuses when a stage would not use the selected route.
 Plan usage ranks candidates whenever every candidate's usage is known, and

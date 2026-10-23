@@ -6,6 +6,7 @@ no real user configuration is read or written, and no engine binary runs
 """
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 import io
 import json
 from pathlib import Path
@@ -805,6 +806,50 @@ def test_execute_project_ceiling_uses_the_project_store(home, tmp_path):
     empty.mkdir()
     missing = management.execute({"action": "read", "surface": "project_ceiling", "project": str(empty)})
     assert missing["error"]["code"] == "project_store_missing"
+
+
+@pytest.mark.parametrize("surface", ["all", "project_ceiling"])
+@pytest.mark.parametrize("wal_write", [False, True])
+def test_execute_project_reads_share_live_runtime_access(home, tmp_path, surface, wal_write):
+    project = tmp_path / "project"
+    project.mkdir()
+    store = Store(project / ".cortex", project_root=project)
+    with store.connection() as held:
+        if wal_write:
+            expected = management.update_project_ceiling(
+                store, str(project), "absent", {"permission_level": "READ_ONLY"})
+            assert Path(str(store.path) + "-wal").stat().st_size > 0
+        else:
+            expected = management.read_project_ceiling(store, str(project))
+        # Keep both the access lock and a SQLite writer alive through the read.
+        held.execute("BEGIN IMMEDIATE")
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            reply = pool.submit(management.execute, {
+                "action": "read", "surface": surface, "project": str(project),
+            }).result(timeout=5)
+        held.rollback()
+    assert reply["ok"], reply
+    if surface == "all":
+        assert all(item["ok"] for item in reply["result"].values()), reply
+        view = reply["result"]["project_ceiling"]["result"]
+    else:
+        view = reply["result"]
+    assert view["revision"] == expected["revision"]
+    assert view["ceiling"] == expected["ceiling"]
+
+
+@pytest.mark.parametrize("surface", ["all", "project_ceiling"])
+def test_execute_project_reads_respect_exclusive_maintenance(home, tmp_path, monkeypatch, surface):
+    import cortex_runtime.store as store_module
+
+    project = tmp_path / "project"
+    project.mkdir()
+    store = Store(project / ".cortex", project_root=project)
+    monkeypatch.setattr(store_module, "SHARED_ACCESS_WAIT_SECONDS", 0.01)
+    with store.connection(exclusive=True):
+        reply = management.execute({"action": "read", "surface": surface, "project": str(project)})
+    assert not reply["ok"]
+    assert reply["error"]["code"] == "storage_busy"
 
 
 # --- routing.json models: automatic-routing selection, tiers and policy ---------
