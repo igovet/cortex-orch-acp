@@ -387,7 +387,7 @@ ranking for covered exact-route nodes in every tier, including retries/fixes.
 They never waive owner deny/disabled/provider policy, route/profile/recipient
 ceilings, supported effort, engine availability or exhausted quota. Failure
 fallback cannot silently switch that choice to another model identity.
-Plan usage ranks candidates whenever every candidate's usage is known; unknown
+Plan usage only breaks the last tie between otherwise equal candidates; unknown
 usage is reported unavailable, never inferred above the 95% hot band.
 No source or settings rewrite repairs a refusal.
 
@@ -598,7 +598,9 @@ selection state, shown only when no attempt history explains the failure. A
 failed history read shows a fixed message, never the transport error. This
 changes presentation and what the host timeline stores, not task state,
 permissions, evidence or verification; the full result remains in the project
-store and published reports.
+store and published reports. The compact card poll also retains the attempt's
+durable dispatch route and selection provenance; it does not fetch result bodies,
+assignment prompts or transcripts to refresh route text.
 
 The Workers tab's assignment prompt is read the same way, only for a read that
 selects a worker (never by a compact card or catalogue read). It shows the
@@ -627,7 +629,17 @@ configured engines; shared bare IDs grant neither route and receive a plan
 preview diagnostic. Terminal prose punctuation cannot truncate another enabled
 configured ID. For enabled exact identities, direct `на/on/via/with` naming or a
 request-form verb in the same user message supplies request grammar; negations
-still apply. Configured labels retain conservative local grammar.
+still apply. Configured labels retain conservative local grammar. A restrictive
+user selection ("только Opus", "do the audit only on Opus") and a parenthesized
+exact identity after a name are requests; remarks ("only Opus found the bug")
+and negations ("только не Opus") are not. A real user answer that is exactly one
+of its question's options grants the single model that option selects; the
+asking model wrote the option, so an option that only mentions a model (its
+result, quota, opinion or past work), a bare model name or a name after a lone
+verb of choice ("Выбрать Opus", "Pick Opus") chosen under a question that does
+not ask which model to use ("Чей результат аудита принять?", "Какой аудит
+выбрать?"), the question text, unchosen options and ambiguous answers never
+grant, and a sentence judging a result never scopes which nodes a choice pins.
 Model prose and hints remain non-consent, and hard route
 authorization checks are unchanged. See [routing](docs/features/routing-and-fallback/index.md#settings-only-routing).
 Matching-pin chat notices compare audit-bound engine/model and any explicit effort;

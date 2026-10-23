@@ -181,6 +181,19 @@ def test_embedded_history_query_binds_lifecycle_and_worker_events_to_one_attempt
         "selection": {"tier": "light→standard", "hint": "ignored:pinned", "decidedBy": "usage",
                       "planUsedPercent": 42.4},
     }
+    # The card's existing compact read already carries the same audit route:
+    # no new server API or transcript/result-body fetch is needed.
+    compact_result = subprocess.run(
+        ["python3", "-B", "-c", query, str(project), task, "xa_revision",
+         str(2**53 - 1), "1", "", "", "1"],
+        capture_output=True, text=True, check=True,
+    )
+    compact = json.loads(compact_result.stdout)["assignments"][0]["attempts"][0]
+    assert compact["route"] == output["assignments"][0]["attempts"][0]["route"]
+    assert compact["events"] == []
+    assert "summary" not in compact
+    assert "checks" not in compact
+    assert "prompt" not in compact
     assert output["assignments"][0]["attempts"][0]["completedAt"] == "6"
     assert events[0]["input"] == {"path": "src/app.py"}
     assert events[0]["output"] == "permission denied"

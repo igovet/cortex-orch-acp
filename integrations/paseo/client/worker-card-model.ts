@@ -4,11 +4,12 @@ type Attempt = WorkerHistory["assignments"][number]["attempts"][number];
 
 /**
  * Everything a coordinator worker card keeps from its compact durable read:
- * status, usage and the open-issue count. Never the summary, check list,
+ * status, route, usage and the open-issue count. Never the summary, check list,
  * failure text or transcript -- those belong to the worker tab.
  */
 export type CardUsage = {
   status: string;
+  route?: Attempt["route"];
   context?: Attempt["context"];
   tokens?: Attempt["tokens"];
   openIssues?: number;
@@ -35,9 +36,10 @@ export function cardFrameStyle(
   };
 }
 
-export function cardUsageSnapshot(attempt: Pick<Attempt, "status" | "context" | "tokens" | "openIssues">): CardUsage {
+export function cardUsageSnapshot(attempt: Pick<Attempt, "status" | "route" | "context" | "tokens" | "openIssues">): CardUsage {
   return {
     status: attempt.status,
+    ...(attempt.route ? { route: { ...attempt.route, ...(attempt.route.selection ? { selection: { ...attempt.route.selection } } : {}) } } : {}),
     ...(attempt.context ? { context: { used: attempt.context.used, size: attempt.context.size } } : {}),
     ...(attempt.tokens ? { tokens: { ...attempt.tokens } } : {}),
     ...(attempt.openIssues !== undefined ? { openIssues: attempt.openIssues } : {}),
@@ -57,6 +59,8 @@ export function sameCardUsage(a: CardUsage | undefined, b: CardUsage | undefined
   if (a === b) return true;
   if (!a || !b) return false;
   return a.status === b.status && a.openIssues === b.openIssues
+    && sameRecord(a.route && { ...a.route, selection: undefined }, b.route && { ...b.route, selection: undefined })
+    && sameRecord(a.route?.selection ?? undefined, b.route?.selection ?? undefined)
     && sameRecord(a.context, b.context) && sameRecord(a.tokens, b.tokens);
 }
 

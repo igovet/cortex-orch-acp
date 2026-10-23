@@ -190,18 +190,19 @@ def suitability(role: str | None, engine: str, affinity: Mapping[str, str | None
     return int(preferred is not None and preferred == engine)
 
 
-# A model hint (or a legacy stored provider preference) is ignored for
-# quota only when its usage is both at or above this percentage *and*
-# meaningfully worse than an available alternative's (see USAGE_MARGIN
-# below): crossing the band alone no longer disqualifies it, so a hint just
-# over HOT_PERCENT with no meaningfully better alternative is still
-# honoured. It is independent of how often an engine was chosen before.
-# Excluded, unavailable and exhausted (100%) routes are never honoured at
-# all.
+# A coordinator's model hint is passed over for quota only when its known
+# usage is at or above this percentage while the tier has a candidate below
+# it (known or unknown usage): a hot hinted route ranks behind non-hot routes,
+# exactly like the quota band of :func:`rank`, and the replacement is recorded
+# as ``ignored:near_quota_limit``. A lower or merely higher usage never moves
+# an eligible hinted route (rank version 15). Excluded, unavailable and
+# exhausted (100%) routes are never honoured at all.
 HINT_TOLERANCE = HOT_PERCENT
-# Whenever every candidate's usage is known, plan usage ranks candidates in
-# steps of this many percentage points above the least-used candidate: a smaller difference is not a meaningful
-# difference in remaining quota, so the task (engine affinity) decides it.
+# The owner's own choices (a provider preference, a preferred model for the
+# work kind) are passed over for quota only when hot *and* this many points
+# worse than an available alternative's known usage (:func:`_meaningfully_worse`).
+# Plan usage no longer ranks candidates in steps of this margin: it is only the
+# last tie-breaker between otherwise equal candidates (rank version 15).
 USAGE_MARGIN = 10.0
 
 
@@ -625,7 +626,7 @@ def pick(role_tier: str, entries: Sequence, usage, tier_overrides: Mapping[str, 
 
 
 # Generic rank ordering; historical decision keys remain readable by clients.
-RANK_VERSION = 14
+RANK_VERSION = 15
 # The rank key's parts in order, named for the decision's ``decided_by``.
 # ``quota`` moved from right after ``hint`` to right before ``used_percent``
 # in rank version 6 (a late tie breaker, behind the usage-gap signal,
@@ -638,7 +639,11 @@ RANK_VERSION = 14
 # known again, not only once one reaches HOT_PERCENT (version 10's gate).
 # Rank version 14 confines plan usage to the owner's preferred models for the
 # work kind while they are honoured, and applies none once they are used up.
-RANK_KEYS = ("preference", "purpose", "hint", "quota", "usage", "diversify", "affinity", "used_percent",
+# Rank version 15 (owner decision 2026-10-23) removes the usage-gap step
+# (``usage``, 10-point bands): plan usage is only the last tie-breaker
+# (``used_percent``) between candidates equal on every other key, and a
+# coordinator-named eligible route is passed over for quota only when hot.
+RANK_KEYS = ("preference", "purpose", "hint", "quota", "diversify", "affinity", "used_percent",
              "engine_order")
 
 
@@ -678,33 +683,28 @@ def rank(role_tier: str, entries: Sequence, usage, tier_overrides: Mapping[str, 
        structured ``preferred_for`` on every attempt, independently of that
        text or hint, and keeps preferred routes in eligible fallback tiers;
        it never grants an unconfigured tier or bypasses exclusions;
-    3. an honoured model hint (see :data:`HINT_TOLERANCE`), ignored on the
-       same hot-and-meaningfully-worse basis; a hint naming no preferred
-       route loses to ``purpose`` and records ``ignored:owner_preferred``.
+    3. an honoured model hint, passed over for quota only when its known
+       usage is hot while the tier has a non-hot candidate (see
+       :data:`HINT_TOLERANCE`); plan usage never otherwise outranks it. A
+       hint naming no preferred route loses to ``purpose`` and records
+       ``ignored:owner_preferred``.
        Affinity-bound work still prefers the configured engine's preferred
        route even over an honoured cross-engine hint while that engine has
        an eligible candidate at all;
     4. the quota band (unknown is not hot): a candidate whose *known*
        usage is at or above :data:`HOT_PERCENT` ranks behind every
        candidate below that band, known or unknown usage alike --
-       this outranks the usage-gap signal, diversification and affinity
-       below, so a hot known candidate never wins merely by being the
-       preferred engine or more suitable for the work;
-    5. subscription plan usage, whenever every remaining candidate's usage
-       is known (at any level, not only near the limit): each full
-       :data:`USAGE_MARGIN` points above the least-used candidate ranks a
-       candidate one step behind (``usage_band``), so work goes to the
-       plan with meaningfully more quota left --
-       this usage-gap signal is what usually separates candidates on
-       remaining quota once the quota band above has not already decided it;
-    6. on escalation, an engine other than the one that fell short (a large
-       usage gap above still wins first: diversification does not send a
-       retry to a plan that is meaningfully more used);
-    7. engine affinity (:func:`suitability`), the task's fit;
-    8. lower exact used percent, whenever every usage is known;
-    9. engine order.
+       this outranks diversification and affinity below, so a hot known
+       candidate never wins merely by being the preferred engine or more
+       suitable for the work;
+    5. on escalation, an engine other than the one that fell short;
+    6. engine affinity (:func:`suitability`), the task's fit;
+    7. lower exact used percent, whenever every compared usage is known:
+       plan usage is only this last tie-breaker between candidates equal on
+       every key above (rank version 15 removed the 10-point usage bands);
+    8. engine order.
 
-    Steps 5 and 8 compare plan usage within ``decision["usage"]["scope"]``:
+    Step 7 compares plan usage within ``decision["usage"]["scope"]``:
     only the ``purpose`` models while that preference is honoured (usage
     picks among the owner's chosen models, never against other models);
     ``none`` when the tier has such models but none is honoured (all hot
@@ -853,7 +853,7 @@ def rank(role_tier: str, entries: Sequence, usage, tier_overrides: Mapping[str, 
                 hint_status = ("ignored:no_candidate_in_tier" if not slash and
                                not any(e.route.engine == hint_engine and serves(e, tier)
                                        for e in entries) else "ignored:unavailable")
-            elif _meaningfully_worse(hinted, candidates, usage):
+            elif _hot_with_cooler_alternative(hinted, candidates, usage):
                 hint_status = "ignored:near_quota_limit"
             else:
                 hint_status = "honoured"
@@ -897,23 +897,19 @@ def rank(role_tier: str, entries: Sequence, usage, tier_overrides: Mapping[str, 
         usage_active = used_percent_compared
         least_used = min(usage(e) for e in usage_scope) if usage_active else None
 
-        def usage_band(e):
-            return (int((usage(e) - least_used) // USAGE_MARGIN)
-                    if usage_active and e.route.id in scope_ids else None)
-
         def used_percent(e):
             return usage(e) if usage_active and e.route.id in scope_ids else 0.0
 
         def key(e):
             # A candidate's own hot/known-quota flag ranks right after
-            # preference/purpose/hint -- before the usage-gap band,
-            # diversification and affinity -- so a known >=95% candidate
-            # always loses to any non-hot one (known or unknown usage).
+            # preference/purpose/hint -- before diversification and
+            # affinity -- so a known >=95% candidate always loses to any
+            # non-hot one (known or unknown usage). Otherwise plan usage
+            # only breaks the last tie (``used_percent``).
             return (e.route.engine != honoured,
                     not (purpose_status == "honoured" and purpose(e)),
                     not (hint_status == "honoured" and e in hinted),
                     _hot(usage(e)),
-                    usage_band(e) or 0,
                     not (escalated and previous_engine and e.route.engine != previous_engine),
                     -suitability(role, e.route.engine, affinity, work_kind_override=work_kind_override),
                     used_percent(e), order[e.route.id])
@@ -941,7 +937,7 @@ def rank(role_tier: str, entries: Sequence, usage, tier_overrides: Mapping[str, 
             usage=dict(compared=used_percent_compared, active=usage_active,
                        status=("active" if usage_active else
                                "not_applied:owner_preferred_unavailable" if scope_name == "none" else "unavailable"),
-                       scope=scope_name, threshold=HOT_PERCENT, margin=USAGE_MARGIN, least_used_percent=least_used),
+                       scope=scope_name, threshold=HOT_PERCENT, role="tie_breaker", least_used_percent=least_used),
             affinity=dict(work_kind=affinity_kind, engine=affinity_engine(role, affinity, work_kind_override=work_kind_override),
                           source=("routing.json" if affinity_kind is not None and affinity
                                   and (affinity_kind in affinity or "*" in affinity
@@ -950,7 +946,7 @@ def rank(role_tier: str, entries: Sequence, usage, tier_overrides: Mapping[str, 
             used_percent_compared=used_percent_compared,
             purpose=dict(work_kind=kind, preferred=[_route_label(e) for e in ranked if purpose(e)],
                          status=purpose_status),
-            candidates=[_candidate(e, usage, role, e.route.engine == honoured, usage_band(e),
+            candidates=[_candidate(e, usage, role, e.route.engine == honoured,
                                    affinity=affinity, work_kind_override=work_kind_override) for e in ranked],
             unavailable=sorted(_route_label(e) for e in entries
                                if serves(e, tier) and e.route.id not in policy_excluded
@@ -1008,6 +1004,19 @@ def _hot(used: float | None) -> bool:
     return (used or 0.0) >= HOT_PERCENT
 
 
+def _hot_with_cooler_alternative(group: Sequence, candidates: Sequence, usage) -> bool:
+    """Whether a coordinator-named ``group`` (a hinted subset of
+    ``candidates``) should be passed over for quota: its least-used member's
+    usage is known and hot while some other candidate is not hot (known
+    below :data:`HOT_PERCENT`, or unknown, which is never inferred hot) --
+    the quota band's own rule. Usage below the hot band, or a gap of any
+    size, never moves an eligible hinted route."""
+    group_ids = {e.route.id for e in group}
+    group_usages = [usage(e) for e in group]
+    return (all(u is not None for u in group_usages) and _hot(min(group_usages))
+            and any(not _hot(usage(e)) for e in candidates if e.route.id not in group_ids))
+
+
 def _meaningfully_worse(group: Sequence, candidates: Sequence, usage) -> bool:
     """Whether ``group`` (a preferred/hinted subset of ``candidates``)
     should be passed over for quota: its least-used member's usage is known,
@@ -1029,12 +1038,12 @@ def _route_label(entry) -> str:
     return f"{entry.route.engine}/{entry.route.model}"
 
 
-def _candidate(entry, usage, role, preferred: bool, usage_band: int | None = None, *,
+def _candidate(entry, usage, role, preferred: bool, *,
                affinity: Mapping[str, str | None] | None = None, work_kind_override: str | None = None) -> dict:
-    """One ranked candidate as the route audit records it."""
+    """One ranked candidate as the route audit records it. Rank version 15
+    dropped ``usage_band``; older audits keep it."""
     return dict(route=_route_label(entry), connection_id=entry.connection_id, used_percent=usage(entry),
                 hot=_hot(usage(entry)), quota_state="unknown" if usage(entry) is None else "known",
-                usage_band=usage_band,
                 suitability=suitability(role, entry.route.engine, affinity, work_kind_override=work_kind_override), preferred=preferred)
 
 
@@ -1403,7 +1412,7 @@ REQUEST_WORDS = re.compile(
 # preposition with no such verb is a remark ("it failed on the named model", "посмотри
 # на модель"). Russian forms as in REQUEST_WORDS.
 WORK_VERBS = re.compile(
-    r"implement|build|fix|write|test|review|perform|handle|redo|rerun|retry|debug|refactor"
+    r"implement|build|fix|write|test|review|audit|perform|handle|redo|rerun|retry|debug|refactor"
     r"|investigate|analy[sz]e|do"
     r"|реализ(?:уй|уйте|овать|уем)|(?:с|пере|до)?дела(?:й|йте|ть)|(?:с|пере|до)делаем"
     r"|выполн(?:и|ите|ить|им|яй|яйте|ять)|напиш(?:и|ите|ем)|написать"
@@ -1483,7 +1492,10 @@ NEGATION_WINDOW = 5
 # Refusal, unavailability and cost words. One anywhere in a mention's own
 # clause segment, before or after it, refuses that mention ("X must never be
 # used", "X is too expensive", "X слишком дорогая", "Opus не нужен"): a
-# missed refusal would run a model the user refused.
+# missed refusal would run a model the user refused. Quota and limit words are
+# deliberately absent: "Сделай аудит на Opus в пределах лимита" still asks for
+# Opus, and a chosen option that only reports a quota ("Opus исчерпал квоту")
+# is rejected by _option_selects as a mention, without revoking anything.
 _REFUSAL_WORDS = re.compile(
     r"not|never|no|without|avoid|cannot|unable|unavailable|expensive|costly|overpriced|pricey"
     r"|forbidden|banned|prohibited|disallowed"
@@ -1529,7 +1541,9 @@ def family_pattern(family: str, names: Sequence[str] | None = None) -> re.Patter
     # Explicit paired quotes disambiguate surrounding prose punctuation. Both
     # ends of the quoted token must be isolated; quoted prefixes/variants do
     # not authorize the shorter identity. Keep quotes out of the retained match.
-    for opening, closing in (("\"", "\""), ("'", "'"), ("`", "`"), ("«", "»"), ("“", "”")):
+    # Paired parentheses are the same: "Claude Opus (claude-agent-acp/opus[1m])"
+    # names the identity; "(engine/unit.v2)" still never names "engine/unit".
+    for opening, closing in (("\"", "\""), ("'", "'"), ("`", "`"), ("«", "»"), ("“", "”"), ("(", ")")):
         left, right = re.escape(opening), re.escape(closing)
         patterns.append(rf"(?<={left})(?<!\S{left}){identity}(?={right}[.,!?;:]?(?!\S))")
     for name in names or ():
@@ -1723,6 +1737,125 @@ def assigns_family(text: str, pattern: re.Pattern) -> str | None:
     return None
 
 
+# A restrictive selection: "только"/"only" right before the mention
+# ("Выполнить аудит только Claude Opus", "do the review only on Opus", "только
+# Opus"), or English "only" right after it ("audit with Opus only").
+_EXCLUSIVE_WORDS = frozenset({"only", "exclusively", "solely", "только", "исключительно", "лишь"})
+_POSTPOSITIVE_EXCLUSIVE = frozenset({"only", "exclusively", "solely"})
+# The means words of MEANS_WORDS plus "with"/"с": after a restrictive marker
+# governed by a request or work verb they no longer read as a comparison.
+_EXCLUSIVE_MEANS = re.compile(r"on|via|through|using|with|на|через|посредством|силами|помощью|с|со",
+                             re.IGNORECASE)
+# Vendor words people put before a model name ("only Claude Opus").
+_VENDOR_WORDS = frozenset({"claude", "клод", "anthropic", "openai", "codex", "gpt"})
+_PURPOSE_PREPOSITIONS = frozenset({"for", "для"})
+_EXCLUSIVE_TAIL = frozenset({"please", "pls", "пожалуйста"})
+_EXCLUSIVE_LEAD_WINDOW = 6
+# A Russian verb form that a role stem can take: a past tense (_RU_PAST), a
+# personal present or future, an infinitive, an imperative, a verbal adverb or
+# a participle ("тестировал", "тестирую", "кодит", "рефакторю", "ревьюить",
+# "планируй", "тестируя", "рефакторя", "протестировав", "тестирующий",
+# "тестировавший", "тестированный", "тестируемый", and the short passive
+# "тестирован", "тестировано"). The role nouns that end like one ("аудит",
+# "аудите", "тестированием", "реализация", "безопасность", "план", "дизайн")
+# are not verbs; a genitive plural in -ов ("тестов") is not a verbal adverb.
+_RU_VERB_FORM = re.compile(
+    r"[а-яё]+(?:(?:ую|юю|[рл]ю|ешь|ёшь|ишь|ет|ёт|ит|ем|ём|им|ете|ёте|ите|ут|ют|ат|ят"
+    r"|ть|уй|уйте|юй|юйте|уя|юя|[бвгджзклмнпрстфхцчшщ]я"
+    r"|(?:ущ|ющ|ащ|ящ|вш|нн|ем|им)(?:ий|ый|ой|ая|яя|ое|ее|ие|ые|ого|его|ому|ему|ым|им|ом|ем"
+    r"|ую|юю|ых|их|ыми|ими|ей|ою|ею))(?:ся|сь)?"
+    r"|[аяеи]в(?:ши|шись)?|(?:ован|ен)[аоы]?)"
+)
+_RU_VERB_LOOKALIKE = re.compile(r"аудит|аудите|[а-яё]+(?:ием|ия|ость|есть)")
+
+
+def _ru_verb_form(word: str) -> bool:
+    word = word.casefold()
+    return bool(_RU_PAST.fullmatch(word)
+                or (_RU_VERB_FORM.fullmatch(word) and not _RU_VERB_LOOKALIKE.fullmatch(word)))
+
+
+def _role_noun(word: str) -> bool:
+    """A role or stage word that is not a Russian verb form of one ("аудит",
+    "тесты", "ревью", "review"; not "тестируй", "тестирован", "проверь")."""
+    return bool(_ROLE_OR_STAGE.fullmatch(word)) and not (
+        _CYRILLIC.search(word) and (WORK_VERBS.fullmatch(word) or REQUEST_WORDS.fullmatch(word)
+                                    or _ru_verb_form(word)))
+
+
+def _apposition_word(word: str) -> bool:
+    """A plain Latin word that may name the model before its parenthesized
+    exact identity ("Claude Opus (claude-agent-acp/opus[1m])")."""
+    return not (_CYRILLIC.search(word) or _reserved_request_word(word) or word in _EXCLUSIVE_WORDS
+                or _ROLE_OR_STAGE.fullmatch(word) or _REFUSAL_WORDS.fullmatch(word))
+
+
+def _exclusive_selection(context: Mapping, pattern: re.Pattern, parenthesized: bool = False) -> bool:
+    """Whether a not-refused mention is restrictively selected: "только"/
+    "only" (optionally followed by a means preposition, a vendor word such
+    as "Claude" or another spelling of the same model) stands right before
+    it, or English "only" right after it, and
+
+    - nothing follows the mention in its clause segment except a purpose
+      phrase ("for the audit", "для ревью") or "please" -- "only Opus found
+      the bug" is a remark; and
+    - before the marker in its clause there is nothing ("Только Opus"), only
+      role or stage nouns without a means preposition ("Аудит только Opus"),
+      or a request-form request verb, or a request-form work verb with its
+      own object or a means preposition ("Выполнить аудит только Opus",
+      "review the code only on Opus") -- "review only Opus" names what is
+      reviewed, "аудит делал только Opus" reports.
+
+    A ``parenthesized`` exact identity is an apposition of the name before
+    it ("только Claude Opus (claude-agent-acp/opus[1m])"): up to two plain
+    name words may stand between it and the marker."""
+    clause = context["clause"]
+    words = [word for word, _lead in clause]
+
+    def name_word(word):
+        if word in _VENDOR_WORDS or word in MEANS_FILLERS or pattern.fullmatch(word):
+            return True
+        # Latin name words only ("Claude Opus"); Russian spellings are labels.
+        return parenthesized and _apposition_word(word)
+
+    position = len(words)
+    for _ in range(2):
+        if position and name_word(words[position - 1]):
+            position -= 1
+    means = bool(position) and bool(_EXCLUSIVE_MEANS.fullmatch(words[position - 1]))
+    if means:
+        position -= 1
+    after = list(context["after"])
+    if position and words[position - 1] in _EXCLUSIVE_WORDS:
+        lead = clause[:position - 1]
+    elif after and after[0] in _POSTPOSITIVE_EXCLUSIVE:
+        lead, after = clause[:position], after[1:]
+    else:
+        return False
+    if after and after[0] not in _PURPOSE_PREPOSITIONS and not all(word in _EXCLUSIVE_TAIL for word in after):
+        return False
+    lead_words = [word for word, _lead in lead]
+    if not lead_words:
+        return True
+    # A role noun alone, never a verb: English "Review only Opus" names what is
+    # reviewed, so an English role word needs "for" or an article before it,
+    # and a Russian verb in any form ("Тестируй только Opus", "Тестировал
+    # только Opus", "Тестируя только Opus", "Тестирующий только Opus")
+    # is never a role noun; "для" only looks like a verbal adverb.
+    if not means and len(lead_words) <= 3 and (
+            _CYRILLIC.search(lead_words[0]) or lead_words[0] in _PURPOSE_PREPOSITIONS
+            or lead_words[0] in {"the", "a", "an"}) and all(
+            word in MEANS_FILLERS or word in _PURPOSE_PREPOSITIONS or _role_noun(word) for word in lead_words):
+        return True
+    recent = lead[-_EXCLUSIVE_LEAD_WINDOW:]
+    for index, (word, word_lead) in enumerate(recent):
+        if _request_form(REQUEST_WORDS, word, word_lead):
+            return True
+        if _request_form(WORK_VERBS, word, word_lead) and (means or index < len(recent) - 1):
+            return True
+    return False
+
+
 def requests_family(text: str, family: str, names: Sequence[str] | None = None,
                     *, pattern: re.Pattern | None = None,
                     exact_pattern: re.Pattern | None = None) -> str | None:
@@ -1737,8 +1870,10 @@ def requests_family(text: str, family: str, names: Sequence[str] | None = None,
     ``exact_pattern`` for enabled identities additionally accepts a direct
     на/on/via/with, or a listing item (the identity alone in its clause, as in
     "Part 2: <identity>") governed by a non-negated request-form verb
-    elsewhere in the same message. Labels retain local grammar. ``names``
-    are extra spellings (see :func:`family_pattern`)."""
+    elsewhere in the same message. Labels retain local grammar. A
+    restrictive selection (:func:`_exclusive_selection`: "только Opus",
+    "do the audit only on Opus") is a request too. ``names`` are extra
+    spellings (see :func:`family_pattern`)."""
     # Only enabled exact identities get message-wide request governance and
     # a direct means-preposition grant. Owner-configured labels keep the
     # conservative local grammar; model-authored text never reaches this call.
@@ -1750,10 +1885,15 @@ def requests_family(text: str, family: str, names: Sequence[str] | None = None,
                     and not any(NEGATION_WORDS.fullmatch(prior) for prior in lead[-NEGATION_WINDOW:])):
                 message_request = True
                 break
-    for match in (pattern if pattern is not None else family_pattern(family, names)).finditer(text):
+    pattern = pattern if pattern is not None else family_pattern(family, names)
+    for match in pattern.finditer(text):
         context = _mention_context(text, match)
         if _refused_mention(context):
             continue
+        if _exclusive_selection(context, pattern, parenthesized=(
+                match.span() in exact_spans and text[match.start() - 1:match.start()] == "("
+                and text[match.end():match.end() + 1] == ")")):
+            return match.group(0)
         # The governing verb must stand in the mention's own clause.
         window = context["clause"][-REQUEST_WINDOW:]
         # A refusal before the subjunctive's clause ("не хочу, чтобы ...")
@@ -1780,12 +1920,28 @@ def _timestamp_key(value) -> float:
 
 
 def _user_texts(store, db, task_id: str) -> Iterator[tuple[str, str | None]]:
-    """``(source_ref, text)`` of every user-authored source of the task,
-    newest first: source revisions (by publication time) and answered
+    """``(source_ref, text)`` of :func:`_user_sources`."""
+    for source_ref, text, _selection in _user_sources(store, db, task_id):
+        yield source_ref, text
+
+
+def _choice(value) -> str:
+    return " ".join(str(value).split()).casefold().rstrip(".!")
+
+
+def _user_sources(store, db, task_id: str) -> Iterator[tuple[str, str | None, dict | None]]:
+    """``(source_ref, text, selection)`` of every user-authored source of the
+    task, newest first: source revisions (by publication time) and answered
     questions' answers (by answer time), interleaved so the latest user
-    message comes first. ``None`` is an attribution barrier after current
+    message comes first. ``None`` text is an attribution barrier after current
     user text surrounding an ambiguous imported summary; older grants cannot
-    survive it unless a newer direct user request reauthorizes them."""
+    survive it unless a newer direct user request reauthorizes them.
+
+    ``selection`` is ``{"question": <question text>}`` when a real user
+    answer is exactly one of its question's recorded options (a typed option
+    number is stored as that option), else ``None``. The user's choice of an
+    option is the user's own words; the question text and the options a
+    model wrote are never consent by themselves."""
     from ..acp import questions_store
 
     rows = db.execute(
@@ -1798,15 +1954,21 @@ def _user_texts(store, db, task_id: str) -> Iterator[tuple[str, str | None]]:
             text = (store._task_directory(db, task_id) / row["filename"]).read_bytes().decode("utf-8")
         except (OSError, UnicodeDecodeError):
             continue
-        texts.append((_timestamp_key(row["created_at"]), f"{row['report_id']}:-1", text))
+        texts.append((_timestamp_key(row["created_at"]), f"{row['report_id']}:-1", text, None))
     for answer in reversed(questions_store.answered_questions(db, task_id)):
         if isinstance(answer.get("answer_text"), str):
-            texts.append((_timestamp_key(answer.get("answered_at")), answer["source_ref"], answer["answer_text"]))
+            options = answer.get("options") if isinstance(answer.get("options"), list) else []
+            chosen = _choice(answer["answer_text"])
+            selection = (dict(question=str(answer.get("question_text") or ""))
+                         if chosen and any(isinstance(option, str) and _choice(option) == chosen for option in options)
+                         else None)
+            texts.append((_timestamp_key(answer.get("answered_at")), answer["source_ref"], answer["answer_text"],
+                          selection))
     # Stable: equal times keep sources before answers, each newest first.
-    for _time, source_ref, text in sorted(texts, key=lambda item: item[0], reverse=True):
-        yield source_ref, _without_substitution_emphasis(_user_authored(text))
+    for _time, source_ref, text, selection in sorted(texts, key=lambda item: item[0], reverse=True):
+        yield source_ref, _without_substitution_emphasis(_user_authored(text)), selection
         if _HISTORY.search(text):
-            yield source_ref, None
+            yield source_ref, None, None
 
 
 _HISTORY = re.compile(r"<chat-history-summary>.*?</chat-history-summary>", re.S)
@@ -1974,6 +2136,439 @@ def _source_effort(source: str, normalized: str, pattern: re.Pattern, matched: s
     return next(iter(values), None)
 
 
+def _named_identity_patterns(overrides: Mapping, identities: Sequence[str]) -> dict[str, re.Pattern]:
+    """Every enabled identity's request pattern: the exact identity, a unique
+    bare model ID, and its configured (else derived) request labels."""
+    patterns = {}
+    for identity in identities:
+        engine, _, model = identity.partition("/")
+        names = model_policy.policy_for(engine, model, overrides).request_names or derived_request_names(
+            identity, identities, overrides)
+        patterns[identity] = re.compile(_source_request_pattern(identity, names, identities).pattern + (
+            "|" + "|".join(rf"(?<![^\s\"'«“(]){re.escape(n)}(?=[.,!?;:)»”\"']?(?:\s|$))" for n in names)
+            if names else ""), re.IGNORECASE)
+    return patterns
+
+
+# The words a chosen question option may hold besides the model's names and
+# still be a choice of that model (see _option_selects).
+_OPTION_AFFIRMATIONS = frozenset({"да", "yes", "ok", "okay", "ок"})
+_OPTION_NOTES = frozenset({"recommended", "default", "рекомендуется", "рекомендую", "рекомендуемый",
+                           "рекомендуемая", "рекомендуемое"})
+_OPTION_FILLERS = MEANS_FILLERS | {"модель"}
+_OPTION_PRONOUNS = frozenset({"it", "this", "это", "его", "её", "ее"})
+_OPTION_COORDINATORS = frozenset({"and", "or", "и", "или"})
+# "Use Opus to review the code" / "Opus для аудита" name what the model is for.
+_OPTION_PURPOSE = _PURPOSE_PREPOSITIONS | {"to"}
+# "Sonnet вместо Opus": what a chosen model replaces, followed only by that model.
+_OPTION_SUBSTITUTION = re.compile(r"instead|rather|replac\w*|substitut\w*|вместо|замен\w*", re.IGNORECASE)
+_OPTION_SUBSTITUTED = frozenset({"of", "than", "на"})
+# Request verbs whose bare object before the model is what the model gets
+# ("Передать аудит Opus"); after any other verb it may be the model's own
+# ("Использовать аудит Opus" can mean Opus's audit).
+_DATIVE_REQUESTS = re.compile(r"переда\w*|поруч\w*|отда\w*|назнач\w*|assign|delegate", re.IGNORECASE)
+_SELF, _OTHER = object(), object()
+
+
+def _purpose_noun(word: str) -> bool:
+    """A role, stage or purpose word ("аудита", "review", "ui"), never a verb."""
+    return _role_noun(word) or (not _CYRILLIC.search(word)
+                                and any(re.fullmatch(purpose, word, re.I) for purpose, _roles in _PURPOSE_ROLES))
+
+
+def _option_tokens(option: str, pattern: re.Pattern, others: Sequence[re.Pattern]) -> list:
+    """The casefolded words of ``option`` with each mention of this model as
+    :data:`_SELF` and of another enabled model as :data:`_OTHER`. Up to two
+    plain Latin words right before a parenthesized mention are its name
+    ("Claude Fable (engine/fable-5)")."""
+    spans = []
+    for kind, patterns in ((_SELF, [pattern]), (_OTHER, others)):
+        for candidate in patterns:
+            for match in candidate.finditer(option):
+                if not any(match.start() < end and start < match.end() for start, end, _kind in spans):
+                    spans.append((match.start(), match.end(), kind))
+    tokens, cursor = [], 0
+    for start, end, kind in sorted(spans, key=lambda span: span[0]):
+        words = _plain_words(option[cursor:start])
+        if kind is _SELF and option[start - 1:start] == "(" and option[end:end + 1] == ")":
+            for index in range(len(words) - 1, max(len(words) - 3, -1), -1):
+                if not _apposition_word(words[index]) or words[index] in (
+                        _OPTION_PURPOSE | _OPTION_AFFIRMATIONS | _OPTION_NOTES | _EXCLUSIVE_TAIL):
+                    break
+                words[index] = _SELF
+        tokens.extend(words)
+        tokens.append(kind)
+        cursor = end
+    tokens.extend(_plain_words(option[cursor:]))
+    return tokens
+
+
+def _option_prefix(words: Sequence, post_exclusive: bool) -> bool:
+    """Whether the words before the model in a chosen option only select it:
+    an optional affirmation, an optional request-form request or work verb
+    (a Russian role-noun object may precede it), its object (role or stage
+    nouns, "it") or a purpose phrase ("для аудита"),
+    then exclusive markers, means prepositions, vendor words and fillers.
+    A bare role noun right before the model may be the model's own ("аудит
+    Opus"), so it needs a marker, a means preposition or a giving verb; a work
+    verb needs a means preposition, or an object and a marker ("Review only
+    Opus" names what is reviewed)."""
+    index = 0
+    while index < len(words) and (words[index] in _OPTION_AFFIRMATIONS or words[index] in _EXCLUSIVE_TAIL):
+        index += 1
+    # Russian may name the object first ("Ревью делай через Opus").
+    verb = index
+    while verb < len(words) and isinstance(words[verb], str) and _CYRILLIC.search(words[verb]) and _role_noun(
+            words[verb]):
+        verb += 1
+    governor = None
+    if verb < len(words) and isinstance(words[verb], str):
+        lead = tuple(words[:verb])
+        if _request_form(REQUEST_WORDS, words[verb], lead):
+            governor = "dative" if _DATIVE_REQUESTS.fullmatch(words[verb]) else "request"
+        elif _request_form(WORK_VERBS, words[verb], lead):
+            governor = "work"
+    objects = governor is not None and verb > index
+    if governor is not None:
+        index = verb + 1
+    purpose = False
+    while index < len(words) and isinstance(words[index], str):
+        word = words[index]
+        if word in _PURPOSE_PREPOSITIONS:
+            purpose = True
+        elif purpose and (_purpose_noun(word) or word in _OPTION_FILLERS or word in _OPTION_COORDINATORS):
+            pass
+        elif not purpose and ((_role_noun(word) and (governor or _CYRILLIC.search(word)))
+                              or (governor and word in _OPTION_PRONOUNS)):
+            objects = True
+        elif not purpose and (word in _OPTION_FILLERS or (objects and word in _OPTION_COORDINATORS)):
+            pass
+        else:
+            break
+        index += 1
+    exclusive = post_exclusive
+    strict_means = means = False
+    for word in words[index:]:
+        if not isinstance(word, str):
+            return False
+        if word in _EXCLUSIVE_WORDS:
+            exclusive = True
+        elif _EXCLUSIVE_MEANS.fullmatch(word) or (word == "to" and governor in {"request", "dative"}):
+            means = True
+            strict_means = strict_means or bool(MEANS_WORDS.fullmatch(word))
+        elif not (word in _VENDOR_WORDS or word in _OPTION_FILLERS):
+            return False
+    if governor == "work":
+        return strict_means or (exclusive and (objects or means))
+    return not objects or means or exclusive or governor == "dative"
+
+
+def _option_suffix(words: Sequence) -> bool:
+    """Whether the words after the model in a chosen option only qualify the
+    choice: "only", "please", "recommended", a purpose phrase ("for the
+    audit", "для ревью") or what it replaces ("вместо Opus")."""
+    state = "free"
+    for word in words:
+        if word is _OTHER:
+            if state != "substitution":
+                return False
+            state = "replaced"
+        elif not isinstance(word, str):
+            return False
+        elif state == "substitution":
+            if not (word in _OPTION_SUBSTITUTED or word in _VENDOR_WORDS or word in _OPTION_FILLERS):
+                return False
+        elif word in _POSTPOSITIVE_EXCLUSIVE or word in _EXCLUSIVE_TAIL or word in _OPTION_NOTES:
+            pass
+        elif state in {"free", "replaced"} and (word in _VENDOR_WORDS or word in _OPTION_FILLERS):
+            pass
+        elif state == "free" and _OPTION_SUBSTITUTION.fullmatch(word):
+            state = "substitution"
+        elif word in _OPTION_PURPOSE:
+            state = "purpose"
+        elif state == "purpose" and (_purpose_noun(word) or word in _OPTION_FILLERS or word in _OPTION_PRONOUNS
+                                     or word in _OPTION_COORDINATORS):
+            pass
+        else:
+            return False
+    return state != "substitution"
+
+
+# The words a chosen option may hold besides the model's names and still be
+# only its name ("Opus", "Только Opus", "Да, Opus (рекомендуется)"). Such an
+# option carries no verb or purpose of its own, so it is a choice of the model
+# only under a question that asks which model to use (_question_selections).
+_OPTION_BARE = (_VENDOR_WORDS | _OPTION_FILLERS | _OPTION_AFFIRMATIONS | _OPTION_NOTES | _EXCLUSIVE_WORDS
+                | _EXCLUSIVE_TAIL)
+# Request verbs of choosing, not of giving the work to the model ("Передать
+# Opus") or running it there: "Выбрать Opus" says no more than "Opus", so
+# under "Чей результат принять?" it picks a result too.
+_CHOICE_REQUESTS = re.compile(
+    r"use|pick|choose|select|prefer|использ\w*|задейств\w*|выб[еи]р\w*|выбрать|взять|возьм\w*"
+    r"|бер(?:и|ите|ём|ем)", re.IGNORECASE)
+# An interrogative determiner and how many words after it may lead to the
+# role or stage noun it asks about ("Какой из двух аудитов использовать?").
+_QUESTION_WHICH = re.compile(r"как(?:ой|ая|ое|ие|ую|им|ом|ого|ому|их|ими)|котор\w+|which|what", re.IGNORECASE)
+_WHICH_WINDOW = 4
+# A model or route noun, a work verb or a purpose word between the determiner
+# and the role noun makes a verb of choice before that noun pick a model:
+# "Какую выбрать модель для аудита?", "Which should we pick for the audit?",
+# "Which should we use to review?".
+_RU_PURPOSE_CONJUNCTIONS = frozenset({"чтобы", "чтоб"})
+# Means and locative prepositions governing the role noun name where the
+# chosen model goes ("Какую выбрать на аудит?", "Какую использовать в
+# аудите?", "Which one should we use on the audit?"); one in an unrelated
+# adverbial phrase does not ("Какой в итоге выбрать аудит?", "Which should we
+# pick in the end, the audit?").
+_CHOICE_PLACEMENT = frozenset({"на", "в", "во", "on", "in", "at"})
+# English articles: one may stand between a placement word and the role noun
+# it governs, and none counts toward the determiner's window.
+_CHOICE_ARTICLES = frozenset({"the", "a", "an"})
+# A question's verb of choice after "<modal> we" or "<modal> I" asks what to
+# choose ("Which one should we use on the audit?"), unlike the statement "we
+# use" in prose.
+_QUESTION_MODALS = frozenset({"should", "shall", "can", "could", "would", "will", "must", "do"})
+_SELECTION_NOUN = re.compile(r"models?|routes?|engines?|модел\w*|маршрут\w*|движ(?:ок|ка|ку|ком|ке|ки|ков)",
+                             re.IGNORECASE)
+# A model or route asked for as the means or the object of a choice: "Какой
+# моделью выполнить аудит?", "На какой модели гонять проверку?", "Какую
+# модель использовать?", "Какой модели поручить аудит?", "Which model should
+# run the review?". Matched over
+# the casefolded words of one sentence joined by single spaces.
+_MODEL_SELECTION_FRAME = re.compile(
+    r"(?<!\S)(?:(?:как|котор)(?:ой|ою) моделью|(?:как|котор)ым (?:маршрутом|движком)"
+    r"|на (?:как|котор)(?:ой модели|ом (?:маршруте|движке))|(?:как|котор)ую модель|(?:как|котор)ая модель для"
+    r"|(?:как|котор)ой модели (?:поруч|переда|отда|назнач)\w*"
+    r"|(?:which|what) (?:model|route|engine)(?:$| (?:to|for|should|shall|will|would|must|can|could|do|does)))(?!\S)")
+# Whose result, opinion or past work to accept, or which model did better,
+# is a judgement, not a model to use: "Чей результат аудита принять?", "Какая
+# модель лучше справилась с аудитом?", "Which model found more issues?".
+_QUESTION_JUDGEMENT = re.compile(
+    r"чей|чь[яеёи]|чь(?:его|ему|ей|ею|им|их|ими|ю|ём|ем)|whose"
+    r"|лучш\w*|хуже|better|best|worse|worst|справ(?:ил|ля|ит|ят)\w*|found|нашл\w*|наш[её]л", re.IGNORECASE)
+_NOT_POSSESSIVE = frozenset({"let's", "it's", "that's", "what's", "here's", "there's", "who's"})
+_EN_PAST_WORK = frozenset({"did", "done", "ran", "wrote", "written", "built", "made", "chose", "chosen",
+                           "took", "taken", "gave", "given"})
+# Results to accept: with only a request verb ("Результаты какой модели
+# использовать?", "Which findings should we use?") the choice is of a result.
+_QUESTION_RESULTS = re.compile(
+    r"результат\w*|мнени\w*|замечани\w*|вывод\w*|отч[её]т\w*|находк\w*|оценк\w*|предложени\w*|верси\w*"
+    r"|ответ(?:а|ы|ов|у|ом|е|ам|ами|ах)?"
+    r"|results?|findings?|opinions?|conclusions?|reports?|answers?|verdicts?|outputs?|suggestions?|proposals?"
+    r"|versions?", re.IGNORECASE)
+
+
+def _past_work(words: Sequence[str], index: int) -> bool:
+    """Whether ``words[index]`` reports past work or a past choice ("выполнила",
+    "провели", "выбрали", "reviewed", "used", "did"), not a request; a
+    Russian past tense after "чтобы" is the subjunctive and still asks."""
+    word = words[index]
+    if _CYRILLIC.search(word):
+        return bool((_RU_SUBJUNCTIVE_WORK.fullmatch(word) or _RU_SUBJUNCTIVE_REQUEST.fullmatch(word))
+                    and not any(lead in _RU_SUBJUNCTIVE_MARKERS for lead in words[:index]))
+    return word in _EN_PAST_WORK or (word.endswith("ed") and any(
+        verbs.fullmatch(word[:-cut]) for verbs in (REQUEST_WORDS, WORK_VERBS) for cut in (1, 2, 3)))
+
+
+def _product_choice(words: Sequence[str]) -> bool:
+    """Whether a sentence asks which work product to choose: a verb of
+    choice (:data:`_CHOICE_REQUESTS`) after a role or stage noun under an
+    interrogative determiner ("Какой аудит выбрать?", "Какой из двух аудитов
+    использовать?", "Which audit should we pick?") picks an audit, not a model.
+    So does one between the determiner and the noun ("Какой выбрать аудит?",
+    "Which should we pick, the audit?") unless a model or route noun, a work
+    verb, a purpose word or a means/locative preposition governing the noun
+    sits between them (:data:`_SELECTION_NOUN`, :data:`_CHOICE_PLACEMENT`:
+    "Какую выбрать на аудит?"). Articles do not count toward the window."""
+    for index, word in enumerate(words):
+        if not _QUESTION_WHICH.fullmatch(word):
+            continue
+        limit, verb, blocked, position, articles = index + _WHICH_WINDOW, None, False, index, 0
+        while position < min(limit, len(words) - 1):
+            position += 1
+            later = words[position]
+            if later in _CHOICE_ARTICLES:
+                articles, limit = articles + 1, limit + 1
+                continue
+            if _role_noun(later):
+                if verb is not None and not blocked:
+                    return True
+                if position <= index + _WHICH_WINDOW + articles:
+                    return any(_CHOICE_REQUESTS.fullmatch(after) for after in words[position + 1:])
+                break
+            if _CHOICE_REQUESTS.fullmatch(later):
+                if verb is None:
+                    verb, limit = position, position + _WHICH_WINDOW
+            elif (_SELECTION_NOUN.fullmatch(later) or WORK_VERBS.fullmatch(later) or later in _OPTION_PURPOSE
+                  or later in _RU_PURPOSE_CONJUNCTIONS or (later in _CHOICE_PLACEMENT
+                                                           and _governs_role_noun(words, position))):
+                blocked = True
+    return False
+
+
+def _governs_role_noun(words: Sequence[str], position: int) -> bool:
+    """Whether the placement word at ``words[position]`` governs a role noun:
+    the noun is the next word, optionally after one article ("на аудит",
+    "on the audit"), not further on ("в итоге ... аудит")."""
+    following = words[position + 1:position + 3]
+    if following and following[0] in _CHOICE_ARTICLES:
+        following = following[1:]
+    return bool(following) and _role_noun(following[0])
+
+
+def _question_sentences(question: str) -> list[tuple[str, bool]]:
+    """The sentences of a model-authored question that neither judge -- a
+    possessor, evaluation, finding or past-work cue (:data:`_QUESTION_JUDGEMENT`,
+    "model's", "выполнила") -- nor choose among results or work products
+    (:data:`_QUESTION_RESULTS`, :func:`_product_choice`), each with whether it
+    asks which model to use for some work: a model/route selection frame
+    (:data:`_MODEL_SELECTION_FRAME`) or a request-form request or work verb
+    whose object is not a result or work product ("Чем выполнить аудит?",
+    "Кому поручить аудит?"). A selection frame asks for a model whatever else
+    the sentence names."""
+    sentences = []
+    for sentence in _SENTENCE_END.split(question.replace("’", "'")):
+        words = _plain_words(sentence)
+        if not words or any(
+                _QUESTION_JUDGEMENT.fullmatch(word) or (word.endswith("'s") and word not in _NOT_POSSESSIVE)
+                or _past_work(words, index) for index, word in enumerate(words)):
+            continue
+        product = _product_choice(words)
+        requested = False
+        for clause in _CLAUSE_BREAK.split(sentence):
+            clause_words = _plain_words(clause)
+            requested = requested or any(
+                _request_form(verbs, word, tuple(clause_words[:index]), subjunctive=True)
+                and not (product and verbs is REQUEST_WORDS and _CHOICE_REQUESTS.fullmatch(word))
+                for verbs in (REQUEST_WORDS, WORK_VERBS) for index, word in enumerate(clause_words))
+            requested = requested or (not product and any(
+                _CHOICE_REQUESTS.fullmatch(word) and index >= 2 and clause_words[index - 1] in _CHOOSERS
+                and clause_words[index - 2] in _QUESTION_MODALS for index, word in enumerate(clause_words)))
+        results = any(_QUESTION_RESULTS.fullmatch(word) for word in words)
+        if _MODEL_SELECTION_FRAME.search(" ".join(words)):
+            sentences.append((sentence, True))
+        elif requested and not results:
+            sentences.append((sentence, True))
+        elif not (results or product):
+            sentences.append((sentence, False))
+    return sentences
+
+
+def _question_selections(question: str) -> list[str]:
+    """The sentences of a model-authored question that ask which model to use
+    for some work (see :func:`_question_sentences`). A bare-name option grants
+    only under one of them, and they scope which purpose the choice covers.
+    The question never grants by itself."""
+    return [sentence for sentence, selects in _question_sentences(question) if selects]
+
+
+def _question_scope(question: str) -> list[str]:
+    """The sentences of a model-authored question that scope the purpose of a
+    chosen option naming no work of its own: those asking which model to use,
+    else those that neither judge nor choose a result or work product
+    ("Аудит завершён. Что дальше?" -> the first sentence; never "Чей результат
+    аудита принять?")."""
+    sentences = _question_sentences(question)
+    return [sentence for sentence, selects in sentences if selects] or [sentence for sentence, _ in sentences]
+
+
+def _bare_choice(prefix: Sequence, suffix: Sequence) -> bool:
+    """Whether a chosen option holds, apart from the model's names, only
+    bare words (:data:`_OPTION_BARE`), at most one request-form verb of choice
+    before the model (:data:`_CHOICE_REQUESTS`: "Выбрать Opus", "Use Opus";
+    not a giving verb, "Передать Opus") and what the model replaces ("Sonnet
+    вместо Opus"): no object, purpose or means of its own."""
+    cut = next((index for index, word in enumerate(suffix)
+                if isinstance(word, str) and _OPTION_SUBSTITUTION.fullmatch(word)), len(suffix))
+    if not all(isinstance(word, str) and word in _OPTION_BARE for word in suffix[:cut]):
+        return False
+    if not all(word is _OTHER or (isinstance(word, str) and (
+            _OPTION_SUBSTITUTION.fullmatch(word) or word in _OPTION_SUBSTITUTED or word in _OPTION_BARE))
+            for word in suffix[cut:]):
+        return False
+    verbs = [index for index, word in enumerate(prefix) if word is not _SELF and word not in _OPTION_BARE]
+    if not verbs:
+        return True
+    verb = verbs[0]
+    return (len(verbs) == 1 and isinstance(prefix[verb], str) and bool(_CHOICE_REQUESTS.fullmatch(prefix[verb]))
+            and _request_form(REQUEST_WORDS, prefix[verb], tuple(prefix[:verb])))
+
+
+# A parenthesized plan-usage note a coordinator may add to an option now that
+# it sees usage: a percentage with only usage words ("(квота 52%)", "(52% of
+# quota used)", "(использовано 52% лимита)"). A note with any other word, such
+# as "исчерпана", stays in the option and makes it a remark.
+_USAGE_NOTE = re.compile(r"\(([^()]*\d\s*%[^()]*)\)")
+_USAGE_NOTE_WORDS = re.compile(
+    r"\d+|квот\w*|лимит\w*|план\w*|расход\w*|использован\w*|израсходован\w*|из"
+    r"|quota|limit|plan|usage|used|of|the", re.IGNORECASE)
+
+
+def _without_usage_notes(option: str) -> str:
+    """``option`` with each parenthesized plan-usage note (:data:`_USAGE_NOTE`)
+    replaced by a space."""
+    return _USAGE_NOTE.sub(lambda note: " " if all(
+        _USAGE_NOTE_WORDS.fullmatch(word) for word in _plain_words(note.group(1))) else note.group(0), option)
+
+
+def _option_selects(option: str, pattern: re.Pattern, others: Sequence[re.Pattern], question: str) -> bool:
+    """Whether a chosen option, read as a whole, selects the model of
+    ``pattern`` as the one to use rather than mentioning it as a subject,
+    possessor or past actor ("Исправить, как предложил Opus", "Opus исчерпал
+    квоту", "Accept Opus's audit result"): apart from the model's names it
+    holds only the words :func:`_option_prefix` and :func:`_option_suffix`
+    accept ("Opus", "Claude Opus (claude-agent-acp/opus[1m])", "Использовать
+    Opus", "Выполнить аудит только Claude Opus", "Opus для аудита", "Sonnet
+    вместо Opus"). Punctuation does not split it: "Opus — уже проверил" is a
+    remark too. An option that is only the model's name, or that name after a
+    lone verb of choice (:func:`_bare_choice`), selects it only when
+    ``question`` asks which model to use (:func:`_question_selections`): under
+    "Чей результат аудита принять?" the options "Opus" and "Выбрать Opus"
+    pick a result. A parenthesized plan-usage note is not part of the choice
+    ("Opus (квота 52%)", :func:`_without_usage_notes`)."""
+    tokens = _option_tokens(_without_usage_notes(option), pattern, others)
+    if _SELF not in tokens:
+        return False
+    first = tokens.index(_SELF)
+    last = len(tokens) - 1 - tokens[::-1].index(_SELF)
+    if not all(token is _SELF or token in _VENDOR_WORDS or token in _OPTION_FILLERS
+               for token in tokens[first + 1:last]):
+        return False
+    suffix = tokens[last + 1:]
+    post_exclusive = bool(suffix) and suffix[0] in _POSTPOSITIVE_EXCLUSIVE
+    if not (_option_prefix(tokens[:first], post_exclusive) and _option_suffix(suffix)):
+        return False
+    if _bare_choice(tokens[:last + 1], suffix):
+        return bool(_question_selections(question))
+    return True
+
+
+def _selected_option_mention(option: str, pattern: re.Pattern, others: Sequence[re.Pattern],
+                             question: str) -> str | None:
+    """The mention of a model in a question option the user selected, when
+    the option selects it -- an explicit responsibility construction
+    (:func:`assigns_family`) or, read as a whole, a choice of that model
+    (:func:`_option_selects`, which reads ``question`` for a bare-name
+    option) -- it is not refused, compared or substituted, and no other
+    enabled model is named the same way; else ``None``. An option naming two
+    models is ambiguous and selects neither. An option that merely mentions
+    the model (its result, quota or opinion) is the asking model's text,
+    never the user's request for it."""
+    mentions = [match for match in pattern.finditer(option)
+                if not _refused_mention(_mention_context(option, match))]
+    if not mentions:
+        return None
+    spans = [match.span() for match in mentions]
+    for other in others:
+        for match in other.finditer(option):
+            overlaps = any(match.start() < end and start < match.end() for start, end in spans)
+            if not overlaps and not _refused_mention(_mention_context(option, match)):
+                return None
+    if assigns_family(option, pattern) is not None or _option_selects(option, pattern, others, question):
+        return mentions[0].group(0)
+    return None
+
+
 def _user_model_consent(store, task_id: str, model_hint: str,
                         names: Sequence[str] | None = None) -> tuple[dict | None, dict | None]:
     """``(grant, revocation)`` from the newest user message that either
@@ -1999,8 +2594,9 @@ def _user_model_consent(store, task_id: str, model_hint: str,
             rf"(?<![^\s\"'«“(]){re.escape(label)}(?=[.,!?;:)»”\"']?(?:\s|$))" for label in derived), re.IGNORECASE)
     exact_pattern = _source_request_pattern(family, (), identities) if family in identities else None
     refusal = None
+    others = None
     with store.connection() as db:
-        for source_ref, text in _user_texts(store, db, task_id):
+        for source_ref, text, selection in _user_sources(store, db, task_id):
             if text is None:
                 if refusal is None:
                     return None, None
@@ -2014,8 +2610,17 @@ def _user_model_consent(store, task_id: str, model_hint: str,
             if refused is not None:
                 refusal = refusal or dict(source_ref=source_ref, family=family, matched=refused)
                 continue
-            matched = requests_family(text, family, names, pattern=pattern, exact_pattern=exact_pattern)
-            if matched is None:
+            if selection is not None:
+                # The user chose a question option. The asking model wrote its
+                # words, so it grants only when it selects this model, never
+                # when it merely mentions it ("Принять результат аудита Opus").
+                if others is None:
+                    others = [other for identity, other in _named_identity_patterns(overrides, identities).items()
+                              if identity != family]
+                matched = _selected_option_mention(text, pattern, others, selection["question"])
+            else:
+                matched = requests_family(text, family, names, pattern=pattern, exact_pattern=exact_pattern)
+            if matched is None and selection is None:
                 # A model made responsible for a role or stage is a request
                 # too: "добавь требование, чтобы за audit отвечал opus" named
                 # Opus for the audit, yet failed the request grammar and the
@@ -2070,33 +2675,72 @@ def _purposes_of(role_id: str) -> list[re.Pattern]:
     return [re.compile(pattern, re.I) for pattern, roles in _PURPOSE_ROLES if role_id in roles]
 
 
+# Work verbs that do not say what the work is ("Выполнить через Opus"): an
+# option holding only one of them takes its purpose from its question.
+_GENERIC_WORK = re.compile(
+    r"perform|handle|do|redo|rerun|retry|(?:с|пере|до)?дела(?:й|йте|ть|ем)|выполн\w*|провер\w*"
+    r"|провед\w*|провести", re.IGNORECASE)
+
+
+def _option_names_work(option: str, patterns) -> bool:
+    """Whether a chosen option names its own work, apart from any model's
+    names: a role, stage or purpose word ("для аудита", "review") or a work
+    verb that says what the work is ("Исправить", "fix"; not "Выполнить")."""
+    for pattern in patterns:
+        option = pattern.sub(" ", option)
+    return any(_purpose_noun(word) or any(re.fullmatch(purpose, word, re.I) for purpose, _roles in _PURPOSE_ROLES)
+               or (WORK_VERBS.fullmatch(word) and not _GENERIC_WORK.fullmatch(word))
+               for word in _plain_words(option))
+
+
 def user_purpose_model_request(store, task_id: str, role_id: str | None) -> str | None:
     """The exact enabled identity the owner asked for this role's purpose
     ("используй sonnet для ревью", "за аудит отвечает Opus", "UI/UX передавай
     Фейблу"), from the newest user sentence naming both a model request and
     that purpose; ``None`` when there is none, it is refused or names two
     models. Only the request grammar of :func:`user_model_request` counts, so
-    the returned identity also grants through it."""
+    the returned identity also grants through it. A selected question option
+    naming one model (see :func:`_user_sources`) covers the purpose the
+    option names, else the purpose its question asks the model for
+    ("Какой моделью выполнить аудит?" -> "Opus"; see :func:`_question_scope`,
+    which never reads a judging sentence): the question only scopes
+    the user's choice, never grants. An option that names its own work
+    ("Исправить через Opus") is scoped by that work alone."""
     purposes = _purposes_of(role_id or "")
     if not purposes:
         return None
     overrides = load_overrides(getattr(store, "project_root", None))
     identities = _enabled_model_identities(overrides)
-    patterns = {}
-    for identity in identities:
-        engine, _, model = identity.partition("/")
-        names = model_policy.policy_for(engine, model, overrides).request_names or derived_request_names(
-            identity, identities, overrides)
-        patterns[identity] = re.compile(_source_request_pattern(identity, names, identities).pattern + (
-            "|" + "|".join(rf"(?<![^\s\"'«“(]){re.escape(n)}(?=[.,!?;:)»”\"']?(?:\s|$))" for n in names)
-            if names else ""), re.IGNORECASE)
+    patterns = _named_identity_patterns(overrides, identities)
+
+    def has_purpose(text):
+        words = _plain_words(_QUALIFIED_AUDIT.sub(r"\g<q>\g<p>", text))
+        return any(p.fullmatch(word) for p in purposes for word in words)
+
     with store.connection() as db:
-        for _source_ref, text in _user_texts(store, db, task_id):
+        for _source_ref, text, selection in _user_sources(store, db, task_id):
             if text is None:
                 return None
-            for sentence in reversed(_SENTENCE_END.split(_effort_source_text(text, identities))):
-                words = _plain_words(_QUALIFIED_AUDIT.sub(r"\g<q>\g<p>", sentence))
-                if not any(p.fullmatch(word) for p in purposes for word in words):
+            text = _effort_source_text(text, identities)
+            if selection is not None:
+                # A chosen option grants by the option rule alone (see
+                # _user_model_consent), so the identity returned here grants there.
+                question = selection["question"]
+                scope = text if _option_names_work(text, patterns.values()) else "\n".join(
+                    _question_scope(question)) + "\n" + text
+                if not has_purpose(scope):
+                    continue
+                named = {identity for identity, pattern in patterns.items()
+                         if _selected_option_mention(text, pattern, [other for name, other in patterns.items()
+                                                                     if name != identity], question) is not None}
+                if len(named) == 1:
+                    return named.pop()
+                if named or any(refuses_family(text, identity, (), pattern=pattern) is not None
+                                for identity, pattern in patterns.items()):
+                    return None
+                continue
+            for sentence in reversed(_SENTENCE_END.split(text)):
+                if not has_purpose(sentence):
                     continue
                 named = set()
                 refused = False

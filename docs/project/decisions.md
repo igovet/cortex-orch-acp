@@ -91,6 +91,20 @@ unavailable), the replacement is chosen by the quota band, retry
 diversification, engine affinity and engine order, not by usage.
 `RANK_VERSION` is 14.
 
+### Plan usage is only the last tie-breaker
+
+The owner decided on 2026-10-23 to weaken usage-based ranking. Plan usage now
+only breaks the last tie between candidates equal on owner preferences, honoured
+hints, the 95% hot band, retry diversification and engine affinity; the 10-point
+usage-gap step is removed. An eligible route the coordinator names is never
+overridden by usage unless its known usage is hot while another candidate is
+not. A dispatch among the owner's preferred models is a legitimate choice, not a
+refusal; only a recorded user request for another route overrides it, and an
+explicit user request still wins over usage unless its route is unavailable or
+exhausted. The plan preview reports `ignored:owner_preferred` and
+`ignored:near_quota_limit` before dispatch. `list_route_options` still shows
+every route's quota band and used percentage. `RANK_VERSION` is 15.
+
 ### Paseo cancel followed by a prompt
 
 In a Paseo session, `session/cancel` followed by `session/prompt` on the same session is

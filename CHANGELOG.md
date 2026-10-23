@@ -9,6 +9,40 @@ failures stay visible. Role guidance and generated profiles are synchronized,
 and cancellation and installed-Paseo regression checks are corrected. These
 changes do not establish live qualification or release readiness.
 
+Recorded user model requests now also recognize restrictive selections
+("Выполнить аудит только Claude Opus", "только Opus", "do the review only on Opus")
+and an exact identity in parentheses after a model name. A real user answer that
+is exactly one of its question's options grants the single model that option
+selects, in plan preview and at dispatch alike. It covers the work the option names,
+or else the purpose its question asks a model for, for unhinted review nodes; a
+sentence judging a result never supplies that purpose. A bare model name, alone or
+after a lone verb of choice ("Выбрать Opus", "Pick Opus"), grants only under a
+question that asks which model to use (including "Какой модели поручить
+аудит?"). An option that only mentions a model
+("Принять результат аудита Opus", "Opus исчерпал квоту"), such a name chosen
+under "Чей результат аудита принять?", "Чью проверку использовать?", "Какой
+аудит выбрать?", "Какой выбрать аудит?" or "Какой в итоге выбрать аудит?", question text, unchosen options,
+coordinator `model_reason`, remarks, negations and imported history still never
+grant. "Какую выбрать на аудит?" and "Which one should we use on the audit?" ask
+which model to use, and a parenthesized usage note ("Opus (квота 52%)") does not
+stop an option from selecting its model. Quota and limit words are not refusals:
+"Сделай аудит на Opus в пределах лимита" still requests Opus and revokes no earlier
+grant. Hard owner deny, unavailability and exhausted quota still refuse without
+substitution.
+
+Plan usage is now only the last tie-breaker between otherwise equal routes (rank
+version 15): the 10-point "meaningfully less used ranks first" step is removed, so
+usage no longer outranks engine affinity or retry diversification. A route the
+coordinator names that is eligible is kept whatever its usage, unless its known
+usage is at least 95% while another candidate is not hot; the replacement is
+recorded as `ignored:near_quota_limit`. Owner preferred models for the work kind
+still outrank a hint naming another route, and the plan preview now reports that
+(`ignored:owner_preferred` with the `owner_preferred` routes) instead of
+`pending_dispatch`, so a legitimate choice among the owner's models is not
+treated as a mismatch. Explicit user requests keep precedence. `list_route_options`
+still shows quota bands and used percentages. New audits drop `usage_band` and the
+usage `margin`.
+
 The default install preset now matches the refreshed production routing values:
 Sol's `preferred_when` is `null`, so its configured work-kind preferences no longer
 need an exact route hint and remain active on quality retries. At equal quota

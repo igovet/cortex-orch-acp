@@ -54,16 +54,17 @@ def test_request_cannot_bypass_route_authorization_ceiling(tmp_path, monkeypatch
 
 @pytest.mark.parametrize("used,expected,status,decided_by", [
     (0.0, "codex-acp", "active", "affinity"),
-    # Within USAGE_MARGIN of the least-used plan: the kind of work decides.
+    # Rank version 15: below the hot band the kind of work decides at any gap;
+    # usage is only the last tie-breaker.
     (9.999, "codex-acp", "active", "affinity"),
-    # A plan at least 10 points more used ranks behind, at any level.
-    (10.0, "claude-agent-acp", "active", "usage"),
-    (85.0, "claude-agent-acp", "active", "usage"),
+    (10.0, "codex-acp", "active", "affinity"),
+    (85.0, "codex-acp", "active", "affinity"),
+    (94.9, "codex-acp", "active", "affinity"),
     (95.0, "claude-agent-acp", "active", "quota"),
     (99.999, "claude-agent-acp", "active", "quota"),
     (None, "codex-acp", "unavailable", "affinity"),
 ])
-def test_plan_usage_ranks_whenever_every_usage_is_known(used, expected, status, decided_by):
+def test_plan_usage_is_compared_whenever_every_usage_is_known(used, expected, status, decided_by):
     observed = [entry("codex-acp", "first"), entry("claude-agent-acp", "second")]
     policies = {"codex-acp": {"auto": ["first"], "tiers": {"first": "standard"}},
                 "claude-agent-acp": {"auto": ["second"], "tiers": {"second": "standard"}}}
@@ -76,7 +77,7 @@ def test_plan_usage_ranks_whenever_every_usage_is_known(used, expected, status, 
     assert decision["decided_by"] == decided_by
     if status != "active":
         assert not decision["usage"]["active"]
-        assert all(e["usage_band"] is None for e in decision["candidates"])
+        assert all("usage_band" not in e for e in decision["candidates"])
 
 
 def test_non_flagship_plan_preview_carries_recorded_source(tmp_path, monkeypatch):

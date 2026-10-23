@@ -184,10 +184,15 @@ A hidden polite live region outside the card's button
 announces each real status or issue-count transition once with the worker's
 role and title; mounting or replaying a card, its first reconciling read and
 usage polls announce nothing. Its only
-store read is a compact history read (`compact: true`: status, usage and the
+store read is a compact history read (`compact: true`: status, route, usage and the
 open-issue count, no summary, check list or events), polled while the host
 shows the card running; an unchanged poll keeps the same state and does not
-re-render the card. The per-card result fetch is retired.
+re-render the card. The durable attempt route from the dispatch audit takes
+precedence over the static timeline title, including its recorded selection
+provenance. A route-only update re-renders the card on the next poll (normally
+within three seconds); before dispatch supplies a route, active cards say
+"Route pending". Settled cards with no known route say "Route unavailable".
+Older title-carried routes remain a fallback. The per-card result fetch is retired.
 
 One worker is one card. A worker's ACP tool call outlives the coordinator turn
 that created it, and the installed Paseo client (0.12.0) merges a `tool_call`
@@ -482,9 +487,9 @@ zero/free.
 Automatic worker routing writes its full choice into the existing
 `attempt_route_audit.decision_detail_json` field. The `route_decision` object
 identifies its ranking algorithm with `rank_version` and records model-hint
-status/reason, quota state and plan usage (`usage`, per-candidate
-`usage_band`), engine affinity, `decided_by`, policy exclusions, and effort
-basis. Rows written before rank version 4 may also carry count-based
+status/reason, quota state and plan usage (`usage`; rows before rank
+version 15 also carry per-candidate `usage_band`), engine affinity,
+`decided_by`, policy exclusions, and effort basis. Rows written before rank version 4 may also carry count-based
 `balance` and `cross_tier` fields; they are kept and read, but no longer
 written. These are decision inputs and outcomes,
 not usage measurements. Unknown quota is retained as unknown, never reported as

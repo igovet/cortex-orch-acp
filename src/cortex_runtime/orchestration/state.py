@@ -1054,6 +1054,52 @@ def _relative(path, root):
     return path[len(root) + 1:] if path.startswith(root + '/') else path
 
 
+def _usable_menu_routes(menu, tier):
+    return {entry['route']: entry for entry in (menu.get('tiers') or {}).get(tier, [])
+            if entry.get('auto_eligible', True) and entry.get('state', 'available') == 'available'}
+
+
+def _menu_prefers(menu, route, kind, *, hinted):
+    """Whether the owner's routing settings prefer ``route`` for ``kind``
+    (``rank``'s ``purpose``): listed under ``preferred``, or a
+    ``preferred_when`` route that the hint names (the coordinator judged the
+    condition) or that affinity-bound work prefers structurally."""
+    from ..routing.auto_route import AFFINITY_BOUND_WORK_KINDS
+    if route in (menu.get('preferred') or {}).get(kind, ()):
+        return True
+    conditional = (menu.get('preferred_when') or {}).get(route)
+    if conditional is None:
+        return False
+    kinds = conditional.get('work_kinds') or ()
+    if kind in AFFINITY_BOUND_WORK_KINDS:
+        return kind in kinds
+    return hinted and (not kinds or kind in kinds)
+
+
+def _owner_preferred_routes(menu, tier, kind):
+    return sorted(route for route in _usable_menu_routes(menu, tier)
+                  if _menu_prefers(menu, route, kind, hinted=False))
+
+
+def _hint_preview_status(menu, model, tier, kind):
+    """The dispatch outcome of an exact, unconfirmed hint that serves the
+    node's tier, as far as the plan-time menu shows it: the owner's
+    preferred models for the work kind outrank a hint naming none of them
+    (``ignored:owner_preferred``), and a hot hinted route ranks behind a
+    non-hot one (``ignored:near_quota_limit``). Plan usage below the hot band
+    never moves it. Dispatch revalidates every route."""
+    usable = _usable_menu_routes(menu, tier)
+    if (not _menu_prefers(menu, model, kind, hinted=True)
+            and _owner_preferred_routes(menu, tier, kind)):
+        return 'ignored:owner_preferred'
+    hinted = usable.get(model)
+    if (hinted is not None and (hinted.get('quota') or {}).get('band') == 'hot'
+            and any((entry.get('quota') or {}).get('band') != 'hot'
+                    for route, entry in usable.items() if route != model)):
+        return 'ignored:near_quota_limit'
+    return 'pending_dispatch'
+
+
 class TaskMachine:
     def __init__(self, store):
         self.store = store
@@ -1247,7 +1293,13 @@ class TaskMachine:
                          for tier in hinted_tiers or [None]):
                 item['preview_status'] = 'ignored:tier_mismatch'
             else:
-                item['preview_status'] = 'pending_dispatch'
+                item['preview_status'] = _hint_preview_status(menu, model, item['tier_now'], item['work_kind'])
+                if item['preview_status'] == 'ignored:owner_preferred':
+                    item['owner_preferred'] = _owner_preferred_routes(menu, item['tier_now'], item['work_kind'])
+                    item['preview_note'] = (
+                        "The owner's preferred models for this work outrank this hint, so dispatch will choose one of "
+                        'owner_preferred; that is a legitimate route, not a mismatch to block on. Only a recorded user '
+                        'request for this exact route changes it.')
             if request is not None and request['matched'] == model.partition('/')[2]:
                 item['user_request_diagnostic'] = (
                     'User text names the model without its engine; it uniquely matches this enabled configured route.')

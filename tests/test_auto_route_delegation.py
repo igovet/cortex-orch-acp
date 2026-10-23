@@ -173,10 +173,10 @@ def test_deep_work_moves_off_the_account_above_the_threshold(tmp_path):
     assert detail["decision_detail"]["route_basis"] == "auto"
     assert detail["decision_detail"]["effort"] == "high"
     decision = detail["decision_detail"]["route_decision"]
-    assert decision["rank_version"] == 14
+    assert decision["rank_version"] == 15
     assert "balance" not in decision
     assert decision["used_percent_compared"] is False
-    assert decision["usage"] == dict(compared=False, active=False, status="unavailable", threshold=95.0, margin=10.0, least_used_percent=None, scope="all")
+    assert decision["usage"] == dict(compared=False, active=False, status="unavailable", threshold=95.0, role="tie_breaker", least_used_percent=None, scope="all")
     assert {c["quota_state"] for c in decision["candidates"]} == {"known", "unknown"}
     assert not hasattr(adapter, "_route_inflight")
     adapter.terminate_owned(result.attempt_id)
@@ -1003,8 +1003,10 @@ def test_coordinator_only_profile_cannot_silently_replace_user_model(tmp_path, m
     assert _read_log(log_a) == [] and _read_log(log_b) == []
 
 
-@pytest.mark.parametrize("used,expected_engine", [(9.999, "codex-acp"), (10.0, "claude-agent-acp"),
-                                                  (95.0, "claude-agent-acp")])
+# Rank version 15: usage below the hot band never moves backend work off its
+# Codex affinity; a hot (>=95%) plan still does.
+@pytest.mark.parametrize("used,expected_engine", [(9.999, "codex-acp"), (10.0, "codex-acp"),
+                                                  (94.9, "codex-acp"), (95.0, "claude-agent-acp")])
 def test_usage_boundary_reaches_real_dispatch(tmp_path, used, expected_engine):
     store, channel, provisioning, adapter, a, b, log_a, log_b, project, env = _setup(
         tmp_path, model_a="gpt-5.6-terra", model_b="claude-sonnet-5")

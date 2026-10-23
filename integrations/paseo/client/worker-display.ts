@@ -180,13 +180,19 @@ export function routeSelectionText(selection: {
 /** The compact coordinator card's identity: task title, role, the actual
  * engine · model · effort route, and separately how that route was chosen
  * (each `null` when the title carries none). */
-export function workerCardIdentity(title: string): { title: string; role: string; route: string | null; selection: string | null } {
+export function workerCardIdentity(title: string, durableRoute?: WorkerAssignment["route"]): { title: string; role: string; route: string | null; selection: string | null } {
   const { name, routeParts } = parseWorkerCardTitle(title);
   const role = (routeParts[0] || "worker").replace(/^worker-/i, "");
   const route = routeParts.slice(1).filter((part) => !ROUTE_PROVENANCE.test(part));
   const selection = routeParts.slice(1).filter((part) => ROUTE_PROVENANCE.test(part)).map(planUsageLabel);
-  return { title: name.trim() || role, role, route: route.length ? route.join(" · ") : null,
-    selection: selection.length ? selection.join(" · ") : null };
+  return { title: name.trim() || role, role, route: durableRoute ? [durableRoute.provider, workerModelDisplay(durableRoute), durableRoute.effort].filter(Boolean).join(" · ")
+      : route.length ? route.join(" · ") : null,
+    selection: durableRoute ? routeSelectionText(durableRoute.selection) : selection.length ? selection.join(" · ") : null };
+}
+
+/** A live card without route evidence is still awaiting dispatch, not unavailable. */
+export function workerCardRouteText(route: string | null, status: string): string {
+  return route ?? (isSettledWorkerStatus(status) ? "Route unavailable" : "Route pending");
 }
 
 export function workerCardMetadata(title: string, status: string) {

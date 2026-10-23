@@ -183,7 +183,9 @@ def test_callers_cannot_supply_unconfigured_request_labels(tmp_path):
     ("", "."), ("", ","), ("", "!"), ("", "?"), ("", ";"), ("", ":"),
     ('"', '"-extended'), ("'", "'[1m]"), ('prefix"', '"'),
     ('"', '-extended"'), ('"', '.v2"'), ('"', '[1m]"'),
-    ('"', "'"), ('"', ''), ('', '"'), ('(', ')'),
+    ('"', "'"), ('"', ''), ('', '"'),
+    # Paired parentheses isolate an identity like paired quotes, never a variant.
+    ('(', ''), ('', ')'), ('(', ')-extended'), ('(', '.v2)'), ('(', '[1m])'), ('x(', ')'),
 ])
 def test_exact_request_never_truncates_an_opaque_identity(identity, prefix, suffix):
     assert auto_route.requests_family(f"Use {prefix}{identity}{suffix}", identity) is None
@@ -197,6 +199,7 @@ def test_exact_request_never_truncates_an_opaque_identity(identity, prefix, suff
 @pytest.mark.parametrize("template", [
     "Use {}", "Please use {} here", "Use: {}", 'Use "{}".', "Use '{}'!",
     "Use `{}`; then continue", "Use «{}»?", "Use “{}”, please",
+    "Use ({})", "Use the named model ({}), please",
 ])
 def test_complete_exact_requests_and_explicit_quotes(identity, template):
     assert auto_route.requests_family(template.format(identity), identity) == identity

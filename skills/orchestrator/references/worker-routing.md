@@ -20,7 +20,11 @@ this task. Use only a matching route from the live menu for the nodes covered by
 that request; cite the actual user request, not a model-authored paraphrase as
 authorization. If the runtime cannot establish the request, ask for the missing
 material user decision rather than manufacture consent or silently substitute a
-route.
+route. A question option that selects exactly one route (just its name, when
+the question asks which model to use for some work, or "Use <model> for the
+audit") counts as the user's request only when the user chooses it; an option
+that only mentions a model, a name chosen to pick whose result to accept, your
+question text and your reasons never do.
 
 Classify frontend nodes involving UI design with the design implementation work
 kind, rather than the role default: this includes layout, styling, markup,

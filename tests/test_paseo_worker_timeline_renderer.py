@@ -21,7 +21,8 @@ def test_paseo_worker_timeline_row_uses_supported_agent_context_and_panel_naviga
     # shows the card running) settles a card the host left stale after a
     # plugin reload.
     assert 'resolveDurableWorkerCardStatus(item.data.title, item.data.status, usage?.status, usage?.openIssues ?? item.data.openIssues, item.data.outcomeStatus)' in source
-    assert 'workerCardIdentity(item.data.title)' in source
+    assert 'workerCardIdentity(item.data.title, usage?.route)' in source
+    assert 'workerCardRouteText(identity.route, resolvedStatus)' in source
     # The coordinator card is compact: no terminal summary or check list (the
     # worker tab shows them), no per-card result fetch, no status stripe and
     # no whole-card animation: only the executing indicator pulses

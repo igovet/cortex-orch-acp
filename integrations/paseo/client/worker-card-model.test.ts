@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { cardAccessibilityLabel, cardAttention, cardIssueCount, cardStatusAnnouncement, cardStatusKey, cardUsageSnapshot, sameCardUsage, shouldAnnounceCardStatus, CARD_ANNOUNCEMENT_TITLE_MAX_CHARS } from "./worker-card-model.ts";
-import { resolveDurableWorkerCardStatus, workerCardIdentity, workerStatusPresentation } from "./worker-display.ts";
+import { resolveDurableWorkerCardStatus, workerCardIdentity, workerCardRouteText, workerStatusPresentation } from "./worker-display.ts";
 import { openIssuesOfResult, workerCardOutcome } from "../shared/worker-card-outcome.ts";
 import { attemptResultView } from "./worker-attempt-result.ts";
 
@@ -17,6 +17,28 @@ test("card identity separates role, actual route, how the route was chosen and t
   // A very long title is kept whole (the card clips visually, the accessible name keeps it).
   const long = "x".repeat(3000);
   assert.equal(workerCardIdentity(`Worker: explorer — ${long}`).title, long);
+});
+
+test("route arrives through the compact poll without a title or usage update", () => {
+  const title = "Worker: explorer — Look";
+  const before = cardUsageSnapshot({ status: "running" });
+  assert.equal(workerCardRouteText(workerCardIdentity(title).route, before.status), "Route pending");
+  const route = { provider: "codex-acp", model: "model-id", modelName: "Observed Model", effort: "high",
+    selection: { tier: "standard", hint: null, decidedBy: "usage", planUsedPercent: 42 } };
+  const after = cardUsageSnapshot({ status: "running", route });
+  assert.ok(!sameCardUsage(before, after), "route-only changes must re-render");
+  assert.ok(sameCardUsage(after, cardUsageSnapshot({ status: "running", route: { ...route, selection: { ...route.selection } } })));
+  assert.ok(!sameCardUsage(after, cardUsageSnapshot({ status: "running", route: { ...route, effort: "low" } })));
+  assert.ok(!sameCardUsage(after, cardUsageSnapshot({ status: "running", route: { ...route, selection: { ...route.selection, planUsedPercent: 43 } } })));
+  const identity = workerCardIdentity(title, after.route);
+  assert.equal(identity.route, "codex-acp · Observed Model · high");
+  assert.equal(identity.selection, "standard · by usage · plan usage 42%");
+  assert.equal(workerCardIdentity("Worker: explorer · old · stale · low — Look", after.route).route, identity.route);
+  assert.equal(workerCardIdentity(title, { ...route, modelName: null, selection: undefined }).route, "codex-acp · model-id (alias) · high");
+  assert.equal(workerCardIdentity("Worker: explorer · old · stale — Look").route, "old · stale");
+  assert.equal(workerCardRouteText(null, "failed"), "Route unavailable");
+  assert.equal(workerCardRouteText(identity.route, "completed"), identity.route);
+  assert.match(cardAccessibilityLabel({ ...identity, status: "Working", issueCount: null, disabled: false }), /Observed Model.*Open worker/);
 });
 
 test("the open-issue count reduces current, legacy and raw results, never guessing", () => {

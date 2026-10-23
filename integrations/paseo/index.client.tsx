@@ -8,7 +8,7 @@ import { PipelinePanel } from "./client/pipeline-panel.js";
 import { SettingsScreen } from "./client/settings-panel.js";
 import { selectWorker } from "./client/worker-selection.js";
 import { isWorkerTimelineRunning } from "./client/worker-timeline-status.js";
-import { resolveDurableWorkerCardStatus, workerCardIdentity, workerStatusPresentation, type WorkerStatusTone } from "./client/worker-display.ts";
+import { resolveDurableWorkerCardStatus, workerCardIdentity, workerCardRouteText, workerStatusPresentation, type WorkerStatusTone } from "./client/worker-display.ts";
 import { coalesced } from "./client/coalesce.ts";
 import { UsageMeter, useWorkerUsage } from "./client/usage-meter.tsx";
 import { isWorkerCardCallId, WORKER_ROW_KIND, WORKER_ROW_VERSION, workerRowData, workerRowId } from "./shared/worker-card-item.ts";
@@ -66,7 +66,7 @@ function WorkerTimelineRow({ theme, layout, agentId, item, workspaceId, onOpen }
   // Polled while the host still shows the card running: a plugin reload
   // closes the provider connection and the host re-sends nothing until the
   // next prompt, so the durable attempt status is what settles the card.
-  // The read is compact (status, usage and an open-issue count only): an
+  // The read is compact (status, route, usage and an open-issue count only): an
   // unopened card never fetches a summary, check list or transcript.
   const { usage, loaded } = useWorkerUsage(workspaceId, agentId, item.data.assignmentRef, hostWorking);
   const resolvedStatus = resolveDurableWorkerCardStatus(item.data.title, item.data.status, usage?.status, usage?.openIssues ?? item.data.openIssues, item.data.outcomeStatus);
@@ -74,7 +74,7 @@ function WorkerTimelineRow({ theme, layout, agentId, item, workspaceId, onOpen }
   // Only the worker marker and status icon breathe, and only while the
   // worker is executing; the card, its text and its border never animate.
   const pulsing = workerCardPulseActive(resolvedStatus, usage?.status);
-  const identity = workerCardIdentity(item.data.title);
+  const identity = workerCardIdentity(item.data.title, usage?.route);
   const issueCount = cardIssueCount(presentation.label, usage?.openIssues, item.data.openIssues);
   const attention = cardAttention(presentation.label, issueCount, item.data.failureReason);
   // Every coloured text is readable (>= 4.5:1) on every background the card
@@ -164,7 +164,7 @@ function WorkerTimelineRow({ theme, layout, agentId, item, workspaceId, onOpen }
         </View>
       </View>
       <Text numberOfLines={2} ellipsizeMode="tail" style={{ color: theme.colors.foreground, fontSize: 14, lineHeight: 20, fontWeight: "600" }}>{identity.title}</Text>
-      <Text style={{ color: muted, fontSize: 12, lineHeight: 18 }}>{identity.route ?? "Route unavailable"}</Text>
+      <Text style={{ color: muted, fontSize: 12, lineHeight: 18 }}>{workerCardRouteText(identity.route, resolvedStatus)}</Text>
       {identity.selection && <Text style={{ color: muted, fontSize: 12, lineHeight: 18 }}>{identity.selection}</Text>}
       {attention && <View style={{ flexDirection: "row", alignItems: "center", gap: 6, minWidth: 0 }}>
         <View style={{ flexShrink: 0 }}><Icon name="CircleAlert" size={12} color={statusColor} /></View>

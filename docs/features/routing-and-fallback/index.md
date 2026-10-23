@@ -617,7 +617,86 @@ task (`routing.auto_route.user_model_request`):
   `trust_label: user_direct`); and
 - the verbatim answer of every question a real user answer resolved
   (`<question_id>:answer`), never the question text, which the asking model
-  wrote.
+  wrote. When that answer is exactly one of the question's recorded options
+  (a typed option number is stored as that option) and the option selects
+  exactly one enabled model -- its exact identity, a unique bare ID or a
+  configured or derived label -- without refusing, comparing or substituting
+  it, the user's choice is the user's request for that model
+  (`auto_route._user_sources`, `auto_route._selected_option_mention`). The
+  asking model wrote the option, so it selects a model only when, read as a
+  whole, it holds nothing but the model's names (vendor words, other spellings,
+  a parenthesized exact identity), an affirmation ("да", "yes"), exclusive
+  markers ("только", "only"), a means preposition, "please" or
+  "recommended", a purpose phrase ("для аудита", "for the review", "to review
+  the code"), what it replaces ("Sonnet вместо Opus" selects Sonnet), and a
+  request-form request or work verb with its role-noun object ("Использовать
+  Opus", "Выполнить аудит только Claude Opus", "Ревью делай через Opus",
+  "Switch the review to Opus"), or makes the model explicitly responsible for a
+  role ("За аудит отвечает Opus"). A role noun directly before the model needs
+  an exclusive marker, a means preposition or a giving verb ("Передать аудит
+  Opus"), because "аудит Opus" can be Opus's audit; a work verb needs a means
+  preposition, or an object and an exclusive marker, as in prose. Punctuation
+  does not split an option. An option that only mentions a model -- as its
+  author, subject, possessor or past actor, or with a remark about its quota or
+  limit -- grants nothing: "Исправить, как предложил Opus", "Opus исчерпал квоту — продолжить
+  автоматически", "Opus уже проверил, пропустить ревью", "Принять результат
+  аудита Opus", "Accept Opus's audit result", "Использовать результаты аудита
+  Opus", "Согласиться с Opus". An option that is only the model's name -- its
+  names, an affirmation, exclusive markers, "please" or "recommended" ("Opus",
+  the exact identity, "Только Opus"), optionally after one request-form verb
+  of choice ("Выбрать Opus", "Взять Opus", "Использовать Opus", "Use Opus",
+  "Pick Opus"; not a giving verb such as "Передать Opus") or with what it
+  replaces ("Sonnet вместо Opus") -- has no object, purpose or means of its own
+  (`auto_route._bare_choice`), so it selects the model only when a sentence of
+  its question asks which model to use for some work
+  (`auto_route._question_selections`): a model or route selection frame
+  ("Какой моделью выполнить аудит?", "На какой модели гонять проверку?",
+  "Какой модели поручить аудит?", "Which model should run the review?") or a
+  request-form request or work verb
+  whose object is not a result ("Чем выполнить аудит?", "Who should do the
+  audit?", "Кому поручить аудит?"), with no possessor, evaluation, finding or
+  past-work cue in that sentence. A verb of choice whose object is a role or
+  stage noun under an interrogative determiner picks a work product, not a
+  model ("Какой аудит выбрать?", "Какое ревью использовать?", "Какой из
+  двух аудитов использовать?", "Which audit should we pick?", "Which review
+  should we use?"), in either word order ("Какой выбрать аудит?", "Which
+  should we pick, the audit?"); a model or route noun, a work verb, a purpose
+  word, or a means or locative preposition (`на`, `в`, `во`, `on`, `in`, `at`)
+  directly governing the role noun (optionally after one article), before the
+  role noun keeps it a choice of the model ("Какую выбрать
+  модель для аудита?", "Which should we pick for the audit?", "Какую выбрать
+  на аудит?", "Какую использовать в аудите?", "Which one should we use on the
+  audit?"). A preposition in an unrelated phrase does not ("Какой в итоге
+  выбрать аудит?", "Which should we pick in the end, the audit?" still pick
+  a work product), and articles do not count toward the determiner's
+  four-word window. In a question, a verb of choice after a modal and `we`/`I`
+  ("should we use") asks what to choose. A parenthesized plan-usage note --
+  a percentage with only usage words, such as "Opus (квота 52%)" or "Opus (52%
+  of quota used)" -- is not part of the option; any other word in the note
+  ("Opus (квота исчерпана, 100%)") keeps the option a remark. Under a question about whose result, opinion or past work
+  to accept or judge ("Чей результат аудита принять?", "Чьи замечания ревью
+  принять?", "Чью проверку аудита использовать?", "Какая модель лучше
+  справилась с аудитом?", "Какая модель выполнила аудит?", "Whose review
+  should we accept?", "Which model found more issues in the review?", "Which
+  model's findings should we use?"), about which work product to pick, or
+  with no such sentence ("Аудит завершён. Что дальше?"), choosing "Opus" or
+  "Pick Opus" grants nothing. This is stricter than prose on purpose: a missed
+  grant leaves the node on its ordinary route, a false one would pin it to a model
+  the user never chose. The question text never grants by itself; it gates a
+  bare-name option and scopes which purpose the choice covers for an unhinted
+  node. An option that names its own work -- a role, stage or purpose word or
+  a work verb that says what the work is ("Исправить через Opus"; not a
+  generic "Выполнить") -- covers only that work, so after "Аудит нашёл 3
+  проблемы. Как исправлять?" it grants Opus without pinning review or audit
+  nodes. Otherwise the purpose comes from the question's sentences that ask for
+  the model ("Какой моделью выполнить аудит?" → "Opus" covers review and
+  audit nodes), or, when none does, from its sentences that neither judge nor
+  choose a result or work product (`auto_route._question_scope`). A judging
+  sentence never scopes it: after "Чей результат аудита принять? Или
+  передать дальше?" the option "Передать Opus" grants Opus without pinning
+  review or audit nodes. An unanswered
+  question, a different option, custom text that is not an option, or an
+  option naming two models grants nothing.
 
 Coordinator prose, model reasons, question text, reports and worker output are
 never read for consent. A source must request the complete, case-sensitive
@@ -654,6 +733,24 @@ in [settings-only routing](#settings-only-routing). For labels, in the same sent
   `instead`, `rather`, `than`, `over`, `compare`, `based`, `не`, `без`,
   `никогда`, `вместо`, `чем`, `сравни`, ... -- "don't use Astra", "prefer
   the default route over Astra").
+
+A restrictive selection is also a request (`auto_route._exclusive_selection`):
+`только`, `исключительно`, `лишь`, `only`, `exclusively` or `solely` directly
+before the mention (a means preposition including `with`/`с`, a vendor word such
+as "Claude" or another spelling of the same model may stand between), or English
+`only` directly after it, when nothing but a purpose phrase ("for the audit",
+"для аудита") or "please" follows the mention in its clause segment, and the
+clause before the marker holds nothing ("Только Opus"), only role or stage nouns
+without a means preposition ("Аудит только Opus", "For the review only Opus"),
+a request-form request verb, or a request-form work verb with its own object or
+a means preposition ("Выполнить аудит только Claude Opus", "Do the review only on
+Opus", "Audit with Opus only"). An exact identity in parentheses after such a
+name ("только Claude Opus (claude-agent-acp/opus[1m])") is the same selection.
+"Only Opus found the bug", "Review only Opus" (the model is what is reviewed),
+"Аудит делал только Opus", "Тестирован только Opus" (a role stem in any verb form,
+including a short passive participle, is not a role noun), "Тесты только на Opus",
+"только не Opus" and "not only Opus" grant nothing, and every negation guard below
+still applies.
 
 A bare mention grants nothing: a comparison ("compare Astra with Fable"),
 an availability remark ("Astra is unavailable; use the default route"), a
@@ -754,14 +851,19 @@ On escalation, the previous hint is not inherited (a
 [user-requested route](#user-requested-flagship-route) is the
 exception). The runtime ranks the new
 tier and prefers a different engine from the failed attempt when candidates
-otherwise tie. A hint is honoured unless the hinted route is excluded,
-unavailable or exhausted, or its usage is both at or above 95%
-(`HINT_TOLERANCE`, equal to `HOT_PERCENT`) and meaningfully worse -- by more
-than `USAGE_MARGIN` (10) points -- than an available alternative's known
-usage (`ignored:near_quota_limit`). Crossing 95% alone, with no known
-alternative or no meaningful gap, no longer disqualifies a hint (rank
-version 10). How often an engine was chosen
-before never affects a hint. Other hint statuses include
+otherwise tie. An eligible hint is honoured unless the hinted route is
+excluded, unavailable or exhausted, or its known usage is at or above 95%
+(`HINT_TOLERANCE`, equal to `HOT_PERCENT`) while the tier has a candidate that
+is not hot, known or unknown (`ignored:near_quota_limit`, rank version 15).
+When every candidate is hot, the hint stays. Plan usage below 95%, whatever
+the gap, never moves an eligible hinted route. How often an engine was chosen
+before never affects a hint. The owner's preferred models for the work kind
+still outrank a hint naming another route (`ignored:owner_preferred`): that
+is a legitimate dispatch among the routes the owner chose, not a refusal, and
+only a recorded user request for the hinted route changes it. The plan preview
+reports both outcomes before dispatch: `preview_status`
+`ignored:owner_preferred` with the `owner_preferred` routes, or
+`ignored:near_quota_limit` for a hot hinted route. Other hint statuses include
 `ignored:provider_not_allowed`, `ignored:not_offered`,
 `ignored:tier_mismatch`, `ignored:superseded`, `ignored:auto_excluded`, `ignored:no_candidate_in_tier`,
 `ignored:unavailable`, `ignored:escalated`, `ignored:owner_preferred`, and
@@ -784,7 +886,7 @@ eligible candidates the rank criteria are, first difference wins:
    alternative's known usage).
 2. Purpose (rank version 9): a model whose `routing.json` `models` policy
    lists the role's work kind under `preferred_for` -- the owner's choice --
-   ranks ahead of a new plan's hint, plan usage and retry diversification.
+   ranks ahead of a new plan's hint, retry diversification and plan usage.
    It never moves a tier or bypasses exclusions. Like a hint, it is passed
    over for quota only when hot (at least 95%) and more than 10 points worse
    than a known usable alternative. The audit records `purpose.status` as
@@ -798,48 +900,43 @@ eligible candidates the rank criteria are, first difference wins:
    preferences survive escalation, and the candidate pool is restricted before
    this within-tier ordering. Legacy provider preference remains first for other
    pre-model stored plans.
-3. Honoured model hint for a new plan (see above), ignored on the same
-   hot-and-meaningfully-worse basis.
+3. Honoured model hint for a new plan (see above), passed over for quota only
+   when hot beside a non-hot candidate.
 4. Quota band (rank version 11): a candidate whose known usage is at or above 95%
    (HOT_PERCENT) ranks behind every candidate that is not hot, whether that candidate's usage
-   is known or unknown. The criterion sits here, ahead of the usage-gap band, diversification
-   and affinity, so no affinity or diversification preference moves a hot route ahead of a
+   is known or unknown. The criterion sits here, ahead of diversification and affinity,
+   so no affinity or diversification preference moves a hot route ahead of a
    non-hot one. Unknown usage is never treated as hot.
-5. Plan usage, whenever every candidate's usage is known, at any level
-   (rank version 13). Each full 10-point USAGE_MARGIN gap above the
-   least-used candidate ranks it one step behind, so work goes to the plan
-   with meaningfully more quota left. A smaller gap leaves the choice to the
-   steps below. Rank versions 10 to 12 applied this step only once some
-   candidate reached 95%. Since rank version 14 the step never reaches
-   past the owner's preferred models for the work kind (step 2,
-   `preferred_for`): while that preference is honoured, usage compares only
-   those models with each other (`usage.scope` `preferred`). When the tier
-   has such models but none is honoured -- all are hot and meaningfully
-   worse, exhausted or unavailable -- usage ranks nothing (`usage.scope`
-   `none`, status `not_applied:owner_preferred_unavailable`), and the
-   replacement is chosen by the quota band and steps 6, 7 and 9. Without
-   preferred models usage compares every candidate (`usage.scope` `all`). If
-   applicable owner preferences remain configured but their preferred routes
-   disappear from the observed catalog or are filtered out by hard eligibility,
-   usage still ranks nothing (`usage.scope` `none`); fallback uses the normal
-   quota, usage-gap, diversification, affinity and engine-order keys. This does
-   not make an unavailable or ineligible preferred route executable. If no
-   applicable preference is configured, usage ranking across candidates remains
-   available.
-6. On escalation, an engine other than the one whose attempt fell short --
-   unless step 4 already sent the work to a meaningfully less-used plan,
-   diversification does not retry onto a plan with meaningfully less room.
-7. Engine affinity (effective work-kind suitability). Built-in defaults
+5. On escalation, an engine other than the one whose attempt fell short.
+6. Engine affinity (effective work-kind suitability). Built-in defaults
    (`WORK_KIND_ENGINES`): backend implementation, frontend without design and
    operations lean to `codex-acp`; frontend implementation with UI design,
    investigation, review, design, writing, planning and analysis lean to
    `claude-agent-acp`; debugging and testing are neutral. `routing.json`
    `engine_affinity` overrides it per work kind (see
    [configuration](../../configuration.md#routing-rules)).
-8. Exact used percentage, within step 5's usage scope.
-9. Stable engine order.
+7. Plan usage, only as the last tie-breaker (rank version 15): among
+   candidates equal on every step above, the lower exact used percentage
+   wins, whenever every compared usage is known. Rank versions 13 and 14
+   instead ranked a plan at least 10 points (`USAGE_MARGIN`) less used ahead
+   of retry diversification and engine affinity; that usage-gap step
+   (`usage`, per-candidate `usage_band`) is removed. Since rank version 14
+   the comparison never reaches past the owner's preferred models for the
+   work kind (step 2, `preferred_for`): while that preference is honoured,
+   usage compares only those models with each other (`usage.scope`
+   `preferred`). When the tier has such models but none is honoured -- all
+   are hot and meaningfully worse, exhausted or unavailable -- usage compares
+   nothing (`usage.scope` `none`, status
+   `not_applied:owner_preferred_unavailable`), and the replacement is chosen
+   by the quota band, diversification, affinity and engine order. Without
+   preferred models usage compares every candidate (`usage.scope` `all`). If
+   applicable owner preferences remain configured but their preferred routes
+   disappear from the observed catalog or are filtered out by hard
+   eligibility, usage still compares nothing (`usage.scope` `none`). This
+   does not make an unavailable or ineligible preferred route executable.
+8. Stable engine order.
 
-`decided_by` names the first of these keys (`preference`, `purpose`, `hint`, `quota`, `usage`,
+`decided_by` names the first of these keys (`preference`, `purpose`, `hint`, `quota`,
 `diversify`, `affinity`, `used_percent`, `engine_order`) that
 separated the chosen candidate from the runner-up, or `only_candidate`; a pin
 records `pin`. It is never `balance`. The runner-up can be another model on
@@ -850,8 +947,10 @@ status is `unavailable` when any candidate in the usage scope has unknown
 usage, `not_applied:owner_preferred_unavailable` when the scope is `none`,
 and `active` otherwise. Audits from rank versions 10 to 12 may also show `below_threshold`.
 The audit keeps the `threshold` field (the 95% hot band of step 4), the
-`active` and `compared` fields, and the raw candidate values. Steps 5 and 8
-compare nothing while usage is unavailable. Step 4 applies whatever the usage status: a known-hot route loses to
+`active` and `compared` fields, `role: tie_breaker` (rank version 15), and the
+raw candidate values. Step 7 compares nothing while usage is unavailable.
+Audits from rank versions 13 and 14 may show `decided_by: usage`, a `margin`
+and per-candidate `usage_band`. Step 4 applies whatever the usage status: a known-hot route loses to
 any non-hot route, including one whose usage is unknown. That does not claim the unknown
 route's percentage was observed.
 
@@ -877,9 +976,9 @@ need a fresh snapshot; there is no push refresh contract.
 Audit rows retain the decision under `decision_detail.route_decision`,
 including `rank_version`, `role_tier`, tier and effort basis, `model_hint`,
 `model_hint_status`, `model_hint_reason`, `diversify_from`, `usage`
-(`compared`, `margin`, `least_used_percent`), `affinity` (work kind, engine,
+(`compared`, `role`, `least_used_percent`), `affinity` (work kind, engine,
 `default` or `routing.json` source, and `required: true` for affinity-bound work), candidates with `used_percent`, `hot`,
-`quota_state`, `usage_band`, `suitability` and `preferred`, `decided_by`,
+`quota_state`, `suitability` and `preferred`, `decided_by`,
 `excluded_by_policy`, `unavailable`, `superseded`, `purpose` (`work_kind`
 and the `preferred` candidates, plus `status` since rank version 9), `stretch` (`status`,
 `candidate`, `chosen`, and `outranked_by`, the rank key that put the best stretch
@@ -901,7 +1000,7 @@ built-in defaults, skips supersede on LISTED engines and adds the `purpose`
 key between `diversify` and `affinity` (no decision changes without
 `models`); 9 moves `purpose` just after legacy `preference`, ahead of hints,
 usage and diversification, and adds the hot-and-meaningfully-worse safety
-exception for owner preferences (no selection change without `preferred_for`). Rank version 10 gates usage bands and exact-percentage comparison at observed usage >=95% and prioritizes confirmed user model requests across every tier; 11 moves the hot-quota criterion back to right after `hint`, ahead of usage bands, retry diversification and engine affinity, so a known route at or above 95% always ranks behind any non-hot route, known or unknown. Rank version 13 removes the 95% gate from usage bands and exact-percentage comparison: whenever every candidate's usage is known, a plan at least 10 points less used ranks first. Rank version 14 confines that comparison to the owner's honoured preferred models for the work kind and applies none once those models are used up.
+exception for owner preferences (no selection change without `preferred_for`). Rank version 10 gates usage bands and exact-percentage comparison at observed usage >=95% and prioritizes confirmed user model requests across every tier; 11 moves the hot-quota criterion back to right after `hint`, ahead of usage bands, retry diversification and engine affinity, so a known route at or above 95% always ranks behind any non-hot route, known or unknown. Rank version 13 removes the 95% gate from usage bands and exact-percentage comparison: whenever every candidate's usage is known, a plan at least 10 points less used ranks first. Rank version 14 confines that comparison to the owner's honoured preferred models for the work kind and applies none once those models are used up. Rank version 15 removes the 10-point usage-gap step: plan usage only breaks the last tie between otherwise equal candidates, and an eligible model hint is passed over for quota only when hot beside a non-hot candidate.
 Rank version 12 adds affinity-bound frontend-design candidate restriction and
 structured preference preservation across retries and eligible fallback tiers.
 Older rows keep their own fields
@@ -950,9 +1049,14 @@ A variant suffix is not part of a model's name: without configured `request_name
 "opus" names `opus[1m]` (a one-word id without a suffix, such as `haiku`, is matched as
 itself). Generic descriptions ("делает/выполняет/проводит", "does/performs",
 "handles/owns") do not assign a route: "Opus does code reviews badly" grants
-nothing. Use a request ("Use only Opus for the audit"), an explicit responsibility
+nothing. Use a request ("Use only Opus for the audit"), a restrictive selection
+("Аудит только Opus"), an explicit responsibility
 construction with a role object ("за аудит отвечает Opus", "Opus is responsible
-for the review"), or an imperative ("Let Opus handle the review").
+for the review"), an imperative ("Let Opus handle the review"), or choose a
+question option that selects the model. An owner's chosen option "Выполнить аудит
+только Claude Opus (claude-agent-acp/opus[1m]), без замены другой моделью" once
+ran on Sol because neither the restrictive form nor the chosen option counted
+(2026-10-23).
 A qualified audit ("security-аудит", "аудит безопасности",
 "accessibility audit") names only its specialist, not the code reviewer; an
 unqualified "аудит"/"audit" still covers review and both auditors. A worker card
@@ -1162,7 +1266,8 @@ ambiguity diagnostic asking the coordinator to obtain an explicit `engine/model`
 a unique bare match is explained as naming the model without its engine.
 
 Whole whitespace-delimited tokens and isolated paired double or single quotes,
-backticks, `«…»` or `“…”` are supported. One terminal prose punctuation character
+backticks, `«…»`, `“…”` or parentheses are supported ("Claude Opus
+(claude-agent-acp/opus[1m])"; `(engine/unit.v2)` still never names `engine/unit`). One terminal prose punctuation character
 (`. , ! ? ; :`) is accepted for a recorded request, including an unquoted
 `Use engine/unit.`, unless the longer token itself names another enabled
 configured ID (for example `unit.`). In that case it is identity data, never
@@ -1180,7 +1285,9 @@ sentences. These deliberate owner-naming rules can include an exact token in
 an otherwise descriptive sentence; there is no inferred model-family grant.
 Negation/comparison/substitution guards apply around each mention. A refusal,
 unavailability or cost word anywhere in the mention's own clause blocks a grant
-(either side of the mention); substitution or stop words ("instead", "replace",
+(either side of the mention). Quota and limit words are not refusals: "Сделай
+аудит на Opus в пределах лимита" and "Do the audit on Opus within the token
+limit" request Opus and revoke nothing; substitution or stop words ("instead", "replace",
 "stop", "except"; Russian equivalents) block only when they come before it. The
 governing request verb must sit in the same clause as the mention. Message-wide
 governance of a model list applies only to an identity that stands alone in its
@@ -1194,7 +1301,8 @@ Separately configured `request_names` retain their existing case-insensitive
 label/ending and conservative local request matching; no label is inferred from
 an ID, and message-wide/direct-preposition grants do not apply to labels.
 Only retained user sources and user answers supply grants, never plan hints,
-questions or model output; source references and exact matched text are retained. A grant does not
+questions or model output; a user's chosen option is that user's answer.
+Source references and exact matched text are retained. A grant does not
 bypass enabled/deny/provider, observed-catalog, availability, hard authorization
 and exhausted-quota checks. Confirmed user requests override automatic membership
 and role tiers, but never those hard checks. These current identity rules

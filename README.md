@@ -250,14 +250,25 @@ ID unique across enabled configured engines, with terminal prose punctuation.
 Exact enabled IDs also accept direct `на/on/via/with` phrasing (for example
 `Часть 2 на gpt-6-luna:`); a request verb in the same user message governs all
 exact identities, while negations and hard policy still apply.
+A restrictive selection ("Выполнить аудит только Claude Opus", "do the review only on
+Opus") is a request, and so is a question option the user chooses that selects
+exactly one model ("Использовать Opus для аудита", or just "Opus" when the question
+asks which model to use, such as "Какой моделью выполнить аудит?"); an option that
+only mentions a model ("Принять результат аудита Opus"), a bare name or a name
+after a lone verb of choice ("Opus", "Выбрать Opus", "Pick Opus") chosen under a
+question about whose result or which work product to accept ("Чей результат аудита
+принять?", "Какой аудит выбрать?"), the question text and unchosen options never are.
 Shared bare IDs grant neither engine and the plan preview explains the ambiguity;
 see [identity rules](docs/features/routing-and-fallback/index.md#settings-only-routing).
-Usage-based ranking applies whenever every candidate's usage is known: a plan at
-least 10 points less used ranks first. Unknown usage remains unavailable, never
-assumed hot. When the settings prefer specific models for a kind of work
-(`preferred_for`), usage only chooses among those models; once they are used up,
-the replacement follows the normal quota, affinity and engine-order rules
-instead of usage.
+Plan usage is only the last tie-breaker between otherwise equal routes: it
+never overrides an eligible route the coordinator names, which is replaced only
+when its known usage is at least 95% (hot) while another candidate is not.
+Unknown usage remains unavailable, never assumed hot. When the settings prefer
+specific models for a kind of work (`preferred_for`), they outrank a coordinator
+hint naming another route (the plan preview reports this before dispatch), and
+usage only breaks ties among those models; once they are used up, the
+replacement follows the normal quota, affinity and engine-order rules instead of
+usage.
 
 Initial host model/provider echoes preserve the configured native effort/mode;
 they are not parameter resets. [Bound task inspection](docs/features/observability/index.md#bound-task-inspection)
@@ -436,7 +447,8 @@ Automatic routing uses only explicit version-2 owner settings plus currently obs
 
 Explicit user requests must name the complete case-sensitive `engine/model`
 identity or an owner-configured request label. Keep an exact identity
-whitespace-delimited or quote it (`Use "engine/unit".`); attached unquoted
+whitespace-delimited, quote it (`Use "engine/unit".`) or put it in parentheses
+after its name (`Claude Opus (engine/unit)`); attached unquoted
 punctuation is ambiguous identity data, never authorization for a shorter ID.
 Plan hints alone cannot promote a flagship. Confirmed requests in recorded
 user messages/answers select that exact model first on covered nodes in every
@@ -447,7 +459,7 @@ request; otherwise owner pins, then automatic ranking, decide its route.
 The policy-only preflight assumes no such request. Before a requested paid CLI run, the
 [route preflight](docs/project/dev-environment.md#route-preflight-before-a-paid-cli-run)
 refuses when a stage would not use the selected route.
-Plan usage ranks candidates whenever every candidate's usage is known, and
+Plan usage only breaks the last tie between otherwise equal candidates, and
 unknown usage is unavailable. See the routing guidance above.
 
 New route audits use the neutral `stretch` policy key and `stretch:<tier>` effort basis for any configured stretch model; stored historical audits remain readable and are not rewritten.
@@ -571,7 +583,7 @@ paseo plugin reload cortex-acp
 
 Git installs run their declared preparation hook. Local directory installs use the checkout directly; use the setup helper for a managed local Paseo installation when needed. See [Paseo onboarding and diagnostics](docs/project/packaging.md).
 
-The Paseo plugin shows per-worker context and token usage on worker cards. It does not add a separate provider plan-usage button.
+The Paseo plugin shows per-worker context and token usage on worker cards. Cards also refresh their route from the durable dispatch audit through the same compact poll, preferring it over the timeline title; active cards without a known route say "Route pending", and settled cards without one say "Route unavailable". It does not add a separate provider plan-usage button.
 
 Asynchronous worker cards do not break coordinator prose into separate rows.
 Text streams immediately, unchanged; card insertions and updates arriving during

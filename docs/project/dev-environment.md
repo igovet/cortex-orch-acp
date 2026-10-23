@@ -351,7 +351,10 @@ not requested for the current work, so those interactions remain unqualified.
 An explicit user model request covers planned exact-route nodes, their retries
 and review fixes. A node without a model hint (the runtime-created mandatory review
 node, or a task left on `auto`) gets the model the user's own message named for its
-purpose ("review with Sonnet", "за аудит отвечает Opus"), ahead of pins; without such a
+purpose ("review with Sonnet", "за аудит отвечает Opus", "Аудит только Opus"), or the
+model of a question option the user chose when the option names that purpose, or
+names no work of its own and its question asks a model for that purpose, ahead of
+pins; without such a
 request it follows owner pins, then automatic ranking. A `*` pin in the dev profile
 therefore decides the reviewer unless the user's request names a model for review.
 Before each requested paid run, check every stage against the owner-selected

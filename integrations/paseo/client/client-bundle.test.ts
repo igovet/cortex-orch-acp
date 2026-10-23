@@ -722,6 +722,41 @@ test("an available:false first read explains itself instead of an empty worker l
   }
 });
 
+for (const platformOs of ["android", "web"] as const) {
+  test(`worker card refreshes a missing route from its compact poll (${platformOs})`, async () => {
+    let route: Record<string, unknown> | undefined;
+    const { runtime, captured, cleanup, rpcCalls } = await loadClient(platformOs, {
+      "cortex.worker-history.read": () => Promise.resolve({
+        available: true, truncated: false, nextCursor: null, nextAssignmentCursor: null,
+        assignments: [{ taskId: "t_1", id: "wa_1", nodeKey: "n1", status: "running",
+          attempts: [{ id: "xa_1", attemptNo: 1, status: "running", failureReason: null, events: [], ...(route ? { route } : {}) }] }],
+      }),
+    });
+    const data = { callId: "worker:ref1", assignmentRef: "ref1", title: "Worker: debugger — Fix it", status: "running" };
+    try {
+      await runtime.mount(() => ({ type: captured["worker-row"].Component, props: workerRow(data) }), { press: false });
+      assert.match(runtime.text(), /Route pending/);
+      route = { provider: "codex-acp", model: "sol", modelName: "Observed Sol", effort: "high" };
+      // Let the existing three-second card poll deliver a route-only change.
+      await new Promise((resolve) => setTimeout(resolve, 3100));
+      await runtime.settle();
+      assert.match(runtime.text(), /codex-acp · Observed Sol · high/);
+      assert.doesNotMatch(runtime.text(), /Route pending|Route unavailable/);
+      assert.match(runtime.text(), /Observed Sol.*Open worker/);
+      assert.deepEqual(runtime.liveRegions(), [""], "route polling is not a status announcement");
+      for (const call of rpcCalls) {
+        assert.equal(call.name, "cortex.worker-history.read");
+        assert.equal(call.input.compact, true);
+        assert.equal(call.input.limit, 1);
+        assert.equal(call.input.cursor, Number.MAX_SAFE_INTEGER);
+      }
+    } finally {
+      runtime.unmountAll();
+      cleanup();
+    }
+  });
+}
+
 test("status announcements name the worker, once per transition, never for usage polls", async () => {
   const durable: Record<string, string> = { w1: "running", w2: "running" };
   let reads = 0;

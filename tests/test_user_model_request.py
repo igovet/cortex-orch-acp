@@ -614,3 +614,525 @@ def test_ambiguous_history_cannot_hide_a_refusal_and_resurrect_an_older_grant(tm
                         history + "\nDo not use Opus.", task.task_id)
     assert auto_route.user_model_request(store, task.task_id, identity) is None
     assert auto_route.user_model_revocation(store, task.task_id, identity) is not None
+
+
+# --- restrictive selections and chosen question options -------------------
+
+OPUS = "claude-agent-acp/opus[1m]"
+SOL = "codex-acp/gpt-6.1-sol"
+SONNET = "claude-agent-acp/claude-sonnet-5"
+# The owner's recorded answer that once routed an Opus-only audit to Sol (2026-10-23).
+OPUS_ONLY_ANSWER = "Выполнить аудит только Claude Opus (claude-agent-acp/opus[1m]), без замены другой моделью"
+
+
+@pytest.mark.parametrize("text,expected", [
+    (OPUS_ONLY_ANSWER, "Opus"),
+    ("Только Opus", "Opus"),
+    ("Да, только опус.", "опус"),
+    ("Only Opus.", "Opus"),
+    ("Only Opus for the audit, please", "Opus"),
+    ("Аудит только Opus", "Opus"),
+    ("Тесты только Opus", "Opus"),
+    ("Реализация только Opus", "Opus"),
+    ("Планирование только Opus", "Opus"),
+    ("Для тестов только Opus", "Opus"),
+    ("Ревью: только Opus", "Opus"),
+    ("Ревью только Opus", "Opus"),
+    ("Аудит модели только Opus", "Opus"),
+    ("Для тестирования только Opus", "Opus"),
+    ("Безопасность только Opus", "Opus"),
+    ("Для аудита только Opus, без замены", "Opus"),
+    ("Сделай ревью только через Opus", "Opus"),
+    ("Проведи аудит исключительно на опусе", "опусе"),
+    ("For the review only Opus", "Opus"),
+    ("Do the review only on Opus", "Opus"),
+    ("Run the audit only with Claude Opus", "Opus"),
+    ("Audit with Opus only", "Opus"),
+    ("только claude-agent-acp/opus[1m]", OPUS),
+    ("Выполни аудит только (claude-agent-acp/opus[1m])", OPUS),
+    ("Use Claude Opus (claude-agent-acp/opus[1m])", "Opus"),
+    # Refusals and negations.
+    ("только не opus", None),
+    ("Не используй opus", None),
+    ("without opus", None),
+    ("Not only Opus", None),
+    ("Не выполняй аудит только Opus", None),
+    # Remarks, reports and the model as the work's object.
+    ("Opus плохо делает ревью", None),
+    ("Only Opus found the bug.", None),
+    ("Last week only Opus found nothing", None),
+    ("Ревью только Opus плохо делает", None),
+    ("Аудит делал только Opus", None),
+    ("Вчера только Opus", None),
+    ("Тесты только на Opus", None),
+    ("Fix the bug only Opus found", None),
+    ("Review only Opus", None),
+    ("Проверь только Opus", None),
+    ("Тестируй только Opus", None),
+    # A role stem as a verb in another form names what the model did or does.
+    ("Тестировал только Opus", None),
+    ("Тестировали только Opus", None),
+    ("Тестирую только Opus", None),
+    ("Аудитировал только Opus", None),
+    ("Ревьюил только Opus", None),
+    ("Кодил только Opus", None),
+    ("Планировал только Opus", None),
+    ("Рефакторил только Opus", None),
+    ("Документировал только Opus", None),
+    ("Тестирует только Opus", None),
+    ("Рефакторю только Opus", None),
+    ("Кодить только Opus", None),
+    ("Планируй только Opus", None),
+    # Verbal adverbs and participles of a role stem are verbs too.
+    ("Тестируя только Opus", None),
+    ("Тестируя только Opus, мы нашли баг", None),
+    ("Планируя только Opus", None),
+    ("Документируя только Opus", None),
+    ("Рефакторя только Opus", None),
+    ("Кодя только Opus", None),
+    ("Тестировав только Opus", None),
+    ("Тестирующий только Opus", None),
+    ("Тестировавший только Opus", None),
+    ("Тестированный только Opus", None),
+    ("Тестируемый только Opus", None),
+    # Short passive participles too ("only Opus was tested").
+    ("Тестирован только Opus", None),
+    ("Тестировано только Opus", None),
+    ("Тестирована только Opus", None),
+    ("Тестированы только Opus", None),
+    ("Документировано только Opus", None),
+    # ... while role nouns that end like one still select.
+    ("Дизайн только Opus", "Opus"),
+    ("План только Opus", "Opus"),
+    ("Аудит только Opus", "Opus"),
+    ("Тестирование только Opus", "Opus"),
+    ("I tried Opus (claude-agent-acp/opus[1m]) yesterday", None),
+    ("Выполни аудит только сегодня (claude-agent-acp/opus[1m])", None),
+    ("claude-agent-acp/opus[1m]", None),
+])
+def test_a_restrictive_selection_is_a_request(text, expected):
+    names = ("opus", "опус")
+    pattern = auto_route._source_request_pattern(OPUS, names, [OPUS])
+    exact = auto_route._source_request_pattern(OPUS, (), [OPUS])
+    text = auto_route._without_substitution_emphasis(text)
+    assert auto_route.requests_family(text, OPUS, names, pattern=pattern, exact_pattern=exact) == expected
+
+
+@pytest.mark.parametrize("opus_names", [("opus", "опус"), None])
+@pytest.mark.parametrize("answer_source", ["elicitation", "text"])
+def test_the_recorded_opus_only_answer_grants_opus(tmp_path, opus_names, answer_source):
+    store = _two_engines(tmp_path, opus_names=opus_names)
+    task = bootstrap_task(store, SourceEvent(origin="test", event_id="audit"), "Проведи аудит.", "owner")
+    question = questions_store.create_if_absent(
+        store, task.task_id, "q-opus", "Как выполнить аудит?",
+        options=[OPUS_ONLY_ANSWER, "Разрешить автоматический выбор модели"])
+    assert auto_route.user_model_request(store, task.task_id, OPUS) is None
+    assert questions_store.answer(store, question.id, OPUS_ONLY_ANSWER, answer_source)
+    grant = auto_route.user_model_request(store, task.task_id, OPUS)
+    assert grant["source_ref"] == questions_store.answer_ref(question.id) and grant["family"] == OPUS
+    assert grant["matched"].casefold() == "opus"
+    assert auto_route.user_model_request(store, task.task_id, SOL) is None
+    assert auto_route.user_purpose_model_request(store, task.task_id, "worker-code-reviewer") == OPUS
+
+
+def test_the_same_words_in_a_user_message_grant_too(tmp_path):
+    store = _two_engines(tmp_path)
+    task = bootstrap_task(store, SourceEvent(origin="test", event_id="typed"), OPUS_ONLY_ANSWER, "owner")
+    assert auto_route.user_model_request(store, task.task_id, OPUS)["source_ref"] == f"{task.report_id}:-1"
+
+
+def _asked(store, task_id, options, text="Какой моделью выполнить аудит?", key="q-model"):
+    return questions_store.create_if_absent(store, task_id, key, text, options=options)
+
+
+@pytest.mark.parametrize("options,answer,granted", [
+    ([OPUS, SOL], OPUS, OPUS),
+    ([OPUS, SOL], SOL, SOL),
+    (["Opus", "Sonnet"], "Opus", OPUS),
+    (["Opus", "Sonnet"], "opus.", OPUS),
+    (["Claude Opus (claude-agent-acp/opus[1m])", "Sol"], "Claude Opus (claude-agent-acp/opus[1m])", OPUS),
+    (["Sonnet вместо Opus", "Opus"], "Sonnet вместо Opus", SONNET),
+])
+def test_a_chosen_option_naming_a_model_requests_it(tmp_path, options, answer, granted):
+    store = _two_engines(tmp_path)
+    task = bootstrap_task(store, SourceEvent(origin="test", event_id="choice"), "Проведи аудит.", "owner")
+    question = _asked(store, task.task_id, options)
+    assert questions_store.answer(store, question.id, answer, "elicitation")
+    for identity in (OPUS, SOL, SONNET):
+        grant = auto_route.user_model_request(store, task.task_id, identity)
+        if identity == granted:
+            assert grant["source_ref"] == questions_store.answer_ref(question.id)
+        else:
+            assert grant is None
+    # The question asked about the audit: the choice covers that purpose.
+    assert auto_route.user_purpose_model_request(store, task.task_id, "worker-code-reviewer") == granted
+    assert auto_route.user_purpose_model_request(store, task.task_id, "worker-frontend-dev") is None
+
+
+@pytest.mark.parametrize("options,answer", [
+    (["Opus для аудита, Sonnet для кода", "Sol"], "Opus для аудита, Sonnet для кода"),  # two models
+    (["Сравнить Opus и Sonnet", "Stop"], "Сравнить Opus и Sonnet"),                # a comparison
+    (["Не использовать Opus", "Opus"], "Не использовать Opus"),                # a refusal
+    (["Да", "Нет"], "Да"),                                                          # no model in the choice
+    (["Opus", "Sonnet"], "Подумаю позже"),                                      # not a choice
+    (["Opus", "Sonnet"], "Opus или Sonnet"),                                     # not one of the options
+])
+def test_an_ambiguous_or_refusing_answer_grants_nothing(tmp_path, options, answer):
+    store = _two_engines(tmp_path)
+    task = bootstrap_task(store, SourceEvent(origin="test", event_id="ambiguous"), "Проведи аудит.", "owner")
+    question = _asked(store, task.task_id, options, text="Выполнить аудит только Opus?")
+    assert questions_store.answer(store, question.id, answer, "elicitation")
+    for identity in (OPUS, SOL, SONNET):
+        assert auto_route.user_model_request(store, task.task_id, identity) is None
+    assert auto_route.user_purpose_model_request(store, task.task_id, "worker-code-reviewer") is None
+
+
+@pytest.mark.parametrize("question,options,answer", [
+    # The model as the author, subject, possessor or past actor of the option.
+    ("Ревью нашло 2 проблемы. Что дальше?", ["Исправить, как предложил Opus", "Оставить"],
+     "Исправить, как предложил Opus"),
+    ("Как продолжить ревью?", ["Opus исчерпал квоту — продолжить автоматически", "Ждать"],
+     "Opus исчерпал квоту — продолжить автоматически"),
+    ("Что делать с ревью?", ["Opus уже проверил, пропустить ревью", "Ревью"], "Opus уже проверил, пропустить ревью"),
+    ("Аудит завершён. Что дальше?", ["Принять результат аудита Opus", "Повторить"],
+     "Принять результат аудита Opus"),
+    ("The audit is done. What next?", ["Accept Opus's audit result", "Repeat"], "Accept Opus's audit result"),
+    ("How should the review continue?", ["Opus hit its quota, continue automatically", "Wait"],
+     "Opus hit its quota, continue automatically"),
+    # The same class, found by the self-check of this rule.
+    ("Что дальше с аудитом?", ["Использовать результаты аудита Opus", "Повторить"],
+     "Использовать результаты аудита Opus"),
+    ("The audit is done. What next?", ["Use Opus's findings", "Repeat"], "Use Opus's findings"),
+    ("Как продолжить аудит?", ["Opus — уже проверил, пропустить", "Ждать"], "Opus — уже проверил, пропустить"),
+    ("Как продолжить аудит?", ["Продолжить (Opus: квота исчерпана)", "Ждать"],
+     "Продолжить (Opus: квота исчерпана)"),
+    # A usage note with a remark in it is not stripped (review 7, 2026-10-23).
+    ("Какой моделью выполнить аудит?", ["Opus (квота исчерпана, 100%)", "Sonnet"],
+     "Opus (квота исчерпана, 100%)"),
+    ("Какой моделью выполнить аудит?", ["Opus исчерпал квоту", "Sonnet"], "Opus исчерпал квоту"),
+    ("Что делать с замечаниями ревью?", ["Согласиться с Opus", "Оспорить"], "Согласиться с Opus"),
+    ("Как продолжить аудит?", ["Выполнить аудит Opus", "Ждать"], "Выполнить аудит Opus"),
+    ("What should the review cover?", ["Review only Opus", "Review everything"], "Review only Opus"),
+    ("Как продолжить аудит?", ["Тестирован только Opus", "Ждать"], "Тестирован только Opus"),
+])
+def test_a_chosen_option_that_only_mentions_a_model_grants_nothing(tmp_path, question, options, answer):
+    """Review 3 of the chosen-option rule (2026-10-23): a chosen option that
+    mentioned a model as context granted it and pinned the review to it."""
+    store = _two_engines(tmp_path)
+    task = bootstrap_task(store, SourceEvent(origin="test", event_id="mention"), "Проведи аудит.", "owner")
+    asked = _asked(store, task.task_id, options, text=question)
+    assert questions_store.answer(store, asked.id, answer, "elicitation")
+    for identity in (OPUS, SOL, SONNET):
+        assert auto_route.user_model_request(store, task.task_id, identity) is None
+    assert auto_route.user_purpose_model_request(store, task.task_id, "worker-code-reviewer") is None
+
+
+@pytest.mark.parametrize("option,granted", [
+    ("Opus", OPUS),
+    (OPUS, OPUS),
+    ("Claude Opus (claude-agent-acp/opus[1m])", OPUS),
+    (OPUS_ONLY_ANSWER, OPUS),
+    ("Sonnet вместо Opus", SONNET),
+    ("Use Sonnet instead of Opus", SONNET),
+    ("Да, Opus", OPUS),
+    ("Opus (рекомендуется)", OPUS),
+    ("Использовать Opus", OPUS),
+    ("Use Opus for the audit", OPUS),
+    ("Use Opus to review the code", OPUS),
+    ("Opus для аудита", OPUS),
+    ("Для аудита Opus", OPUS),
+    ("Аудит только Opus", OPUS),
+    ("Аудит на Opus", OPUS),
+    ("Opus only", OPUS),
+    ("Do the review only on Opus", OPUS),
+    ("Audit with Opus only", OPUS),
+    ("Провести аудит через Opus", OPUS),
+    ("Переключить ревью на Opus", OPUS),
+    ("Передать аудит Opus", OPUS),
+    ("Switch the review to Opus", OPUS),
+    ("За аудит отвечает Opus", OPUS),
+])
+def test_a_chosen_option_that_selects_a_model_grants_it(tmp_path, option, granted):
+    store = _two_engines(tmp_path)
+    task = bootstrap_task(store, SourceEvent(origin="test", event_id="select"), "Проведи аудит.", "owner")
+    asked = _asked(store, task.task_id, [option, "Автоматический выбор"])
+    assert questions_store.answer(store, asked.id, option, "elicitation")
+    for identity in (OPUS, SOL, SONNET):
+        grant = auto_route.user_model_request(store, task.task_id, identity)
+        assert (grant is not None and grant["source_ref"] == questions_store.answer_ref(asked.id)) == (
+            identity == granted), identity
+    assert auto_route.user_purpose_model_request(store, task.task_id, "worker-code-reviewer") == granted
+
+
+@pytest.mark.parametrize("question,reviewer", [
+    ("Какой моделью выполнить аудит?", OPUS),
+    ("На какой модели гонять проверку?", None),
+    ("Which model should run the review?", OPUS),
+    ("Какую модель использовать для аудита?", OPUS),
+    ("Which model to use for the audit?", OPUS),
+    ("Чем выполнить аудит?", OPUS),
+    # Only the sentence that asks for the model scopes the purpose.
+    ("Аудит нашёл 3 проблемы. Какой моделью исправлять?", None),
+])
+@pytest.mark.parametrize("option", ["Opus", OPUS, "Только Opus", "Claude Opus (claude-agent-acp/opus[1m])"])
+def test_a_bare_name_option_grants_when_its_question_asks_which_model_to_use(tmp_path, question, reviewer, option):
+    store = _two_engines(tmp_path)
+    task = bootstrap_task(store, SourceEvent(origin="test", event_id="bare-select"), "Проведи аудит.", "owner")
+    asked = _asked(store, task.task_id, [option, "Sonnet"], text=question)
+    assert questions_store.answer(store, asked.id, option, "elicitation")
+    assert auto_route.user_model_request(store, task.task_id, OPUS)["source_ref"] == questions_store.answer_ref(asked.id)
+    assert auto_route.user_model_request(store, task.task_id, SONNET) is None
+    assert auto_route.user_purpose_model_request(store, task.task_id, "worker-code-reviewer") == reviewer
+
+
+@pytest.mark.parametrize("question", [
+    # Whose result, opinion or past work to accept or judge (review 4, 2026-10-23).
+    "Чей результат аудита принять?",
+    "Чьи замечания ревью принять?",
+    "Какая модель лучше справилась с аудитом?",
+    "Which model found more issues in the review?",
+    "Whose review should we accept?",
+    "Какая модель нашла больше проблем при аудите?",
+    "Какая модель выполнила аудит?",
+    "Which model ran the review?",
+    "Результаты какой модели использовать для аудита?",
+    "Which model's findings should we use for the audit?",
+    # No question of which model to use at all.
+    "Аудит завершён. Что дальше?",
+])
+@pytest.mark.parametrize("option", ["Opus", OPUS, "Только Opus"])
+def test_a_bare_name_option_under_a_judgement_question_grants_nothing(tmp_path, question, option):
+    """Review 4 of the chosen-option rule (2026-10-23): a bare model name
+    chosen under "whose result to accept" granted that model and pinned the
+    review and audit nodes to it."""
+    store = _two_engines(tmp_path)
+    task = bootstrap_task(store, SourceEvent(origin="test", event_id="bare-judge"), "Проведи аудит.", "owner")
+    asked = _asked(store, task.task_id, [option, "Sonnet"], text=question)
+    assert questions_store.answer(store, asked.id, option, "elicitation")
+    for identity in (OPUS, SOL, SONNET):
+        assert auto_route.user_model_request(store, task.task_id, identity) is None
+    for role in ("worker-code-reviewer", "worker-security-auditor"):
+        assert auto_route.user_purpose_model_request(store, task.task_id, role) is None
+
+
+@pytest.mark.parametrize("question", [
+    # Review 5 (2026-10-23): a lone verb of choice before the name.
+    "Чей результат аудита принять?",
+    "Чей результат аудита взять?",
+    "Whose review should we accept?",
+    "Какая модель лучше справилась с аудитом?",
+    "Чьи замечания ревью принять?",
+    # Possessive forms "чью" and "чьём".
+    "Чью проверку аудита использовать?",
+    "Чью работу взять?",
+    "На чьём ревью остановиться?",
+    "На чьем аудите остановиться?",
+    # Which work product to pick, not which model to use.
+    "Какой аудит выбрать?",
+    "Какое ревью использовать?",
+    "Какой из двух аудитов использовать?",
+    "Какой вариант аудита выбрать?",
+    "Which audit should we pick?",
+    "Which review should we use?",
+    "Which of the two audits should we use?",
+    "Which audit to choose?",
+    # Review 6 (2026-10-23): the verb of choice before the work-product noun.
+    "Какой выбрать аудит?",
+    "Какое использовать ревью?",
+    "Which should we pick, the audit?",
+    # Review 8 (2026-10-23): a placement word in an unrelated adverbial phrase
+    # does not make the question choose a model.
+    "Какой в итоге выбрать аудит?",
+    "Какой выбрать в итоге аудит?",
+    "Which should we pick in the end, the audit?",
+])
+@pytest.mark.parametrize("option", ["Opus", "Выбрать Opus", "Взять Opus", "Use Opus", "Pick Opus",
+                                    "Использовать только Opus", "Sonnet вместо Opus"])
+def test_a_choice_verb_option_under_a_judgement_question_grants_nothing(tmp_path, question, option):
+    """Review 5 of the chosen-option rule (2026-10-23): "Pick Opus" under
+    "Whose review should we accept?" granted Opus and, through the whole
+    question, pinned the review and audit nodes to it."""
+    store = _two_engines(tmp_path)
+    task = bootstrap_task(store, SourceEvent(origin="test", event_id="verb-judge"), "Проведи аудит.", "owner")
+    asked = _asked(store, task.task_id, [option, "Sol"], text=question)
+    assert questions_store.answer(store, asked.id, option, "elicitation")
+    for identity in (OPUS, SOL, SONNET):
+        assert auto_route.user_model_request(store, task.task_id, identity) is None
+    for role in ("worker-code-reviewer", "worker-security-auditor"):
+        assert auto_route.user_purpose_model_request(store, task.task_id, role) is None
+
+
+@pytest.mark.parametrize("question,reviewer", [
+    ("Какой моделью выполнить аудит?", OPUS),
+    ("Which model should run the review?", OPUS),
+    ("Какую модель использовать для аудита?", OPUS),
+    # Work and giving verbs still ask who does the work.
+    ("Чем выполнить аудит?", OPUS),
+    ("Who should do the audit?", OPUS),
+    ("Кому поручить аудит?", OPUS),
+    ("Кого взять для аудита?", OPUS),
+    # Review 6 (2026-10-23): the dative "which model to hand the work to".
+    ("Какой модели поручить аудит?", OPUS),
+    ("Какой модели отдать аудит?", OPUS),
+    ("Which model should get the audit?", OPUS),
+    # A model noun or a purpose word before the work noun keeps the choice a
+    # choice of the model.
+    ("Какую модель выбрать для аудита?", OPUS),
+    ("Какую выбрать модель для аудита?", OPUS),
+    ("Какой выбрать для аудита?", OPUS),
+    ("Which should we pick for the audit?", OPUS),
+    # Review 7 (2026-10-23): a means or locative preposition names where the
+    # chosen model goes, so these too choose a model.
+    ("Какую выбрать на аудит?", OPUS),
+    ("Какую взять на аудит?", OPUS),
+    ("Какую использовать в аудите?", OPUS),
+    ("Which one should we use on the audit?", OPUS),
+])
+@pytest.mark.parametrize("option", ["Opus", "Выбрать Opus", "Взять Opus", "Use Opus", "Pick Opus"])
+def test_a_choice_verb_option_grants_when_its_question_asks_which_model_to_use(tmp_path, question, reviewer,
+                                                                              option):
+    store = _two_engines(tmp_path)
+    task = bootstrap_task(store, SourceEvent(origin="test", event_id="verb-select"), "Проведи аудит.", "owner")
+    asked = _asked(store, task.task_id, [option, "Sonnet"], text=question)
+    assert questions_store.answer(store, asked.id, option, "elicitation")
+    assert auto_route.user_model_request(store, task.task_id, OPUS)["source_ref"] == questions_store.answer_ref(asked.id)
+    assert auto_route.user_model_request(store, task.task_id, SONNET) is None
+    assert auto_route.user_purpose_model_request(store, task.task_id, "worker-code-reviewer") == reviewer
+
+
+@pytest.mark.parametrize("question,option", [
+    ("Чей результат аудита принять? Или передать дальше?", "Передать Opus"),
+    ("Whose audit result should we accept? Or switch?", "Switch to Opus"),
+])
+def test_a_judging_sentence_never_scopes_a_chosen_option(tmp_path, question, option):
+    """A giving or switching option still grants, but the sentence that asks
+    whose audit to accept does not give it the review or audit purpose."""
+    store = _two_engines(tmp_path)
+    task = bootstrap_task(store, SourceEvent(origin="test", event_id="judge-scope"), "Проведи аудит.", "owner")
+    asked = _asked(store, task.task_id, [option, "Sonnet"], text=question)
+    assert questions_store.answer(store, asked.id, option, "elicitation")
+    assert auto_route.user_model_request(store, task.task_id, OPUS)["source_ref"] == questions_store.answer_ref(asked.id)
+    for role in ("worker-code-reviewer", "worker-security-auditor"):
+        assert auto_route.user_purpose_model_request(store, task.task_id, role) is None
+
+
+def test_an_option_naming_its_own_work_scopes_the_purpose_by_itself(tmp_path):
+    """"Исправить через Opus" chosen after an audit asks Opus for the fixes,
+    not for the review or audit nodes the question mentions."""
+    store = _two_engines(tmp_path)
+    task = bootstrap_task(store, SourceEvent(origin="test", event_id="own-work"), "Проведи аудит.", "owner")
+    asked = _asked(store, task.task_id, ["Исправить через Opus", "Оставить"],
+                   text="Аудит нашёл 3 проблемы. Как исправлять?")
+    assert questions_store.answer(store, asked.id, "Исправить через Opus", "elicitation")
+    assert auto_route.user_model_request(store, task.task_id, OPUS)["source_ref"] == questions_store.answer_ref(asked.id)
+    for role in ("worker-code-reviewer", "worker-security-auditor"):
+        assert auto_route.user_purpose_model_request(store, task.task_id, role) is None
+
+
+def test_options_alone_never_grant(tmp_path):
+    """An unanswered question, or one answered with another option, grants
+    nothing for the model its text and options name."""
+    store = _two_engines(tmp_path)
+    task = bootstrap_task(store, SourceEvent(origin="test", event_id="unanswered"), "Проведи аудит.", "owner")
+    _asked(store, task.task_id, [OPUS_ONLY_ANSWER, "Opus"], text="Use only Opus for the audit?")
+    assert auto_route.user_model_request(store, task.task_id, OPUS) is None
+    assert auto_route.user_purpose_model_request(store, task.task_id, "worker-code-reviewer") is None
+    other = _asked(store, task.task_id, [OPUS, "Автоматический выбор"], key="q-other")
+    assert questions_store.answer(store, other.id, "Автоматический выбор", "elicitation")
+    assert auto_route.user_model_request(store, task.task_id, OPUS) is None
+    # The same option text as ordinary user prose is a bare mention.
+    append_source_event(store, SourceEvent(origin="test", event_id="bare"), "Opus", task.task_id)
+    assert auto_route.user_model_request(store, task.task_id, OPUS) is None
+
+
+def test_a_newer_chosen_refusal_revokes_and_a_newer_choice_regrants(tmp_path):
+    store = _two_engines(tmp_path)
+    task = bootstrap_task(store, SourceEvent(origin="test", event_id="grant"), "Use only Opus for the audit.", "owner")
+    refusal = _asked(store, task.task_id, ["Не использовать Opus", "Opus"], key="q-refuse")
+    assert questions_store.answer(store, refusal.id, "Не использовать Opus", "elicitation")
+    assert auto_route.user_model_request(store, task.task_id, OPUS) is None
+    assert auto_route.user_model_revocation(store, task.task_id, OPUS)["source_ref"] == questions_store.answer_ref(
+        refusal.id)
+    again = _asked(store, task.task_id, [OPUS, SOL], key="q-again")
+    assert questions_store.answer(store, again.id, OPUS, "elicitation")
+    assert auto_route.user_model_request(store, task.task_id, OPUS)["source_ref"] == questions_store.answer_ref(again.id)
+
+
+@pytest.mark.parametrize("follow_up", [
+    "Сделай аудит на Opus в пределах лимита.",
+    "Do the audit on Opus within the token limit.",
+])
+def test_a_limit_word_neither_refuses_nor_revokes_a_request(tmp_path, follow_up):
+    """Review 7 (2026-10-23): quota and limit words refused a mention, so a
+    request to stay within a limit revoked the user's earlier request for Opus."""
+    store = _two_engines(tmp_path)
+    alone = bootstrap_task(store, SourceEvent(origin="test", event_id="limit-alone"), follow_up, "owner")
+    assert auto_route.user_model_request(store, alone.task_id, OPUS) is not None
+    task = bootstrap_task(store, SourceEvent(origin="test", event_id="limit-grant"), "Используй Opus для аудита.",
+                          "owner")
+    append_source_event(store, SourceEvent(origin="test", event_id="limit-follow-up"), follow_up, task.task_id)
+    assert auto_route.user_model_request(store, task.task_id, OPUS) is not None
+    assert auto_route.user_model_revocation(store, task.task_id, OPUS) is None
+    assert auto_route.user_purpose_model_request(store, task.task_id, "worker-security-auditor") == OPUS
+
+
+@pytest.mark.parametrize("option", ["Opus (квота 52%)", "Opus (52% of quota used)", "Opus (использовано 52% лимита)"])
+def test_a_quota_annotated_option_grants_and_a_quota_remark_never_revokes(tmp_path, option):
+    """Review 7 (2026-10-23): a coordinator that sees plan usage may annotate
+    an option with it; the annotation neither refused nor was part of the choice."""
+    store = _two_engines(tmp_path)
+    task = bootstrap_task(store, SourceEvent(origin="test", event_id="quota-note"), "Проведи аудит.", "owner")
+    asked = _asked(store, task.task_id, [option, "Sonnet"])
+    assert questions_store.answer(store, asked.id, option, "elicitation")
+    assert auto_route.user_model_request(store, task.task_id, OPUS)["source_ref"] == questions_store.answer_ref(asked.id)
+    assert auto_route.user_purpose_model_request(store, task.task_id, "worker-code-reviewer") == OPUS
+    # A newer option that only reports a quota grants nothing and revokes nothing.
+    remark = _asked(store, task.task_id, ["Opus исчерпал квоту", "Ждать"], text="Как продолжить аудит?",
+                    key="q-remark")
+    assert questions_store.answer(store, remark.id, "Opus исчерпал квоту", "elicitation")
+    assert auto_route.user_model_request(store, task.task_id, OPUS)["source_ref"] == questions_store.answer_ref(asked.id)
+    assert auto_route.user_model_revocation(store, task.task_id, OPUS) is None
+
+
+def test_imported_history_still_cannot_authorize_a_restrictive_selection(tmp_path):
+    store = _two_engines(tmp_path)
+    text = "<chat-history-summary>\n[User] " + OPUS_ONLY_ANSWER + "\n</chat-history-summary>\nПродолжай"
+    task = bootstrap_task(store, SourceEvent(origin="test", event_id="history-only"), text, "owner")
+    assert auto_route.user_model_request(store, task.task_id, OPUS) is None
+    assert auto_route.user_purpose_model_request(store, task.task_id, "worker-code-reviewer") is None
+
+
+def test_a_chosen_option_grants_in_plan_preview_and_dispatch_alike(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from cortex_runtime.orchestration.state import TaskMachine, attempt_routing
+    from test_runtime_task_machine import _hint_policy, _provision, plan
+
+    store = Store(tmp_path / ".cortex", project_root=tmp_path)
+    _hint_policy(store)
+    task = bootstrap_task(store, SourceEvent(origin="test", event_id="e2e"), "Implement the feature", "owner")
+    state = TaskMachine(store)
+    state.create(task.task_id, "Implement the feature")
+    channel = SimpleNamespace(task_id=task.task_id, channel_id="coordinator", role="coordinator")
+    identity = "codex-acp/gpt-6-astra"
+    monkeypatch.setattr(auto_route, "route_menu", lambda *_: {
+        "tiers": {"flagship": [{"route": identity}], "deep": [], "standard": [], "light": []}})
+    question = questions_store.create_if_absent(
+        store, task.task_id, "q-astra", "Какой моделью выполнить реализацию?",
+        options=["Реализация только на Astra (codex-acp/gpt-6-astra)", "Автоматический выбор"])
+    proposal = plan()
+    # A model_reason claiming the user's wish is still not consent.
+    proposal["tasks"][0].update(model=identity, model_reason="The user requires Astra.")
+    assert state.submit_plan(channel, proposal, "before-answer")["model_hints"][0]["preview_status"] == (
+        "ignored:tier_mismatch")
+    assert questions_store.answer(store, question.id, "Реализация только на Astra (codex-acp/gpt-6-astra)",
+                                  "elicitation")
+    preview = state._plan_model_previews(channel, proposal)[0]
+    assert preview["preview_status"] == "pending_dispatch:user_request"
+    assert preview["user_request"] == questions_store.answer_ref(question.id)
+    state.move(task.task_id, "EXECUTING")
+    state.claim_ready(task.task_id, channel.channel_id)
+    _provision(state, channel, "N0", "xa_choice")
+    routed = attempt_routing(store, task.task_id, "xa_choice")
+    assert routed.model_hint == identity
+    assert routed.user_request["source_ref"] == questions_store.answer_ref(question.id)
