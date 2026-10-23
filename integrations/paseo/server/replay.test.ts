@@ -96,6 +96,10 @@ for line in sys.stdin:
                        "messageId":f"message:{i}","content":{"type":"text","text":f"🙂я {i}"}})
             if sid == "invalid-card" and i == 99: update["status"] = "impossible"
             send({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":sid,"update":update}})
+            if i == 2:
+                send({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":sid,"update":{
+                    "sessionUpdate":"agent_message_chunk","messageId":"__cortex_message_boundary__:replay",
+                    "content":{"type":"text","text":""}}}})
             if sid == "crash-mid" and i == 100: os._exit(8)
         send({"jsonrpc":"2.0","id":req["id"],"result":{"configOptions":[
             {"id":"model","name":"Model","category":"model","type":"select","currentValue":"available-model",

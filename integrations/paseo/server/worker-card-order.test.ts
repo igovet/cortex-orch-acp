@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { runInNewContext } from "node:vm";
 import test from "node:test";
 import { ProviderEventSchema } from "@getpaseo/plugin/server/provider";
+import { runAcpProvider } from "@getpaseo/plugin/server/acp";
 import { wrapCortexConnection } from "./provider.ts";
 import { WorkerCardFence } from "./worker-card-fence.ts";
 
@@ -126,6 +127,28 @@ test("a worker insertion or update cannot split token-sized coordinator prose", 
   await f.wrapped.close();
 });
 
+test("a completed coordinator message releases workers before the long ACP turn ends", async () => {
+  const f = fixture();
+  f.text("Delegating ");
+  f.card("early");
+  f.text("Delegating now.");
+  // This zero-text runtime marker ends an engine message, not the ACP
+  // prompt: the task can keep running workers for hours without another row.
+  f.emit({ type: "timeline.item", sessionId: "s", item: {
+    type: "assistant_message", id: "__cortex_message_boundary__:first",
+    messageId: "__cortex_message_boundary__:first", text: "",
+  } });
+  f.card("next");
+  f.card("early", "completed");
+  const items = f.seen.filter(event => event.type === "timeline.item");
+  assert.deepEqual(items.filter(event => event.item.type === "plugin").map(event => event.item.data.callId),
+    ["worker:early", "worker:next", "worker:early"]);
+  assert.deepEqual(hostRows(f.seen).filter(row => row.kind === "assistant_message").map(row => row.text),
+    ["Delegating now."]);
+  // No turn completion, new text, timer, reload or close is needed to see them.
+  await f.wrapped.close();
+});
+
 for (const boundary of ["completed", "canceled", "failed", "ready", "closed", "runtime_failed", "message", "tool", "close"]) {
   test(`pending cards flush on ${boundary} without dropping or duplicating text`, async () => {
     const f = fixture();
@@ -148,6 +171,71 @@ for (const boundary of ["completed", "canceled", "failed", "ready", "closed", "r
     if (boundary !== "close") await f.wrapped.close();
   });
 }
+
+test("boundaries are session-local, idempotent and never discard nonempty prose", async () => {
+  const f = fixture();
+  f.text("still writing", "m", "s");
+  f.card("waiting");
+  f.open("other");
+  const boundary = (sessionId: string) => f.emit({ type: "timeline.item", sessionId, item: {
+    type: "assistant_message", id: "__cortex_message_boundary__:isolation",
+    messageId: "__cortex_message_boundary__:isolation", text: "",
+  } });
+  boundary("other");
+  assert.equal(f.seen.filter(event => event.item?.type === "plugin").length, 0);
+  boundary("s");
+  boundary("s");
+  assert.equal(f.seen.filter(event => event.item?.type === "plugin").length, 1);
+  f.text("not a control marker", "__cortex_message_boundary__:nonempty");
+  assert.equal(f.seen.at(-1).item.text, "not a control marker");
+  await f.wrapped.close();
+});
+
+test("the installed SDK carries an empty boundary without a displayed message or turn end", async () => {
+  let stream!: ReadableStreamDefaultController<any>;
+  const provider = runAcpProvider({ id: "cortex", label: "Cortex", connector: () => ({
+    readable: new ReadableStream({ start(controller) { stream = controller; } }),
+    writable: new WritableStream({ write(frame: any) {
+      const result = frame.method === "initialize" ? { protocolVersion: 1, agentCapabilities: {} }
+        : frame.method === "session/new" ? { sessionId: "native" } : {};
+      if (frame.id !== undefined) stream.enqueue({ jsonrpc: "2.0", id: frame.id, result });
+    } }),
+  }) });
+  const connection = wrapCortexConnection(await provider.connect({ versions: [1], capabilities: ["prompt.message"] }), []);
+  const seen: any[] = [];
+  let ready!: () => void;
+  let arrived!: () => void;
+  const opened = new Promise<void>(resolve => { ready = resolve; });
+  const released = new Promise<void>(resolve => { arrived = resolve; });
+  connection.onEvent(event => {
+    seen.push(ProviderEventSchema.parse(event));
+    if (event.type === "session.ready") ready();
+    if (event.type === "timeline.item" && event.item.type === "plugin"
+      && (event.item.data as { callId?: string }).callId === "worker:late") arrived();
+  });
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await connection.send({ type: "session.open", requestId: "open", sessionId: "s", history: "replay",
+      config: { cwd: "/fixture", env: {}, mcpServers: {}, settings: {}, persist: false } });
+    await opened;
+    for (const update of [
+      { sessionUpdate: "agent_message_chunk", messageId: "m", content: { type: "text", text: "One " } },
+      { sessionUpdate: "tool_call", toolCallId: "worker:early", title: "Worker: qa-engineer", kind: "other", status: "pending" },
+      { sessionUpdate: "agent_message_chunk", messageId: "m", content: { type: "text", text: "message." } },
+      { sessionUpdate: "agent_message_chunk", messageId: "__cortex_message_boundary__:sdk", content: { type: "text", text: "" } },
+      { sessionUpdate: "tool_call", toolCallId: "worker:late", title: "Worker: qa-engineer", kind: "other", status: "pending" },
+    ]) stream.enqueue({ jsonrpc: "2.0", method: "session/update", params: { sessionId: "native", update } });
+    await Promise.race([released, new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error("Workers stayed hidden after the engine message ended")), 3000);
+    })]);
+    assert.equal(seen.filter(event => event.item?.type === "plugin").length, 2);
+    assert.deepEqual(hostRows(seen).filter(row => row.kind === "assistant_message").map(row => row.text), ["One message."]);
+    assert.ok(!seen.some(event => event.item?.messageId?.startsWith("__cortex_message_boundary__:")));
+  } finally {
+    clearTimeout(timer);
+    await connection.close();
+  }
+});
 
 test("ordering preserves the worker status fence across cancellation and later outcome", async () => {
   const fence = new WorkerCardFence();
@@ -178,7 +266,13 @@ test("replay before opened and interleaved sessions use the same ordering", asyn
   f.card("r", "completed", "replay");
   f.text("A **B**\n\nC", "m2", "replay");
   f.card("live");
+  f.emit({ type: "timeline.item", sessionId: "replay", item: {
+    type: "assistant_message", id: "__cortex_message_boundary__:replay",
+    messageId: "__cortex_message_boundary__:replay", text: "",
+  } });
   f.open("replay");
+  assert.equal(f.seen.filter(event => event.sessionId === "replay" && event.item?.type === "plugin").length, 1,
+    "the saved boundary releases cards before session.ready");
   f.emit({ type: "session.ready", sessionId: "replay" });
   const rows = hostRows(f.seen.filter(event => event.sessionId === "replay"));
   assert.deepEqual(rows.filter(row => row.kind === "assistant_message").map(row => row.text), ["A **B**\n\nC"]);

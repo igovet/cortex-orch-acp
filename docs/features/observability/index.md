@@ -204,8 +204,20 @@ replacing its data in place (`integrations/paseo/shared/worker-card-item.ts`).
 Paseo 0.12.0 flushes its text row even for an update to an existing plugin item.
 The provider therefore holds worker-card display events while a logical
 coordinator message streams and releases them, in arrival order, at the next
-message/timeline boundary, turn end, completed load, cancellation, error or close
-(`integrations/paseo/server/worker-card-order.ts`). Text is never buffered,
+message/timeline boundary, engine-message completion, turn end, completed load,
+cancellation, error or close (`integrations/paseo/server/worker-card-order.ts`).
+Engine-message completion is distinct from the outer ACP prompt, which can remain
+open while workers run. After its final text/redactor tail (also on an engine
+exception), the controller emits an empty `agent_message_chunk` with a unique
+`__cortex_message_boundary__:` message id. Runtime text written while workers run
+(a route notice, a worker question or other notice) has no engine turn after it:
+the next scheduler pass emits the same marker after its notices and before its
+worker cards, at most one per pass and only when text was written since the last
+marker. The installed SDK preserves this empty chunk; the provider consumes it without displaying an empty row, clears its
+streaming-message state and releases queued cards. Later workers then appear
+immediately instead of waiting for another coordinator message or the whole task.
+The marker is retained in ordered display replay, not engine input. Old journals
+without it still rely on the other boundaries above. Text is never buffered,
 trimmed or reconstructed. Worker-card creation no longer rotates the runtime
 message id; real coordinator tools still do. This applies to new live output and
 ACP replay, not repair of old split identities or already persisted host rows.

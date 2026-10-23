@@ -12,6 +12,7 @@ import subprocess
 import tempfile
 import threading
 import time
+import uuid
 
 from .state import CONSULTATION_NODE, TaskMachine, encoded, event, now, transition
 from .prompt_context import coordinator_prompt_context
@@ -68,6 +69,29 @@ def _own_paragraph(text):
     the coordinator's streamed prose must start its own paragraph; otherwise
     a leading Markdown heading or list lands mid-line and is not parsed."""
     return text if text.startswith('\n') else '\n\n' + text
+
+
+def _finish_coordinator_message(emit_display_update, open_text=None):
+    # Paseo's outer ACP turn also includes waiting for workers. End only the
+    # current engine message so its queued worker cards need not wait for the
+    # entire task. Empty text adds no prose; the provider consumes this marker.
+    if open_text is not None:
+        open_text.clear()
+    if emit_display_update:
+        emit_display_update(dict(
+            sessionUpdate='agent_message_chunk',
+            messageId='__cortex_message_boundary__:' + str(uuid.uuid4()),
+            content=dict(type='text', text=''),
+        ))
+
+
+def _tracking_text(emit_update, open_text):
+    # Set after the text is out: a boundary cleared before it still follows it.
+    def emit(text):
+        shown = emit_update(text)
+        open_text.set()
+        return shown
+    return emit
 
 
 def _final_response_pending(runtime, task_id, state):
@@ -563,6 +587,10 @@ def _run(runtime, task_id, session_id, channel, session_ref, content, emit_updat
         speculation=None, wait_cards=None):
     machine = TaskMachine(runtime._store)
     wait_cards = {} if wait_cards is None else wait_cards
+    # Runtime text outside an engine message (notices, worker questions) also
+    # opens a message that holds later worker cards; the worker loop ends it.
+    open_text = threading.Event()
+    emit_update = _tracking_text(emit_update, open_text)
     context = machine.create(task_id, content)
     from .recovery import reconcile_results
     if context['state'] not in {'COMPLETED', 'FAILED', 'CANCELLED'}:
@@ -820,6 +848,7 @@ def _run(runtime, task_id, session_id, channel, session_ref, content, emit_updat
                 flush()
                 if tool_emitter:
                     tool_emitter.close_group()
+                _finish_coordinator_message(emit_display_update, open_text)
                 runtime._finalize_generation_delivery(session_ref, delivery_id,
                                                      failure_kind=type(error).__name__, stop_reason=None)
                 if cancel_event.is_set() or _transport_lost(runtime, task_id):
@@ -904,6 +933,7 @@ def _run(runtime, task_id, session_id, channel, session_ref, content, emit_updat
                     and not final_pending
                     and not _final_response_pending(runtime, task_id, machine.get_state(task_id))):
                 emit_update(outcome.text)
+            _finish_coordinator_message(emit_display_update, open_text)
             if outcome.stop_reason == StopReason.CANCELLED:
                 return _stop_turn(runtime, task_id, machine, emit_tool_call, emit_update, language)
             if early_start:
@@ -962,6 +992,10 @@ def _run(runtime, task_id, session_id, channel, session_ref, content, emit_updat
             from .route_notices import ignored_hint_notices
             for line in ignored_hint_notices(runtime._store, task_id, language):
                 emit_update(_own_paragraph(line))
+            # No engine turn follows while workers run: end that notice (or
+            # any other runtime text) before this pass emits worker cards.
+            if open_text.is_set():
+                _finish_coordinator_message(emit_display_update, open_text)
             # A step that cannot start is shown, with what holds it, instead
             # of a silent chat; the card closes when the wait ends.
             if wait_cards or any(n['status'] == 'pending' for n in context['nodes']):

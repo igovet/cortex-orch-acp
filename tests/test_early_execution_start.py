@@ -46,6 +46,18 @@ def test_workers_start_before_the_planning_turn_ends(tmp_path):
         prompt_id = harness.send('session/prompt', dict(sessionId=session_id,
                                                         prompt=[dict(type='text', text='Inspect it.')]))
         harness.response_for(prompt_id, timeout=60.0)
+        boundaries = [
+            frame["params"]["update"] for frame in harness.stdout.lines
+            if frame.get("method") == "session/update"
+            and frame.get("params", {}).get("update", {}).get("messageId", "").startswith("__cortex_message_boundary__:")
+        ]
+        assert boundaries, "engine completion must cross the real Agent/stdio boundary"
+        assert all(update["content"] == {"type": "text", "text": ""} for update in boundaries)
+        from cortex_runtime.acp.replay_store import replay_session
+        saved = replay_session(harness.store, session_id)
+        saved_boundaries = [entry["update"] for entry in saved
+                            if entry.get("update", {}).get("messageId", "").startswith("__cortex_message_boundary__:")]
+        assert saved_boundaries == boundaries, "empty ordering markers must survive durable display replay"
     finally:
         harness.stop()
     assert observed.get('started_during_turn') is True

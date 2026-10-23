@@ -12,6 +12,11 @@ Only adjacent updates for the same card coalesce; a message or another card
 ends that run. Ordered source sequence membership and text byte boundaries
 travel in ACP `_meta.cortexReplay`. Legacy rows without message IDs get stable
 identities based on their stored sequence. Saved rows are never rewritten.
+An empty `agent_message_chunk` with a unique `__cortex_message_boundary__:` id
+ends a coordinator engine message without ending the outer ACP turn. It travels
+through the same ordered replay/manifest checks as other chunks, then the provider
+consumes it as a worker-card flush boundary without adding an empty timeline row.
+Older journals without these markers retain the existing fallback boundaries.
 
 The compatibility relay stages matching load notifications in an unlinked,
 owner-only temporary file. The temporary directory is removed immediately;

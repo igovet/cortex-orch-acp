@@ -33,6 +33,10 @@ export class WorkerCardOrder {
       const item = event.item;
       if (item.type === "assistant_message") {
         const id = item.messageId ?? item.id;
+        // An engine turn can finish while the outer ACP prompt keeps waiting
+        // for workers. Its empty runtime marker is an ordering boundary, not
+        // another message to show or to keep future worker cards behind.
+        if (id.startsWith("__cortex_message_boundary__:") && item.text === "") return this.flush(sessionId);
         const pending = this.messages.get(sessionId) === id ? [] : this.flush(sessionId);
         this.messages.set(sessionId, id);
         return [...pending, event];

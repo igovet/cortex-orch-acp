@@ -595,7 +595,10 @@ The Paseo plugin shows per-worker context and token usage on worker cards. Cards
 
 Asynchronous worker cards do not break coordinator prose into separate rows.
 Text streams immediately, unchanged; card insertions and updates arriving during
-one logical message wait until its next timeline/message boundary or turn end.
+one logical message wait until its next timeline/message boundary or engine-message
+completion (or, for runtime notices written while workers run, the next scheduler
+pass), not until the outer ACP prompt finishes waiting for workers. An empty
+runtime marker releases the cards without adding a displayed message.
 Cancellation, errors and completed history loads also release pending cards in
 arrival order. Previously saved split message identities are not rewritten.
 

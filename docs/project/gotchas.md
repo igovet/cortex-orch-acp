@@ -792,6 +792,24 @@ before blaming an engine version, and start daemons with `outside_command`. See
 These are implementation contracts, not proof of zero errors in a later paid
 desktop workload. Qualification still requires real retained run evidence.
 
+## Worker cards absent while the pipeline shows running workers (2026-10-23)
+
+The provider deferred cards after coordinator prose until another visible message
+or the end of the ACP turn. That turn can include the whole worker workload, long
+after the coordinator engine stopped writing. A worker could therefore be running
+and navigable in Pipeline while its chat card, and even earlier card outcomes,
+remained queued. This is not proof of a missing runtime dispatch or card emission.
+
+The controller now sends an empty, uniquely identified
+`__cortex_message_boundary__:` chunk after each engine message's final text/tail,
+including exception cleanup, and after runtime notices written while workers run
+(for example an ignored model-hint notice) on the next scheduler pass. The
+provider consumes it as a flush boundary, not a
+display row. It neither ends the ACP turn nor changes worker status. No timer or
+punctuation heuristic is involved; token-sized prose stays together. Old saved
+history without these markers is not rewritten. See
+[worker-card ordering](../features/observability/index.md#bounded-acp-event-projections).
+
 ## Paseo 0.12.0 worker cards: per-turn tool rows, Stop status and Space (2026-10-21)
 
 - **A `tool_call` row is per turn.** The installed Paseo 0.12.0 client keys a
