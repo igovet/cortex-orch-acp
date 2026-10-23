@@ -1498,7 +1498,16 @@ NEGATION_WORDS = re.compile(
     re.IGNORECASE,
 )
 _WORD = re.compile(r"[\w']+", re.UNICODE)
-_SENTENCE_END = re.compile(r"[.!?;\n]")
+# A period inside a token never ends a sentence: one with a non-space
+# character before it and a token character after it, as in a dotted model
+# identity ("codex-acp/gpt-6.1-sol"), a version or a file name ("AGENTS.md").
+# Splitting there cut "All audits and reviews must use codex-acp/gpt-6.1-sol."
+# into fragments that named no model, so the rule granted nothing (live,
+# 2026-10-23). A period before whitespace, the end of the text, a closing
+# quote or bracket ("Use Opus.\" Then") or a closing Markdown emphasis marker
+# ("**Use Opus.** Never use Sonnet.") still ends one: user messages keep their
+# emphasis, and a merged next sentence would refuse or question the request.
+_SENTENCE_END = re.compile(r"[!?;\n]|(?<!\S)\.|\.(?![^\s\"'`»”)\]*_~])")
 # A request verb's lead is read within its own clause ("No, use the named model").
 _CLAUSE_BREAK = re.compile(r"[,:()\"«»“”„—–]")
 # An opening quote attached to a request label is not a preceding word.
@@ -1822,8 +1831,14 @@ def _assignment(text: str, pattern: re.Pattern, others: Sequence[re.Pattern] = (
 
 def _sentences(text: str) -> list[str]:
     """``text`` split after each sentence end, keeping it: a question mark
-    still marks its sentence a question (see :func:`_asks`)."""
-    return re.split(r"(?<=[.!?;\n])", text)
+    still marks its sentence a question (see :func:`_asks`). A period inside
+    a token is no sentence end (:data:`_SENTENCE_END`)."""
+    sentences, start = [], 0
+    for end in _SENTENCE_END.finditer(text):
+        sentences.append(text[start:end.end()])
+        start = end.end()
+    sentences.append(text[start:])
+    return sentences
 
 
 def _asks(text: str, match: re.Match, prefix: Sequence[str], clause: Sequence[str]) -> bool:
@@ -1834,6 +1849,29 @@ def _asks(text: str, match: re.Match, prefix: Sequence[str], clause: Sequence[st
     return ((end is not None and end.group(0) == "?")
             or bool(prefix and prefix[0] in _INVERTED_AUXILIARIES)
             or any(word in _QUESTION_WORDS for word in clause))
+
+
+# Modals that make a request verb state a requirement ("Reviews must use X",
+# "Audits have to use X", "Аудит должен использовать X").
+_REQUIREMENT_MODALS = re.compile(r"must|shall|should|need|needs|required|должен|должн\w*|обязан\w*", re.IGNORECASE)
+# Words right after an opening auxiliary that keep it the requirement's own
+# modal ("Must use X for reviews", "Has to use X"), not an inverted question.
+_DIRECT_AFTER_AUXILIARY = frozenset({"to", "always", "only", "exclusively", "solely", "use"})
+
+
+def _requirement_question(text: str, match: re.Match, context: Mapping) -> bool:
+    """Whether the request governing ``match`` states a requirement with a
+    modal in its clause (:data:`_REQUIREMENT_MODALS`, "have to") that its
+    sentence asks about rather than states, as :func:`_asks` reads the
+    passive forms: "Do reviews have to use X?", "Why do audits need to use
+    X", "Почему аудит должен использовать X?". A polite request without such
+    a modal ("Could you run the review on X?") still asks for X."""
+    words = [word for word, _lead in context["clause"]]
+    if not any(_REQUIREMENT_MODALS.fullmatch(word) or (word == "to" and index and words[index - 1] in {"have", "has", "had"})
+               for index, word in enumerate(words)):
+        return False
+    inverted = len(words) >= 2 and words[0] in _INVERTED_AUXILIARIES and words[1] not in _DIRECT_AFTER_AUXILIARY
+    return _asks(text, match, words[:1] if inverted else (), words)
 
 
 # A restrictive selection: "только"/"only" right before the mention
@@ -1987,7 +2025,7 @@ def requests_family(text: str, family: str, names: Sequence[str] | None = None,
     pattern = pattern if pattern is not None else family_pattern(family, names)
     for match in pattern.finditer(text):
         context = _mention_context(text, match)
-        if _refused_mention(context):
+        if _refused_mention(context) or _requirement_question(text, match, context):
             continue
         if _exclusive_selection(context, pattern, parenthesized=(
                 match.span() in exact_spans and text[match.start() - 1:match.start()] == "("

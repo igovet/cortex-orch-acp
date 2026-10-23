@@ -513,3 +513,180 @@ def test_a_mid_task_edit_leaves_a_visible_status_in_preview_and_dispatch(tmp_pat
     assert choice.basis != "auto:user_request"
     assert choice.decision["decided_by"] != "project_instruction"
     assert choice.decision["project_instruction"] == changed
+
+
+SOL = "codex-acp/gpt-6.1-sol"
+LUNA = "codex-acp/gpt-6-luna"
+# The committed rule of the live CLI run (2026-10-23): the period inside
+# "gpt-6.1-sol" split the sentence, so it granted nothing and the mandatory
+# reviewer ran on Luna.
+LIVE_RULE = "All audits and reviews must use codex-acp/gpt-6.1-sol."
+DOTTED_RULES = [(LIVE_RULE, SOL), ("All audits and reviews must use `codex-acp/gpt-6.1-sol`.", SOL),
+                ("All audits and reviews must use gpt-6.1-sol.", "gpt-6.1-sol"),
+                ("Reviews must use codex-acp/gpt-6.1-sol", SOL),
+                ("Аудит должен использовать gpt-6.1-sol.", "gpt-6.1-sol")]
+# Questions, negations, alternatives and remarks naming the dotted identity.
+DOTTED_NON_REQUESTS = [
+    "Do all audits and reviews have to use codex-acp/gpt-6.1-sol?",
+    "Reviews must use gpt-6.1-sol?",
+    "Почему аудит должен использовать gpt-6.1-sol?",
+    "All audits and reviews must not use codex-acp/gpt-6.1-sol.",
+    "Аудит не должен использовать gpt-6.1-sol.",
+    "All audits and reviews must use gpt-6.1-sol or gpt-6-luna.",
+    "All audits and reviews must use codex-acp/gpt-6.1-sol or codex-acp/gpt-6-luna.",
+    "The last review used codex-acp/gpt-6.1-sol.",
+]
+
+
+def _rules(rule):
+    return f"# Project agent rules\n\n{rule}\n"
+
+
+def test_a_period_inside_a_token_never_ends_a_sentence():
+    assert auto_route._sentences("Use Opus. Then review.") == ["Use Opus.", " Then review.", ""]
+    assert auto_route._sentences(f"{LIVE_RULE} Then review AGENTS.md v1.0.0.") == [
+        LIVE_RULE, " Then review AGENTS.md v1.0.0.", ""]
+    assert auto_route._sentences('Use "Opus." Then review') == ['Use "Opus.', '" Then review']
+    assert auto_route._sentences("**Use Opus.** Never Sonnet") == ["**Use Opus.", "** Never Sonnet"]
+
+
+# A period before closing Markdown emphasis still ends the sentence in a user
+# message, whose emphasis is never stripped: merged with the next sentence,
+# its negation or question mark dropped the request (review, 2026-10-23).
+@pytest.mark.parametrize("message", ["**Use Opus for the review.** Never use Sonnet.",
+                                     "**Reviews must use Opus.** Why? Cost."])
+def test_a_period_before_closing_emphasis_keeps_the_users_request(tmp_path, message):
+    store, task = _project(tmp_path, None, message=message)
+    assert auto_route.user_purpose_model_request(store, task.task_id, "worker-code-reviewer") == OPUS
+
+
+@pytest.mark.parametrize("rule,matched", DOTTED_RULES)
+def test_a_dotted_identity_in_a_rule_grants_its_exact_route(tmp_path, rule, matched):
+    store, task = _project(tmp_path, _rules(rule))
+    for role in AUDITORS:
+        assert auto_route.project_instruction_route(store, task.task_id, role) == (dict(
+            source="project_instruction", path="AGENTS.md", line=3, source_ref="project_instruction:AGENTS.md:3",
+            family=SOL, matched=matched), None)
+    for role in OTHERS:
+        assert auto_route.project_instruction_route(store, task.task_id, role) == (None, None)
+
+
+@pytest.mark.parametrize("rule,matched", DOTTED_RULES)
+def test_a_dotted_identity_in_a_user_message_requests_its_exact_route(tmp_path, rule, matched):
+    store, task = _project(tmp_path, None, message=rule)
+    assert auto_route.user_model_request(store, task.task_id, SOL)["matched"] == matched
+    for role in AUDITORS:
+        assert auto_route.user_purpose_model_request(store, task.task_id, role) == SOL
+    assert auto_route.user_purpose_model_request(store, task.task_id, "worker-backend-dev") is None
+
+
+@pytest.mark.parametrize("option", [SOL, "gpt-6.1-sol", "Use codex-acp/gpt-6.1-sol for the review"])
+def test_a_chosen_option_naming_a_dotted_identity_selects_it(tmp_path, option):
+    from cortex_runtime.acp import questions_store
+
+    store, task = _project(tmp_path, None, message="Inspect the changes.")
+    question = questions_store.create_if_absent(
+        store, task.task_id, "model", "Which model should run the review: codex-acp/gpt-6.1-sol or gpt-6-luna?",
+        options=[option, LUNA])
+    assert questions_store.answer(store, question.id, option, "elicitation")
+    assert auto_route.user_model_request(store, task.task_id, SOL) is not None
+    assert auto_route.user_purpose_model_request(store, task.task_id, "worker-code-reviewer") == SOL
+
+
+@pytest.mark.parametrize("text", DOTTED_NON_REQUESTS)
+def test_a_dotted_identity_question_negation_list_or_remark_grants_nothing(tmp_path, text):
+    store, task = _project(tmp_path, _rules(text), message=text)
+    for role in AUDITORS:
+        assert auto_route.project_instruction_route(store, task.task_id, role) == (None, None)
+        assert auto_route.user_purpose_model_request(store, task.task_id, role) is None
+    if " or " not in text:
+        # A listed alternative may still let a coordinator hint through as
+        # task-wide consent (see test_a_requested_list_of_alternatives_...).
+        assert auto_route.user_model_request(store, task.task_id, SOL) is None
+
+
+@pytest.mark.parametrize("text", ["Do reviews have to use Sol?", "Почему аудит должен использовать Sol?",
+                                  "Why do audits need to use Sol"])
+def test_a_question_about_a_must_use_requirement_grants_nothing(tmp_path, text):
+    store, task = _project(tmp_path, _rules(text), message=text)
+    assert auto_route.user_model_request(store, task.task_id, SOL) is None
+    for role in AUDITORS:
+        assert auto_route.project_instruction_route(store, task.task_id, role) == (None, None)
+        assert auto_route.user_purpose_model_request(store, task.task_id, role) is None
+
+
+@pytest.mark.parametrize("text", ["Reviews must use Sol.", "Must use Sol for reviews.", "Reviews have to use Sol.",
+                                  "Аудит должен использовать Sol.", "Could you run the review on Sol?"])
+def test_a_stated_must_use_requirement_and_a_polite_request_still_grant(tmp_path, text):
+    store, task = _project(tmp_path, _rules(text), message=text)
+    for role in AUDITORS:
+        assert auto_route.user_purpose_model_request(store, task.task_id, role) == SOL
+        if not text.startswith("Could"):
+            assert auto_route.project_instruction_route(store, task.task_id, role)[0]["family"] == SOL
+
+
+@pytest.mark.parametrize("rule,matched", DOTTED_RULES[:3])
+def test_a_dotted_identity_rule_reaches_preview_and_dispatch(tmp_path, monkeypatch, rule, matched):
+    from cortex_runtime.orchestration.state import TaskMachine, attempt_routing
+    from test_runtime_task_machine import _provision, plan
+
+    store = _two_engines(tmp_path)
+    (tmp_path / "AGENTS.md").write_text(_rules(rule), encoding="utf-8")
+    task = bootstrap_task(store, SourceEvent(origin="test", event_id="dotted"), "Review the changes", "owner")
+    state = TaskMachine(store)
+    state.create(task.task_id, "Review the changes")
+    channel = SimpleNamespace(task_id=task.task_id, channel_id="coordinator", role="coordinator")
+    monkeypatch.setattr(auto_route, "route_menu", lambda *_: {
+        "tiers": {"flagship": [], "deep": [], "standard": [{"route": SOL}], "light": [{"route": LUNA}]}})
+    proposal = plan(2)
+    proposal["tasks"][0].update(role="security-auditor", model=LUNA, model_reason="Luna is enough here.")
+    proposal["tasks"][1].update(role="backend-dev")
+    previews = state.submit_plan(channel, proposal, "plan")["model_hints"]
+    assert previews[0]["preview_status"] == "pending_dispatch:project_instruction"
+    assert previews[0]["project_instruction"] == dict(route=SOL, path="AGENTS.md", line=3, matched=matched)
+    assert previews[1]["preview_status"] == "auto"
+    state.move(task.task_id, "EXECUTING")
+    state.claim_ready(task.task_id, channel.channel_id)
+    _provision(state, channel, "N0", "xa_dotted")
+    routed = attempt_routing(store, task.task_id, "xa_dotted")
+    assert routed.model_hint == SOL
+    assert routed.user_request["source"] == "project_instruction" and routed.user_request["superseded_hint"] == LUNA
+
+
+@pytest.mark.parametrize("rule,matched", DOTTED_RULES[:3])
+def test_a_dotted_identity_rule_routes_the_mandatory_reviewer(tmp_path, monkeypatch, rule, matched):
+    """The live failure: the unhinted runtime reviewer must run on the exact
+    route the rule names, ahead of the opposite-provider preference and the
+    owner's preferred review model."""
+    from cortex_runtime.delegation.live_adapters import EngineSessionManagerAdapter
+    from cortex_runtime.orchestration import state as runtime_state
+    from test_runtime_task_machine import _provision, plan
+
+    store = _review_preferred(monkeypatch, tmp_path)
+    (tmp_path / "AGENTS.md").write_text(_rules(rule), encoding="utf-8")
+    task = bootstrap_task(store, SourceEvent(origin="test", event_id="dotted"), "Inspect the changes.", "owner")
+    state = runtime_state.TaskMachine(store)
+    state.create(task.task_id, "Inspect the changes.")
+    channel = SimpleNamespace(task_id=task.task_id, channel_id="coordinator", role="coordinator")
+    state.submit_plan(channel, plan(), "plan")
+    state.move(task.task_id, "EXECUTING")
+    state.claim_ready(task.task_id, channel.channel_id)
+    (tmp_path / "changed.txt").write_text("implementation change\n", encoding="utf-8")
+    with store.connection() as db:
+        db.execute("UPDATE runtime_nodes SET status='completed' WHERE task_id=?", (task.task_id,))
+        db.commit()
+    state.add_review(task.task_id)
+    [review] = state.claim_ready(task.task_id, channel.channel_id)
+    assert review["node_id"] == "_review_1"
+    _provision(state, channel, review["node_id"], "xa_dotted_review")
+    monkeypatch.setattr(runtime_state, "review_provider_preference",
+                        lambda *_: ("claude-agent-acp", "prefer_claude_after_codex_execution"))
+    adapter = EngineSessionManagerAdapter(lambda _: None, lambda _: str(tmp_path),
+                                          environ={"HOME": str(tmp_path)}, store=store)
+    launch = dict(task_id=task.task_id, assignment_id=review["assignment_ref"],
+                  attempt_id="xa_dotted_review", role_id=review["role"])
+    adapter._resolve_runtime_route(launch, str(tmp_path))
+    assert launch["resolved_model"] == "gpt-6.1-sol"
+    assert launch["route_decision"]["decided_by"] == "project_instruction"
+    assert launch["route_decision"]["project_instruction"] == dict(
+        path="AGENTS.md", line=3, matched=matched, superseded_hint="auto")

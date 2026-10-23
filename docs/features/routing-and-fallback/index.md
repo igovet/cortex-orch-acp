@@ -96,7 +96,21 @@ starting a different reviewer and relying on it to request replanning.
   Opus?", "Почему аудит должен проводить Opus?") is not. A question is a sentence
   ending in `?`, one opened by an auxiliary before the role (do, does, did, must,
   should, shall, has, have, need) or one holding a question word (why, whether,
-  почему, разве, ли, зачем, неужели).
+  почему, разве, ли, зачем, неужели). A request verb after a requirement modal is a
+  requirement too ("All audits and reviews must use codex-acp/gpt-6.1-sol",
+  "Reviews have to use Sol", "Аудит должен использовать Sol"), and the same
+  question rule applies to it in messages and files alike: "Do reviews have to
+  use Sol?", "Reviews must use Sol?" and "Почему аудит должен использовать
+  Sol?" request nothing (`auto_route._requirement_question`); a polite request
+  without such a modal ("Could you run the review on Sol?") still asks.
+- **Sentence boundaries.** A period ends a sentence only before whitespace, the
+  end of the text, a closing quote or bracket, or a closing Markdown emphasis
+  marker (`**Use Opus for the review.** Never use Sonnet.`), never inside a token: the dots
+  in `codex-acp/gpt-6.1-sol`, `AGENTS.md` or `1.0.0` keep the sentence whole
+  (`auto_route._SENTENCE_END`). An exact `engine/model` identity, the same
+  identity in backticks or a unique bare model ID such as `gpt-6.1-sol` is
+  therefore read in its own sentence, in rule files, user messages and chosen
+  question options alike; "Use Opus. Then review." is still two sentences.
 - **Scope.** A sentence covers only the roles whose purpose it names, using the
   same purpose map as purpose-scoped user requests: "All audits must be performed
   by Opus" covers the security, accessibility and code-review roles (including the
@@ -150,7 +164,11 @@ Before this, the requirement reached routing only through the coordinator's
 hint: a re-audit hinted to Opus with a reason quoting `AGENTS.md` ran on Sonnet
 because owner preferred models for review outranked an unconfirmed hint
 (`ignored:owner_preferred`), and the passive rule sentence did not match the
-request grammar either (observed 2026-10-23).
+request grammar either (observed 2026-10-23). Later the same day a committed
+rule naming a dotted identity, `All audits and reviews must use
+codex-acp/gpt-6.1-sol.`, still granted nothing and the mandatory reviewer ran
+on another model: the period inside `gpt-6.1-sol` split the rule into fragments
+that named no model. Labels without dots (Sol, Luna) were unaffected.
 Before a run, `python3 -B scripts/cortex_paseo_dev.py route-preflight --route
 ENGINE/MODEL[:EFFORT]` reads only the dev profile's routing policy and exits 1
 with a visible refusal for the following policy mismatches:
@@ -1388,7 +1406,9 @@ configured ID (for example `unit.`). In that case it is identity data, never
 consent for `unit`. Quote the intended exact ID when punctuation is ambiguous.
 A request for `engine/unit.v2`, `engine/unit-extended` or `engine/unit[wide]`
 cannot authorize `engine/unit`. Prefixes, suffixes, case changes and partial
-provider paths grant nothing for a different identity.
+provider paths grant nothing for a different identity. A period inside an
+identity (`gpt-6.1-sol`) is never a sentence end, so the request grammar reads
+the whole identity with its request verb.
 
 For enabled exact identities (qualified or bare-unique), a means preposition
 directly before the token (`на`, `on`, `via`, `with`) is a request, including

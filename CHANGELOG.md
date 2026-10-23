@@ -2,6 +2,19 @@
 
 ## 1.0.0 (unreleased)
 
+A model requirement naming a dotted identity now routes to that identity. A
+period inside a token (`codex-acp/gpt-6.1-sol`, `AGENTS.md`, `1.0.0`) no longer
+ends a sentence, so `All audits and reviews must use codex-acp/gpt-6.1-sol.`,
+the same identity in backticks and the bare `gpt-6.1-sol` are read whole in
+instruction files, user messages and chosen question options. Previously the
+rule split into fragments that named no model, granted nothing, and the
+mandatory reviewer ran on another model. A question about a "must use"
+requirement ("Do reviews have to use Sol?", "Почему аудит должен использовать
+Sol?") now requests nothing, like the passive forms; negations, alternatives
+lists and remarks still grant nothing, and ordinary sentences such as "Use Opus.
+Then review." still split as before, including after closing Markdown emphasis
+("**Use Opus for the review.** Never use Sonnet." still requests Opus).
+
 Selected recheck options now retain the user's model at explorer dispatch:
 `recheck`/`перепроверить` and commit-list/history work objects are recognized,
 without assigning a model to unrelated role purposes. Previously an explicit
