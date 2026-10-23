@@ -436,8 +436,10 @@ def test_plan_model_states_purpose_scoped_review_routing():
     tools={t['name']:t for t in mcp_tools.tool_definitions('coordinator')}
     description=tools['plan_submit']['inputSchema']['properties']['plan']['properties']['tasks']['items']['properties']['model']['description']
     assert 'Mandatory review still follows owner reviewer pins/ranking' not in description
-    assert ('mandatory review has no plan hint: it follows a recorded user model request '
-            'for the review/audit purpose, otherwise owner reviewer pins/ranking') in description
+    assert ('mandatory review has no plan hint: it follows a recorded user model request, else a project '
+            'instruction requirement, for the review/audit purpose, otherwise owner reviewer pins/ranking') in description
+    # A project instruction file requirement counts as the owner's request.
+    assert 'AGENTS.md or CLAUDE.md counts as the owner\'s request for the role purpose it names' in description
 
 
 def test_project_git_context_only_is_explicit_on_result_check_surfaces():

@@ -23,6 +23,31 @@ answers. Descriptive model remarks and coordinator `model_reason` text never
 authorize a route. Flattened imported history is not trusted turn provenance;
 restate requests outside it. Unterminated literal history tags cannot erase a
 user refusal. See [request matching](docs/features/routing-and-fallback/index.md#owner-model-requests-in-plain-words).
+The one other consent source is a model requirement in the project root's own
+`AGENTS.md` or `CLAUDE.md` (regular, non-symlink files), which counts as the
+owner's request for the role purpose it names. It is recorded as
+`decided_by: project_instruction` with the file path, a newer user message
+outranks it, a prohibition never grants, and hard owner deny, provider
+authorization, unavailability and exhausted quota still refuse without
+substitution. A file counts only when its inode change time and modification
+time both precede the task's creation, so an edit made during the task,
+including one by the task's own writing workers, grants nothing for that task;
+the dispatch decision and plan preview then show `project_instruction` with
+`status: changed_during_task` and the file path, which is never consent.
+An owner edit made during a task applies from the next task. Anyone who could
+edit those files before a task started, including an earlier task's workers
+whose uncommitted edits remain, can still select an enabled model for the named
+work, within owner policy, so review changes to them. A question about a
+requirement is not one. See
+[project instruction requirements](docs/features/routing-and-fallback/index.md#project-instruction-model-requirements).
+The same requirement applies to runtime-created mandatory reviews without a plan
+hint: dispatch resolves the required model, or refuses without substitution,
+before reserving engine capacity or creating an engine manager. A reviewer does
+not need to start on another model to discover the conflict. Chosen options that
+request a recheck through a named model also count as user consent, including
+commit-list/history objects that name no role purpose. They do not assign that
+model to unrelated review roles; unselected options, past-work descriptions,
+negations and ambiguous multi-model choices still grant nothing.
 
 Non-initializing Store inspection (the default `initialize=False` mode) does not
 create directories, locks, schema, rows or SQLite sidecars. Immutable inspection

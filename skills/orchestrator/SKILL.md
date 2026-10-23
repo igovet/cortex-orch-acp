@@ -81,8 +81,10 @@ Follow the live plan schema's exact field descriptions for `complexity` and
 `model`; do not restate their enum values or routing rules here. A non-auto
 model recommendation is advisory unless it carries the user's explicit model
 choice for this task; confirm the exact route against the live menu and schema
-and establish consent only from recorded user messages or answers, never
-model-authored text. Hard owner authorization or an unavailable route must be
+and establish consent only from recorded user messages or answers, or a model
+requirement in the project root's own `AGENTS.md`/`CLAUDE.md` (it counts as the
+user's request for the work it names; see
+[worker routing](references/worker-routing.md)), never model-authored text. Hard owner authorization or an unavailable route must be
 surfaced visibly; never silently substitute another model. The runtime
 validates and schedules.
 Verification is one field of the whole plan, not a per-task property; follow

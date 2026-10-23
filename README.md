@@ -53,7 +53,15 @@ both Claude Code and Codex CLI `unsupported` because no such command is yet
 proven for either. See [opt-in login keepalive](docs/features/failures-and-cancellation/index.md#opt-in-native-cli-login-keepalive-outside-the-runtime).
 
 Model consent comes only from actual requests in recorded user messages or
-answers, not remarks about a model or coordinator reasons. Imported flattened
+answers, not remarks about a model or coordinator reasons. A model requirement in
+the project root's own `AGENTS.md` or `CLAUDE.md` counts as the owner's request for
+the work it names ("All audits must be performed by Opus" routes audit and review
+roles to Opus); only the file as it stood when the task started counts (an edit
+during the task shows as `changed_during_task` in the route decision and plan
+preview), a newer user message outranks it, a prohibition there never grants and
+a list of alternatives ("Opus or Sonnet") demands none of them. See [project instruction requirements](docs/features/routing-and-fallback/index.md#project-instruction-model-requirements). Selected options to recheck commit lists or history through a named model also
+count before explorer dispatch; past-work descriptions and unselected options do
+not. Imported flattened
 history is not turn provenance; restate requests outside it. Non-initializing
 storage inspection never repairs schema or creates SQLite sidecars, and refuses
 uncheckpointed WAL data. Live runtime opens, including settings-panel project reads,
@@ -65,8 +73,8 @@ Explicit model-and-effort requests on covered planned nodes retain the exact
 effort through dispatch, retries and review fixes (for example, ask to use
 `codex-acp/gpt-6.1-sol at medium effort`). Conflicting policy or missing engine
 support refuses before a worker prompt; it never substitutes an automatic effort.
-Mandatory review honors recorded purpose-scoped user requests, otherwise owner
-reviewer pins/ranking. An exact reviewer pin
+Mandatory review honors recorded purpose-scoped user requests and applicable
+project model requirements before reviewer pins/ranking or cross-provider preference. An exact reviewer pin
 also refuses instead of clamping its effort. Editor thinking selection alone does
 not set every worker's effort. See [routing](docs/features/routing-and-fallback/index.md#explicit-effort-preservation).
 

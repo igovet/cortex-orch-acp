@@ -37,6 +37,120 @@ For a policy-only guarantee across the workload, the owner pins the reviewer
 role to the selected route. A recorded purpose-scoped request can also select
 that reviewer at dispatch, but this preflight does not read task sources.
 Review fixes inherit the planned node's hint, so they stay covered.
+
+A selected option requesting a recheck through a model is a model choice too:
+`recheck` and request-form Russian `перепроверить`/`перепроверь` are work verbs.
+The option parser accepts analysis, history, list, commit and change nouns as
+work objects after a work verb, without treating them as role purposes. For
+example, "Перепроверить список изменений через Opus" grants the exact planned
+explorer hint; it does not choose a model for every audit. The existing means
+or exclusive-marker checks remain: a model's own commit list, past-work
+descriptions, a negation, an unselected option or an ambiguous multi-model choice
+grants nothing.
+
+### Project instruction model requirements
+
+A model requirement written in the project root's own instruction file counts as
+the owner's request for the purpose it names, with the same precedence as a
+recorded user model request: ahead of the coordinator's hint, pins, owner
+preferred models, usage ranking and automatic tiers, and still below hard owner
+deny/provider authorization, unconfigured identities, engine unavailability and
+exhausted quota, which refuse visibly (`user_requested_route_unavailable`)
+without substitution (`auto_route.project_instruction_model_request` and
+`auto_route.project_instruction_route`, applied in
+`orchestration.state.attempt_routing` and the plan preview).
+The runtime-created mandatory reviewer has no plan hint, but receives this same
+requirement. It overrides the opposite-provider review preference too. The live
+adapter resolves it at engine-open time, before capacity reservation or engine
+manager creation (`delegation.live_adapters.EngineSessionManagerAdapter.open`
+and `_resolve_runtime_route`); an unavailable required model refuses rather than
+starting a different reviewer and relying on it to request replanning.
+
+- **Sources.** Only `AGENTS.md` and `CLAUDE.md` at the project root, the files the
+  runtime already hands workers as project rules
+  (`delegation.live_adapters.PROJECT_RULE_FILES`): regular, non-symlink UTF-8
+  files, read to the same 64 000-character bound. Nested copies, README files,
+  reports, tool output and coordinator `model_reason` never count.
+- **Only the owner's version counts.** A task's own writing workers can edit these
+  files, and a model-authored edit is never consent. A file therefore counts only
+  when its inode change time and modification time both precede the task's
+  creation and it does not change while it is read
+  (`auto_route._project_instruction_texts`). A file created, edited, replaced,
+  renamed, linked or re-permissioned after the task started grants nothing for
+  that task; it is skipped, never partly read. No unprivileged process can set
+  the change time back. An owner edit made during a task takes effect from the
+  next task. The lapse is visible: when the changed file, as it reads now,
+  requires a model for the node's role, the dispatch decision and the plan
+  preview item carry `project_instruction: {status: changed_during_task, path,
+  line, route}` (the preview adds a `project_instruction_note`), and the route
+  follows ordinary ranking (`auto_route.project_instruction_change`). Edits already in the file when a task starts, including uncommitted
+  edits left by an earlier task's workers, count as the owner's, so review
+  changes to these files.
+- **Grammar.** Each rule sentence is read with the user request grammar
+  (`requests_family`, `assigns_family`); Markdown emphasis around a model name
+  is ignored. A passive requirement is a request in messages and files alike:
+  "All audits and re-audits must be owned and performed by **Claude Opus**",
+  "Reviews should be done by Sonnet", "Аудит должен проводить Opus". A statement
+  ("The previous audit was performed by Opus"), a refusal ("Audits must not be
+  performed by Opus") or a question ("Does the audit have to be performed by
+  Opus?", "Почему аудит должен проводить Opus?") is not. A question is a sentence
+  ending in `?`, one opened by an auxiliary before the role (do, does, did, must,
+  should, shall, has, have, need) or one holding a question word (why, whether,
+  почему, разве, ли, зачем, неужели).
+- **Scope.** A sentence covers only the roles whose purpose it names, using the
+  same purpose map as purpose-scoped user requests: "All audits must be performed
+  by Opus" covers the security, accessibility and code-review roles (including the
+  runtime's mandatory review), never implementers, writers or debuggers. A
+  sentence naming no role purpose ("Use only Opus for prompt/skill work") grants
+  nothing. Within a sentence a model covers only its own work: the subject a
+  passive or assignment construction gives it, or the phrases before and after a
+  requested model, each bounded by the neighbouring model mention or a clause
+  break (`auto_route._request_scopes`, `auto_route._purpose_request`). "Run all
+  audits on Opus before deploying" and "Проведи ревью на Opus и обнови
+  документацию" cover the review roles. A phrase between two models counts for
+  both unless it plainly belongs to one: it opens with "for"/"для" after the
+  earlier model, or ends in a means word ("on", "через", "with", "by") before the
+  later one. "Implementation must be performed by Sonnet and reviewed by Opus"
+  and "Use Sonnet for implementation and Opus for reviews" never give the review
+  roles Sonnet. Purpose-scoped user requests are scoped the same way.
+- **Alternatives demand none.** A model listed with another enabled model ("or",
+  "или", "либо", a comma, "/" or "и/или" between the mentions, where "or" may
+  repeat the preposition: "Audits must be performed by Opus or Sonnet", "…by
+  Opus or by Sonnet", "…by Opus/Sonnet", "Аудит должен проводить Opus или
+  Sonnet", "Аудит делай на Opus или на Sonnet", "Opus, Sonnet or Sol", "Run the
+  review on Opus or Sonnet") permits a choice among them: it is
+  no file requirement and no purpose-scoped request for any of them, and a
+  passive or responsibility construction listing them is no request at all, so
+  ordinary routing chooses (`auto_route._listed_with_alternatives`). A plain
+  request verb before the list ("Use Opus or Sonnet") still confirms a
+  coordinator hint naming one of the listed models exactly.
+- **Prohibitions exclude.** A sentence refusing the model for that purpose, or for
+  no named purpose ("Opus is prohibited for audits", "Never use Opus"), excludes
+  it; two models required for one purpose grant neither. A model name that only
+  qualifies a work noun under another verb ("never relabel another model's work as
+  an Opus audit") names a work product and is not a refusal; "Don't run an Opus
+  review" and "Opus reviews are prohibited" still are.
+- **The owner's own words outrank the file.** A recorded user request for the
+  node's exact hint, a purpose request naming another model for that purpose, or
+  a newer user message refusing the file's model wins (when the node's hint
+  names that model, recorded as `user_model_request.status: revoked_by_user`
+  with the file's source reference). Imported chat history neither grants nor
+  revokes, so it never hides the file, nor an older direct refusal or purpose
+  request that outranks the file.
+- **Provenance.** Dispatch records `decided_by` and `basis` `project_instruction`,
+  a `project_instruction` object with the file `path`, `line` and the matched
+  label (plus `superseded_hint` when the coordinator hinted another route), and
+  `user_model_request` with `source: project_instruction` and `status: honoured`.
+  The route keeps the `auto:user_request` basis, so an engine-failure fallback
+  never substitutes another model. The plan preview reports
+  `preview_status: pending_dispatch:project_instruction` with the route, path and
+  line, and a note when the hint differs. Worker cards read `by project rules`.
+
+Before this, the requirement reached routing only through the coordinator's
+hint: a re-audit hinted to Opus with a reason quoting `AGENTS.md` ran on Sonnet
+because owner preferred models for review outranked an unconfirmed hint
+(`ignored:owner_preferred`), and the passive rule sentence did not match the
+request grammar either (observed 2026-10-23).
 Before a run, `python3 -B scripts/cortex_paseo_dev.py route-preflight --route
 ENGINE/MODEL[:EFFORT]` reads only the dev profile's routing policy and exits 1
 with a visible refusal for the following policy mismatches:

@@ -12,7 +12,7 @@ from ..catalog.labels import engine_short_name
 # characters, so the decision stays readable on a card.
 CARD_SUMMARY_MAX = 80
 # What decided a route, in the owner's words where the id is not plain.
-_DECIDED_BY = {"user_request": "your request"}
+_DECIDED_BY = {"user_request": "your request", "project_instruction": "project rules"}
 # A model name is never shortened below this many characters plus "…".
 _MIN_MODEL_CHARS = 12
 

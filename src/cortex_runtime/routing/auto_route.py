@@ -312,7 +312,8 @@ def choose(role: str, project_root=None, environ: Mapping[str, str] | None = Non
            model_reason: str | None = None, previous_engine: str | None = None,
            user_request: Mapping | None = None,
            eligible_route_ids: frozenset[str] | None = None,
-           user_revocation: Mapping | None = None, work_kind_override: str | None = None) -> Choice | None:
+           user_revocation: Mapping | None = None, work_kind_override: str | None = None,
+           project_instruction_status: Mapping | None = None) -> Choice | None:
     """The route this worker role should open on, or ``None`` when nothing
     engine-confirmed is configured (keep the coordinator's route).
     See :func:`tier_for` for ``escalate`` and ``complexity``, and
@@ -326,12 +327,18 @@ def choose(role: str, project_root=None, environ: Mapping[str, str] | None = Non
     unavailable route named -- never the coordinator's route instead.
 
     User requests are established by user_model_request from retained user
-    text. For covered exact hints they precede pins, ranking, automatic
+    text, or by project_instruction_route from the project's own instruction
+    files (``source='project_instruction'``, recorded as ``decided_by``
+    ``project_instruction`` with its file path). For covered exact hints they precede pins, ranking, automatic
     membership and role tiers, including on retries. Hard owner authorization,
     observed identity, availability and exhausted quota still refuse visibly;
     a requested route is never silently substituted. ``user_revocation``
     (:func:`user_model_revocation`) is never consent; it is recorded in the
     decision as ``user_model_request.status='revoked_by_user'``.
+    ``project_instruction_status`` (:func:`project_instruction_change`) is
+    never consent either: it is recorded as the decision's
+    ``project_instruction`` so a requirement that lapsed because its file
+    changed during the task stays visible.
 
     Tiers, automatic eligibility and per-model policy come from routing.json
     ``models`` only (:mod:`routing.model_policy`). ``eligible_route_ids`` is
@@ -402,16 +409,23 @@ def choose(role: str, project_root=None, environ: Mapping[str, str] | None = Non
                                 "no substitution permitted. Select a permitted effort or ask the owner to revise policy.")
         effort = (explicit_effort if explicit_effort is not None else
                   nearest(EFFORT_BY_TIER[requested_tier], permitted_efforts(picked, requested_tier, policy)))
+        # A requirement in the project's own instruction file counts as the
+        # owner's request; its provenance stays visible as its own basis.
+        source = (PROJECT_INSTRUCTION_SOURCE if user_request.get("source") == PROJECT_INSTRUCTION_SOURCE
+                  else "user_request")
         decision = dict(
             role=role, base_role_tier=base_role_tier, role_tier=requested_tier, tier=requested_tier,
-            basis="user_request", decided_by="user_request", rank_version=RANK_VERSION,
+            basis=source, decided_by=source, rank_version=RANK_VERSION,
             escalated=escalate, preference=preference,
-            preference_status="ignored:user_request" if preference else "none",
+            preference_status=f"ignored:{source}" if preference else "none",
             model_hint=model_hint, model_hint_status="honoured", model_hint_reason=model_reason,
-            effort_basis="user_request:explicit_effort" if explicit_effort is not None else f"user_request:{requested_tier}",
+            effort_basis=f"{source}:explicit_effort" if explicit_effort is not None else f"{source}:{requested_tier}",
             user_model_request=dict(user_request, status="honoured"),
             candidates=[_candidate(e, usage, role, False, affinity=affinity, work_kind_override=work_kind_override) for e in requested],
             chosen=model_hint, chosen_connection_id=picked.connection_id)
+        if source == PROJECT_INSTRUCTION_SOURCE:
+            decision[PROJECT_INSTRUCTION_SOURCE] = {
+                key: user_request[key] for key in ("path", "line", "matched", "superseded_hint") if key in user_request}
         if profile_label is not None:
             decision["routing_profile"] = profile_label
         return Choice(picked.connection_id, picked.route.model, effort, "auto:user_request", decision, picked.route.id)
@@ -478,6 +492,8 @@ def choose(role: str, project_root=None, environ: Mapping[str, str] | None = Non
             decision["user_model_request"] = dict(user_request, status="ignored:pinned")
         elif user_revocation is not None:
             decision["user_model_request"] = dict(user_revocation, status="revoked_by_user")
+        if project_instruction_status is not None:
+            decision[PROJECT_INSTRUCTION_SOURCE] = dict(project_instruction_status)
         if profile_label is not None:
             decision["routing_profile"] = profile_label
         default_effort = (stretch_effort(role_tier, escalate, best_policy.effort_ladder)
@@ -533,6 +549,8 @@ def choose(role: str, project_root=None, environ: Mapping[str, str] | None = Non
         decision["user_model_request"] = dict(user_revocation, status="revoked_by_user")
     elif decision is not None and request_status is not None:
         decision["user_model_request"] = dict(user_request or {}, status=request_status)
+    if decision is not None and project_instruction_status is not None:
+        decision[PROJECT_INSTRUCTION_SOURCE] = dict(project_instruction_status)
     if decision is not None and profile_label is not None:
         decision["routing_profile"] = profile_label
     if picked is None:
@@ -1413,10 +1431,10 @@ REQUEST_WORDS = re.compile(
 # на модель"). Russian forms as in REQUEST_WORDS.
 WORK_VERBS = re.compile(
     r"implement|build|fix|write|test|review|audit|perform|handle|redo|rerun|retry|debug|refactor"
-    r"|investigate|analy[sz]e|do"
+    r"|investigate|analy[sz]e|recheck|do"
     r"|реализ(?:уй|уйте|овать|уем)|(?:с|пере|до)?дела(?:й|йте|ть)|(?:с|пере|до)делаем"
     r"|выполн(?:и|ите|ить|им|яй|яйте|ять)|напиш(?:и|ите|ем)|написать"
-    r"|провер(?:ь|ьте|ить|им|яй|яйте|ять)|исправ(?:ь|ьте|ить|им|ляй|ляйте|лять)"
+    r"|(?:пере)?провер(?:ь|ьте|ить|им|яй|яйте|ять)|исправ(?:ь|ьте|ить|им|ляй|ляйте|лять)"
     r"|почин(?:и|ите|ить|им)|(?:про)?тестир(?:уй|уйте|овать|уем)"
     r"|собер(?:и|ите|ём|ем)|собрать|провед(?:и|ите|ём|ем)|провести|отревью(?:й|йте|ить)",
     re.IGNORECASE,
@@ -1431,7 +1449,7 @@ _RU_SUBJUNCTIVE_REQUEST = re.compile(
     re.IGNORECASE,
 )
 _RU_SUBJUNCTIVE_WORK = re.compile(
-    r"(?:(?:с|пере|до)?дела|реализова|выполни|выполня|написа|провери|проверя|исправи|исправля"
+    r"(?:(?:с|пере|до)?дела|реализова|выполни|выполня|написа|(?:пере)?провери|(?:пере)?проверя|исправи|исправля"
     r"|почини|(?:про)?тестирова|собра|провё|прове|отревьюи)" + _RU_PAST_SUFFIX,
     re.IGNORECASE,
 )
@@ -1691,26 +1709,80 @@ def refuses_family(text: str, family: str, names: Sequence[str] | None = None,
 # "Responsible for" a role or stage, and those roles and stages. A past
 # form ("отвечал") is a request only after "чтобы"/"пусть"; alone it reports.
 _RESPONSIBILITY_SUBJUNCTIVE = frozenset({"чтобы", "пусть", "should", "must", "will", "let"})
+# "<role> must (always) be (owned and) performed (only) by <model>".
+_PASSIVE_REQUIREMENT = (
+    r"(?:must|shall|should|(?:has|have|needs?)\s+to)\s+(?:always\s+|only\s+)?be\s+(?:\w+\s+(?:and|or)\s+)?"
+    r"(?:performed|done|handled|owned|conducted|run|executed|carried\s+out)\s+(?:only\s+|exclusively\s+|solely\s+)?by")
+# "<role> должен (всегда) проводить (только) <model>".
+_RU_REQUIREMENT = (
+    r"(?:должен|должн\w*|обязан\w*)\s+(?:всегда\s+)?(?:выполнять|проводить|делать|вести)(?:\s+(?:только|лишь|исключительно))?")
+# A question about a requirement is not one ("Does the audit have to be
+# performed by Opus?", "Почему аудит должен проводить Opus?"): an auxiliary
+# opening the clause before the role, or a question word in it.
+_INVERTED_AUXILIARIES = frozenset({"do", "does", "did", "must", "should", "shall", "has", "have", "need", "needs"})
+_QUESTION_WORDS = frozenset({"why", "whether", "почему", "разве", "ли", "зачем", "неужели"})
 _ROLE_OR_STAGE = re.compile(
     r"(?:audit|аудит|review|ревью|code|код|design|дизайн|frontend|фронт|backend|бэк|test|тест|qa|plan|план|"
     r"docs?|документ|security|безопасност|accessibility|доступност|architect|архитект|debug|отладк|"
     r"verification|проверк|implementation|реализац|refactor|рефактор|research|исследован)\w*", re.I)
 
 
-def assigns_family(text: str, pattern: re.Pattern) -> str | None:
+# Between two model mentions, a list separator ("Opus or Sonnet", "Opus,
+# Sonnet или Sol", "Opus/Sonnet", "Opus и/или Sonnet"), where "or" may repeat
+# the means preposition ("by Opus or by Sonnet", "на Opus или на Sonnet"),
+# optionally before a vendor word ("Opus or Claude Sonnet").
+_ALTERNATIVE_MEANS = r"(?:(?:by|on|with|via|using|на|через|с|при\s+помощи)\s+)?"
+_ALTERNATIVE_SEPARATOR = re.compile(
+    rf"\s*(?:,\s*(?:(?:or|или|либо)\s+{_ALTERNATIVE_MEANS})?|(?:or|или|либо)\s+{_ALTERNATIVE_MEANS}"
+    r"|/\s*|и\s*/\s*или\s+)(?:(?:claude|клод|anthropic|openai|codex|gpt)\s+)?",
+    re.IGNORECASE)
+
+
+def _listed_with_alternatives(text: str, match: re.Match, others: Sequence[re.Pattern]) -> bool:
+    """Whether the mention ``match`` stands in a list with another enabled
+    model's mention (``others``): "Audits must be performed by Opus or Sonnet"
+    permits a choice among them, so it assigns none of them (review,
+    2026-10-23)."""
+    for other in others:
+        for found in other.finditer(text):
+            if found.start() >= match.end():
+                between = text[match.end():found.start()]
+            elif found.end() <= match.start():
+                between = text[found.end():match.start()]
+            else:
+                continue
+            if _ALTERNATIVE_SEPARATOR.fullmatch(between):
+                return True
+    return False
+
+
+def assigns_family(text: str, pattern: re.Pattern, others: Sequence[re.Pattern] = ()) -> str | None:
     """A model explicitly made responsible for a role object, not a remark.
 
     Match the construction next to this mention, never responsibility assigned
     to a different model elsewhere in the clause. Past forms require a request
     mood ("чтобы за audit отвечал opus"); generic "does/handles" assign nothing.
+    A mention listed with another enabled model's (``others``) is a choice
+    among them, never an assignment (:func:`_listed_with_alternatives`).
     """
+    assignment = _assignment(text, pattern, others)
+    return assignment[0] if assignment is not None else None
+
+
+def _assignment(text: str, pattern: re.Pattern, others: Sequence[re.Pattern] = ()) -> tuple[str, str] | None:
+    """``(mention, subject)`` of :func:`assigns_family`: the model mention and
+    the role words the construction assigned it ("audits and re audits" in
+    "All audits and re-audits must be performed by Opus"), so a caller scoping
+    by purpose binds the model to its own subject, never to another purpose
+    the sentence also names ("Implementation must be performed by Sonnet and
+    reviewed by Opus" assigns Sonnet the implementation, not the review)."""
     role = _ROLE_OR_STAGE.pattern
-    object_role = rf"(?:\w+\s+){{0,2}}{role}\b"
+    object_role = rf"(?P<subject>(?:\w+\s+){{0,2}}{role})\b"
     label_lead = r"(?:claude\s*)?"
     historical = {"was", "were", "previously", "last", "раньше", "ранее", "вчера", "прошлый"}
     for match in pattern.finditer(text):
         context = _mention_context(text, match)
-        if _refused_mention(context):
+        if _refused_mention(context) or _listed_with_alternatives(text, match, others):
             continue
         before = _plain_words(_REQUEST_CLAUSE_BREAK.split(
             _SENTENCE_END.split(text[:match.start()])[-1])[-1])
@@ -1719,22 +1791,49 @@ def assigns_family(text: str, pattern: re.Pattern) -> str | None:
         if any(word in historical for word in [*before, *after]):
             continue
         lead, follow = " ".join(before), " ".join(after)
-        if (re.search(rf"\bза\s+{object_role}\s+отвеча(?:ет|ют|ть|й|йте)\s*{label_lead}$", lead)
-                or re.match(rf"отвеча(?:ет|ют|ть|й|йте)\s+за\s+{object_role}", follow)
-                or re.match(rf"(?:(?:is|be)\s+)?(?:responsible\s+for|in\s+charge\s+of)\s+{object_role}", follow)):
-            return match.group(0)
+        found = (re.search(rf"\bза\s+{object_role}\s+отвеча(?:ет|ют|ть|й|йте)\s*{label_lead}$", lead)
+                 or re.match(rf"отвеча(?:ет|ют|ть|й|йте)\s+за\s+{object_role}", follow)
+                 or re.match(rf"(?:(?:is|be)\s+)?(?:responsible\s+for|in\s+charge\s+of)\s+{object_role}", follow))
+        if found:
+            return match.group(0), found.group("subject")
         # "чтобы" is also written "что бы".
         subjunctive = (any(word in _RESPONSIBILITY_SUBJUNCTIVE for word in before)
                        or any(a == "что" and b == "бы" for a, b in zip(before, before[1:])))
-        if subjunctive and (
-                re.search(rf"\bза\s+{object_role}\s+отвечал[аи]?\s*{label_lead}$", lead)
-                or re.match(rf"отвечал[аи]?\s+за\s+{object_role}", follow)):
-            return match.group(0)
-        if ((re.search(rf"\blet\s*{label_lead}$", lead)
-             and re.match(rf"(?:handle|perform)\s+{object_role}", follow))
-                or re.match(rf"(?:should|must)\s+(?:handle|perform)\s+{object_role}", follow)):
-            return match.group(0)
+        found = subjunctive and (
+            re.search(rf"\bза\s+{object_role}\s+отвечал[аи]?\s*{label_lead}$", lead)
+            or re.match(rf"отвечал[аи]?\s+за\s+{object_role}", follow))
+        if found:
+            return match.group(0), found.group("subject")
+        found = ((re.search(rf"\blet\s*{label_lead}$", lead)
+                  and re.match(rf"(?:handle|perform)\s+{object_role}", follow))
+                 or re.match(rf"(?:should|must)\s+(?:handle|perform)\s+{object_role}", follow))
+        if found:
+            return match.group(0), found.group("subject")
+        # A requirement in the passive, as project rules are written: "All
+        # audits and re-audits must be owned and performed by Claude Opus"
+        # named Opus for the audits, yet a re-audit ran on Sonnet (observed
+        # 2026-10-23); "аудит должен проводить Opus".
+        found = (re.search(rf"\b(?P<subject>{role}(?:\s+\w+){{0,4}}?)\s+{_PASSIVE_REQUIREMENT}\s*{label_lead}$", lead)
+                 or re.search(rf"\b(?P<subject>{role}(?:\s+\w+){{0,3}}?)\s+{_RU_REQUIREMENT}\s*{label_lead}$", lead))
+        if found and not _asks(text, match, lead[:found.start()].split(), before):
+            return match.group(0), found.group("subject")
     return None
+
+
+def _sentences(text: str) -> list[str]:
+    """``text`` split after each sentence end, keeping it: a question mark
+    still marks its sentence a question (see :func:`_asks`)."""
+    return re.split(r"(?<=[.!?;\n])", text)
+
+
+def _asks(text: str, match: re.Match, prefix: Sequence[str], clause: Sequence[str]) -> bool:
+    """Whether the sentence of ``match`` asks about a requirement rather than
+    states it: it ends with "?", an auxiliary opens the clause before the role
+    (``prefix``), or the clause holds a question word."""
+    end = _SENTENCE_END.search(text, match.end())
+    return ((end is not None and end.group(0) == "?")
+            or bool(prefix and prefix[0] in _INVERTED_AUXILIARIES)
+            or any(word in _QUESTION_WORDS for word in clause))
 
 
 # A restrictive selection: "только"/"only" right before the mention
@@ -2157,6 +2256,12 @@ _OPTION_NOTES = frozenset({"recommended", "default", "рекомендуется
                            "рекомендуемая", "рекомендуемое"})
 _OPTION_FILLERS = MEANS_FILLERS | {"модель"}
 _OPTION_PRONOUNS = frozenset({"it", "this", "это", "его", "её", "ее"})
+# Work objects are not role purposes: rechecking commit history selects a
+# model for that recheck, but never assigns it to every audit or review.
+_OPTION_WORK_OBJECTS = re.compile(
+    r"analysis|history|lists?|commits?|changes?|анализ(?:а|у|ом|е)?|истори(?:я|ю|и|ей)"
+    r"|спис(?:ок|ка|ку|ком|ке|ки|ков|кам|ками|ках)"
+    r"|коммит(?:ы|а|ов|у|ам|ом|ами|е|ах)?|изменени(?:я|й|ю|ям|ем|ями|и|ях)", re.IGNORECASE)
 _OPTION_COORDINATORS = frozenset({"and", "or", "и", "или"})
 # "Use Opus to review the code" / "Opus для аудита" name what the model is for.
 _OPTION_PURPOSE = _PURPOSE_PREPOSITIONS | {"to"}
@@ -2206,8 +2311,8 @@ def _option_tokens(option: str, pattern: re.Pattern, others: Sequence[re.Pattern
 def _option_prefix(words: Sequence, post_exclusive: bool) -> bool:
     """Whether the words before the model in a chosen option only select it:
     an optional affirmation, an optional request-form request or work verb
-    (a Russian role-noun object may precede it), its object (role or stage
-    nouns, "it") or a purpose phrase ("для аудита"),
+    (a Russian role-noun object may precede it), its object (role/stage nouns,
+    work-object nouns after a work verb, "it") or a purpose phrase ("для аудита"),
     then exclusive markers, means prepositions, vendor words and fillers.
     A bare role noun right before the model may be the model's own ("аудит
     Opus"), so it needs a marker, a means preposition or a giving verb; a work
@@ -2239,6 +2344,7 @@ def _option_prefix(words: Sequence, post_exclusive: bool) -> bool:
         elif purpose and (_purpose_noun(word) or word in _OPTION_FILLERS or word in _OPTION_COORDINATORS):
             pass
         elif not purpose and ((_role_noun(word) and (governor or _CYRILLIC.search(word)))
+                              or (governor == "work" and _OPTION_WORK_OBJECTS.fullmatch(word))
                               or (governor and word in _OPTION_PRONOUNS)):
             objects = True
         elif not purpose and (word in _OPTION_FILLERS or (objects and word in _OPTION_COORDINATORS)):
@@ -2564,20 +2670,27 @@ def _selected_option_mention(option: str, pattern: re.Pattern, others: Sequence[
             overlaps = any(match.start() < end and start < match.end() for start, end in spans)
             if not overlaps and not _refused_mention(_mention_context(option, match)):
                 return None
-    if assigns_family(option, pattern) is not None or _option_selects(option, pattern, others, question):
+    if assigns_family(option, pattern, others) is not None or _option_selects(option, pattern, others, question):
         return mentions[0].group(0)
     return None
 
 
 def _user_model_consent(store, task_id: str, model_hint: str,
-                        names: Sequence[str] | None = None) -> tuple[dict | None, dict | None]:
-    """``(grant, revocation)`` from the newest user message that either
-    refuses or requests ``model_hint``: the latest message wins. A refusal
-    newer than a grant revokes it (``reason='revoked_by_user'``); a refusal
-    with no older grant is neither."""
+                        names: Sequence[str] | None = None, *,
+                        through_history: bool = False) -> tuple[dict | None, dict | None, dict | None]:
+    """``(grant, revocation, refusal)`` from the newest user message that
+    either refuses or requests ``model_hint``: the latest message wins. A
+    refusal newer than a grant revokes it (``reason='revoked_by_user'``); a
+    refusal with no older grant is neither, and is returned as ``refusal``
+    (it still outranks a project instruction file).
+
+    Imported history ends the scan, so no older grant survives it. With
+    ``through_history`` (a project instruction file's refusal channel) it
+    neither grants nor revokes and the scan continues past it: a newer
+    imported summary never hides the owner's older direct refusal."""
     family = family_of(model_hint or "")
     if family is None:
-        return None, None
+        return None, None, None
     overrides = load_overrides(getattr(store, "project_root", None))
     engine, _, model = model_hint.partition("/")
     configured_names = model_policy.policy_for(engine, model, overrides).request_names
@@ -2598,8 +2711,8 @@ def _user_model_consent(store, task_id: str, model_hint: str,
     with store.connection() as db:
         for source_ref, text, selection in _user_sources(store, db, task_id):
             if text is None:
-                if refusal is None:
-                    return None, None
+                if refusal is None and not through_history:
+                    return None, None, None
                 continue  # retain a newer direct refusal against any older grant
             # Strip only known effort suffixes from exact configured identities,
             # keeping offsets intact for source-bound effort extraction below.
@@ -2610,13 +2723,13 @@ def _user_model_consent(store, task_id: str, model_hint: str,
             if refused is not None:
                 refusal = refusal or dict(source_ref=source_ref, family=family, matched=refused)
                 continue
+            if others is None:
+                others = [other for identity, other in _named_identity_patterns(overrides, identities).items()
+                          if identity != family]
             if selection is not None:
                 # The user chose a question option. The asking model wrote its
                 # words, so it grants only when it selects this model, never
                 # when it merely mentions it ("Принять результат аудита Opus").
-                if others is None:
-                    others = [other for identity, other in _named_identity_patterns(overrides, identities).items()
-                              if identity != family]
                 matched = _selected_option_mention(text, pattern, others, selection["question"])
             else:
                 matched = requests_family(text, family, names, pattern=pattern, exact_pattern=exact_pattern)
@@ -2625,11 +2738,11 @@ def _user_model_consent(store, task_id: str, model_hint: str,
                 # too: "добавь требование, чтобы за audit отвечал opus" named
                 # Opus for the audit, yet failed the request grammar and the
                 # audit ran on another model (observed 2026-10-22).
-                matched = assigns_family(text, pattern)
+                matched = assigns_family(text, pattern, others)
             if matched is None:
                 continue
             if refusal is not None:
-                return None, dict(refusal, reason="revoked_by_user", revoked_source_ref=source_ref)
+                return None, dict(refusal, reason="revoked_by_user", revoked_source_ref=source_ref), refusal
             for engine, config in (overrides.get("models") or {}).items():
                 for model, policy in (config.get("policy") or {}).items():
                     identity = f"{engine}/{model}"
@@ -2639,8 +2752,8 @@ def _user_model_consent(store, task_id: str, model_hint: str,
             effort = _source_effort(source_text, text, pattern, matched)
             if effort is not None:
                 grant["effort"] = effort
-            return grant, None
-    return None, None
+            return grant, None, None
+    return None, None, refusal
 
 
 # What a role is for, in the owner's words. A node with no model hint (the
@@ -2693,7 +2806,76 @@ def _option_names_work(option: str, patterns) -> bool:
                for word in _plain_words(option))
 
 
-def user_purpose_model_request(store, task_id: str, role_id: str | None) -> str | None:
+def _names_work(text: str) -> bool:
+    """Whether ``text`` names a role, stage or purpose ("implementation",
+    "reviews", "аудита")."""
+    return any(_ROLE_OR_STAGE.fullmatch(word) or any(re.fullmatch(purpose, word, re.I) for purpose, _roles in _PURPOSE_ROLES)
+               for word in _plain_words(text))
+
+
+def _phrase_owner(phrase: str) -> str | None:
+    """Which of the two model mentions around ``phrase`` it plainly belongs
+    to: ``'earlier'`` when it opens with "for"/"для" (the earlier model's
+    purpose: "Sonnet for implementation and use Opus"), ``'later'`` when it
+    ends in a means word before the later one ("Opus and the tests on
+    Sonnet"), else ``None`` (both, or neither)."""
+    words = _plain_words(phrase)
+    last = words[-2] if len(words) > 1 and words[-1] in MEANS_FILLERS else words[-1] if words else None
+    earlier = bool(words) and words[0] in _PURPOSE_PREPOSITIONS
+    later = last is not None and (bool(_EXCLUSIVE_MEANS.fullmatch(last)) or last == "by")
+    return "earlier" if earlier and not later else "later" if later and not earlier else None
+
+
+def _request_scopes(sentence: str, mention: re.Match, patterns) -> list[str]:
+    """The phrases a requested model mention is for: the phrase before it,
+    from the previous model mention or clause break ("Проведи ревью на" in
+    "Проведи ревью на Opus и обнови документацию"), and the phrase after it,
+    up to the next mention or break ("for reviews" in "Use Sonnet for
+    implementation and use Opus for reviews"). A phrase between two mentions
+    is both's, unless it is plainly the other model's own (:func:`_phrase_owner`).
+    The whole sentence when no phrase around the mention names any work;
+    none when only the other model's own phrase does."""
+    mentions = [m.span() for p in patterns for m in p.finditer(sentence)]
+    breaks = [m.start() for m in _REQUEST_CLAUSE_BREAK.finditer(sentence)]
+    next_mention = min([s for s, _e in mentions if s >= mention.end()], default=None)
+    end = min([b for b in breaks if b >= mention.end()] + [len(sentence) if next_mention is None else next_mention])
+    following = sentence[mention.end():end]
+    previous_mention = max([e for _s, e in mentions if e <= mention.start()], default=None)
+    start = max([b + 1 for b in breaks if b < mention.start()] + [0 if previous_mention is None else previous_mention])
+    preceding = sentence[start:mention.start()]
+    phrases = [(preceding, start == previous_mention and _phrase_owner(preceding) == "earlier"),
+               (following, end == next_mention and _phrase_owner(following) == "later")]
+    own = [phrase for phrase, other in phrases if not other and _names_work(phrase)]
+    if own:
+        return own
+    return [] if any(_names_work(phrase) for phrase, _other in phrases) else [sentence]
+
+
+def _purpose_request(sentence: str, identity: str, patterns: Mapping[str, re.Pattern], covers) -> str | None:
+    """The mention of ``identity`` one sentence requests for a purpose that
+    ``covers`` (a test of text) accepts: the request grammar for the work its
+    own phrases name (:func:`_request_scopes`), or an assignment
+    (:func:`_assignment`) whose own subject names the purpose. "Implementation
+    must be performed by Sonnet and reviewed by Opus" and "Use Sonnet for
+    implementation and Opus for reviews" name the review, yet ask Sonnet for
+    the implementation only, so neither grants Sonnet for the review (review,
+    2026-10-23). A mention listed with another model's ("Run the review on
+    Opus or Sonnet") permits a choice and requests neither
+    (:func:`_listed_with_alternatives`)."""
+    pattern = patterns[identity]
+    others = [other for name, other in patterns.items() if name != identity]
+    matched = requests_family(sentence, identity, (), pattern=pattern)
+    if matched is not None:
+        scopes = [scope for mention in pattern.finditer(sentence)
+                  if not _listed_with_alternatives(sentence, mention, others)
+                  for scope in _request_scopes(sentence, mention, patterns.values())]
+        return matched if any(covers(scope) for scope in scopes) else None
+    assignment = _assignment(sentence, pattern, others)
+    return assignment[0] if assignment is not None and covers(assignment[1]) else None
+
+
+def user_purpose_model_request(store, task_id: str, role_id: str | None, *,
+                               through_history: bool = False) -> str | None:
     """The exact enabled identity the owner asked for this role's purpose
     ("используй sonnet для ревью", "за аудит отвечает Opus", "UI/UX передавай
     Фейблу"), from the newest user sentence naming both a model request and
@@ -2705,7 +2887,8 @@ def user_purpose_model_request(store, task_id: str, role_id: str | None) -> str 
     ("Какой моделью выполнить аудит?" -> "Opus"; see :func:`_question_scope`,
     which never reads a judging sentence): the question only scopes
     the user's choice, never grants. An option that names its own work
-    ("Исправить через Opus") is scoped by that work alone."""
+    ("Исправить через Opus") is scoped by that work alone. Imported history
+    ends the scan, unless ``through_history`` (see :func:`_user_model_consent`)."""
     purposes = _purposes_of(role_id or "")
     if not purposes:
         return None
@@ -2720,6 +2903,8 @@ def user_purpose_model_request(store, task_id: str, role_id: str | None) -> str 
     with store.connection() as db:
         for _source_ref, text, selection in _user_sources(store, db, task_id):
             if text is None:
+                if through_history:
+                    continue
                 return None
             text = _effort_source_text(text, identities)
             if selection is not None:
@@ -2739,7 +2924,7 @@ def user_purpose_model_request(store, task_id: str, role_id: str | None) -> str 
                                 for identity, pattern in patterns.items()):
                     return None
                 continue
-            for sentence in reversed(_SENTENCE_END.split(text)):
+            for sentence in reversed(_sentences(text)):
                 if not has_purpose(sentence):
                     continue
                 named = set()
@@ -2750,8 +2935,7 @@ def user_purpose_model_request(store, task_id: str, role_id: str | None) -> str 
                     if refuses_family(sentence, identity, (), pattern=pattern) is not None:
                         refused = True
                         continue
-                    if (requests_family(sentence, identity, (), pattern=pattern) is not None
-                            or assigns_family(sentence, pattern) is not None):
+                    if _purpose_request(sentence, identity, patterns, has_purpose) is not None:
                         named.add(identity)
                 if refused and not named:
                     return None
@@ -2774,3 +2958,226 @@ def user_model_revocation(store, task_id: str, model_hint: str) -> dict | None:
     ``model_hint`` (``source_ref``, ``matched``, ``reason='revoked_by_user'``
     and the revoked ``revoked_source_ref``), or ``None``. Never consent."""
     return _user_model_consent(store, task_id, model_hint)[1]
+
+
+# --- project instruction model requirements ----------------------------------
+
+PROJECT_INSTRUCTION_SOURCE = "project_instruction"
+# Markdown emphasis around a model name ("**Claude Opus**") is not a word.
+_MARKDOWN_EMPHASIS = re.compile(r"\*+")
+
+
+def _file_version(info: os.stat_result) -> tuple[int, int, int, int]:
+    return info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns
+
+
+def _project_instruction_texts(project_root, changed_before_ns: int,
+                               changed: list[tuple[str, str]] | None = None) -> list[tuple[str, str]]:
+    """``(file name, text)`` of the project root's own instruction files:
+    exactly the files the runtime hands workers as project rules
+    (``delegation.live_adapters.PROJECT_RULE_FILES``), regular non-symlink
+    UTF-8 files read to the same bound. Never a report, tool output or any
+    other project file.
+
+    Only a file last changed before ``changed_before_ns`` (the task's
+    creation) counts: the task's own writing workers can edit these files,
+    and a model-authored edit is never the owner's consent (review,
+    2026-10-23). Its inode change time, which no unprivileged write, rename,
+    link or ``utime`` can set back, and its modification time must both
+    precede the task, and the file must be unchanged while it is read.
+    ``changed``, when given, collects the files changed since then, read the
+    same way, for :func:`project_instruction_change` only: they never grant."""
+    import stat
+
+    from ..delegation.live_adapters import PROJECT_RULE_FILES, _PROJECT_RULES_MAX_CHARS
+
+    if not project_root:
+        return []
+    texts = []
+    for name in PROJECT_RULE_FILES:
+        try:
+            fd = os.open(os.path.join(str(project_root), name), os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        except OSError:
+            continue
+        try:
+            info = os.fstat(fd)
+            late = max(info.st_ctime_ns, info.st_mtime_ns) >= changed_before_ns
+            if not stat.S_ISREG(info.st_mode) or (late and changed is None):
+                continue
+            with open(fd, encoding="utf-8", closefd=False) as stream:
+                text = stream.read(_PROJECT_RULES_MAX_CHARS)
+            if _file_version(os.fstat(fd)) == _file_version(info):
+                (changed if late else texts).append((name, text))
+        except (OSError, UnicodeDecodeError):
+            continue
+        finally:
+            os.close(fd)
+    return texts
+
+
+def _task_created_ns(store, task_id: str) -> int | None:
+    """The task's creation time in epoch nanoseconds, or ``None``."""
+    from datetime import datetime, timedelta, timezone
+
+    try:
+        with store.connection() as db:
+            row = db.execute("SELECT created_at FROM tasks WHERE id=?", (task_id,)).fetchone()
+        moment = datetime.fromisoformat(row[0]) if row is not None else None
+    except (AttributeError, TypeError, ValueError):
+        return None
+    if moment is None:
+        return None
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    epoch = datetime(1970, 1, 1, tzinfo=timezone.utc)
+    return (moment - epoch) // timedelta(microseconds=1) * 1000
+
+
+def _attributive_mention(context: Mapping) -> bool:
+    """A model name that only qualifies the work noun after it ("never
+    relabel another model's work as an Opus audit", "not substitute them for
+    the independent Opus audit"): it names a work product, not a refused
+    model. Never when a request or work verb, or a refusal or substitution
+    word right before the name, stands in its clause segment, or a refusal
+    word follows it ("don't run an Opus review", "no Opus audits", "Opus
+    reviews are prohibited" still refuse)."""
+    before, after = context["before"], context["after"]
+    if not after or not _role_noun(after[0]) or any(_REFUSAL_WORDS.fullmatch(word) for word in after):
+        return False
+    if before and (_REFUSAL_WORDS.fullmatch(before[-1]) or _SUBSTITUTION_WORDS.fullmatch(before[-1])):
+        return False
+    return not any(REQUEST_WORDS.fullmatch(word) or WORK_VERBS.fullmatch(word) for word in before)
+
+
+def _instruction_refuses(sentence: str, pattern: re.Pattern) -> bool:
+    """Whether one rule sentence refuses the model (see :func:`refuses_family`),
+    apart from :func:`_attributive_mention` names of a work product."""
+    for match in pattern.finditer(sentence):
+        context = _mention_context(sentence, match)
+        if _refused_mention(context, strict=True) and not _attributive_mention(context):
+            return True
+    return False
+
+
+def project_instruction_model_request(store, role_id: str | None, changed_before_ns: int) -> dict | None:
+    """The exact enabled identity the project's own instruction files
+    (AGENTS.md, CLAUDE.md at the project root), as they stood before
+    ``changed_before_ns`` (see :func:`_project_instruction_texts`), require
+    for this role's purpose, as a grant ``dict(source='project_instruction',
+    path, line, source_ref, family, matched)``; ``None`` otherwise.
+
+    The owner ruled that a model requirement written in the project's
+    instruction file counts as the owner's own request. Each rule sentence
+    is read with the user request grammar (:func:`requests_family`,
+    :func:`assigns_family`), scoped like :func:`user_purpose_model_request`:
+    it covers only roles whose purpose it names ("All audits and re-audits
+    must be performed by Claude Opus" covers the audit and review roles, not
+    the implementers), and a model assigned to a subject covers only that
+    subject's purpose (:func:`_purpose_request`). A question about a
+    requirement is none. A sentence refusing the model for this purpose or for
+    no named purpose ("Opus is prohibited", "never use Opus for reviews")
+    excludes it, and two models required for one purpose grant neither: a
+    prohibition never grants. A sentence naming no role purpose grants
+    nothing."""
+    if not _purposes_of(role_id or ""):
+        return None
+    project_root = getattr(store, "project_root", None)
+    return _instruction_requirement(project_root, role_id, _project_instruction_texts(project_root, changed_before_ns))
+
+
+def _instruction_requirement(project_root, role_id: str | None, sources: Sequence[tuple[str, str]]) -> dict | None:
+    """The grant :func:`project_instruction_model_request` reads from
+    ``sources`` (``(file name, text)``)."""
+    purposes = _purposes_of(role_id or "")
+    if not purposes or not sources:
+        return None
+    overrides = load_overrides(project_root)
+    identities = _enabled_model_identities(overrides)
+    patterns = _named_identity_patterns(overrides, identities)
+
+    def purposes_in(sentence):
+        words = _plain_words(_QUALIFIED_AUDIT.sub(r"\g<q>\g<p>", sentence))
+        own = any(p.fullmatch(word) for p in purposes for word in words)
+        named = any(re.fullmatch(purpose, word, re.I) for purpose, _roles in _PURPOSE_ROLES for word in words)
+        return own, named
+
+    named: dict[str, dict] = {}
+    refused: set[str] = set()
+    for path, text in sources:
+        text = _without_substitution_emphasis(_effort_source_text(_MARKDOWN_EMPHASIS.sub("", text), identities))
+        for line_number, line in enumerate(text.splitlines(), 1):
+            for sentence in _sentences(line):
+                own, any_purpose = purposes_in(sentence)
+                if not own and any_purpose:
+                    continue  # a rule for another purpose
+                for identity, pattern in patterns.items():
+                    if not pattern.search(sentence):
+                        continue
+                    if _instruction_refuses(sentence, pattern):
+                        refused.add(identity)
+                        continue
+                    if not own:
+                        continue
+                    matched = _purpose_request(sentence, identity, patterns, lambda scope: purposes_in(scope)[0])
+                    if matched is not None:
+                        named.setdefault(identity, dict(
+                            source=PROJECT_INSTRUCTION_SOURCE, path=path, line=line_number,
+                            source_ref=f"{PROJECT_INSTRUCTION_SOURCE}:{path}:{line_number}",
+                            family=identity, matched=matched))
+    if len(named) != 1:
+        return None
+    identity, grant = next(iter(named.items()))
+    return None if identity in refused else grant
+
+
+PROJECT_INSTRUCTION_CHANGED = "changed_during_task"
+
+
+def project_instruction_change(store, task_id: str, role_id: str | None) -> dict | None:
+    """``dict(status='changed_during_task', path, line, route)`` when a root
+    instruction file changed after this task started and, as it reads now,
+    requires ``route`` for this role's purpose at ``path``:``line``; ``None``
+    otherwise. Never a
+    grant: a changed file counts only from the next task
+    (:func:`_project_instruction_texts`), and this status makes that lapse
+    visible in the dispatch decision and the plan preview instead of silent
+    (review, 2026-10-23)."""
+    created = _task_created_ns(store, task_id)
+    if created is None or not _purposes_of(role_id or ""):
+        return None
+    project_root = getattr(store, "project_root", None)
+    changed: list[tuple[str, str]] = []
+    _project_instruction_texts(project_root, created, changed)
+    requirement = _instruction_requirement(project_root, role_id, changed)
+    if requirement is None:
+        return None
+    return dict(status=PROJECT_INSTRUCTION_CHANGED, path=requirement["path"], line=requirement["line"],
+                route=requirement["family"])
+
+
+def project_instruction_route(store, task_id: str, role_id: str | None) -> tuple[dict | None, dict | None]:
+    """``(grant, revocation)`` of the project instruction requirement for
+    this role (:func:`project_instruction_model_request`) in this task.
+
+    The owner's own words in the task outrank the file: a recorded user
+    request naming another model for this role's purpose drops it, and the
+    newest user message mentioning its model that refuses it revokes it
+    (``reason='revoked_by_user'``). Imported history neither grants nor
+    revokes, so it never hides the file nor the owner's older words. Only
+    the files as they stood when the task was created count. Callers
+    consult this only when no recorded user request covers the node's exact
+    hint."""
+    created = _task_created_ns(store, task_id)
+    if created is None:
+        return None, None
+    grant = project_instruction_model_request(store, role_id, created)
+    if grant is None:
+        return None, None
+    identity = grant["family"]
+    own = user_purpose_model_request(store, task_id, role_id, through_history=True)
+    if own is not None and own != identity:
+        return None, None
+    refusal = _user_model_consent(store, task_id, identity, through_history=True)[2]
+    if refusal is not None:
+        return None, dict(refusal, reason="revoked_by_user", revoked_source_ref=grant["source_ref"])
+    return grant, None

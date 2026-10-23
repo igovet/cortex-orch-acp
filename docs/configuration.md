@@ -632,6 +632,11 @@ to light, standard, deep and flagship models. Hard owner deny/disabled/provider,
 task route/profile/recipient authorization, missing configured/observed identity
 or supported effort, engine unavailability and exhausted quota still refuse
 visibly with no silent substitution. No model-authored text establishes consent.
+A model requirement in the project root's own `AGENTS.md` or `CLAUDE.md` has the
+same priority for the role purpose it names, as the file stood when the task
+started (an edit made during the task, including a worker's, grants nothing for
+that task); a newer user message outranks it. See
+[project instruction requirements](features/routing-and-fallback/index.md#project-instruction-model-requirements).
 
 Plan usage is only the last tie-breaker within a tier (rank version 15): among
 candidates equal on owner preferences, honoured hints, the 95% hot band

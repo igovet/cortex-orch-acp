@@ -2,12 +2,46 @@
 
 ## 1.0.0 (unreleased)
 
+Selected recheck options now retain the user's model at explorer dispatch:
+`recheck`/`перепроверить` and commit-list/history work objects are recognized,
+without assigning a model to unrelated role purposes. Previously an explicit
+choice could be dismissed as an unconfirmed hint, starting a cheaper worker
+that then had to be cancelled. Negated, past-work, unselected and ambiguous
+options still grant nothing. Mandatory-review regression checks also ensure
+project model requirements override the opposite-provider preference before
+engine open, or refuse without a substitute when hard policy denies the model.
+
 Orchestration audit fixes tighten path reservations, dropped-check certification,
 worker-question continuation and consultant access. Model routing now requires
 recorded user consent; storage inspection remains non-mutating and recovery
 failures stay visible. Role guidance and generated profiles are synchronized,
 and cancellation and installed-Paseo regression checks are corrected. These
 changes do not establish live qualification or release readiness.
+
+A model requirement in the project root's own `AGENTS.md` or `CLAUDE.md` now counts
+as the owner's model request for the role purpose it names, with the same precedence
+as a recorded user request: ahead of the coordinator's hint, pins, owner preferred
+models and usage, and still refused visibly by hard owner policy, unavailability or
+exhausted quota. Previously such a rule reached routing only as an unconfirmed
+hint, so a re-audit required to run on Opus ran on Sonnet under the owner's review
+preference. Dispatch and the plan preview record it as `project_instruction` with
+the file path and line; a newer user message outranks it, prohibitions never grant,
+and a sentence naming no role purpose grants nothing. The request grammar also
+recognizes passive requirements ("must be performed by Claude Opus", "аудит должен
+проводить Opus") in user messages and instruction files alike, but not questions
+about them ("Does the audit have to be performed by Opus?"). A model in a sentence
+covers only its own work, so "Implementation must be performed by Sonnet and
+reviewed by Opus" never gives reviewers Sonnet, while the work named before the
+model stays its purpose ("Проведи ревью на Opus и обнови документацию", "Run all
+audits on Opus before deploying"). A list of alternatives ("Audits must be performed
+by Opus or Sonnet") permits a choice and demands none of them. Only the file as it
+stood when the task started counts: a file changed during the task, including by
+the task's own workers, grants nothing for it, and the dispatch decision and plan
+preview show `changed_during_task` with the file path. Newer imported history no
+longer hides an older user refusal of the file's model. Regression coverage also
+checks an unhinted runtime-created reviewer: the project requirement beats the
+opposite-provider preference, and a hard-denied required model refuses at the
+dispatch boundary instead of selecting a substitute.
 
 Recorded user model requests now also recognize restrictive selections
 ("Выполнить аудит только Claude Opus", "только Opus", "do the review only on Opus")

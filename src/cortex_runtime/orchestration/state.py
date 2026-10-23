@@ -508,6 +508,10 @@ class AttemptRouting(NamedTuple):
     # hint (routing.auto_route.user_model_revocation); never consent.
     user_revocation: dict | None = None
     work_kind: str | None = None
+    # A project instruction requirement for this role that lapsed because its
+    # file changed during the task (routing.auto_route.project_instruction_change);
+    # recorded in the route decision, never consent.
+    project_instruction_status: dict | None = None
 
 
 # A retry caused only by an infrastructure failure -- the engine/transport
@@ -560,18 +564,38 @@ def attempt_routing(store, task_id, attempt_id):
                   and p.get('failure_class') not in _INFRASTRUCTURE_RETRY_CLASSES
                   for p in (json.loads(r[0]) for r in retries))
     hint = task.get('model') or task.get('provider') or 'auto'
-    from ..routing.auto_route import user_model_request, user_model_revocation, user_purpose_model_request
+    reason = task.get('model_reason')
+    role = resolve_role(node['role'])
+    from ..routing.auto_route import (project_instruction_change, project_instruction_route, user_model_request,
+                                      user_model_revocation, user_purpose_model_request)
     if '/' not in hint:
         # No exact hint (the runtime's review node, or a task left on auto):
         # the model the owner asked for this role's purpose still applies,
         # ahead of pins and preferences, as an explicit request does.
-        hint = user_purpose_model_request(store, task_id, resolve_role(node['role'])) or hint
+        hint = user_purpose_model_request(store, task_id, role) or hint
     request = user_model_request(store, task_id, hint) if '/' in hint else None
+    revocation = user_model_revocation(store, task_id, hint) if '/' in hint else None
+    status = None
+    if request is None:
+        # A model requirement in the project's own instruction file counts as
+        # the owner's request for the purpose it names, ahead of the
+        # coordinator's hint, pins, preferences and usage: AGENTS.md required
+        # Opus for every audit, yet a re-audit hinted Opus ran on Sonnet
+        # (ignored:owner_preferred, observed 2026-10-23).
+        instruction, refused = project_instruction_route(store, task_id, role)
+        if instruction is not None:
+            if instruction['family'] != hint:
+                instruction, reason = dict(instruction, superseded_hint=hint), None
+            hint, request = instruction['family'], instruction
+        elif refused is not None and revocation is None and refused['family'] == hint:
+            revocation = refused
+        elif refused is None:
+            # A requirement whose file changed during the task grants nothing
+            # for it; say so in the decision rather than lapse silently.
+            status = project_instruction_change(store, task_id, role)
     return AttemptRouting(bool(fix) or retried, task.get('complexity', 'normal'), hint,
-                          task.get('model_reason'), prior['engine'] if prior else None,
-                          request,
-                          user_model_revocation(store, task_id, hint) if '/' in hint else None,
-                          task.get('work_kind'))
+                          reason, prior['engine'] if prior else None,
+                          request, revocation, task.get('work_kind'), status)
 
 
 def review_provider_preference(store, task_id, attempt_id):
@@ -1268,13 +1292,34 @@ class TaskMachine:
                 raise StoreError('unknown_model_hint', 'model', ', '.join(exact_hints),
                                  'an exact route from list_route_options',
                                  'Call list_route_options and copy an offered route.')
-        from ..routing.auto_route import ambiguous_user_model_request, user_model_request
+        from ..routing.auto_route import (ambiguous_user_model_request, project_instruction_change,
+                                          project_instruction_route, user_model_request)
 
         def preview(n):
             model, role = n.get('model', 'auto'), resolve_role(n['role'])
             complexity = n.get('complexity', 'normal')
             item = dict(node=n['id'], model=model, tier_now=tier_for(role, complexity=complexity),
                         work_kind=work_kind(role, n.get('work_kind')))
+            # The same order as attempt_routing: a recorded user request for
+            # the exact hint first, then the project's instruction files.
+            if '/' not in model or user_model_request(self.store, channel.task_id, model) is None:
+                instruction, refused = project_instruction_route(self.store, channel.task_id, role)
+                change = (project_instruction_change(self.store, channel.task_id, role)
+                          if instruction is None and refused is None else None)
+                if change is not None:
+                    item.update(project_instruction=change, project_instruction_note=(
+                        f"{change['path']} changed after this task started, so its model requirement for this "
+                        "role's work does not apply to this task; it applies from the next task."))
+                if instruction is not None:
+                    item.update(preview_status='pending_dispatch:project_instruction', project_instruction=dict(
+                        route=instruction['family'], path=instruction['path'], line=instruction['line'],
+                        matched=instruction['matched']))
+                    if model != instruction['family']:
+                        item['preview_note'] = (
+                            "The project's own instruction file requires this route for this role's work. It counts as "
+                            "the owner's request: dispatch uses it instead of this hint, ahead of pins, owner preferred "
+                            'models and usage, and refuses visibly rather than substituting when it cannot run.')
+                    return item
             if '/' not in model:
                 item['preview_status'] = 'auto' if model == 'auto' else 'pending_dispatch'
                 return item
