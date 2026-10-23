@@ -10,6 +10,16 @@ A plan proposes scopes; it cannot grant privileges, choose a model or create a
 session. Coordinator and consultant are read-only. Reviewers cannot edit source.
 Database-architect and performance-engineer are read-only specialists too.
 
+## Discovery and bounded read batches
+
+[The additive read API](../tool-discovery-and-read-batch/index.md) requires a
+live task and, for workers, a running resolved assignment. It intersects the
+current offered catalogue with an explicit evidence-read allowlist; descriptive
+read-only annotations grant nothing. Every inner read retains native task/owner
+binding and schema validation. Authority loss or role/stage catalogue change
+aborts delivery, not just the next read. Existing individual historical evidence
+reads keep their existing behavior. No evaluator or new containment claim follows.
+
 ## Native engines
 
 Every channel-bound engine process runs in the engine jail
@@ -400,6 +410,41 @@ commits, but returns an empty `diff`, `diff_truncated: true` and
 `diff_omitted: "input_budget"`; hash, size and line evidence remain available.
 Presentation is computed before the filesystem effect. `project_edit` refuses
 links, binary files and results above 16 MB.
+
+### Read-precondition recovery
+
+`gateway_read_required`, `gateway_complete_read_required` and `gateway_stale_read`
+are recognized non-authorizing preconditions, with `write_state: rejected` on the
+MCP error response. No file mutation occurred. They do not require an owner
+question, access request or extra approval when the existing assignment and
+authority already cover the change:
+
+1. Read the current target with `project_read` on the same channel. For whole-file
+   replacement, finish all non-truncated pages and use `full_content_sha256`.
+2. Build a valid exact edit or complete replacement from that current content.
+   Rebuild a stale patch; never blindly retry it or overwrite concurrent work.
+3. Follow the live tool's delivery-key rules below: a keyless precondition failure
+   has no replayable effect; a failed explicit key retains its rejection and
+   needs a fresh key for the corrected proposal.
+
+These corrections grant no authority. Real access, channel, role, scope,
+private-path and policy refusals remain final; never reach the denied effect via
+another tool, shell, channel or worker. A read can itself be denied; stop that
+route rather than reclassifying it as a missing-read precondition.
+The existing digest, coverage and exact-match guards remain authoritative.
+`project_files.require_read` and `gateway._edit` enforce these guards; shared tool
+discipline, both unified-prompt editions and writer recovery capsules distinguish
+this workflow from an authorization refusal. No new error taxonomy or retry
+engine is introduced.
+
+Focused regressions: `tests/test_project_read_recovery.py` and
+`tests/test_project_file_tools.py`. The former exercises real channel dispatch
+and stdio recovery without creating a question or consent request; its scripted
+calls and instruction checks do **not** prove real-model compliance. Requested
+live CLI qualification must use a fresh stamped runtime and exact session
+bindings; checkout edits do not hot-upgrade an existing session.
+
+### File-action delivery keys
 
 `project_write`, `project_edit`, `project_mkdir` and `project_delete` accept an
 omitted `request_key`: the runtime derives a stable operation/payload hash scoped

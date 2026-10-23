@@ -1213,9 +1213,7 @@ class TaskMachine:
         value['nodes'] = value_nodes
         return value
 
-    def submit_plan(self, channel, plan, request_key, *, authorization=None):
-        validate_plan(plan)
-        digest = hashlib.sha256(encoded(plan).encode()).hexdigest()
+    def _plan_model_previews(self, channel, plan):
         # Exact model labels must be in the currently confirmed, policy-allowed
         # menu. Engine hints and auto do not require a catalog at plan time.
         from ..routing.auto_route import hint_serves_tier, route_menu, tier_for, work_kind
@@ -1266,7 +1264,11 @@ class TaskMachine:
                         'User text names a model ambiguously without its engine; ask the user to name engine/model.'))
             return item
 
-        previews = [preview(n) for n in plan['tasks']]
+        return [preview(n) for n in plan['tasks']]
+
+    def submit_plan(self, channel, plan, request_key, *, authorization=None):
+        validate_plan(plan)
+        digest = hashlib.sha256(encoded(plan).encode()).hexdigest()
         with self.store.connection() as db:
             db.execute('BEGIN IMMEDIATE')
             if authorization: authorization(db)
@@ -1279,6 +1281,14 @@ class TaskMachine:
             task = db.execute('SELECT * FROM runtime_tasks WHERE task_id=?', (channel.task_id,)).fetchone()
             if task is None or task['state'] != 'PLANNING':
                 raise StoreError('plan_not_expected')
+            from ..contracts import PortableToolError
+            from ..portable.errors import PortableError
+            try:
+                previews = self._plan_model_previews(channel, plan)
+            except PortableError as error:
+                # No plan writes have started. Replay above deliberately
+                # precedes current policy reads: it reconciles a prior result.
+                raise PortableToolError(error, rejected=True) from None
             from .policy import validate_grants
             project = db.execute('SELECT project_root FROM tasks WHERE id=?', (channel.task_id,)).fetchone()
             from .gateway import READ_ONLY

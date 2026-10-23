@@ -31,7 +31,7 @@ def explicit_read(title=None, kind=None, raw_input=None):
     if args.get('server') == 'cortex' and isinstance(args.get('tool'), str):
         name = 'mcp.cortex.' + args['tool']
     match = re.match(r'^mcp(?:__|\.)([^.]+?)(?:__|\.)([\w-]+)', name, re.I)
-    return (match[1].lower() == 'cortex' and match[2].lower() in {'project_read', 'read_skill'}) if match else name.lower() in {'project_read', 'read_skill'}
+    return (match[1].lower() == 'cortex' and match[2].lower() in {'project_read', 'read_skill', 'read_batch', 'tools_discover'}) if match else name.lower() in {'project_read', 'read_skill', 'read_batch', 'tools_discover'}
 
 
 def metadata_only_read(title=None, kind=None, raw_input=None):

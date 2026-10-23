@@ -143,11 +143,15 @@ def require_read(state, digest, *, complete):
                          'path', expected='a current complete read' if complete else 'a prior text read',
                          correction='Read the file with project_read first. For whole-file replacement, read all '
                          'pages without truncated lines; a partial page sha256 never authorizes project_write. '
-                         'Use project_edit for partial changes.')
+                         'Use project_edit for partial changes. This is a read precondition, not an access refusal; '
+                         'nothing was changed. No owner question or extra approval is needed under existing authority. '
+                         'Follow the tool delivery-key rules when re-proposing.')
     if state['sha256'] != digest:
         raise StoreError('gateway_stale_read', 'path', expected='the content last read by this channel',
                          correction='The file changed since this channel read it. Read the current file again '
-                         'before editing or replacing it. Nothing was changed.')
+                         'and rebuild the patch or replacement against that content; never blindly retry a stale patch. '
+                         'Nothing was changed. This is a read precondition, not an access refusal; no owner question '
+                         'or extra approval is needed under existing authority. Follow the tool delivery-key rules.')
 
 
 def apply_edits(body, edits):

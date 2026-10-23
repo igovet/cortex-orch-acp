@@ -1137,6 +1137,9 @@ def test_writer_environment_states_the_users_access_mode(mode):
     from cortex_runtime.recovery.capsule import _worker_environment
     offered = sorted(mcp_tools._WRITE_TOOLS | {"project_read", "command_run", "outside_write", "outside_command"})
     environment = _worker_environment("backend-dev", "build", offered, mode=mode)
+    assert "An access or policy refusal is final" in environment
+    assert "without an owner question or extra approval" in environment
+    assert "same-channel read and a rebuilt valid edit" in environment
     host = "command_run works on the whole computer"
     if mode == "guarded":
         assert host not in environment

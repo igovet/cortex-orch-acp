@@ -19,10 +19,11 @@ import traceback
 from collections import OrderedDict
 
 from .contracts import BY_NAME, MAX_REQUEST_BYTES, StoreError, TOOLS, error_help, outcome_uncertain, storage_failure, validate, clip_summary_preview
+from .contracts import PortableToolError
+from .portable.errors import PortableError
 from .channeled_tools import channeled_base_tools
 from .delegation import contracts as delegation_contracts
 from .delegation import mcp_tools as delegation_mcp_tools
-from .engine.mcp_bridge import always_load
 from .store import Store, private_directory
 from .project_storage import migrate_legacy_project_storage, project_store_directory, canonical_project
 from .trusted_channel import resolve_channel
@@ -50,7 +51,7 @@ MUTATING_TOOLS = frozenset({'create_draft', 'write_report', 'set_governance'})
 DELEGATION_READ_OPERATIONS = frozenset({
     'list_sources','read_source','read_capsule','read_large_output',
     'read_diagnostics','read_skill','task_get_context','project_read',
-    'list_route_options',
+    'list_route_options','tools_discover','read_batch',
 })
 
 
@@ -221,11 +222,11 @@ class Server:
     def dispatch(self, method, params, request_id=None):
         trace = get_trace()
         if trace is None:
-            return self._dispatch(method, params, request_id)
+            return self._dispatch_evidenced(method, params, request_id)
         trace.record("mcp", "in", dict(jsonrpc="2.0", id=request_id, method=method, params=params),
                      **self._wire_trace_identity())
         try:
-            result = self._dispatch(method, params, request_id)
+            result = self._dispatch_evidenced(method, params, request_id)
         except Exception as error:
             trace.record("mcp", "out", dict(jsonrpc="2.0", id=request_id,
                          error=dict(code=error.code if isinstance(error, ProtocolError) else -32603,
@@ -234,6 +235,14 @@ class Server:
             raise
         trace.record("mcp", "out", dict(jsonrpc="2.0", id=request_id, result=result),
                      **self._wire_trace_identity())
+        return result
+
+    def _dispatch_evidenced(self, method, params, request_id):
+        result = self._dispatch(method, params, request_id)
+        if method == "tools/call" and isinstance(params, dict):
+            from .read_api_evidence import record
+            record(self.store, self._resolved_channel, params.get("name"),
+                   params.get("arguments", {}), result, request_id)
         return result
 
     def _dispatch(self, method, params, request_id=None):
@@ -284,11 +293,8 @@ class Server:
                 raise ProtocolError(-32001, error_help(str(exc))) from None
             if channel is None:
                 return dict(tools=TOOLS)
-            role_id, stage = delegation_mcp_tools.assignment_profile(self.store, channel)
-            # A channel's catalogue is the runtime contract its model works
-            # through; keep Claude from hiding it behind ToolSearch.
-            return dict(tools=[always_load(tool) for tool in list(channeled_base_tools()) + delegation_mcp_tools.tool_definitions(
-                channel.role, role_id=role_id, stage=stage)])
+            from .tool_read_api import effective_catalogue
+            return dict(tools=effective_catalogue(self.store, channel))
         if method != 'tools/call':
             raise ProtocolError(-32601,'Unknown method. Use initialize, server/discover, ping, tools/list or tools/call; discover tool names through tools/list.')
         if not isinstance(params, dict) or set(params)-{'name','arguments','_meta'} or not isinstance(params.get('name'), str) or ('arguments' in params and not isinstance(params['arguments'],dict)):
@@ -316,12 +322,18 @@ class Server:
                 arguments = params.get('arguments', {})
                 if not isinstance(arguments, dict):
                     raise StoreError('invalid_arguments','arguments',str(type(arguments).__name__),'JSON object','Send one object matching the advertised inputSchema.')
-                data = delegation_mcp_tools.dispatch(self.store, channel, name, arguments)
-                observe(name,'success',False,None,arguments,data)
-                return _reply_content(data)
-            except StoreError as exc:
-                observe(name, str(exc), meta=params.get('_meta'), arguments=params.get('arguments'))
-                return self.error(exc)
+                data = delegation_mcp_tools.dispatch(self.store, channel, name, arguments, request_id=request_id)
+                outcome = (data.get("outcome", data.get("status", "success"))
+                           if name in {"tools_discover", "read_batch"} else "success")
+                observe(name,outcome,False,None,arguments,data)
+                reply = _reply_content(data)
+                if name in {"tools_discover", "read_batch"}:
+                    reply["isError"] = data.get("outcome") == "incomplete" or data.get("status") == "deferred"
+                return reply
+            except (StoreError, PortableError) as exc:
+                failure = PortableToolError(exc) if isinstance(exc, PortableError) else exc
+                observe(name, str(failure), meta=params.get('_meta'), arguments=params.get('arguments'))
+                return self.error(failure)
             except Exception as exc:
                 # A delegation/gateway op that raised something other than a
                 # StoreError (e.g. a raw sqlite3.OperationalError from lock
@@ -345,18 +357,13 @@ class Server:
             validate(name,params.get('arguments',{}))
             data=self._dispatch_channeled(name,params)
             if name == 'read_report':
-                from .delegation.report_reads import record_report_read
-                channel = self._channel_context()
-                record_report_read(
-                    self.store, task_id=channel.task_id, attempt_id=channel.attempt_id,
-                    report_id=data.get('report_id') or params.get('arguments', {}).get('report_id'),
-                    request_id=request_id,
-                )
+                from .tool_read_api import record_report_delivery
+                record_report_delivery(self.store, channel, data, request_id)
             observe(name,'success',data.get('replayed',False),None,params.get('arguments'),data)
             return dict(content=[dict(type='text',text=json.dumps(data,ensure_ascii=False))], structuredContent=data, isError=False)
-        except StoreError as exc:
-            code = str(exc)
-            failure = exc
+        except (StoreError, PortableError) as exc:
+            failure = PortableToolError(exc) if isinstance(exc, PortableError) else exc
+            code = str(failure)
         except Exception as exc:
             _log_unexpected(f'tools/call:{name}')
             code = 'storage_error'
@@ -426,6 +433,9 @@ class Server:
                                      expected=public(v['expected']),correction=public(v['correction']))
                                 for v in violations]
         data['write_state']='uncertain' if outcome_uncertain(code) else 'rejected'
+        if isinstance(failure, PortableToolError):
+            data.update(message=failure.correction, category=failure.category,
+                        write_state=failure.write_state, retry_eligible=failure.retry_eligible)
         return dict(content=[dict(type='text',text=json.dumps(data))],isError=True)
 
 
@@ -510,7 +520,7 @@ def main():
                 raise ProtocolError(-32600,'Request id must be a string of at most 128 characters or an integer; null and boolean ids are not valid MCP request ids.')
             if 'id' not in item:
                 continue
-            result = server._dispatch(item['method'],item.get('params',{}),request_id=request_id)
+            result = server._dispatch_evidenced(item['method'],item.get('params',{}),request_id=request_id)
             reply = dict(jsonrpc='2.0',id=request_id,result=result)
         except ProtocolError as exc:
             reply = dict(jsonrpc='2.0',id=request_id,error=dict(code=exc.code,message=exc.message))

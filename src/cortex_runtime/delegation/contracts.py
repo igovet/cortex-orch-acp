@@ -9,7 +9,36 @@ def integer(description, minimum=0, maximum=1000000000):
     return dict(type='integer',description=description,minimum=minimum,maximum=maximum)
 
 
+# Membership is explicit, never inferred from readOnlyHint.
+from ..tool_read_api import BATCH_READS
+
 SHARED = {
+    'tools_discover': dict(
+        obj(dict(
+            name=text('Exact offered Cortex tool name; returns its complete effective tools/list record. Excludes cursor and limit.',64),
+            cursor=text('Exact next_cursor from this channel and unchanged catalogue.',256),
+            limit=integer('Catalogue page count, 1 to 50, default 20; also bounded to 16384 compact UTF-8 bytes.',1,50),
+        ), required=[]),
+        **{'if': {'required': ['name']},
+           'then': {'not': {'anyOf': [{'required': ['cursor']}, {'required': ['limit']}]}}, 'else': {}}),
+    'read_batch': obj(dict(calls=dict(
+        type='array', minItems=1, maxItems=8,
+        description=required_bounds(1,8) + ' Independent evidence reads, executed sequentially, not a snapshot. '
+                    'Each item has a unique id (1 to 32 letters/digits/_/-), an allowlisted tool and native arguments. '
+                    'Whole compact UTF-8 request is at most 32768 bytes and 16 container levels. '
+                    'Preflight rejects the whole batch before execution on any invalid item. '
+                    'Five-second admission budget, not a hard timeout. Native paging metadata is preserved; '
+                    'At most 6144 compact UTF-8 bytes per inline native result and 65536 for the structured envelope; '
+                    'larger results defer as exact JSON up to 1048576 bytes. Oversized read_large_output pages '
+                    'fail instead of spilling again. Incomplete results are MCP errors.',
+        items=dict(obj(dict(
+            id=dict(text('Unique case-sensitive item identity, 1 to 32 letters/digits/_/-.',32), pattern='^[A-Za-z0-9_-]+$'),
+            tool=dict(text('Exact allowlisted Cortex evidence-read name, also currently offered on this channel.',64),enum=sorted(BATCH_READS)),
+            arguments=dict(type='object', properties={}, required=[], additionalProperties=True,
+                           description='Native arguments matching the current inner inputSchema from tools_discover. No expressions or output references.'),
+        )), description='One independent read. Images require individual read_source; no commands, external tools, project/skill reads or recursive batches.'),
+    ))),
+
     'list_sources': obj(dict(after=integer('Exact cursor returned by the preceding source page.'),
                              limit=integer('Maximum page size.',1,200)), required=[]),
     'read_source': obj(dict(source_ref=text('Exact source_ref from list_sources: an entry source_ref or an answered_questions source_ref.',64),

@@ -362,3 +362,79 @@ def run_case(budget, exercise, cleanup):
         blockers.append('case_deadline_exceeded')
     return dict(passed=not blockers, blockers=blockers, outcome=outcome, cleanup=cleaned,
                 elapsed=finished - budget.start, cleanup_started=cleanup_started - budget.start)
+
+
+def supervise_cli(consent, preflight, launch, assert_task, cleanup, *, clock=time.monotonic):
+    """Finite phase supervisor for an explicitly owner-requested CLI case.
+
+    Adapters use the current guarded CLI and bounded_command below. They must
+    return observed host/ACP bindings, never guessed IDs. This function grants
+    no permission, supplies no route/model defaults and never accepts a task.
+    Cleanup is adapter-owned (only resources this case actually started).
+    """
+    route = consent.get("route") if isinstance(consent, dict) else None
+    if (not isinstance(consent, dict) or consent.get("mode") != "cli"
+            or not isinstance(consent.get("owner_request"), str) or not consent["owner_request"].strip()
+            or not isinstance(route, str) or not route.strip()):
+        return dict(passed=False, phase="consent_required", dispatched=False, asserted=False, accepted=False)
+    budget = Budget(clock=clock)
+    phase = dict(phase="preflight", dispatched=False, asserted=False, accepted=False)
+
+    def exercise(budget):
+        ready = preflight(budget)
+        required = {"isolation", "native_login", "build", "plugin", "supported_cli", "route", "expectations"}
+        checks = ready.get("checks", {}) if isinstance(ready, dict) else {}
+        if (not isinstance(ready, dict) or ready.get("ready") is not True or ready.get("route") != route
+                or set(checks) != required or any(v is not True for v in checks.values())):
+            return dict(status="preflight_failed", **phase)
+        if budget.clock() >= budget.observe_deadline:
+            return dict(status="deadline", **phase)
+        # An interrupted launch has unknown disposition, never preflight-only.
+        phase.update(phase="launch_attempted", dispatched=None)
+        started = launch(budget, route)
+        if not isinstance(started, dict) or started.get("dispatched") is not True or not started.get("binding"):
+            return dict(status="launch_uncertain", **phase)
+        phase.update(phase="dispatched", dispatched=True)
+        result = assert_task(budget, started["binding"])
+        if (not isinstance(result, dict) or result.get("passed") is not True
+                or result.get("binding") != started["binding"]):
+            return dict(status="assertion_failed", **phase)
+        phase.update(phase="asserted", asserted=True)
+        return dict(status="passed", **phase)
+
+    result = run_case(budget, exercise, cleanup)
+    return dict(result, **phase)
+
+
+def bounded_command(argv, budget, *, cleanup=False, timeout=MAX_WAIT_SECONDS):
+    """Real finite subprocess primitive for adapters; no shell or paid defaults.
+
+    Captures at most 1 MiB, kills only this process group on a timeout, and
+    returns complete stdout privately to the adapter. Never print raw output.
+    """
+    import os
+    import signal
+    import subprocess
+    import tempfile
+
+    deadline = budget.case_deadline if cleanup else budget.observe_deadline
+    remaining = min(timeout, MAX_WAIT_SECONDS, deadline - budget.clock())
+    if remaining <= 0:
+        raise TimeoutError("case_deadline")
+    with tempfile.TemporaryFile() as output:
+        process = subprocess.Popen(argv, stdout=output, stderr=subprocess.STDOUT, start_new_session=True)
+        try:
+            code = process.wait(timeout=remaining)
+        except BaseException:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            process.wait(timeout=5)
+            raise
+        size = output.tell()
+        if size > 1048576:
+            raise ValueError("command_output_limit")
+        output.seek(0)
+        raw = output.read()
+    return dict(exit_code=code, complete=True, byte_count=size, output=raw)

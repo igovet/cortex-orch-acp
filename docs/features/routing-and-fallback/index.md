@@ -950,9 +950,25 @@ desktop check on 2026-10-22, where a dev profile without request names ran the
 owner-assigned Opus audit on Sonnet. A worker card and the worker page show a route the
 owner asked for as "by your request".
 
-When the router still ignores a coordinator's model hint, the runtime says so once per
-attempt in the chat: which model was asked for, which runs and why
-(`orchestration.route_notices`, recorded as `MODEL_HINT_IGNORED_SHOWN`).
+### Ignored model hint notices
+
+An ignored advisory hint does not necessarily mean a different model was selected:
+a pin can independently select the same engine/model. The chat stays silent when
+the attempt audit binds the same effective engine/model (or requested engine) and
+any explicitly requested effort matches. Internal `ignored:pinned` provenance
+remains unchanged; matching a pin does not turn a hint into owner consent.
+
+For a genuine difference, the chat names the request, the audit-bound dispatch
+route and available effort, and the reason. Missing or conflicting route bindings
+remain visible as unverifiable, never as a confirmed replacement. Missing effort
+cannot establish an explicitly requested effort match. A dispatch audit is not
+native configuration confirmation.
+
+Notices are recorded once per attempt as `MODEL_HINT_IGNORED_SHOWN` by
+`orchestration.route_notices`, under the existing transaction and recovery
+boundary. Duplicate audit rows and repeated controller calls do not duplicate
+notices; no previous audit or notice is rewritten. This presentation changes
+neither route choice nor authorization, eligibility or effort floors.
 
 ## Automatic worker routing: unavailable routes
 

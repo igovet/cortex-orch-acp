@@ -96,6 +96,13 @@ without dropping requirements or silently truncating it. Rejection retains no
 accepted plan or worker reservation. Codex and Claude receive the same channel
 MCP schema; this does not guarantee model compliance.
 
+Plan model-policy preflight failures retain safe portable classification, rather
+than becoming uncertain storage errors. Authorization and identical key/payload
+replay precede current policy reads; accepted replay does not revalidate changed
+routing settings. Unknown-stage failures remain uncertain, never a guessed
+rollback. Preserve the original request and key for reconciliation; see
+[MCP tool errors](../failures-and-cancellation/index.md#mcp-tool-errors).
+
 After accepting a plan, `plan_submit` tells the coordinator that its workers
 are starting and to end the turn rather than poll. The runtime does not wait
 for that turn to end: once the coordinator's next tool or text update shows the
@@ -347,6 +354,23 @@ remain parallel. It never infers a contract change; a reviewer marks one
 
 Worker results bind to a published report owned by the exact provisioned attempt.
 The result receipt retains a content digest.
+
+### Qualification is not completion alone
+
+A read/search response and an execution worker's QA label are not automated
+check receipts or mandatory-review verdicts. Inspect the complete nested tool
+reply: errors may exist only in content blocks when structured data is absent.
+Use a real same-attempt command receipt on every passed automated check;
+never manufacture a gateway ID. Preflight readiness is not dispatch; dispatch
+is not assertions; `COMPLETED` alone does not qualify an API.
+
+The qualification assertion reader preserves valid runtime unchanged-project
+waivers. Its `--require-review` option instead requires an actual review node
+and the matching attempt's structured `APPROVE`. Use a tiny real edit in a
+disposable fixture for that scenario; never force review by changing lifecycle
+metadata. Arbitrary prose `REQUEST_CHANGES` is not a runtime verdict, although
+a real unresolved assertion or failed check still blocks qualification.
+See [public read evidence](../tool-discovery-and-read-batch/index.md#executable-public-evidence).
 
 ### Check evidence
 

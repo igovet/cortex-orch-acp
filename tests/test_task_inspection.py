@@ -303,6 +303,33 @@ def test_rejections_forged_refs_route_and_question_metadata_fail_closed(worker_b
     assert 'private' not in json.dumps(rows) and 'sentinel' not in json.dumps(rows)
 
 
+def test_read_api_metadata_and_inner_observations_are_bound_and_private(worker_bound):
+    from cortex_runtime.delegation import mcp_tools
+    from cortex_runtime.tool_read_api import _member_request_id
+    from cortex_runtime.observability.events import append_event
+    project, store, sid, task, worker, assignment = worker_bound
+    reply = mcp_tools.dispatch(store, worker, 'read_batch', dict(calls=[
+        dict(id='private_item_sentinel', tool='read_report',
+             arguments=dict(report_id=task.report_id, limit=50))]), request_id='private_outer_sentinel')
+    assert reply['outcome'] == 'complete'
+    append_event(store, task.task_id, 'tool_read_api', 'rejected', 'observed', detail=dict(
+        arguments='private sentinel', body='private sentinel', item_hash='not-a-digest',
+        operation='private_bad_operation', channel_hash='not-a-digest'))
+    before = files(project)
+    rows = _all_rows(project, sid, task)
+    observed = [r for r in rows if r.get('category') == 'tool_read_api']
+    assert len(observed) >= 3
+    member = next(r for r in observed if r['outcome'] == 'ok')
+    assert member['read_api']['operation'] == 'read_report'
+    assert member['read_api']['item_index'] == 0
+    assert member['read_api']['outer_hash'] == _member_request_id('private_outer_sentinel', '')
+    reads = [r for r in rows if r['section'] == 'report_reads']
+    assert len(reads) == 1 and reads[0]['attempt_id'] == worker.attempt_id
+    assert reads[0]['batch_request'] == _member_request_id('private_outer_sentinel', 'private_item_sentinel')
+    assert 'private' not in json.dumps(rows) and 'sentinel' not in json.dumps(rows)
+    assert files(project) == before
+
+
 def test_oversized_evidence_is_refused_before_materializing_history(bound, monkeypatch):
     import cortex_runtime.storage.inspection as inspector
     project, store, sid, task, epoch = bound

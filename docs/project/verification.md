@@ -56,6 +56,85 @@ and the profile-generation check below) and package payload
 it belongs in `plan.verification`, which the runtime runs once after review,
 with no time limit.
 
+## Model hint notice checks
+
+Run the no-paid routing/notice and native fake-engine regressions:
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 python3 -B -m pytest -q tests/test_route_notices.py tests/test_auto_route_delegation.py tests/test_routing_visibility.py tests/test_explicit_effort_handoff.py
+```
+
+These exercise matching pins, real differences, explicit effort, unknown/conflicting
+audit bindings, transaction rollback and repeated/recovered notifications. Wire
+assertions use disposable fake engines, not paid native accounts. Neither notice
+text nor a dispatch audit proves native live configuration. See
+[notice semantics](../features/routing-and-fallback/index.md#ignored-model-hint-notices).
+
+## Tool discovery and read batches
+
+Run the changed-surface checks sequentially, not the entire suite:
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 python3 -B -m pytest -q tests/test_tool_read_api.py
+PYTHONDONTWRITEBYTECODE=1 python3 -B -m pytest -q tests/test_advertised_tool_contracts.py tests/test_all_mcp_advertised_contracts.py tests/test_codex_tool_cheat_sheet.py tests/test_codex_code_mode_visibility.py tests/test_delegation_contracts.py tests/test_codex_visible_tool_contracts.py
+python3 -B scripts/cortex_read_api_benchmark.py
+```
+
+The benchmark reports deterministic JSON bytes and illustrative client round
+trips, never paid token/cost measurements. Real dispatch/stdio tests cover
+authority loss, schema parity, preflight, per-item failure, bounds, deferred
+retrieval and conservative report observations; they do not prove live model
+usage. Requested live CLI qualification follows the [dev guide](dev-environment.md)
+and [read API scenarios](../features/tool-discovery-and-read-batch/index.md#live-cli-qualification).
+Cancellation interleavings not established by bound events stay unverified.
+
+The [executable public evidence matrix](../features/tool-discovery-and-read-batch/index.md#executable-public-evidence)
+provides a no-paid real-stdio fixture and a separate current-task live assertion
+reader. Run these focused regressions sequentially with other checks:
+
+```bash
+python3 -B -m pytest -q tests/test_read_api_evidence.py tests/test_qualification_assert.py tests/test_task_inspection.py
+python3 -B -m pytest -q tests/test_qualification_observer.py
+python3 -B scripts/cortex_read_api_fixture.py
+```
+
+Expected literal bytes, current effective schemas, native parity, receipt
+identity and explicit completeness matter; a digest alone, preflight readiness
+or `COMPLETED` does not prove API behavior. Valid unchanged-project review
+waivers remain valid; `--require-review` explicitly tests a legitimate edit and
+its runtime reviewer. Missing/forged/wrong-owner/task/stale/replayed/truncated/
+pending evidence blocks assertions. The public live reader authenticates every
+snapshot page and channel binding before selecting the worker's evidence and
+role/stage catalogue. It checks every selected occurrence of each required read
+shape; distinct valid repetitions are not replay. Other authenticated same-task
+actors are counted separately and cannot replace a missing worker operation.
+Counts and safe correlation identities remain in its result. Exercise its real CLI,
+including paged disposable snapshots and contradictory/replayed controls:
+
+```bash
+python3 -B -m pytest -q tests/test_read_api_live_assert.py tests/test_read_api_actor_scope.py
+```
+
+No paid check is launched by these commands.
+
+## Plan error recovery
+
+Run this executable no-paid scenario in the checkout; every store it creates is
+disposable, and it never starts an engine or replays an existing task:
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 python3 -B -m pytest -q tests/test_plan_error_classification.py
+```
+
+It covers actual malformed/missing/unsupported routing policy through dispatch
+and stdio, typed categories, conservative unknown-stage errors, controlled
+precommit/commit/reply faults, atomic rollback and same-key exact reconciliation.
+It also checks payload conflicts, changed-key rejection after acceptance and
+concurrent identical submissions. Fault injection is test-only, never a live
+qualification procedure. The fixture preserves exact-route plan structure without
+retaining private objective bodies. It is not evidence of a historical failure's
+inner cause or transaction disposition, nor of real-model recovery compliance.
+
 ## Development command verification
 
 Focused default/provenance/gateway regressions include

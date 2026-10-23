@@ -61,9 +61,10 @@ def timeout(description):
 # the whole project; the plan's declared scope coordinates writers only.
 AUTO_KEY = ('Optional unique action identity. Omit to derive a stable identity from the operation and payload; '
             'an identical keyless retry reuses a retained effect receipt, and a different payload is a new action. '
-            'A precondition refusal before any possible effect has no replayable derived-key receipt: fix the '
-            'precondition, then retry identically. An explicit key retains its structured refusal; use a new '
-            'key after correction.')
+            'A recognized non-authorizing precondition failure before any possible effect has no replayable '
+            'derived-key receipt: correct it and safely re-propose (rebuild stale patches, never blindly retry). '
+            'An explicit key retains its structured refusal; use a new key after correction. '
+            'Actual access/channel/role/scope/policy refusals remain final; never bypass them.')
 
 WORK_AREA = ("A writing worker may change any project path except private storage and paths the user protected. "
              "The assignment's declared scope is the agreed work area that coordinates parallel writers, not an "

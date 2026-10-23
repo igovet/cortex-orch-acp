@@ -14,7 +14,7 @@ from cortex_runtime.orchestration import mcp,gateway
 READ_NAMES = {
     "read_draft", "list_reports", "read_report", "task_get_context", "project_read", "project_git", "list_sources",
     "read_source", "read_capsule", "read_large_output", "read_diagnostics",
-    "read_skill", "list_route_options",
+    "read_skill", "list_route_options", "tools_discover", "read_batch",
 }
 
 
@@ -59,8 +59,12 @@ def test_every_advertised_tool_uses_its_current_validator_and_read_classificatio
     # stale hand-count in this coverage test (for example complete_assignment).
     assert len(advertised) == len(entries) == len(expected_names)
     assert set(advertised) == expected_names
-    assert set(mcp_tools._ROLE_HANDLERS[role]) | set(mcp.schemas(role)) | set(gateway.SCHEMAS) == expected_delegation
-    # dispatch() tries gateway.SCHEMAS, then mcp.schemas(role), then
+    assert set(mcp_tools._ROLE_HANDLERS[role]) | set(mcp.schemas(role)) | set(gateway.SCHEMAS) | {"tools_discover", "read_batch"} == expected_delegation
+    # The two request-correlated read wrappers dispatch separately; they must
+    # never shadow an ordinary handler or a runtime/gateway operation.
+    read_api_names = {"tools_discover", "read_batch"}
+    assert not read_api_names & (set(mcp_tools._ROLE_HANDLERS[role]) | set(mcp.schemas(role)) | set(gateway.SCHEMAS))
+    # Other dispatch tries gateway.SCHEMAS, then mcp.schemas(role), then
     # _ROLE_HANDLERS[role] in that fixed order and returns on the first
     # match: a name present in more than one of these groups is routed only
     # to the earliest one, silently shadowing any handler in a later group

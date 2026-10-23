@@ -34,7 +34,14 @@ def test_no_model_contract_accepts_authority_selectors():
             for child in schema['properties'].values(): inspect(child)
         if schema.get('type')=='array': inspect(schema['items'])
     for role in ['coordinator','worker']:
-        for schema in dc.schemas_for(role).values(): inspect(schema)
+        for name, schema in dc.schemas_for(role).items():
+            if name == 'read_batch':
+                schema = deepcopy(schema)
+                # Assert the only open node exactly, then inspect the closed envelope.
+                arguments = schema['properties']['calls']['items']['properties']['arguments']
+                assert arguments == dc.SHARED['read_batch']['properties']['calls']['items']['properties']['arguments']
+                arguments['additionalProperties'] = False
+            inspect(schema)
 
 
 def test_plan_contract_accepts_valid_dag_proposal():
@@ -93,6 +100,29 @@ def test_report_identity_and_verdict_are_structured():
     for value in [dict(report_ref='r_'+'a'*12),['r_'+'a'*12]]:
         with pytest.raises(StoreError,match='invalid_arguments'): dc.validate('worker','result_submit',dict(args,report=value))
     with pytest.raises(StoreError): dc.validate('worker','result_submit',dict(args,verdict='looks fine'))
+
+
+def test_tools_discover_conditional_diagnostic_is_schema_derived():
+    for extra, expected_field in (
+        ({'cursor': 'next'}, 'arguments.cursor'),
+        ({'limit': 1}, 'arguments.limit'),
+        ({'cursor': 'next', 'limit': 1}, 'arguments.cursor'),
+    ):
+        with pytest.raises(StoreError) as error:
+            dc.validate('worker', 'tools_discover', {'name': 'read_report', **extra})
+        assert error.value.field == expected_field
+        assert error.value.expected.endswith('when name is supplied')
+        assert 'Omit' in error.value.correction and 'name' in error.value.correction
+        assert not any(term in error.value.correction.lower() for term in ('command', 'tool_call_ref', 'blocker'))
+        assert {item['field'] for item in error.value.violations} == {
+            f'arguments.{name}' for name in extra
+        }
+        for item in error.value.violations:
+            assert 'omitted' in item['expected']
+            assert 'Omit' in item['correction'] and 'name' in item['correction']
+
+    dc.validate('worker', 'tools_discover', {'name': 'read_report'})
+    dc.validate('worker', 'tools_discover', {'cursor': 'next', 'limit': 1})
 
 
 def test_read_skill_uses_only_the_advertised_selector():

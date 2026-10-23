@@ -24,6 +24,17 @@
   </tr>
 </table>
 
+Cortex offers engine-neutral `tools_discover` for exact current tool schemas
+and `read_batch` for bounded independent evidence pages. Existing tools remain:
+this adds no evaluator, mutation batching or reduced bootstrap catalogue.
+See [tool discovery and read batches](docs/features/tool-discovery-and-read-batch/index.md).
+
+Missing, incomplete or stale gateway file reads are correctable preconditions,
+not permission refusals. Workers read current content on the same channel and
+re-propose a valid edit without an owner question or extra approval; stale patches
+must be rebuilt. Actual access denials remain final and cannot be bypassed.
+See [read-precondition recovery](docs/features/permissions-and-containment/index.md#read-precondition-recovery).
+
 Native authentication loss gets one bounded engine-process restart on the same
 account/model when replay is safe. A second auth failure stops and asks for
 `claude /login` or `codex login`; Cortex itself does not copy credentials or run
@@ -41,6 +52,11 @@ support refuses before a worker prompt; it never substitutes an automatic effort
 Mandatory review still uses owner reviewer pins/ranking. An exact reviewer pin
 also refuses instead of clamping its effort. Editor thinking selection alone does
 not set every worker's effort. See [routing](docs/features/routing-and-fallback/index.md#explicit-effort-preservation).
+
+An advisory model hint that matches the effective pin no longer produces a
+misleading replacement notice. Genuine differences and unverifiable route bindings
+remain visible once per attempt; dispatch policy is unchanged. See
+[model hint notices](docs/features/routing-and-fallback/index.md#ignored-model-hint-notices).
 
 Required shared instructions cannot be silently omitted: if an always-included
 skill cannot be loaded or is empty, session startup stops with a diagnostic naming
@@ -237,10 +253,22 @@ Before Python binding checks or the default suite, run checkout-local
 `npm --prefix integrations/paseo ci` then `npm --prefix integrations/paseo run typecheck`;
 see [verification sequencing](docs/project/verification.md#sequencing).
 
+Read API qualification now has a [public executable fixture and live assertion matrix](docs/features/tool-discovery-and-read-batch/index.md#executable-public-evidence).
+Runtime-owned read fingerprints retain no bodies and are not command receipts.
+The public matrix binds the selected worker before matching read shapes and checks
+every worker occurrence. Other authenticated same-task actors are counted, not
+substituted; replayed, contradictory or incompletely bound evidence still fails.
+Preflight, dispatch, assertions and runtime acceptance are distinct.
+
 Before `plan_submit`, inspect the live schema and measure complete bounded fields.
 The objective property description exposes its Unicode code-point limit even
 when a host renders only descriptions; rewrite overlong text without dropping
 requirements. Rejection does not accept a plan or start workers.
+Known portable plan-policy failures retain their error code and category rather
+than appearing as storage failures. Only a pre-write refusal is marked rejected;
+unknown-stage or indeterminate failures require reconciliation with the identical
+request and delivery key. Exact accepted-plan replay precedes current routing
+policy reads. See [MCP error recovery](docs/features/failures-and-cancellation/index.md#mcp-tool-errors).
 
 For `result_submit`, `report` is required and is one plain string, never an
 object: the complete report Markdown (optional `report_title`; otherwise its

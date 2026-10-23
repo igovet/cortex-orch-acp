@@ -27,6 +27,18 @@ There is no default basis — every append site chooses explicitly
 (`observability/events.py`'s `append_event`/`append_event_tx` raise on an
 unknown value).
 
+The additive [tool discovery/read API](../tool-discovery-and-read-batch/index.md)
+records `tool_read_api` events: catalogue revision, hashed channel/outer/item
+correlation, operation/index, execution/delivery status, elapsed milliseconds and
+compact UTF-8 input/output byte counts. Arguments, bodies, cursor values and
+caller item-id text are not recorded in these events. Executed members remain
+observable even when later authority loss withholds the reply. Successful inline
+report pages retain composite outer/item report-read observations; deferred
+references do not establish report handoff reads. Counts are executions and bytes,
+not native MCP round trips, model tokens, command receipts or proof of consumption.
+New discovery/batch bodies are omitted from display history through the existing
+read projection.
+
 The current append sites are:
 
 - `store.py`'s `_call` records a `publication`/`duplicate_attempt` row, in
@@ -817,7 +829,13 @@ keeps (`src/cortex_runtime/storage/inspection.py`):
   was clamped. Candidates, usage figures and reasons are omitted.
 - **Observability rows.** The `observability` section lists `validation`,
   `submission_rejection` and `gateway_refusal` rows: category, error code,
-  attempt, operation and bounded field paths.
+  attempt, operation and bounded field paths. `tool_read_api` rows additionally
+  retain allowlisted correlation digests, member index, counts, elapsed/byte
+  measurements and deferred-output identity/hash; never bodies or arguments.
+  The `report_reads` section exposes successful read metadata, hashed native
+  request identities and runtime-derived composite batch request ids, never
+  arbitrary caller request-id text. These prove observations, not model
+  consumption or native command receipts.
 - **Questions.** `USER_QUESTION_REQUESTED` exposes the question ID, whether it
   is a runtime stop, its blocker code, resume state, revision and option count.
   Its text and options are never exposed.
@@ -848,6 +866,36 @@ truncated history or incomplete action receipts block qualification. The
 inspector does not probe `/proc`, prove native resource liveness, verify report
 body bytes, or invent SIGKILL telemetry. It has no acceptance verdict. Missing
 host/cleanup/engine evidence still requires an explicit limitation, not a pass.
+
+### Prepared read fingerprints
+
+`read_api_calls` is an allowlisted immutable server-boundary observation:
+canonical sorted compact UTF-8 JSON hashes and bytes for arguments and decoded
+responses; typed request and channel hashes; owner/attempt binding; member index,
+item hash/status, deferred ID and delivery-request hash. Markdown and decoded
+output chunks have content hashes/bytes, never bodies. Native partial, truncation
+and paging flags remain explicit. Missing request identity or unsupported/oversized
+serialization is unavailable, not success. Member execution metadata additionally
+carries the same request hash, so a rejected envelope can be checked for zero reads.
+
+These observations mean **prepared**, not delivered to the engine. Reused request
+identities are ambiguous and cannot qualify. They are not `tool_call_ref` command
+receipts and never close automated checks. The [executable public evidence
+matrix](../tool-discovery-and-read-batch/index.md#executable-public-evidence)
+compares independently known bytes/schema expectations with these observations.
+Distinct request/observation identities can represent legitimate repeated
+idempotent reads with identical response hashes. The public matrix validates
+every selected-worker occurrence and reports safe counts/identities. Actor binding
+precedes shape matching: authenticated coordinator/reviewer/other-attempt reads
+within the same bound snapshot are counted separately, not worker evidence.
+Duplicate rows, reused correlation, unbound/foreign identities and contradictory
+worker occurrences remain failures. The inspector still never opens report or
+output bodies.
+
+`REVIEW_NOT_REQUIRED` and `EXECUTION_BASELINE` project only revision, reason,
+reference and project digest/head. A valid unchanged-project waiver is not a
+failed review. Actual review approval requires a runtime review node and its
+exact attempt's structured verdict, not execution QA labels or synthesis prose.
 
 ## Orchestration phase measurement
 

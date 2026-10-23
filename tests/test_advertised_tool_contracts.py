@@ -88,7 +88,10 @@ def _problems(tool, path, schema):
     if kind in ("integer", "number") and ("minimum" not in schema or ("maximum" not in schema and not unbounded_by_design)):
         yield f"{tool} {path}: number without bounds"
     if kind == "object":
-        if schema.get("additionalProperties") is not False:
+        # One declarative forwarding envelope; every member is preflighted
+        # against the currently offered inner schema before any dispatch.
+        native_arguments = tool == "read_batch" and path == "args.calls[].arguments"
+        if schema.get("additionalProperties") is not False and not native_arguments:
             yield f"{tool} {path}: object open to undeclared fields"
         if "required" not in schema:
             yield f"{tool} {path}: object without a required list"

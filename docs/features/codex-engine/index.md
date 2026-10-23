@@ -14,6 +14,17 @@ install identity/integrity) and
 (launch/env mapping, configuration-option mapping, evidence, instruction
 delivery).
 
+## Schema discovery and evidence batches
+
+Native Codex Code Mode is supplied by the engine, not Cortex.
+Cortex's additive [discovery/read API](../tool-discovery-and-read-batch/index.md)
+recovers exact channel-offered schemas when a native renderer shows only names.
+The Codex cheat sheet remains mechanically derived from the live catalogue.
+The batch's native-arguments object is deliberately dynamic; discover its inner
+tool schema rather than guessing. Individual tools and normal bootstrap loading
+remain unchanged. Native exec can already combine independent calls in one
+model turn: no additional turn, token or cost saving is established there.
+
 ## Current support: 2.1.1 (2026-10-07)
 
 The npm latest release is **2.1.1**. Its exact registration is separate from

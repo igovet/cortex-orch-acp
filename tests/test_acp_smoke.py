@@ -9,19 +9,22 @@ uses only fake fixture data and never reaches a paid model.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
+
+import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SMOKE_SCRIPT = REPO_ROOT / "scripts" / "cortex_acp_smoke.py"
 
 
-def _run_smoke(tmp_path, *extra_args):
+def _run_smoke(tmp_path, *extra_args, env=None):
     report_path = tmp_path / "smoke-report.json"
     proc = subprocess.run(
         [sys.executable, "-B", str(SMOKE_SCRIPT), "--report", str(report_path), *extra_args],
-        cwd=str(tmp_path), capture_output=True, text=True, timeout=60)
+        cwd=str(tmp_path), capture_output=True, text=True, timeout=60, env=env)
     return proc, json.loads(report_path.read_text()) if report_path.exists() else None
 
 
@@ -162,14 +165,47 @@ def test_smoke_failure_prints_reason_to_stderr_without_polluting_stdout(tmp_path
     assert report_path.exists()
 
 
-def test_smoke_removes_its_temporary_directories(tmp_path):
-    """Every run used to leave its project and HOME directories behind
-    (561 pairs, 16.6 GB under /var/tmp by 2026-10-15)."""
-    import os
-    root = Path(os.environ["TMPDIR"])
-    proc, report = _run_smoke(tmp_path)
-    assert proc.returncode == 0
-    assert not [entry for entry in os.listdir(root) if entry.startswith("cortex-acp-smoke-")]
-    proc, report = _run_smoke(tmp_path, "--keep-temp")
-    kept = [entry for entry in os.listdir(root) if entry.startswith("cortex-acp-smoke-")]
-    assert len(kept) == 2 and "kept" in proc.stderr
+@pytest.fixture
+def smoke_temp_root(tmp_path):
+    """Seed another run's resources, held throughout this run's cleanup."""
+    root = tmp_path / "smoke-temp"
+    root.mkdir()
+    unrelated = {}
+    for kind in ("project", "home"):
+        path = root / f"cortex-acp-smoke-{kind}-other-run"
+        path.mkdir()
+        marker = path / "owned-by-other-run"
+        marker.write_bytes(kind.encode())
+        unrelated[path] = marker.read_bytes()
+    return root, unrelated
+
+
+@pytest.mark.parametrize("fixture_connection", [False, True])
+def test_smoke_removes_its_temporary_directories(tmp_path, smoke_temp_root, fixture_connection):
+    """Remove this run's project/HOME, not another simultaneously held pair."""
+    root, unrelated = smoke_temp_root
+    env = {**os.environ, "TMPDIR": str(root)}
+    args = ("--fixture-connection",) if fixture_connection else ()
+    proc, report = _run_smoke(tmp_path, *args, env=env)
+    assert proc.returncode == 0, proc.stderr
+    assert report is not None
+    _assert_all_checks_passed(report)
+    assert "cortex_acp_smoke: could not remove" not in proc.stderr
+    assert set(root.iterdir()) == set(unrelated)
+
+    proc, report = _run_smoke(tmp_path, *args, "--keep-temp", env=env)
+    assert proc.returncode == 0, proc.stderr
+    assert report is not None
+    _assert_all_checks_passed(report)
+    kept = set(root.iterdir()) - set(unrelated)
+    projects = [path for path in kept if path.name.startswith("cortex-acp-smoke-project-")]
+    homes = [path for path in kept if path.name.startswith("cortex-acp-smoke-home-")]
+    assert len(kept) == 2 and len(projects) == len(homes) == 1
+    project, home = projects[0], homes[0]
+    assert f"cortex_acp_smoke: kept {project} and {home}" in proc.stderr.splitlines()
+    assert "cortex_acp_smoke: could not remove" not in proc.stderr
+    assert (project / ".cortex" / "cortex.sqlite3").is_file()
+    assert (home / "config").is_dir() and (home / "state").is_dir()
+    for path, contents in unrelated.items():
+        assert list(path.iterdir()) == [path / "owned-by-other-run"]
+        assert (path / "owned-by-other-run").read_bytes() == contents

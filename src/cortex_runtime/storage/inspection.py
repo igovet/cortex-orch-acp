@@ -160,6 +160,7 @@ def _event_detail(kind, payload, channels, actor):
         checks = result.get('checks') if isinstance(result.get('checks'), list) else []
         item.update(attempt_id=_code(payload.get('attempt_id')), node=_code(payload.get('node')),
                     verdict=_enum(result.get('verdict'), {'APPROVE', 'REQUEST_CHANGES', 'BLOCK'}),
+                    project_digest=result.get('project_digest') if isinstance(result.get('project_digest'), str) and re.fullmatch(r'[0-9a-f]{64}', result['project_digest']) else None,
                     assignment_outcome=_enum(result.get('assignment_outcome'), {'failed'}),
                     checks=[dict(name_sha256=_digest(c.get('name')),
                                  outcome=_enum(c.get('outcome')), claimed_outcome=_enum(c.get('claimed_outcome')),
@@ -167,6 +168,14 @@ def _event_detail(kind, payload, channels, actor):
                                  closed_by=_ref(c.get('closed_by')), retracted_by=_ref(c.get('retracted_by')))
                             for c in checks if isinstance(c, dict)],
                     checks_count=len(checks))
+    elif kind in ('REVIEW_NOT_REQUIRED', 'EXECUTION_BASELINE'):
+        item.update(revision=_int(payload.get('revision')), reason=_code(payload.get('reason')),
+                    reference=_code(payload.get('reference')),
+                    reference_revision=_int(payload.get('reference_revision')),
+                    kind=_code(payload.get('kind')))
+        for key in ('revision_digest', 'head'):
+            value = payload.get(key)
+            item[key] = value if isinstance(value, str) and re.fullmatch(r'[0-9a-f]{40,64}', value) else None
     elif kind == 'USER_QUESTION_REQUESTED':
         # Which kind of question and where it resumes; never its text/options.
         options = payload.get('options')
@@ -358,7 +367,7 @@ def read_binding_page(project, session_id, task_id, owner_epoch, *, cursor=None,
                         signal=_code(retained['signal']), failure=_code(retained['failure']))
                 rows.append(item)
         observed = db.execute("SELECT id,category,outcome,attempt_id,created_at,detail_json FROM observability_events "
-                              "WHERE task_id=? AND category IN ('validation','submission_rejection','gateway_refusal') "
+                              "WHERE task_id=? AND category IN ('validation','submission_rejection','gateway_refusal','tool_read_api') "
                               "ORDER BY created_at,id LIMIT ?", (task_id, MAX_ROWS + 1)).fetchall()
         if len(observed) > MAX_ROWS:
             raise StoreError('inspection_evidence_overflow')
@@ -369,6 +378,52 @@ def read_binding_page(project, session_id, task_id, owner_epoch, *, cursor=None,
                              attempt_id=row['attempt_id'], created_at=row['created_at'],
                              operation=_code(detail.get('operation')), field=_code(detail.get('field')),
                              fields=[_code(f) for f in fields[:20]]))
+            if row['category'] == 'tool_read_api':
+                from ..tool_read_api import BATCH_READS
+                # Explicit metadata projection, never forwarding arbitrary detail keys.
+                projected = {}
+                for key in ('catalog_revision','item_hash','result_sha256','channel_hash','outer_hash','request_hash'):
+                    value = detail.get(key)
+                    if isinstance(value, str) and re.fullmatch(r'(?:batch:)?[0-9a-f]{32,64}', value):
+                        projected[key] = value
+                for key in ('item_index','elapsed_ms','input_bytes','output_bytes','executed_count',
+                            'deferred_count','not_run_count','byte_count'):
+                    value = _int(detail.get(key))
+                    if value is not None and value >= 0:
+                        projected[key] = value
+                projected['operation'] = detail.get('operation') if detail.get('operation') in BATCH_READS | {'tools_discover','read_batch'} else None
+                projected['error_code'] = _code(detail.get('error_code'))
+                projected['large_output_id'] = _code(detail.get('large_output_id'))
+                rows[-1].update(operation=projected['operation'], field=None, fields=[], read_api=projected)
+        # Prepared read replies are separate from delivery observations and checks.
+        from ..read_api_evidence import project as project_read_evidence
+        from ..tool_read_api import encoded
+        call_rows = db.execute(
+            "SELECT id,attempt_id,detail_json FROM observability_events "
+            "WHERE task_id=? AND category='read_api_call' ORDER BY created_at,id LIMIT ?",
+            (task_id, MAX_ROWS + 1)).fetchall()
+        if len(call_rows) > MAX_ROWS:
+            raise StoreError('inspection_evidence_overflow')
+        for call in call_rows:
+            detail = project_read_evidence(json.loads(call['detail_json'] or '{}'))
+            matches = [c for c in channel_rows if hashlib.sha256(encoded([
+                c['channel_id'], c['owner_epoch'], c['attempt_id']])).hexdigest()[:32] == detail.get('channel_hash')
+                and c['attempt_id'] == call['attempt_id'] and c['owner_epoch'] == owner_epoch]
+            detail['bound'] = len(matches) == 1 and detail.get('owner_epoch') == owner_epoch
+            rows.append(dict(section='read_api_calls', id=call['id'], attempt_id=call['attempt_id'], **detail))
+        report_reads = db.execute(
+            "SELECT attempt_id,report_id,request_id,outcome,created_at FROM report_read_observations "
+            "WHERE task_id=? ORDER BY created_at,attempt_id,request_id LIMIT ?",
+            (task_id, MAX_ROWS + 1)).fetchall()
+        if len(report_reads) > MAX_ROWS:
+            raise StoreError('inspection_evidence_overflow')
+        for row in report_reads:
+            # Native request ids may be arbitrary caller text: hash those.
+            request = row['request_id']
+            rows.append(dict(section='report_reads', attempt_id=row['attempt_id'], report_id=row['report_id'],
+                             request_sha256=_digest(request), outcome=_code(row['outcome']),
+                             batch_request=request if re.fullmatch(r'batch:[0-9a-f]{64}', request or '') else None,
+                             created_at=row['created_at']))
         if len(rows) > MAX_ROWS or len(_encode(rows).encode()) > MAX_METADATA_BYTES:
             raise StoreError('inspection_evidence_overflow')
         binding = dict(project_root=str(root), session_id=session_id, task_id=task_id, owner_epoch=owner_epoch)

@@ -18,6 +18,38 @@ for exact paths, artifact-test limits and the next upstream-fix decision.
 
 ## Current ACP boundary (1.0.0)
 
+Portable MCP error translation exposes a bounded identifier code, category and
+fixed corrective guidance, not exception-owned remediation, details or arbitrary
+field values. Plan preflight and route-menu reads can establish rejection before
+plan writes; an unlocated portable failure remains uncertain even when its category
+is validation. Raw storage faults retain uncertainty and disclose only the class
+and standard errno reason, never exception-owned reason text or filenames.
+Accepted-plan reconciliation uses the same channel, key and complete payload;
+it cannot bypass authority or create duplicate nodes. This is tested with
+disposable stores, not evidence of a historical transaction's outcome.
+See [MCP tool errors](docs/features/failures-and-cancellation/index.md#mcp-tool-errors).
+
+Recognized `gateway_read_required`, `gateway_complete_read_required` and
+`gateway_stale_read` errors reject before file mutation; they are read
+preconditions, not authorization decisions. Guidance directs a current same-channel
+read, required non-truncated coverage and a rebuilt valid edit under existing
+authority, without an owner question or extra approval. It grants no access and
+never cures a channel, role, scope, private-path or policy refusal. Hash,
+exact-match and complete-read guards are unchanged. Tests establish the scripted
+gateway/wire workflow, not real-model compliance; new guidance does not hot-upgrade
+running sessions. See [read-precondition recovery](docs/features/permissions-and-containment/index.md#read-precondition-recovery).
+
+Channel-scoped `tools_discover` exposes only the effective offered Cortex
+catalogue, never external or other-role schemas. `read_batch` preflights every
+member against an explicit evidence-read allowlist and its current schema.
+It has no evaluator, commands, project/skill reads, publishing or mutations.
+Fresh task/channel/assignment authority and catalogue checks surround execution
+and delivery; revocation or changed offers withhold all accumulated bodies.
+Reads can still write runtime bookkeeping and owner-private retained outputs;
+they are not filesystem isolation or zero-write transactions. Batches are
+sequential, not snapshots, with cooperative authority-based cancellation, not
+preemptible stdio execution. See [bounds and evidence semantics](docs/features/tool-discovery-and-read-batch/index.md).
+
 Explicit worker effort comes only from the same retained user source that
 authorizes the exact planned model, or an owner effort pin; model-authored reasons
 and the coordinator's editor setting do not authorize it. Policy floors/ceilings,
@@ -573,6 +605,10 @@ request-form verb in the same user message supplies request grammar; negations
 still apply. Configured labels retain conservative local grammar.
 Model prose and hints remain non-consent, and hard route
 authorization checks are unchanged. See [routing](docs/features/routing-and-fallback/index.md#settings-only-routing).
+Matching-pin chat notices compare audit-bound engine/model and any explicit effort;
+silence is not consent or native configuration evidence. Missing/conflicting
+bindings remain visible as unverifiable, and historical audits/notices are not
+rewritten. See [notice boundaries](docs/features/routing-and-fallback/index.md#ignored-model-hint-notices).
 Creating a project file creates its missing parent directories only after the
 private-path, write-grant and user deny-write checks passed for the full path;
 each component is created and reopened no-follow, and a file or symlink component
@@ -1275,6 +1311,32 @@ copying the output. Unknown exception codes are redacted, not accepted by prefix
 Zero exit requires a complete canonical exact-identity/digest binding envelope;
 missing evidence or extra fields never become success. Diagnostics never return a binding or authorize another read, retry,
 checkpoint or migra
+## Prepared read evidence
+
+The server records bounded canonical argument/response fingerprints for the
+read API and its six native reads: hashes, byte counts, explicit completeness
+flags, hashed typed request/channel/item identities and deferred output IDs.
+The bound inspector projects only an allowlist and joins current durable owner
+and channel/attempt identity. Unsupported or missing fingerprints remain
+unavailable. It never reads report/output bodies for this projection.
+
+A prepared reply is not transport acknowledgement, model consumption, a command
+receipt, successful report delivery or acceptance. Deferred retrieval does not
+create a report-read observation. Public fixture expectations must be independently
+established; copying observed hashes into an expectation file proves no semantics.
+The no-paid fixture uses new disposable storage only. The live assertion reader
+accepts one exact binding and a public expected fixture file, not a private-history
+export. Distinct repeated idempotent reads require independent exact binding and
+expected semantics for every selected-worker occurrence; response-hash equality
+is not identity. The complete task/session/current-owner snapshot and durable
+channel/attempt/assignment/role/stage joins precede semantic shape matching.
+Other authenticated actors in that same snapshot are counted, never substituted
+for a missing worker call or compared to the worker's role-specific catalogue.
+Duplicate observations, reused request correlation, unbound/foreign identities
+and contradictory selected-worker occurrences fail even beside a correct reply. No paid consent, model route,
+authority, hidden tool, batch limit or
+result-submission rule is relaxed.
+
 ## Inspection projection and route preflight
 
 The bound task inspector projects runtime-created outcome metadata and nothing

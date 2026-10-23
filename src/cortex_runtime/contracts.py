@@ -300,6 +300,9 @@ ERROR_HELP = {
     "read_only_scope_not_writable": "A read-only role (architect, code-reviewer, database-architect, explorer, performance-engineer, planner, security-auditor, accessibility-auditor, senior-consultant, ux-designer) cannot create or change files, and this scope names a path that does not exist yet and that no writing task ordered with it creates (see violations for every such path). Nothing was accepted. Keep only existing paths, or name a path a writing task of this plan creates when that writer's scope covers it and the two are ordered (the read-only task depends on the writer, e.g. a reviewer, or the writer depends on the read-only task). When the read-only task must produce the file, have it return the content in its report and add a dependent task for a writing role (for example technical-writer) that creates the file.",
     "skill_link_not_managed": "unlink removes only the exact managed link ../../.agents/skills/<name>. The entry there is something else and was kept.",
     "skill_link_replace_not_confirmed": "The user did not confirm replacing that link, so it was kept. Do not retry it; continue without replacing it.",
+    "gateway_read_required": "No file was changed. This is a correctable read precondition, not an access refusal. Read the current target with project_read on this channel, then re-propose the exact edit without an owner question or extra approval. Existing authority still applies.",
+    "gateway_complete_read_required": "No file was changed. Complete all non-truncated project_read pages of the current file on this channel before whole-file replacement, or use project_edit for a partial change. No owner question or extra approval is needed for this read precondition; existing authority still applies.",
+    "gateway_stale_read": "No file was changed. Read the current target again on this channel and rebuild the patch or replacement against it; never blindly retry a stale patch. No owner question or extra approval is needed for this read precondition; existing authority still applies.",
     "gateway_write_conflict": "The file changed since you read it, or expected_sha256 is wrong. Read it again with project_read and pass its current sha256 (\"absent\" only for a new file). Nothing was written.",
     "gateway_task_inactive": "The task is not running (it is waiting for the user, blocked or finished), so no action is accepted now. Stop and let the runtime continue.",
     "gateway_task_recovering": "Replanning or recovery is in progress. End this turn; the runtime will stop workers and then request the new plan.",
@@ -457,12 +460,51 @@ def validate(name, args):
             raise StoreError("invalid_arguments",key,_received(value),f"integer {rule['minimum']}..{rule['maximum']}",f"Use a JSON integer from {rule['minimum']} through {rule['maximum']}.")
 
 
+class PortableToolError(StoreError):
+    """Value-free portable failure at the MCP boundary.
+
+    Only a boundary that has not started its mutation may set rejected=True.
+    A semantic category alone says nothing about a later commit/reply failure.
+    """
+    def __init__(self, error, *, rejected=False):
+        import re
+        from .portable.errors import PortableErrorCategory
+
+        category = error.category
+        code = error.code if re.fullmatch(r"[a-z][a-z0-9_]{0,79}", error.code) else "portable_error"
+        guidance = {
+            PortableErrorCategory.VALIDATION: "Correct the request or configured policy before resubmitting; identical invalid input will fail again.",
+            PortableErrorCategory.AUTHORIZATION: "The required authority is missing. Do not bypass the refusal through another route.",
+            PortableErrorCategory.TRANSPORT: "The counterpart is unavailable or busy. Retry only the identical request and delivery key when it is available.",
+            PortableErrorCategory.ENGINE_FAILURE: "The engine reported a failure. Check its availability before reconciling the identical request and delivery key.",
+            PortableErrorCategory.INDETERMINATE_WRITE: "The mutation outcome is unknown. Reconcile only the identical request and delivery key; never change keys to bypass uncertainty.",
+        }
+        known = {
+            "model_policy_migration_required": ("model_policy_version", "Explicitly migrate routing.json to model_policy_version=2 with exact enabled identities and per-engine tiers."),
+            "model_policy_version_unsupported": ("model_policy_version", "Only model_policy_version=2 is supported; correct the configured policy."),
+            "invalid_routing_overrides": ("routing", "Repair the routing policy to match its documented schema, then resubmit."),
+        }
+        field = error.field if error.field in {"routing", "model_policy_version"} else None
+        field, correction = known.get(code, (field, guidance[category]))
+        uncertain = not rejected or category == PortableErrorCategory.INDETERMINATE_WRITE
+        if uncertain:
+            correction = guidance[PortableErrorCategory.INDETERMINATE_WRITE]
+        super().__init__(code, field, correction=correction)
+        self.category = category.value
+        self.write_state = "uncertain" if uncertain else "rejected"
+        self.retry_eligible = error.retry_eligible and not uncertain
+
+
 def storage_failure(exc):
-    """storage_error naming what failed: the exception class, and for an
-    OSError its reason -- never its message or file name, which may carry
-    paths or data. A bare storage_error hid a validator KeyError behind
-    "check disk space" for a whole task; the traceback goes to the log."""
-    reason = exc.strerror if isinstance(exc, OSError) and exc.strerror else None
+    """Name the class and standard errno reason, never exception-owned text.
+
+    Even OSError.strerror can contain caller data; derive its reason from the
+    operating system's fixed errno catalogue instead.
+    """
+    import errno
+    import os
+    reason = (os.strerror(exc.errno) if isinstance(exc, OSError)
+              and type(exc.errno) is int and exc.errno in errno.errorcode else None)
     return StoreError("storage_error", "cause", type(exc).__name__ + (f": {reason}" if reason else ""))
 
 

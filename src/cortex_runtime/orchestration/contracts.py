@@ -309,7 +309,8 @@ def _collect(schema, value, field, violations):
                                    correction=f'Add {name} in the advertised form.'))
             if len(violations) >= MAX_VIOLATIONS:
                 return
-        for name in sorted(set(value) - set(schema['properties'])):
+        extra = set(value) - set(schema['properties']) if schema.get('additionalProperties') is not True else set()
+        for name in sorted(extra):
             violations.append(dict(field=f'{field}.{name}', received='unexpected field',
                                    expected='one of ' + ', '.join(schema['properties']),
                                    correction=f'Omit {name}; use only fields listed in this tool\'s live schema.'))
@@ -330,6 +331,23 @@ def _collect(schema, value, field, violations):
             violations.append(dict(field=field, received='mixed or incomplete question form',
                                    expected='question and options, or questions, never both',
                                    correction='Supply one question with 2 to 8 meaningful options, or 2 to 8 related question/options objects.'))
+        elif (conditional.get('required') and
+              set(branch.get('not', {}).keys()) == {'anyOf'}):
+            trigger = ', '.join(conditional['required'])
+            forbidden = sorted({
+                name
+                for rule in branch['not']['anyOf']
+                for name in rule.get('required', ())
+                if name in value
+            })
+            if forbidden:
+                for name in forbidden:
+                    violations.append(dict(
+                        field=f'{field}.{name}',
+                        received=f'present with {trigger}',
+                        expected=f'{name} omitted when {trigger} is supplied',
+                        correction=f'Omit {name} when {trigger} is supplied; use the advertised schema form.',
+                    ))
         else:  # checks[].blocker/command combinations
             if 'required' in branch:
                 violations.append(dict(field=f'{field}.blocker', received='missing',

@@ -124,10 +124,36 @@ def evaluate(rows, args, *, binding=None):
         nodes = [n for n in section('nodes') if n['revision'] == runtime['revision']]
         if not nodes or any(n['status'] != 'completed' for n in nodes):
             failures.append(dict(expectation='nodes_completed', observed=sorted({n['status'] for n in nodes})))
-        verdicts = {e.get('node'): e.get('verdict') for e in events if e['type'] == 'WORKER_COMPLETED'}
         reviews = [n['node_id'] for n in nodes if n['stage'] == 'review']
-        if reviews and verdicts.get(reviews[-1]) != 'APPROVE':
-            failures.append(dict(expectation='review_approved', observed=verdicts.get(reviews[-1])))
+        if reviews:
+            review = next(n for n in nodes if n['node_id'] == reviews[-1])
+            attempts = [a for a in section('attempts') if a.get('idempotency_key') == review.get('assignment_ref')]
+            results = [e for e in events if e['type'] == 'WORKER_COMPLETED' and e.get('node') == reviews[-1]
+                       and len(attempts) == 1 and e.get('attempt_id') == attempts[0].get('attempt_id')]
+            if (len(results) != 1 or results[0].get('verdict') != 'APPROVE' or binding is None
+                    or attempts[0].get('owner_epoch') != binding['owner_epoch']):
+                failures.append(dict(expectation='review_approved', observed=results[0].get('verdict') if len(results) == 1 else None))
+        else:
+            waivers = [e for e in events if e['type'] == 'REVIEW_NOT_REQUIRED'
+                       and e.get('revision') == runtime['revision']]
+            valid = len(waivers) == 1
+            if valid:
+                waiver = waivers[0]
+                digest, head = waiver.get('revision_digest'), waiver.get('head')
+                valid = bool(digest) and bool(head)
+                if waiver.get('reason') == 'no_project_changes' and waiver.get('reference') == 'execution_baseline':
+                    baselines = [e for e in events if e['type'] == 'EXECUTION_BASELINE'
+                                 and e.get('revision') == waiver.get('reference_revision')
+                                 and e.get('id', 0) < waiver.get('id', 0)]
+                    valid = valid and len(baselines) == 1 and baselines[0].get('kind') == 'observed'
+                    valid = valid and baselines[0].get('revision_digest') == digest and baselines[0].get('head') == head
+                elif waiver.get('reason') == 'no_changes_since_approved_review' and waiver.get('reference') == 'approved_review':
+                    valid = valid and any(e['type'] == 'WORKER_COMPLETED' and e.get('verdict') == 'APPROVE'
+                                          and e.get('project_digest') == digest for e in events)
+                else:
+                    valid = False
+            if not valid or getattr(args, 'require_review', False):
+                failures.append(dict(expectation='review_or_valid_waiver', observed='waiver' if valid else None))
         verification = [e for e in events if e['type'] in ('VERIFICATION_PASSED', 'VERIFICATION_FAILED')]
         if (not verification or verification[-1]['type'] != 'VERIFICATION_PASSED'
                 or not verification[-1].get('checks')
@@ -154,6 +180,18 @@ def evaluate(rows, args, *, binding=None):
         if not any(size >= args.expect_retained_output_bytes for size in sizes):
             failures.append(dict(expectation='complete_retained_output_metadata', expected=args.expect_retained_output_bytes,
                                  observed=max(sizes, default=None)))
+    manifest = getattr(args, "read_api_expectations", None)
+    if manifest is not None:
+        from cortex_runtime.read_api_evidence import evaluate_manifest
+        failures.extend(dict(expectation=code) for code in evaluate_manifest(rows, binding, manifest))
+    for ref in getattr(args, "expect_command_ref", []):
+        receipts = [r for r in section("action_receipts") if r.get("tool_call_ref") == ref]
+        checks = [(e, c) for e in events if e["type"] == "WORKER_COMPLETED" for c in e.get("checks") or []
+                  if c.get("tool_call_ref") == ref and c.get("outcome") == "passed"
+                  and len(receipts) == 1 and e.get("attempt_id") == receipts[0].get("channel_attempt_id")]
+        if (len(receipts) != 1 or not _retained_sizes(receipts) or not checks or binding is None
+                or receipts[0].get("channel_owner_epoch") != binding["owner_epoch"]):
+            failures.append(dict(expectation="current_task_command_receipt"))
     return failures
 
 
@@ -166,11 +204,24 @@ def main():
     parser.add_argument('--expect-state', default='COMPLETED')
     parser.add_argument('--expect-route', action='append', default=[], metavar='ROLE=ENGINE/MODEL:EFFORT',
                         help='every attempt of ROLE has this native worker_configuration_confirmed route')
+    parser.add_argument("--require-review", action="store_true", help="require an actual runtime review node and APPROVE, not a waiver")
     parser.add_argument('--expect-closed-failure', action='store_true',
                         help='a failed worker check is closed by a passed exact rerun')
     parser.add_argument('--expect-retained-output-bytes', type=int, metavar='BYTES',
                         help='complete zero-exit command/output metadata records at least BYTES bytes (body not verified)')
+    parser.add_argument("--read-api-expectations", type=Path,
+                        help="independently established public expected fingerprints, not observed output")
+    parser.add_argument("--expect-command-ref", action="append", default=[],
+                        help="exact current-task runtime command receipt also attached to a passed worker check")
     args = parser.parse_args()
+    if args.read_api_expectations is not None:
+        try:
+            if args.read_api_expectations.stat().st_size > 1048576:
+                raise ValueError("expectation_limit")
+            args.read_api_expectations = json.loads(args.read_api_expectations.read_text())
+        except (OSError, ValueError):
+            print(json.dumps(dict(passed=False, error="invalid_read_api_expectations")))
+            return 2
     routes = []
     for value in args.expect_route:
         match = _ROUTE.fullmatch(value)

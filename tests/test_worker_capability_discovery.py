@@ -166,7 +166,7 @@ def test_composed_guidance_preserves_direct_reads_and_denial_boundary_for_all_pr
     assert len(profiles) == 23
     for role in profiles:
         instructions = composed_instructions(load_role(role))
-        assert "A refusal is a decision, not a glitch" in instructions
+        assert "refusal is a decision, not a glitch" in " ".join(instructions.split())
         assert "never reach the same effect another way" in instructions
     names = {tool["name"] for tool in mcp_tools.tool_definitions("coordinator")}
     assert {"plan_submit", "answer_submit", "project_read"} <= names

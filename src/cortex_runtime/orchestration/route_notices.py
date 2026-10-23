@@ -3,7 +3,8 @@
 The coordinator told the owner that Opus would own an audit; the router
 ignored that hint (``ignored:owner_preferred``) and the audit ran on Sol,
 visible only in the route audit (observed 2026-10-22). Each worker attempt
-whose model hint was ignored now gets one plain line in the chat.
+whose model hint differs from the effective dispatch gets one chat line.
+An ignored advisory input can still match a pin; the audit keeps its provenance.
 """
 from __future__ import annotations
 
@@ -12,7 +13,7 @@ import json
 from .state import event
 
 _REASONS = {
-    'pinned': ('a different model is pinned in the routing settings', 'в настройках маршрутов закреплена другая модель'),
+    'pinned': ('the route is pinned in the routing settings', 'в настройках маршрутов закреплён этот маршрут'),
     'owner_preferred': ('the routing settings prefer another model for this work',
                         'настройки маршрутов предпочитают для этой работы другую модель'),
     'tier_mismatch': ("the model's level does not match this work in the routing settings",
@@ -31,42 +32,103 @@ _REASONS = {
 }
 
 
+def _detail(row):
+    try:
+        detail = json.loads(row['decision_detail_json'] or '{}')
+    except (TypeError, ValueError):
+        return {}
+    return detail if isinstance(detail, dict) else {}
+
+
+def _decision(detail):
+    decision = detail.get('route_decision')
+    return decision if isinstance(decision, dict) else {}
+
+
+def _actual(rows):
+    """Audit-bound dispatch identity, not proof of native configuration.
+    Conflicting or incomplete bindings must never establish a matching route."""
+    identities = set()
+    for row in rows:
+        engine, model, connection = row['engine'], row['model'], row['connection_id']
+        if not all(isinstance(value, str) and value for value in (engine, model, connection)):
+            return None
+        detail = _detail(row)
+        decision = _decision(detail)
+        route = f'{engine}/{model}'
+        if (decision.get('chosen', route) != route
+                or decision.get('chosen_connection_id', connection) != connection):
+            return None
+        effort = detail.get('effort')
+        if effort is not None and not isinstance(effort, str):
+            return None
+        identities.add((route, effort or None, connection))
+    if len(identities) != 1:
+        return None
+    route, effort, _ = identities.pop()
+    return route, effort
+
+
 def _ignored(db, task_id):
     shown = {json.loads(row[0]).get('attempt_id') for row in db.execute(
         "SELECT payload_json FROM runtime_events WHERE task_id=? AND type='MODEL_HINT_IGNORED_SHOWN'", (task_id,))}
+    attempts = {}
+    for row in db.execute("SELECT attempt_id, role, engine, model, connection_id, decision_detail_json "
+                          "FROM attempt_route_audit WHERE task_id=? ORDER BY recorded_at", (task_id,)):
+        attempts.setdefault(row['attempt_id'], []).append(row)
     found = []
-    for row in db.execute("SELECT attempt_id, role, engine, model, decision_detail_json FROM attempt_route_audit "
-                          "WHERE task_id=? AND decision_detail_json LIKE '%ignored:%' ORDER BY recorded_at",
-                          (task_id,)).fetchall():
-        if row['attempt_id'] in shown:
+    for attempt_id, rows in attempts.items():
+        if attempt_id in shown:
             continue
-        try:
-            decision = (json.loads(row['decision_detail_json'] or '{}').get('route_decision') or {})
-        except (TypeError, ValueError):
-            continue
-        hint, status = decision.get('model_hint'), decision.get('model_hint_status') or ''
-        if hint and hint != 'auto' and status.startswith('ignored:'):
-            found.append((row, hint, status))
+        actual = _actual(rows)
+        for row in rows:
+            decision = _decision(_detail(row))
+            hint, status = decision.get('model_hint'), decision.get('model_hint_status')
+            if not (isinstance(hint, str) and hint and hint != 'auto'
+                    and isinstance(status, str) and status.startswith('ignored:')):
+                continue
+            request = decision.get('user_model_request')
+            requested_effort = request.get('effort') if isinstance(request, dict) else None
+            if actual:
+                route, effort = actual
+                engine, _, _ = route.partition('/')
+                if (hint in (route, engine)
+                        and (requested_effort is None or requested_effort == effort)):
+                    continue
+            found.append((row, hint, status, requested_effort, actual))
+            break  # One notice per attempt, including duplicate audit rows.
     return found
 
 
 def ignored_hint_notices(store, task_id, language):
-    """One chat line per not-yet-announced attempt whose model hint was
-    ignored, recorded so it is shown once. The idle controller loop only
-    reads; a write transaction opens only when there is something to say."""
+    """One durable notice per differing or unverifiable ignored hint.
+    Matching pins remain silent without changing route provenance. The idle
+    loop only reads; a write transaction opens only when there is a notice."""
     with store.connection() as db:
         if not _ignored(db, task_id):
             return []
     lines = []
     with store.connection() as db:
         db.execute('BEGIN IMMEDIATE')
-        for row, hint, status in _ignored(db, task_id):
+        for row, hint, status, requested_effort, actual in _ignored(db, task_id):
             reason = status.split(':', 1)[1]
             en, ru = _REASONS.get(reason, (reason.replace('_', ' '), reason.replace('_', ' ')))
             role = (row['role'] or 'worker').replace('worker-', '')
-            used = f"{row['engine']}/{row['model']}"
-            lines.append(f'Для «{role}» была запрошена модель {hint}, но запущена {used}: {ru}.' if language == 'ru'
-                         else f'{hint} was requested for {role}, but {used} runs it: {en}.')
+            requested = f'{hint}:{requested_effort}' if requested_effort else hint
+            used = None
+            if actual:
+                route, effort = actual
+                used = f'{route}:{effort}' if effort else route
+                if requested_effort is not None and not effort:
+                    en += '; the effective effort could not be verified from the attempt audit'
+                    ru += '; фактический effort не удалось проверить по аудиту попытки'
+                lines.append(f'Для «{role}» был запрошен {requested}; для отправки выбран {used}: {ru}.' if language == 'ru'
+                             else f'{requested} was requested for {role}; dispatch selected {used}: {en}.')
+            else:
+                lines.append(f'Для «{role}» рекомендация {requested} не определяла выбор ({status}); '
+                             'фактический маршрут не удалось проверить по аудиту попытки.' if language == 'ru'
+                             else f'The hint {requested} did not determine routing for {role} ({status}); '
+                             'the effective route could not be verified from the attempt audit.')
             event(db, task_id, 'MODEL_HINT_IGNORED_SHOWN', dict(attempt_id=row['attempt_id'], hint=hint,
                                                                 status=status, used=used))
         db.commit()

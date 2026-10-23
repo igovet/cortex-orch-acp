@@ -42,17 +42,33 @@ def test_every_other_worker_keeps_its_external_servers(role_id):
     assert [entry["name"] for entry in forwarded] == [CODE_INDEX_SERVER, "playwright"]
 
 
-def test_consultant_base_prompt_names_packet_and_reports_not_the_code_index(tmp_path):
+@pytest.mark.parametrize("edition", [1, 2])
+@pytest.mark.parametrize("code_mode", [False, True])
+@pytest.mark.parametrize("native_tools", [False, True])
+@pytest.mark.parametrize("access_class", ["write", "read_only"])
+def test_consultant_base_prompt_names_packet_and_reports_not_the_code_index(
+        tmp_path, edition, code_mode, native_tools, access_class):
     environ = {"HOME": str(tmp_path)}
-    consultant = cortex_system_prompt("worker", str(tmp_path), environ=environ, consultant=True)
-    worker = cortex_system_prompt("worker", str(tmp_path), environ=environ)
+    options = dict(environ=environ, edition=edition, code_mode=code_mode, native_tools=native_tools)
+    consultant = cortex_system_prompt("worker", str(tmp_path), **options, consultant=True)
+    worker = cortex_system_prompt("worker", str(tmp_path), **options, access_class=access_class)
+    index_guidance = (
+        "Use an attached code index first for definitions, callers, dependencies, impact and architecture, "
+        "then read its exact source snippets."
+    )
     assert "# Working material" in consultant and "consultation packet" in consultant
     assert "# Finding code" not in consultant
     assert CODE_INDEX_SERVER not in consultant
-    assert "code index MCP server is attached" not in consultant
+    assert index_guidance not in consultant
+    assert 'Use only your consultation packet and retained `read_report` reports.' in consultant
+    assert "No code index, project source reads or commands are offered." in consultant
+    assert "access_request" not in consultant
+    assert "ask through the runtime's question tool" not in consultant
     assert "@@" not in consultant
     # The ordinary worker prompt is unchanged by the variant.
-    assert "# Finding code" in worker and "code index MCP server is attached" in worker
+    assert "# Finding code" in worker and index_guidance in worker
+    assert "Follow `code-and-evidence` when included in your role." in worker
+    assert "Prefer fast text search for literals, configuration, docs or code outside index coverage." in worker
     assert "# Working material" not in worker and "@@" not in worker
     with pytest.raises(ValueError):
         cortex_system_prompt("coordinator", str(tmp_path), environ=environ, consultant=True)

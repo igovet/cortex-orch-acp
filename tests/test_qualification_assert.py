@@ -238,3 +238,76 @@ def test_inconsistent_execution_and_output_metadata_cannot_hide_behind_size():
     receipt.update(complete=False, run_complete=False, failure='timeout', exit_code=0)
     receipt['retained_output'].update(exit_code=7, failure='timeout', byte_count=1000000)
     assert _evaluate([receipt], output=65537)
+
+
+def completion_rows():
+    return [
+        dict(section='runtime', state='COMPLETED', revision=1),
+        dict(section='nodes', revision=1, node_id='work', stage='execution', status='completed', assignment_ref=REF),
+        dict(section='runtime_events', id=1, type='EXECUTION_BASELINE', revision=1, kind='observed',
+             revision_digest='a' * 64, head='b' * 40),
+        dict(section='runtime_events', id=2, type='REVIEW_NOT_REQUIRED', revision=1, reason='no_project_changes',
+             reference='execution_baseline', reference_revision=1, revision_digest='a' * 64, head='b' * 40),
+        dict(section='runtime_events', id=3, type='VERIFICATION_PASSED', checks=[dict(exit_code=0, complete=True)]),
+        dict(section='synthesis', text_sha256='f' * 64)]
+
+
+def completed(rows, require_review=False):
+    args = Namespace(expect_state='COMPLETED', expect_route=[], expect_closed_failure=False,
+                     expect_retained_output_bytes=None, require_review=require_review)
+    return qualification.evaluate(rows, args, binding=BINDING)
+
+
+def test_valid_unchanged_project_waiver_is_not_a_missing_review():
+    assert completed(completion_rows()) == []
+    assert completed(completion_rows(), require_review=True)[0]['expectation'] == 'review_or_valid_waiver'
+
+
+@pytest.mark.parametrize('change', ['missing', 'mismatch', 'duplicate', 'prose'])
+def test_waiver_requires_actual_runtime_baseline(change):
+    rows = completion_rows()
+    if change == 'missing':
+        rows.pop(3)
+    elif change == 'mismatch':
+        rows[3]['revision_digest'] = 'c' * 64
+    elif change == 'duplicate':
+        rows.append(deepcopy(rows[3]))
+    else:
+        rows[3] = dict(section='synthesis', text='REQUEST_CHANGES APPROVE REVIEW_NOT_REQUIRED')
+    assert completed(rows)
+
+
+def test_real_review_verdict_is_not_execution_qa_or_arbitrary_prose():
+    rows = completion_rows()
+    rows.pop(3)
+    rows += [dict(section='nodes', revision=1, node_id='_review_1', stage='review', status='completed', assignment_ref='e' * 64),
+             dict(section='attempts', idempotency_key='e' * 64, attempt_id='xa_review', owner_epoch=1),
+             dict(section='runtime_events', type='WORKER_COMPLETED', node='_review_1', attempt_id='xa_review', verdict='APPROVE')]
+    assert completed(rows, require_review=True) == []
+    rows[-1]['verdict'] = None
+    rows[-1]['text'] = 'APPROVE'
+    assert completed(rows)
+    rows[-1]['verdict'] = 'REQUEST_CHANGES'
+    assert completed(rows)
+    rows[-1]['verdict'] = 'APPROVE'
+    rows[-1]['attempt_id'] = 'xa_execution_qa'
+    assert completed(rows)
+
+
+def test_exact_command_expectation_rejects_unattached_or_foreign_attempt_receipts():
+    receipt = _receipt()
+    receipt.update(channel_owner_epoch=1, channel_attempt_id="xa_current")
+    event = dict(section="runtime_events", type="WORKER_COMPLETED", attempt_id="xa_current",
+                 checks=[dict(tool_call_ref=receipt["tool_call_ref"], outcome="passed")])
+    args = Namespace(expect_state="EXECUTING", expect_route=[], expect_closed_failure=False,
+                     expect_retained_output_bytes=None, expect_command_ref=[receipt["tool_call_ref"]])
+    rows = [dict(section="runtime", state="EXECUTING", revision=1), receipt, event]
+    assert qualification.evaluate(rows, args, binding=BINDING) == []
+    event["attempt_id"] = "xa_foreign"
+    assert qualification.evaluate(rows, args, binding=BINDING)
+    event["attempt_id"] = "xa_current"
+    receipt["channel_owner_epoch"] = 2
+    assert qualification.evaluate(rows, args, binding=BINDING)
+    receipt["channel_owner_epoch"] = 1
+    event["checks"] = []
+    assert qualification.evaluate(rows, args, binding=BINDING)

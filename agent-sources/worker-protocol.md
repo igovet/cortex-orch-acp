@@ -46,7 +46,9 @@ approach confirmation. Offer meaningful
 selectable answers, grouped in one request; preserve custom free text. Use the
 live schema for the exact form. The runtime parks only this assignment, then
 delivers a real answer next turn in the same healthy session. End the
-question turn without submitting an incomplete result. For additional paths or refused actions, follow worker tool discipline.
+question turn without submitting an incomplete result. A recognized file-read precondition is not missing
+owner input: follow tool discipline to read current content and re-propose safely without a question.
+For additional paths or actual access refusals, follow worker tool discipline.
 
 If your evidence shows the assignment or its plan is wrong, obsolete or cannot
 succeed as decomposed, submit the advertised replan request with that evidence

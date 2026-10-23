@@ -30,6 +30,7 @@ Runtime lifecycle and coordination:
 - [Durable input history and replay](input-history-and-replay/index.md)
 - [Publications and consistency](publications-and-consistency/index.md)
 - [Markdown reports](markdown-reports/index.md)
+- [Tool discovery and read batches](tool-discovery-and-read-batch/index.md)
 - [Knowledge routing](knowledge-routing/index.md)
 - [Senior consultant](senior-consultant/index.md)
 - [Retired advisory lane](advisory-lane/index.md)

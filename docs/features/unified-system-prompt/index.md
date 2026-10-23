@@ -3,6 +3,14 @@
 > Status: migrated from the former ACP reference. Statements were not re-verified line by line against source in this pass; claims without a source path are unverified until reviewed.
 
 
+Both prompt editions distinguish recognized missing/incomplete/stale file-read
+preconditions from access refusals. They direct a current same-channel read and
+a rebuilt valid edit under existing authority, without an owner question or extra
+approval; actual channel, role, scope and policy denials remain non-bypassable.
+Shared tool discipline and writer recovery capsules carry the same distinction.
+This is guidance, not deterministic model obedience or a permission grant. See
+[read-precondition recovery](../permissions-and-containment/index.md#read-precondition-recovery).
+
 The unified Cortex base prompt is enabled by default. Set
 `CORTEX_UNIFIED_BASE_PROMPT=0` in the environment before starting Cortex to
 disable it for newly created session metadata. This restores the engines'
@@ -103,10 +111,11 @@ substance of the inlined `tool-discipline`, `code-and-evidence` and
 `report-publication` skills and the shared worker protocol; those are
 unchanged.
 
-Rendered on one Linux host with no working directory and no project skills,
-edition 1 is 6,779 to 8,915 characters and edition 2 is 7,767 to 10,249
-characters, depending on role and native-tool policy; the Codex code-mode
-variant is 7,300 to 9,168 and 8,320 to 10,533. Size ceilings for edition 1 are in `tests/test_prompt_drift.py`; for
+Rendered on Linux with no working directory or project skills, after compacting
+redundant wording, edition 1 is 5,844 to 7,807 characters and edition 2 is 6,541
+to 8,840, depending on role and native-tool policy. The code-mode variants are
+6,272 to 8,099 and 7,000 to 9,163 respectively. Existing size ceilings are
+unchanged: edition 1 is checked in `tests/test_prompt_drift.py`; for
 edition 2 they are in `tests/test_first_prompt_size_and_dedup.py`. Real-model
 behavior with edition 2 has not been observed in a paid live check.
 

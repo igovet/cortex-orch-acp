@@ -619,7 +619,10 @@ def _worker_environment(role_id: str | None, stage: str | None, offered: list[st
         + "Your declared scope is the work area agreed with the other workers for coordination: make your "
         "changes there. The runtime does not wall off the rest of the project (only paths the user protected "
         "are refused), so before changing a project path outside your declared scope, ask for it with "
-        "access_request. " + outside + "A refusal is final. Deleting a project file asks the user too. "
+        "access_request. " + outside + "An access or policy refusal is final. Recognized missing/incomplete/stale "
+        "file-read preconditions instead require a current same-channel read and a rebuilt valid edit, "
+        "without an owner question or extra approval; existing authority and tool delivery-key rules still apply. "
+        "Deleting a project file asks the user too. "
         + _ENVIRONMENT_BACKGROUND
         + "Never reach a refused action another way: say exactly what you need through access_request or "
         "ask_question, or report it as a blocker."

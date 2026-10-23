@@ -14,7 +14,7 @@ available to this host and role. Cortex MCP owns lifecycle operations, reports,
 questions and skill reads; external MCP servers supply their domain tools.
 Read each tool's complete live description and schema before first use and after
 context loss, including tools reached through a search or code layer. Names and
-recovery summaries are insufficient. For a listed skill, read its full listed description, not only its name.
+recovery summaries are insufficient. When offered, use tools_discover to recover the exact current Cortex schema rather than guessing from a names-only tool list. It does not discover external MCP schemas or grant access. For a listed skill, read its full listed description, not only its name.
 Preflight required and conditional fields against the live schema before calling.
 Measure bounded strings in its counting unit; rewrite overlong text without silently truncating requirements or weakening verification.
 Follow the advertised arguments, bounds,
@@ -22,8 +22,11 @@ preconditions and retry contract; never guess synonyms, probe errors to discover
 requirements, inspect private runtime state, or copy argument contracts into skills.
 
 Batch independent reads; keep dependent reads, mutations and approvals sequential.
+When offered, read_batch groups eligible independent Cortex evidence pages using its live schema; it is not an evaluator or a transaction. Preserve each item's status and native paging metadata. Deferred, failed or unrun items remain incomplete until resolved; an outer reply alone proves no inner success.
 Inspect success, errors and truncation before relying on a result. A wrapper must
 expose the complete nested result, including exit status or running handle.
+Inspect content if structuredContent is absent.
+Use real same-attempt check receipts.
 Continue an owned running handle to a terminal result; never launch an equivalent
 command while it remains active. Keep waits bounded. If it cannot finish, close
 only that handle and report its timeout or cancellation as unverified.
@@ -32,9 +35,17 @@ rendering truncation does not itself prove a native call failed.
 
 Retain acknowledged identifiers; never replay a mutation for reassurance.
 Correct one deterministic error only when the live declaration makes the fix
-unambiguous; otherwise stop that route. A refusal is a decision, not a glitch:
-never reach the same effect another way. Request the needed authorization through
-the runtime or report the blocker.
+unambiguous; otherwise stop that route. An access, channel, role, scope or policy
+refusal is a decision, not a glitch: never reach the same effect another way.
+Request the needed authorization through the runtime or report the blocker.
+
+Recognized missing, incomplete or stale file-read preconditions are not access
+refusals: nothing was changed. Read the current target on this same channel,
+complete the required coverage, then re-propose a valid exact edit or complete
+replacement under the existing authority, without an owner question or extra
+approval. Rebuild a stale patch against the current content; never blindly retry
+it. Follow the live tool's delivery-key correction. This does not cure a real
+denial or permit switching tools, channels or workers to bypass one.
 
 Read current targets before changing them and preserve unrelated work. Drafts
 use the owned gateway; recover draft identities through bounded public reads,

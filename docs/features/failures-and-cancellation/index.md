@@ -79,6 +79,38 @@ as `EngineTurnFailed("route_unavailable:<reason>")`. That classifies as
 and the route is recorded unavailable for automatic routing (see
 [routing and fallback](../routing-and-fallback/index.md#automatic-worker-routing-unavailable-routes)).
 
+### MCP tool errors
+
+The MCP server distinguishes a typed portable failure from an unexpected storage
+exception. Its portable envelope retains a bounded identifier code, `category`,
+`retry_eligible` and `write_state`, with fixed, value-free guidance. It does not
+copy exception remediation/details or arbitrary fields, which can contain local
+paths or policy values. Route-policy migration, unsupported-version and malformed
+policy errors have specific safe corrections.
+
+`TaskMachine.submit_plan` checks authorization and the recorded key/payload before
+reading current model policy. An exact accepted replay returns the stored result,
+even if that policy is no longer available; a changed payload under that key is
+rejected. The model preview is read-only and precedes plan writes in the same
+transaction. A portable refusal there is marked `rejected` (except a declared
+`indeterminate_write`); it records no accepted plan, nodes or request receipt.
+`list_route_options` uses the same safe translation for its read-only failure.
+
+A portable failure caught at an unknown stage is not proof of rollback:
+`write_state=uncertain` and `retry_eligible=false` require reconciliation using
+only the identical request and delivery key. Even a validation-category error can
+occur while preparing a reply after commit. A raw storage/unknown exception still
+returns conservative `storage_error`; that label alone does not prove a disk
+outage or a commit outcome. Its public cause uses the exception class and a
+standard errno reason, never the exception-owned reason or filename.
+
+The no-paid scenario `tests/test_plan_error_classification.py` exercises real
+policy validation through dispatch and stdio, controlled precommit/commit/reply
+faults, rollback, exact replay, key conflicts and concurrent identical requests.
+It observes transaction state in disposable stores. It neither diagnoses an
+earlier runtime nor injects faults into live tasks. See the
+[scoped command](../../project/verification.md#plan-error-recovery).
+
 ## 2. Retry policy and reconciliation
 
 `engine.retry_policy.decide(operation, attempt_number, reconciled=...)`

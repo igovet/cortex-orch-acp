@@ -203,13 +203,25 @@ def test_consultant_channel_is_refused_access_and_question_routes(tmp_path):
         assert 'limitation' in error.value.correction
 
 
-def test_consultant_prompt_records_missing_evidence_and_asks_nothing():
+@pytest.mark.parametrize('edition', [1, 2])
+@pytest.mark.parametrize('code_mode', [False, True])
+@pytest.mark.parametrize('native_tools', [False, True])
+@pytest.mark.parametrize('selector', [dict(consultant=True), dict(access_class='consultant')])
+def test_consultant_prompt_records_missing_evidence_and_asks_nothing(edition, code_mode, native_tools, selector):
     from cortex_runtime.engine.unified_system_prompt import cortex_system_prompt
-    consultant = cortex_system_prompt('worker', None, environ={}, access_class='consultant')
-    worker = cortex_system_prompt('worker', None, environ={})
+    options = dict(environ={}, edition=edition, code_mode=code_mode, native_tools=native_tools)
+    consultant = cortex_system_prompt('worker', None, **options, **selector)
+    worker = cortex_system_prompt('worker', None, **options)
     assert "ask through the runtime's question tool" not in consultant
     assert 'access_request' not in consultant
-    assert 'record it in your report as a limitation' in consultant
+    assert ('Report missing information as a limitation and name the exact resolving data; '
+            'do not invent it; you ask the user nothing.') in consultant
+    assert 'Report missing evidence; do not reach it another way.' in consultant
+    assert ('Evaluate the supplied evidence; name missing evidence in your report instead of '
+            'running checks or inventing results.') in consultant
+    assert 'Report refused consultation needs as limitations and name the resolving evidence or check.' in consultant
+    assert 'Use only your consultation packet and retained `read_report` reports.' in consultant
+    assert 'No code index, project source reads or commands are offered.' in consultant
     assert 'you ask the user nothing' in consultant
     assert "ask through the runtime's question tool" in worker and '`access_request`' in worker
     assert '@@' not in consultant + worker

@@ -183,6 +183,7 @@
     "src/cortex_runtime/portable/version.py",
     "src/cortex_runtime/project_docs.py",
     "src/cortex_runtime/project_storage.py",
+    "src/cortex_runtime/read_api_evidence.py",
     "src/cortex_runtime/recovery/__init__.py",
     "src/cortex_runtime/recovery/budget_store.py",
     "src/cortex_runtime/recovery/capsule.py",
@@ -211,6 +212,7 @@
     "src/cortex_runtime/store.py",
     "src/cortex_runtime/task_workspace.py",
     "src/cortex_runtime/tempdirs.py",
+    "src/cortex_runtime/tool_read_api.py",
     "src/cortex_runtime/trusted_channel.py",
     "src/cortex_split.py"
   ]

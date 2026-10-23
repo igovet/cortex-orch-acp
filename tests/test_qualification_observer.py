@@ -20,6 +20,48 @@ from cortex_runtime.storage.inspection import discover_binding, read_binding_pag
 from test_task_inspection import bound, files  # noqa: F401 - fixture
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+@pytest.mark.parametrize("consent", [None, {}, dict(mode="desktop", owner_request="owner", route="explicit"),
+                                     dict(mode="cli", route="explicit")])
+def test_supervisor_has_no_paid_authority_defaults(consent):
+    result = observer.supervise_cli(consent, lambda _: pytest.fail("preflight"), None, None, None)
+    assert result["phase"] == "consent_required"
+    assert result["dispatched"] is False and result["accepted"] is False
+
+
+def test_supervisor_distinguishes_preflight_dispatch_assertion_and_uncertainty():
+    consent = dict(mode="cli", owner_request="explicit-owner-request", route="owner-selected-route")
+    checks = {key: True for key in ("isolation", "native_login", "build", "plugin", "supported_cli", "route", "expectations")}
+    ready = dict(ready=True, route=consent["route"], checks=checks)
+    binding = dict(task_id="fixture-observed-binding")
+    cleaned = []
+    cleanup = lambda budget: (cleaned.append(True) or dict(ok=True))
+    no_launch = lambda *a: pytest.fail("dispatched before ready")
+    result = observer.supervise_cli(consent, lambda _: dict(ready=False), no_launch, None, cleanup)
+    assert result["phase"] == "preflight" and not result["passed"] and result["dispatched"] is False
+    for launch, assertion, phase, dispatched, passed in (
+        (lambda *a: {}, None, "launch_attempted", None, False),
+        (lambda *a: dict(dispatched=True, binding=binding), lambda *a: dict(passed=False),
+         "dispatched", True, False),
+        (lambda *a: dict(dispatched=True, binding=binding),
+         lambda *a: dict(passed=True, binding=binding), "asserted", True, True),
+    ):
+        result = observer.supervise_cli(consent, lambda _: ready, launch, assertion, cleanup)
+        assert (result["phase"], result["dispatched"], result["passed"]) == (phase, dispatched, passed)
+        assert result["accepted"] is False
+    assert len(cleaned) == 4
+
+
+def test_supervisor_real_subprocess_timeout_and_supported_flags():
+    budget = observer.Budget()
+    result = observer.bounded_command([sys.executable, "-B", "-c", "print('fixture')"], budget)
+    assert result == dict(exit_code=0, complete=True, byte_count=8, output=b"fixture\n")
+    with pytest.raises(subprocess.TimeoutExpired):
+        observer.bounded_command([sys.executable, "-B", "-c", "import time;time.sleep(10)"], budget, timeout=0.05)
+    # Read-only installed wrapper help is not dispatched/accepted work.
+    help_run = observer.bounded_command([sys.executable, "-B", str(ROOT / "scripts/cortex_paseo_dev.py"), "--help"], budget)
+    assert help_run["exit_code"] == 0 and b"--check" in help_run["output"]
 _spec = importlib.util.spec_from_file_location('cortex_qualification_observer',
                                                ROOT / 'scripts' / 'cortex_qualification_observer.py')
 observer = importlib.util.module_from_spec(_spec)

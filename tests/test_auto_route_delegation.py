@@ -507,6 +507,84 @@ def test_a_preference_never_overrides_a_pin(tmp_path, monkeypatch):
     adapter.terminate_owned(result.attempt_id)
 
 
+@pytest.mark.parametrize(("hint", "pin", "notice_count"), [
+    ("codex-acp/gpt-6-luna", "codex-acp/gpt-6-luna:high", 0),
+    ("codex-acp", "codex-acp/gpt-6-luna:high", 0),
+    ("codex-acp/gpt-6-sol", "codex-acp/gpt-6-luna:high", 1),
+    ("claude-agent-acp/claude-sonnet-5", "codex-acp/gpt-6-luna:high", 1),
+])
+def test_pinned_hint_notice_uses_effective_dispatch_without_changing_native_choice(
+        tmp_path, monkeypatch, hint, pin, notice_count):
+    from cortex_runtime.orchestration.route_notices import ignored_hint_notices
+    from cortex_runtime.store import Store
+
+    store, channel, provisioning, adapter, connection_a, connection_b, log_a, log_b, project, environ = _setup(
+        tmp_path, model_a="gpt-6-luna", model_b="claude-sonnet-5",
+        efforts=("low", "medium", "high", "xhigh", "max"))
+    log_alternative = tmp_path / "alternative.jsonl"
+    alternative = _make_connection(tmp_path, environ, engine="codex-acp", model="gpt-6-sol",
+                                   request_log=log_alternative)
+    catalog_store.save_snapshot(_snapshot(alternative, "gpt-6-sol"), environ)
+    _runtime_task(store, channel)
+    _routing(project, {"pin": {"planner": pin}})
+    _planned_provider(monkeypatch, hint)
+    result = provisioning.delegate(channel, "Plan", "Plan it.", "planner", "Planned.", "req-pin-notice")
+    assert result.status == "ready"
+    try:
+        before_a, before_b = _read_log(log_a), _read_log(log_b)
+        audit = routing_store.list_audit_for_attempt(store, result.attempt_id)
+        assert (audit[0]["engine"], audit[0]["model"]) == ("codex-acp", "gpt-6-luna")
+        assert audit[0]["decision_detail"]["effort"] == "high"
+        assert _decision(store, result)["model_hint_status"] == "ignored:pinned"
+        assert _decision(store, result)["basis"] == "pin"
+        assert before_a and before_b == [] and _read_log(log_alternative) == []
+        assert _effort_calls(log_a)[-1]["params"]["value"] == "high"
+        assert any(entry["method"] == "session/set_config_option"
+                   and entry["params"].get("configId") == "model"
+                   and entry["params"].get("value") == "gpt-6-luna"
+                   for entry in before_a)
+        lines = ignored_hint_notices(store, channel.task_id, "en")
+        assert len(lines) == notice_count
+        if lines:
+            assert hint in lines[0] and "codex-acp/gpt-6-luna:high" in lines[0]
+        # Reopening the store simulates the controller's durable recovery boundary.
+        reopened = Store(project / ".cortex", project_root=project)
+        assert ignored_hint_notices(reopened, channel.task_id, "ru") == []
+        assert routing_store.list_audit_for_attempt(store, result.attempt_id) == audit
+        assert (_read_log(log_a), _read_log(log_b)) == (before_a, before_b)
+        assert _read_log(log_alternative) == []
+        with store.connection() as db:
+            assert db.execute("SELECT COUNT(*) FROM runtime_events WHERE task_id=? "
+                              "AND type='MODEL_HINT_IGNORED_SHOWN'", (channel.task_id,)).fetchone()[0] == notice_count
+    finally:
+        adapter.terminate_owned(result.attempt_id)
+
+
+def test_notice_does_not_change_explicit_user_effort_ahead_of_a_different_pin(tmp_path, monkeypatch):
+    from cortex_runtime.orchestration import state
+    from cortex_runtime.orchestration.route_notices import ignored_hint_notices
+
+    store, channel, provisioning, adapter, connection_a, connection_b, log_a, log_b, project, environ = _setup(tmp_path)
+    _runtime_task(store, channel)
+    _routing(project, {"pin": {"planner": "codex-acp/coordinator-model:high"}})
+    monkeypatch.setattr(state, "attempt_routing", lambda *args: state.AttemptRouting(
+        False, "normal", "codex-acp/coordinator-model", None, None,
+        dict(source_ref="test-user-source", effort="medium")))
+    result = provisioning.delegate(channel, "Plan", "Plan it.", "planner", "Planned.", "req-owner-effort")
+    assert result.status == "ready"
+    try:
+        before = routing_store.list_audit_for_attempt(store, result.attempt_id)
+        assert before[0]["decision_detail"]["effort"] == "medium"
+        assert before[0]["decision_detail"]["route_basis"] == "auto:user_request"
+        assert _decision(store, result)["model_hint_status"] == "honoured"
+        assert _effort_calls(log_a)[-1]["params"]["value"] == "medium"
+        assert _read_log(log_b) == []
+        assert ignored_hint_notices(store, channel.task_id, "en") == []
+        assert routing_store.list_audit_for_attempt(store, result.attempt_id) == before
+    finally:
+        adapter.terminate_owned(result.attempt_id)
+
+
 def test_a_preference_never_takes_an_exhausted_provider(tmp_path, monkeypatch):
     store, channel, provisioning, adapter, connection_a, connection_b, log_a, log_b, project, environ = _setup(tmp_path)
     _unavailable(store, channel, connection_a)

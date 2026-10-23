@@ -89,6 +89,12 @@ exact surface being checked.
 
 ## Requested `cli` mode
 
+Read-only guarded CLI checks on 2026-10-22 and 2026-10-23 reported installed Paseo **0.12.0**.
+Its `run --help` advertises `--no-wait`, not `--background`, together with
+`--provider`, `--model`, `--thinking`, `--cwd` and `--json`.
+This is command-surface evidence only: it does not requalify bridge/isolation,
+daemon state, model routes or a paid workload. Recheck those before live use.
+
 `cli` mode drives a Cortex agent headlessly through the guarded wrapper, without
 Electron. Verify that the installed Paseo CLI help supports the commands and flags used here, and check the dev daemon's actual provider/model configuration before use.
 For a later freshly authorized CLI qualification, include startup, exercise,
@@ -101,14 +107,22 @@ disposable project directory outside this checkout:
 
 ~~~bash
 W="python3 -B $CHECKOUT/scripts/cortex_paseo_dev.py --"
-$W run --provider cortex --model "$MODEL_FROM_SETTINGS" --thinking "$EFFORT_FROM_SETTINGS" \
-  --cwd "$PROJECT" --background --json "<scenario prompt>"
+$W run --provider cortex --model "$MODEL_ID_FROM_SETTINGS" --thinking "$EFFORT_FROM_SETTINGS" \
+  --cwd "$PROJECT" --no-wait --json "<scenario prompt>"
 $W permit ls --json                      # pending permission requests
 $W permit allow <agent-id> <request-id>  # or: permit deny
 $W send <agent-id> --prompt "<steering message>" --no-wait
 $W wait <agent-id> --timeout 60 --json
 $W inspect <agent-id> --json
 ~~~
+
+`MODEL_ID_FROM_SETTINGS` is the bare model ID from the owner-selected current
+settings route, not its combined `engine/model:effort` string. Do not substitute
+a route or use an unsupported `--background` flag. Read-only help on 2026-10-23
+also confirmed `send --prompt --no-wait`, `wait --timeout`, `inspect --json`
+and explicit `permit allow AGENT REQUEST`. This does not authorize launching,
+blanket permissions or a daemon change. Inspect complete nested error/content
+output, not only an absent structured value.
 
 Check outcomes against the disposable project's `.cortex/cortex.sqlite3`
 store, opened read-only: tasks, reports, review and verification records.
@@ -126,6 +140,14 @@ status, not the output body's bytes. A steering continuation remains pending
 until the matching steering capture and same-attempt progress or terminal result
 are observed. A read-only store snapshot alone cannot prove that the host sent a
 cancel-then-prompt sequence.
+The public read matrix binds the selected worker before matching shapes and allows
+repeated fresh idempotent reads only when every selected occurrence independently
+satisfies its binding and public expectations. Authenticated same-task reads by
+other actors are counted separately and cannot replace missing worker evidence.
+It reports safe counts/identities, never selects a good first/last reply or merges
+identical hashes. One contradictory occurrence or reused correlation still fails.
+A new assertion over stopped old-build data is only a later diagnostic; it cannot
+rewrite the original failure or qualify a newly stamped runtime.
 On 2026-09-28, `logs <agent-id> --json` on 0.9.2 printed a text timeline, not
 JSON, so do not parse it as structured evidence; use it only under the
 retained-history rules below. A `cli` check establishes runtime and protocol
@@ -388,7 +410,7 @@ python3 -B scripts/cortex_qualification_assert.py --project "$PROJECT" \
 ~~~
 
 It exits 0 only when the task is `COMPLETED` (or the `--expect-state` given) with
-completed nodes, an approved last review, a passing latest verification and a
+completed nodes, an approved actual review or valid runtime unchanged-project waiver, a passing latest verification and a
 recorded final text; each `--expect-route` role has only attempts whose native
 `worker_configuration_confirmed` engine/model/thinking match (dispatch alone does
 not count); `--expect-closed-failure` needs a failed worker check closed by a
@@ -399,6 +421,13 @@ task inspector only and changes nothing; its regressions are
 `tests/test_qualification_assert.py`. A pending state such as `WAITING_USER`
 is a failed assertion, not a pass.
 
+For the mandatory-review scenario use `--require-review` and a tiny real
+disposable edit. Execution QA labels and synthesis prose are not a runtime
+verdict. Attach the exact returned same-attempt command receipt to automated
+checks; read/search calls have no such receipt. The
+[public read matrix](../features/tool-discovery-and-read-batch/index.md#executable-public-evidence)
+adds semantic assertions instead of relying on completion alone.
+
 ### Observe and steer within the case budget
 
 A case supervisor imports `scripts/cortex_qualification_observer.py` instead of
@@ -406,6 +435,17 @@ an inline body. It launches nothing: launch, steering and cleanup are callables
 the supervisor passes in, and its own reads go only through the bound task
 inspector. Its parts:
 
+- `supervise_cli` requires explicit owner request, CLI mode and exact route;
+  has no paid authority/model defaults; requires observed isolation, login,
+  build, plugin, supported-CLI, route and expectation preconditions before
+  invoking a launch adapter. It distinguishes preflight, uncertain launch,
+  dispatched and asserted phases; accepted is always false. Launch/cleanup
+  adapters own only the dev resources they started and must use supported
+  guarded commands, not hypothetical host APIs.
+- `bounded_command` runs adapter argv without a shell, within the remaining
+  observation/cleanup budget and a maximum 60-second wait. Timeout stops only
+  that subprocess group; excessive output refuses rather than truncating it.
+  Complete output is private to the adapter, never raw logs in a report.
 - `Budget` holds one case to at most 600 monotonic seconds, keeps at least 90 s
   for cleanup, and caps each wait at 60 s.
 - `observe`/`collect_snapshot` read every page of one snapshot. A busy access
