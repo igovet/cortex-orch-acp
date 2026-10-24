@@ -244,8 +244,8 @@ def test_build_connection_label_uses_the_short_engine_name_not_the_adapter_packa
 # the operator-chosen nickname (T035 account-label follow-up) -----------
 
 def test_build_provider_label_shows_the_resolved_account():
-    assert build_provider_label("codex-acp", "igovet+2@gmail.com") == "codex · igovet+2@gmail.com"
-    assert build_provider_label("claude-agent-acp", "igovet@gmail.com") == "claude · igovet@gmail.com"
+    assert build_provider_label("codex-acp", "user+2@example.com") == "codex · user+2@example.com"
+    assert build_provider_label("claude-agent-acp", "user@example.com") == "claude · user@example.com"
 
 
 def test_build_provider_label_falls_back_to_engine_alone_without_an_account():
@@ -266,8 +266,8 @@ def test_build_provider_label_sanitizes_but_never_rejects_the_account():
 
 
 def test_build_provider_label_two_connections_same_engine_different_accounts_distinguishable():
-    first = build_provider_label("codex-acp", "igovet@gmail.com")
-    second = build_provider_label("codex-acp", "igovet+1@gmail.com")
+    first = build_provider_label("codex-acp", "user@example.com")
+    second = build_provider_label("codex-acp", "user+1@example.com")
     assert first != second
 
 

@@ -45,7 +45,7 @@ def _b64url(data: dict) -> str:
     return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
 
 
-def _fake_id_token(email="igovet+2@gmail.com", **claims) -> str:
+def _fake_id_token(email="user+2@example.com", **claims) -> str:
     header = _b64url({"alg": "none", "typ": "JWT"})
     payload = _b64url({"email": email, "email_verified": True, "name": "Test User", **claims})
     signature = base64.urlsafe_b64encode(b"fake-signature-not-real").rstrip(b"=").decode("ascii")
@@ -76,7 +76,7 @@ def test_codex_resolves_email_from_isolated_auth_json(tmp_path, monkeypatch):
         }
     })
     identity = account_identity.resolve_account_identity(record, environ)
-    assert identity == "igovet+2@gmail.com"
+    assert identity == "user+2@example.com"
 
 
 def test_codex_falls_back_to_none_when_no_credential_yet(tmp_path, monkeypatch):
@@ -151,9 +151,9 @@ def _claude_connection(environ, *, name="claude-live"):
 def test_claude_resolves_email_from_own_isolated_config_dir(tmp_path, monkeypatch):
     environ = _isolate(tmp_path, monkeypatch)
     record = _claude_connection(environ)
-    environ = _install_fake_claude(tmp_path, monkeypatch, _FAKE_CLAUDE_SCRIPT.format(email="igovet@gmail.com"), environ)
+    environ = _install_fake_claude(tmp_path, monkeypatch, _FAKE_CLAUDE_SCRIPT.format(email="user@example.com"), environ)
     identity = account_identity.resolve_account_identity(record, environ)
-    assert identity == "igovet@gmail.com"
+    assert identity == "user@example.com"
 
 
 def test_claude_falls_back_to_none_when_binary_missing(tmp_path, monkeypatch):
@@ -246,15 +246,15 @@ def test_a_referencing_connection_shows_the_account_the_client_is_signed_in_as(t
     record = _native_codex_connection(environ)
     # The copy it no longer uses still holds the old account.
     _write_codex_auth_json(record, environ, {"tokens": {"id_token": _fake_id_token()}})
-    assert account_identity.resolve_account_identity(record, environ) == "igovet+2@gmail.com"
+    assert account_identity.resolve_account_identity(record, environ) == "user+2@example.com"
 
     native = Path(environ["HOME"]) / ".codex"
     native.mkdir(parents=True, exist_ok=True)
     registry.atomic_write_private(
         native / "auth.json",
-        json.dumps({"tokens": {"id_token": _fake_id_token(email="igovet@gmail.com")}}).encode("utf-8"),
+        json.dumps({"tokens": {"id_token": _fake_id_token(email="user@example.com")}}).encode("utf-8"),
         directory=native,
     )
     referencing = replace(record, credential_ref=EngineNativeDir(path=str(native), owned=False))
 
-    assert account_identity.resolve_account_identity(referencing, environ) == "igovet@gmail.com"
+    assert account_identity.resolve_account_identity(referencing, environ) == "user@example.com"

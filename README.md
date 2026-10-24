@@ -1,726 +1,377 @@
-<table>
-  <tr>
-    <td width="190" align="center" valign="middle">
-      <img src="./assets/logo.png" alt="Cortex logo" width="156" />
-    </td>
-    <td valign="middle">
-      <h1>Cortex</h1>
-      <p><strong>Multi-agent coordination for software work, as an ACP agent.</strong></p>
-      <p>
-        You talk to Cortex in your editor. Cortex decides what to delegate,
-        runs other coding agents (codex-acp, claude-agent-acp) as workers in
-        the exact project opened in your editor, serializes writers, checks
-        what they did, and records it. Tasks,
-        one Markdown pipeline per task, and reports are kept on disk next to
-        your project.
-      </p>
-      <p>
-        <img src="https://img.shields.io/badge/Cortex-1.0.0-7c3aed" alt="Cortex 1.0.0" />
-        <img src="https://img.shields.io/badge/Python-3.11%2B-3776ab" alt="Python 3.11+" />
-        <img src="https://img.shields.io/badge/Protocol-ACP%20v1-111827" alt="Agent Client Protocol v1" />
-        <img src="https://img.shields.io/badge/Storage-Markdown%20%2B%20SQLite-0f766e" alt="Markdown files and SQLite metadata" />
-      </p>
-    </td>
-  </tr>
-</table>
+<p align="center">
+  <img src="./assets/logo.png" alt="Cortex logo" width="120" />
+</p>
 
-Writer reservations normalize lexical path aliases before scheduling and policy
-comparison. Removed failed verification checks survive later command repairs;
-only an exact passing verification rerun or an answer to a later task-global
-question clears them. Worker answers restore the replan budget, not verification
-approval. See [orchestration](docs/features/orchestration/index.md).
+<h1 align="center">Cortex</h1>
+<p align="center"><strong>Multi-agent coordination for software work, as an ACP agent.</strong></p>
 
-Cortex offers engine-neutral `tools_discover` for exact current tool schemas
-and `read_batch` for bounded independent evidence pages. Existing tools remain:
-this adds no evaluator, mutation batching or reduced bootstrap catalogue.
-See [tool discovery and read batches](docs/features/tool-discovery-and-read-batch/index.md).
+<p align="center">
+  <img src="https://img.shields.io/badge/Cortex-1.0.0-7c3aed" alt="Cortex 1.0.0" />
+  <img src="https://img.shields.io/badge/Python-3.11%2B-3776ab" alt="Python 3.11+" />
+  <img src="https://img.shields.io/badge/Protocol-ACP%20v1-111827" alt="Agent Client Protocol v1" />
+  <img src="https://img.shields.io/badge/Storage-Markdown%20%2B%20SQLite-0f766e" alt="Markdown files and SQLite metadata" />
+  <img src="https://img.shields.io/badge/Tested%20on-Ubuntu%20(Linux)-E95420" alt="Tested on Ubuntu" />
+  <img src="https://img.shields.io/badge/License-MIT-green" alt="MIT License" />
+</p>
 
-Missing, incomplete or stale gateway file reads are correctable preconditions,
-not permission refusals. Writing workers read current content on the same channel
-and re-propose a valid edit without an owner question or extra approval; stale
-patches must be rebuilt. Only writing-worker prompts carry this recovery. Actual
-access denials remain final and cannot be bypassed.
-See [read-precondition recovery](docs/features/permissions-and-containment/index.md#read-precondition-recovery).
+<p align="center">
+  <img src="./assets/paseo-logo.png" alt="Paseo logo" width="56" /><br />
+  <strong>Recommended client: <a href="https://github.com/getpaseo/paseo">Paseo</a></strong>
+</p>
 
-Native authentication loss gets one bounded engine-process restart on the same
-account/model when replay is safe. A second auth failure stops and asks for
-`claude /login` or `codex login`; Cortex itself does not copy credentials or run
-keepalive prompts. See [authentication recovery](docs/features/failures-and-cancellation/index.md#native-authentication-loss).
-Separately, an opt-in `scripts/cortex_auth_keepalive.py` with optional
-`systemd --user` templates under `scripts/systemd/` lets an owner run a
-proven zero-cost refresh-forcing command on a schedule; today it reports
-both Claude Code and Codex CLI `unsupported` because no such command is yet
-proven for either. See [opt-in login keepalive](docs/features/failures-and-cancellation/index.md#opt-in-native-cli-login-keepalive-outside-the-runtime).
+Cortex is an incoming [ACP](https://agentclientprotocol.com) agent: a client
+such as Paseo talks to it over stdio, and Cortex acts as a coordinator. It
+plans your request, has its runtime dispatch independent specialist AI
+workers — on different engines and models — to carry the plan out, sends
+every change through a reviewer who did not write it, verifies the result
+against your project's own checks, and keeps a durable, recoverable record
+next to your project.
 
-Model consent comes only from actual requests in recorded user messages or
-answers, not remarks about a model or coordinator reasons. A model requirement in
-the project root's own `AGENTS.md` or `CLAUDE.md` counts as the owner's request for
-the work it names ("All audits must be performed by Opus" routes audit and review
-roles to Opus); only the file as it stood when the task started counts (an edit
-during the task shows as `changed_during_task` in the route decision and plan
-preview), a newer user message outranks it, a prohibition there never grants and
-a list of alternatives ("Opus or Sonnet") demands none of them. See [project instruction requirements](docs/features/routing-and-fallback/index.md#project-instruction-model-requirements). Selected options to recheck commit lists or history through a named model also
-count before explorer dispatch; past-work descriptions and unselected options do
-not. Imported flattened
-history is not turn provenance; restate requests outside it. Non-initializing
-storage inspection never repairs schema or creates SQLite sidecars, and refuses
-uncheckpointed WAL data. Live runtime opens, including settings-panel project reads,
-use a separate shared-access validation mode that reads committed WAL data without schema repair or migration; SQLite
-sidecar/checkpoint housekeeping remains allowed there. See [routing requests](docs/features/routing-and-fallback/index.md#owner-model-requests-in-plain-words)
-and [storage inspection](docs/project/storage.md).
+---
 
-Explicit model-and-effort requests on covered planned nodes retain the exact
-effort through dispatch, retries and review fixes (for example, ask to use
-`codex-acp/gpt-6.1-sol at medium effort`). Conflicting policy or missing engine
-support refuses before a worker prompt; it never substitutes an automatic effort.
-Mandatory review honors recorded purpose-scoped user requests and applicable
-project model requirements before reviewer pins/ranking or cross-provider preference. An exact reviewer pin
-also refuses instead of clamping its effort. Editor thinking selection alone does
-not set every worker's effort. See [routing](docs/features/routing-and-fallback/index.md#explicit-effort-preservation).
+## Table of contents
 
-An advisory model hint that matches the effective pin no longer produces a
-misleading replacement notice. Genuine differences and unverifiable route bindings
-remain visible once per attempt; dispatch policy is unchanged. See
-[model hint notices](docs/features/routing-and-fallback/index.md#ignored-model-hint-notices).
-
-Required shared instructions cannot be silently omitted: if an always-included
-skill cannot be loaded or is empty, session startup stops with a diagnostic naming
-the skill and receiving role. Situational skills remain on-demand references.
-See [instruction delivery](docs/features/roles-and-delegation/index.md#instruction-delivery).
-
-The coordinator answers informational questions with its granted reads and plans
-specialist work when an operation needs worker capabilities, including authorized
-outside-project access. A bounded configured worker MCP summary distinguishes
-worker grants from the coordinator's own tools; it is not proof of access or
-successful discovery. Built-in worker command/read-search discovery does not
-require an external MCP attachment. Unknown external locations are investigation
-objectives, not automatic requests for pasted data; a Paseo UUID is not a local
-Cortex report id. Workers discover safe installed history/export mechanisms and
-report exact-session completeness or a real access limit. Read-only/Guarded command
-`/var/tmp` is private scratch, not the host directory: a missing file there is
-not proof of host absence. Authorized host-only reads use the advertised
-outside-command consent route through a suitable writing specialist; no refusal
-may be retried by another route. Denials cannot be bypassed by delegation. See
-[capability-based delegation](docs/features/roles-and-delegation/index.md#capability-based-delegation).
-
-Terminal tasks automatically tear down their owned coordinator/worker engines;
-`COMPLETED` and `FAILED` are not relabeled `CANCELLED`. Unexpected prompt errors
-and host disconnects also stop owned work without certifying a task outcome.
-Cleanup revokes the owned channels before shutdown, even if exit cannot be
-confirmed. Old-connection EOF and stale turn cleanup cannot claim a replacement
-turn, including one continued by an explicit answer.
-Writer locks and capacity release only after observed exit; unknown liveness
-remains a blocker. Shutdown reuses an already-owned usage-settlement teardown
-without retrying its exact manager in the same shutdown. A waiting or interrupted
-turn is not task completion; its background-worker host requesters remain available.
-The incoming ACP connection remains host-owned until it closes; Cortex does not
-exit an open multi-session connection merely because one prompt returned.
-See [cleanup and disconnects](docs/features/failures-and-cancellation/index.md#terminal-resource-cleanup).
-
-On a fully closed, unrepaired first-review path, Cortex can complete with a
-[runtime-composed synthesis](docs/features/task-lifecycle/index.md#runtime-composed-synthesis)
-instead of another coordinator model turn. Independent review, digest-bound
-verification and evidence-gap gates remain mandatory. The short final answer
-includes the submitted work summary and changed file paths, without internal check
-records. Missing or lengthy summaries and filenames unsafe for inline code keep
-the coordinator path, as do pending decisions, gaps or replans. Registry exit bookkeeping shares
-the completion transaction instead of opening a second SQLite writer; a restart
-from unfinished reconciliation retries the same gates without completing twice.
-Before composition, an already-owned post-result settlement/exit cleanup gets
-at most ten seconds outside the SQLite transaction to confirm absence; timeout
-or enduring ineligibility retains coordinator reconciliation.
-
-After a coordinator question commits, Cortex suppresses further text received
-in that turn, including when tool lifecycle callbacks arrive late. Details
-delivered only after the commit can also be omitted; see the
-[question display boundary](docs/features/orchestration/index.md#plan-submission-and-coordinator-polling).
-After coordinator synthesis commits, later engine prose in that turn is also
-withheld: the runtime displays the stored final result, not an additional
-post-tool recap. Gap disclosures belong only in the structured list: a second
-English/Russian not-verified section in the submitted text is refused before
-publication, rather than silently deleting context. See
-[synthesis display](docs/features/task-lifecycle/index.md#runtime-composed-synthesis).
-
-
-Fresh-install model settings use the owner's refreshed portable default-profile
-routing policy, `codex-acp/gpt-6.1-sol` coordinator at medium effort, and Russian
-message language. Existing owner settings are never replaced. Account/connection
-identities and machine-specific MCP definitions/paths are not cloned; see
-[the install snapshot boundary](docs/configuration.md#fresh-install-owner-default-snapshot).
-
-Development/Auto writer commands can update hardlinked uv/pnpm environments:
-Cortex first makes granted project aliases independent of shared-cache inodes.
-Preparation preserves complete files and metadata, uses reflinks when available,
-and fails closed above 2 GiB of logical alias bytes or its cooperative 60 s
-deadline. Guarded/engine and read-only behavior is unchanged. See
-[hardlink preparation](docs/features/permissions-and-containment/index.md#git-and-tool-state)
-for persistence, cost and interruption limits.
-
-## Clear old project tasks from chat
-
-Preview `/cortex-clear before 2026-10-01`, then use the displayed command ending
-in `confirm` to delete old unprotected tasks. Dates mean strictly before
-00:00 UTC; `7`, `7d` or `days 7` instead select retention days (0..36500).
-The runtime handles this without a model call and normally protects loaded-session
-and active tasks. To remove stale protected tasks, preview `/cortex-clear days 1 force`,
-then use `/cortex-clear days 1 force confirm`. Force always keeps the invoking
-session's task; it assumes other processes are already dead and does not kill them.
-Cleanup also removes old unbound/orphan chat sessions, then runs SQLite `VACUUM`
-after committed deletion and reports reclaimed bytes (or an honest vacuum failure).
-Session access-default rows are removed only with their deleted sessions;
-surviving sessions keep their defaults and explicit selections.
-Invalid input and busy-store races are refused. `/clear` is host-reserved, not a Cortex alias.
-See [retention maintenance](docs/project/packaging.md#retention-maintenance)
-for safety details and the owner-run CLI alternative.
-
-Claude ACP's current fallback is 0.88.0, with an exact source-backed
-instruction-delivery registration and bundled SDK 0.3.293. Discovery prefers
-the newest registered install and retains it across future unqualified updates;
-critical-role dispatch excludes unsupported engine versions instead of retrying another model on them. A paid `desktop` check on 2026-10-08 completed its resumed scenario on this adapter with `claude-agent-acp/claude-sonnet-5`; that is bounded evidence, not full qualification. SDK 0.3.293 resolves `haiku` to Haiku 5.5 and
-advertises low/medium/high/xhigh/max. The default preset and production
-`default` profile enable it at Luna policy parity; old Haiku remains denied
-by exact ID. No-prompt ACP controls accepted high/xhigh/max. See [adapter support and limits](docs/features/claude-engine/index.md#current-support-0880-2026-10-08).
-A Cortex runtime older than this checkout repoints Claude to the upstream SDK
-0.3.287 install at each start, where `haiku` is Haiku 4.5; the owner's production
-runtime was in that state on 2026-10-08. The catalog refresh a new session starts
-now runs in its own process, so Paseo's Refresh also saves the Claude catalog; see
-[catalog refresh lifetime](docs/features/claude-engine/index.md#catalog-refresh-lifetime-and-deployed-runtimes).
-This is no-paid evidence, not live model or release qualification.
-
-Codex ACP's current fallback and exact supported release is 2.1.1.
-The owner already had it installed; checkout discovery now selects it instead
-of 2.0.1. No-paid bundle and CLI/jail checks passed; the production Paseo plugin
-was not refreshed. See [Codex support and limits](docs/features/codex-engine/index.md#current-support-211-2026-10-07).
-
-## Paseo tool-history display
-
-Paseo keeps shell-command output with the shell call, including when command input
-and output arrive in separate updates. An explicit native `read` remains
-metadata-only, as do Cortex `project_read` and `read_skill` bodies. Native
-Edit/Write field aliases only shape the displayed edit row and diff; they do not
-perform another edit or grant filesystem authority. These are
-history/presentation behaviors: no-paid tests do not establish a live model
-result or rendered Desktop behavior, and neither is claimed without the
-explicitly requested check.
-
-## Requirements and UI/UX design
-
-Explicit frontend-design implementation preserves its structured preferred route
-across retries and review fixes. Fallback first tries its affinity engine
-(Claude in the preset); only once that engine has no eligible route at all does
-selection widen to another engine, and only a route nowhere refuses visibly.
-Confirmed user model requests still take priority.
-See [design routing](docs/features/routing-and-fallback/index.md#affinity-bound-frontend-design).
-
-Cortex checks project context before planning and asks grouped, PRD-style
-questions only when missing decisions materially change the result. This applies
-to features, bugs, refactors, design, documentation, operations and investigations.
-Sufficient requests proceed without an interview.
-
-For substantial visual work, the bundled design workflow uses the target
-project's PRODUCT, DESIGN and SCREENS documents, separates read-only design from
-writing, and requires screenshots plus independent visual/accessibility findings.
-Five stage-specific design skills ship in core, adapted from Apache-2.0 and MIT
-upstreams with their license and provenance files beside them; session-listed project
-extras can take precedence. Browser availability is checked, never assumed.
-See [requirements and design](docs/features/design-workflow/index.md).
+- [What Cortex is](#what-cortex-is)
+- [How orchestration works](#how-orchestration-works)
+- [Why use orchestration](#why-use-orchestration)
+- [Platform support](#platform-support)
+- [Install in Paseo (recommended)](#install-in-paseo-recommended)
+- [Other ACP clients](#other-acp-clients)
+- [Configuration](#configuration)
+- [Documentation](#documentation)
+- [Development](#development)
+- [Security](#security)
+- [License](#license)
 
 ## What Cortex is
 
-Final-answer verification disclosures use the coordinator's localized description
-and blocker without appending the original check name. The unchanged name remains
-in structured evidence for matching; without a description it is displayed as before.
-See [final disclosure behavior](docs/features/task-lifecycle/index.md).
+Cortex is an [ACP v1](https://agentclientprotocol.com) stdio agent
+(`src/cortex_acp.py`) — it is not a plugin that runs inside another agent's
+process. Any ACP-speaking client (Paseo, Zed, or others) launches Cortex as a
+subprocess and talks to it over stdio. Internally, Cortex opens its own
+outgoing ACP sessions against other coding agents —
+[Codex](docs/features/codex-engine/index.md),
+[Claude Code](docs/features/claude-engine/index.md), and the optional
+[OpenCode v2](docs/features/opencode-engine/index.md) — and drives them
+itself, inside the exact project your client has open.
 
-When a reviewer requests the plan's exact verification command on the same
-project digest, Cortex returns the runtime-produced receipt instead of rerunning
-it. In-flight checks are awaited for at most five seconds; mismatches, unavailable
-or discarded evidence and wait expiry execute normally. Independent diff review
-and mandatory final verification remain unchanged. See
-[reviewer verification reuse](docs/features/orchestration/index.md#reviewer-verification-reuse).
+The runtime, not any model, owns the task lifecycle: scheduling, dependency
+resolution, write-conflict serialization, permissions, mandatory independent
+review, verification, and completion. Models propose plans, carry out the
+assigned work, and report evidence back — they cannot grant themselves
+access, skip review, or declare a task finished on their own say. See the
+[architecture overview](docs/project/architecture.md) for the full source
+map.
 
-After an accepted worker/reviewer result, Cortex banks the in-flight prompt's
-token report on a separate cleanup thread for up to 15 seconds before teardown
-(a turn that ends sooner settles at once).
-Missing reports stay unknown; capacity and writer locks stay reserved until
-confirmed exit. See [usage settlement](docs/features/token-and-plan-usage/index.md#coverage-and-interrupted-turns).
+## How orchestration works
 
-ACP route/effort selection retains the owner and project ceilings and any
-task-local narrowing. Automatic workers and reviewers use only eligible
-observed routes within that ceiling; a denied pin is refused, not replaced.
-See [route authorization](docs/features/routing-and-fallback/index.md#pre-dispatch-enforcement).
+```mermaid
+flowchart LR
+    U["You, in Paseo"] --> C["Coordinator\n(plans, answers simple questions)"]
+    C -- "structured plan" --> S["Runtime scheduler"]
+    S --> W1["Specialist worker\n(engine/model A)"]
+    S --> W2["Specialist worker\n(engine/model B)"]
+    S --> W3["Specialist worker\n(engine/model C)"]
+    W1 --> RV["Independent reviewer\n(fresh session)"]
+    W2 --> RV
+    W3 --> RV
+    RV --> VF["Final verification\n(documented project checks)"]
+    VF --> ST[".cortex store\nreports + pipeline, newest first"]
+```
 
-An explicit model requested by the user is the first routing priority, but it
-never overrides authorization, availability, or supported parameters. If that
-exact route cannot be used, Cortex reports the refusal instead of silently
-substituting another model. Recorded requests also recognize an exact bare model
-ID unique across enabled configured engines, with terminal prose punctuation.
-Exact enabled IDs also accept direct `на/on/via/with` phrasing (for example
-`Часть 2 на gpt-6-luna:`); a request verb in the same user message governs all
-exact identities, while negations and hard policy still apply.
-A restrictive selection ("Выполнить аудит только Claude Opus", "do the review only on
-Opus") is a request, and so is a question option the user chooses that selects
-exactly one model ("Использовать Opus для аудита", or just "Opus" when the question
-asks which model to use, such as "Какой моделью выполнить аудит?"); an option that
-only mentions a model ("Принять результат аудита Opus"), a bare name or a name
-after a lone verb of choice ("Opus", "Выбрать Opus", "Pick Opus") chosen under a
-question about whose result or which work product to accept ("Чей результат аудита
-принять?", "Какой аудит выбрать?"), the question text and unchosen options never are.
-Shared bare IDs grant neither engine and the plan preview explains the ambiguity;
-see [identity rules](docs/features/routing-and-fallback/index.md#settings-only-routing).
-Plan usage is only the last tie-breaker between otherwise equal routes: it
-never overrides an eligible route the coordinator names, which is replaced only
-when its known usage is at least 95% (hot) while another candidate is not.
-Unknown usage remains unavailable, never assumed hot. When the settings prefer
-specific models for a kind of work (`preferred_for`), they outrank a coordinator
-hint naming another route (the plan preview reports this before dispatch), and
-usage only breaks ties among those models; once they are used up, the
-replacement follows the normal quota, affinity and engine-order rules instead of
-usage.
+1. **You talk to the coordinator.** It is read-only: it can answer a simple
+   question straight from what it can already read, but any change,
+   investigation, or capability outside its own role becomes a specialist
+   assignment in a structured plan instead. See
+   [capability-based delegation](docs/features/roles-and-delegation/index.md#capability-based-delegation).
+2. **The runtime validates the plan and schedules workers.** Each plan node
+   names a role (coder, reviewer, tester, designer, technical writer, and 19
+   others) and may carry a model recommendation, but the runtime — not the
+   model — makes the final engine/model/effort decision from the current
+   catalog, task tier, work kind, and routing policy. See
+   [automatic routing](docs/features/routing-and-fallback/index.md#automatic-worker-routing-tiers-model-hints-and-ranking).
+3. **Independent specialist workers run in parallel**, one ACP session per
+   worker, each on the engine/model the runtime picked for it. One chat
+   session runs up to four workers at once across every engine and role.
+   Workers whose declared write scopes overlap are serialized so they never
+   race on the same files; read-only and non-overlapping work runs
+   concurrently. See
+   [plan submission and scheduling](docs/features/orchestration/index.md#plan-submission-and-coordinator-polling).
+4. **A fresh, independent reviewer checks the diff** before anything counts
+   as done, unless a plan genuinely changed no project file. The reviewer
+   never wrote the code it is reviewing. See
+   [review and verification](docs/features/index.md).
+5. **Final verification runs the project's own documented commands** —
+   tests, type checks, lints, whatever the plan declared — against the real
+   checkout before the task can complete. A failing or unrun check blocks
+   completion; it is never silently waived.
+6. **Everything is recorded next to your project.** Immutable Markdown
+   worker/reviewer reports and one newest-first pipeline document per task
+   live under the project's own `.cortex/` folder, indexed by a local SQLite
+   file, so nothing lives only in chat scrollback. These records themselves
+   stay on your machine, but getting there still means running the engines
+   you chose, and some of those engines send your prompts and project
+   content to an external AI provider under that provider's own policy. See
+   [storage and recovery](docs/project/storage.md) and
+   [PRIVACY.md](PRIVACY.md) for exactly what stays local versus what a
+   provider processes.
 
-Initial host model/provider echoes preserve the configured native effort/mode;
-they are not parameter resets. [Bound task inspection](docs/features/observability/index.md#bound-task-inspection)
-provides paged, read-only lifecycle metadata and native confirmation references,
-plus allowlisted outcome metadata: receipt exit codes and completeness, check
-closure refs, route-decision bases, rejection codes and question kinds.
-The [dev binding exporter](docs/project/dev-environment.md#read-only-dev-binding) can observe one explicitly owned host agent and its guarded session/task/current-owner binding; it never starts a daemon or engine. It does not qualify a live run or replace independent review and verification. Failures retain bounded local stage/process diagnostics and complete allowlisted inspector reasons without returning a binding. Missing endpoint metadata, helper startup/output failures and storage refusals remain distinct; earlier generic errors cannot identify their historical cause. Zero child exit alone is not complete binding evidence.
-Targeted tests can use the [fresh-process isolated launcher](docs/project/verification.md#fresh-process-isolated-targeted-launcher) with an explicitly authorized existing dependency path.
-Before Python binding checks or the default suite, run checkout-local
-`npm --prefix integrations/paseo ci` then `npm --prefix integrations/paseo run typecheck`;
-see [verification sequencing](docs/project/verification.md#sequencing).
+## Why use orchestration
 
-Read API qualification now has a [public executable fixture and live assertion matrix](docs/features/tool-discovery-and-read-batch/index.md#executable-public-evidence).
-Runtime-owned read fingerprints retain no bodies and are not command receipts.
-The public matrix binds the selected worker before matching read shapes and checks
-every worker occurrence. Other authenticated same-task actors are counted, not
-substituted; replayed, contradictory or incompletely bound evidence still fails.
-Preflight, dispatch, assertions and runtime acceptance are distinct.
+- **Parallel specialists instead of one long linear thread.** Independent
+  pieces of work run as separate workers at the same time, instead of one
+  agent doing everything serially.
+- **The right engine and model for each job.** Routing is computed by the
+  runtime from real catalog data, task tier, and work kind — not guessed by
+  whichever model happens to be talking to you.
+- **Mandatory independent review.** A worker's own output is never
+  self-certified; a separate reviewer session checks the diff first.
+- **Verification before completion.** A task cannot be marked done until the
+  project's own documented checks actually pass against the current code.
+- **Durable, recoverable history.** Reports and the task pipeline are
+  immutable Markdown files plus a local SQLite index inside your project's
+  `.cortex/` folder, so you can inspect or recover task history without
+  relying on client-side chat memory.
+- **Permission and scope control.** Writers get a declared scope that
+  serializes conflicting writes; read-only roles (including the coordinator)
+  cannot write the project at all; Development/Guarded/Auto access modes
+  control how much a worker's commands can touch outside the project. See
+  [permissions and containment](docs/features/permissions-and-containment/index.md).
 
-Before `plan_submit`, inspect the live schema and measure complete bounded fields.
-The objective property description exposes its Unicode code-point limit even
-when a host renders only descriptions; rewrite overlong text without dropping
-requirements. Rejection does not accept a plan or start workers.
-Known portable plan-policy failures retain their error code and category rather
-than appearing as storage failures. Only a pre-write refusal is marked rejected;
-unknown-stage or indeterminate failures require reconciliation with the identical
-request and delivery key. Exact accepted-plan replay precedes current routing
-policy reads. See [MCP error recovery](docs/features/failures-and-cancellation/index.md#mcp-tool-errors).
+Documentation never references internal task/assignment/report identifiers —
+these pages describe product behavior, not how a particular run was tracked.
 
-For `result_submit`, `report` is required and is one plain string, never an
-object: the complete report Markdown (optional `report_title`; otherwise its
-first heading is the title), or only the `report_id` returned by this worker's
-`write_report`. Claude engines emit a top-level string verbatim but hand-escape
-object values as JSON, which broke long nested reports before Cortex received
-the call. The advertised schema
-specifies check fields and receipt sources; rejected result submissions attempt to retain
-only a code and safe field path for diagnostics, not the submitted content.
-Review workers must send a verdict (`APPROVE`, `REQUEST_CHANGES` or `BLOCK`;
-lowercase forms normalize). A supplied `command` on a passed or failed check is
-descriptive only; it never replaces the same-attempt `tool_call_ref` evidence.
-Open failed checks return `open_failed_check` before publication or channel
-revocation. Keep the failure and cite an exact later passing rerun, or explicitly
-submit `assignment_outcome: "failed"`; changing argv does not close it. The
-correction names the failed receipt, a bounded command identity (never the argv
-or script), the relevant rerun and its evidence gap, and says when no exact
-rerun can close the failure. A failed receipt that any submission of the attempt
-already presented, even a refused one, must be cited again by every later
-submission or it is refused with `omitted_failed_check`. A shell check that ends
-with `exit $VARIABLE` verifies only in the plain `CHECK; code=$?; <print/read>;
-exit $code` form ([trivial-command rule](docs/features/orchestration/index.md#check-evidence));
-the capture identifier and `=` must be unquoted (`rc="$?"` is supported).
-Assignment-prefixed commands (for example `x=1 trap ...`) and leading numeric
-command words (including `2>log CHECK`) are outside this restricted form, and so
-is every expansion beyond a plain `$NAME`/`${NAME}` argument: `${x[...]}`,
-`${x:...}` and other `${...}` forms, `$(...)`, unquoted globs, braces and `~`,
-anywhere in the script (including printer arguments and redirection targets).
-`printf` between capture and exit is also excluded: Bash `%n` and expanded
-`-v` options can overwrite the captured status. Use `echo`/`tail` for supported
-output wrappers, or direct check argv rather than a more complex shell wrapper.
-Other forms stay unverified with `status_variable_unproven`, which no exact
-rerun can close. `command_run`
-inlines at most 64 KiB of output (`output_truncated`, `byte_count`), while
-checks verify from the complete retained output. Accepted receipts include
-`node_status`, not task acceptance.
-The review brief includes a bounded runtime-facts block: verified executor
-receipts, planned verification argv (not results), and changed-path hashes/sizes
-versus the execution baseline. Worker report access, independent review and
-mandatory digest-bound verification are unchanged; see
-[reviewer handoff](docs/features/orchestration/index.md#reviewer-handoff).
-Prepare the complete report before the first submission; a summary or verdict
-alone is insufficient. Pass structured arguments, not hand-concatenated JSON.
-Reviewers default to publishing the complete report inline with `result_submit`,
-including the shared decision brief and explicit verdict. Other roles may prefer
-the owned-draft publication route for code blocks or larger reports; it remains
-available for genuine incremental editing. Decision-
-brief items (including contradictions) are Markdown sections inside `markdown`,
-never separate report fields. After an inline JSON failure, correct serialization
-or use that draft route. This guidance does not
-guarantee model compliance; see [publication rules](docs/features/publications-and-consistency/index.md).
-A worker whose own changes pair documentation (`docs/**.md`, `README.md`,
-`SECURITY.md`) with source or other behavior files must have read
-`documentation-sync` through Cortex `read_skill` first; otherwise the result is
-refused with `situational_skill_required` and nothing is recorded. Gateway writes
-provide early shared-tree skill reminders; submission attributes only this node's
-reserved paths or successful channel writes, excluding sibling writers' paths.
-Native edits remain checked where authorship is attributable.
-If a reminder's database lookup or observation fails after a write commits,
-the successful write receipt carries `skill_hint_unavailable` instead of a write error.
+## Platform support
 
-A text `project_read` pages by 1-based line: `offset` is a line number, `limit` is at most 2000 lines, and `line_numbers` is on by default. Each result stays under 24,000 bytes. A line longer than 2000 characters is flagged as truncated and never counts as read. Complete coverage is kept per channel. `project_write` replaces an existing file only with the `full_content_sha256` from that complete read; a partial page's `sha256` identifies those bytes and never authorizes an overwrite. The new `project_edit` applies up to 64 ordered exact replacements atomically, after any prior text read of the unchanged file. An append replaces a unique tail anchor. Each successful write or edit clears the channel's read coverage. Receipts show previous and new size and lines and a `drastic_shrink` flag. A file with a line over 2000 characters cannot be fully read, so `project_edit` is the only route to change it.
+Orchestration is developed and tested only on **Ubuntu (Linux)**. Other
+platforms (macOS, Windows, WSL) are untested and not currently supported;
+expect to find and fix gaps yourself if you try one.
 
-## Development command access
+## Install in Paseo (recommended)
 
-Fresh ACP sessions durably start **Development**: every sandboxed command --
-any worker's or reviewer's `command_run` and the runtime's automatic verification
-checks -- can use ordinary host resources, Docker/Compose (including `docker
-build`), SDK/cache state and outside-project working directories through the
-receipt-producing command gateway without routine approval cards. Roles still
-decide the project: read-only roles never write it, and verification writes only
-git-ignored directories. Engine jails, channel/revocation gates, owner denials,
-independent review and runtime completion remain in place.
+[Paseo](https://github.com/getpaseo/paseo) is the primary, recommended ACP
+client for Cortex: it has a native Cortex provider plugin, shows per-worker
+cards with live status and token usage, and is what orchestration is
+qualified against. The steps below are exact commands from this repository;
+for the local-checkout path, replace `/absolute/path/to/cortex-orch-acp` with
+where you cloned it.
 
-Read-only Git diff/status supports modified Git LFS files without opening
-`.git` for writes: LFS filters use disposable command/session scratch storage.
-Development/Auto writing workers with a whole-project grant can stage, commit,
-switch branches, stash, merge and rebase in ordinary repositories, linked
-worktrees and existing submodules. Config, hooks, info and repository pointers
-stay protected; narrower grants, reviewers and verification keep metadata
-read-only. Engine/Guarded writing grants are unchanged. See
-[Git and tool state](docs/features/permissions-and-containment/index.md#git-and-tool-state)
-for the boundary and LFS cache limitations.
+### Prerequisites
 
-This is trusted local development, **not hostile-code OS isolation**. Direct
-filesystem masks cannot stop arbitrary owner code or a Docker daemon from
-bypassing them. Host capability is not permission for deletion, production/shared
-changes, publication, credentials or paid checks; declared deletion commands
-still require consent, including `env rm`, `sh -c 'env rm file'`,
-`bash -o pipefail -c 'rm file'`, `unlink`, `rmdir`, `find -delete`, `git clean`,
-`git rm` and `shred -u`. Read-only roles (reviewer, auditor and similar) are refused these
-commands outright. Deletion recognition is lexical: it does not cover deletions inside
-scripts, interpreters or build tools. Simple shell assignment prefixes and
-conditional/loop command positions are recognized too, for example
-`sh -c 'LABEL=fixture rm fixture'` and `sh -c 'if true; then env rm fixture; fi'`.
-Literal `echo`/`printf` argv arguments are not shell commands. Select **Guarded**
-to keep workers inside the project: a deletion, an outside write and a command
-outside the sandbox each ask first. **Auto** gives commands the same
-host-writable profile as Development and answers every permission card itself,
-deletions included. In Development an `outside_write` needs no card unless it
-targets protected engine, Cortex, Paseo or git control-plane state;
-`outside_command` (no sandbox) still asks. Legacy sessions/tasks and
-unknown/unreadable configuration remain Guarded; reconnect preserves durable
-choices without rewriting owner settings. Stopping a command does not roll back
-Docker or outside-project effects. See [permissions and containment](docs/features/permissions-and-containment/index.md#access-mode-development-guarded-and-auto).
+- **Ubuntu (Linux)** — see [Platform support](#platform-support).
+- **Python 3.11+** with only the standard library — `cortex_runtime` has no
+  pip dependencies for the agent itself.
+- **[Paseo](https://github.com/getpaseo/paseo)** installed and running.
+- **At least one supported engine**, each with its own existing account or
+  credential, set up independently of Cortex:
+  - [Codex CLI](docs/features/codex-engine/index.md) (native ChatGPT login or
+    `CODEX_API_KEY`/`OPENAI_API_KEY`), and/or
+  - [Claude Code](docs/features/claude-engine/index.md) (native `claude
+    /login` or an Anthropic API key).
 
-Root `.gitignore` repair reads exact full text internally, never display pages. Edit receipts describe the protected committed bytes. Diff matching is input-budgeted; oversized inputs return `diff_omitted: "input_budget"` and `diff_truncated: true` without blocking the edit.
+  A native-account connection never has Cortex copy or store that login
+  itself — it only runs the CLI you already authenticated. An API-key
+  connection is different: the key you give Cortex is written to a private,
+  owner-only secret file Cortex manages (see
+  [Connect an engine](#2-connect-an-engine)); it is never logged or printed.
+- **`git`** — only needed for the local-checkout install path below.
 
-A missing permitted `project_read` path succeeds with `sha256: "absent"` for
-creation and `parent_exists`; private/link/read-error boundaries remain enforced.
-Creating a file (`expected_sha256: "absent"`) also creates its missing parent
-directories, no-follow; `project_mkdir` likewise creates missing parents and
-returns `created: false` for an existing directory. A file or symlink in the parent
-chain is refused with `gateway_parent_not_directory`; a non-`absent` hash under a
-missing parent is a `gateway_write_conflict`.
-Project write/edit/mkdir/delete keys may be omitted: identical keyless retries reuse
-their effect receipt, but a precondition refusal before any effect is not replayed
-under its derived key. After correcting the precondition, retry the same keyless
-write; explicit-key refusals still need a fresh key. `project_git` is context only,
-not a check receipt. Plan scopes reserve writes, not reads. Worker capsules
-separate the task/coordinator configuration from the attempt's confirmed route.
-See [file operations](docs/features/permissions-and-containment/index.md).
+### 1. Install the plugin
 
-Cortex is an ACP v1 stdio agent. Its runtime coordinates Codex and Claude ACP workers in the project you opened, and owns task scheduling, review, verification, and completion. Task records and Markdown reports are stored in that project’s `.cortex/` directory. Workers can ask assignment-local questions and request additional exact paths: the runtime parks only that worker and resumes its same healthy session after a real answer or validated access decision, without a replacement plan. A recovered channel without retained session metadata keeps its ordinary tools; questions use task-global recovery instead of promising same-session continuation. Access requests retry writer conflicts automatically with bounded delays, then grant or refuse without a user question; path, owner-policy and read-only refusals are immediate runtime decisions. An engine that fails for an infrastructure reason is retried automatically: a coordinator engine that does not start, a coordinator turn that failed before it answered, or a lost or crashed worker. The chat shows each retry. Delays grow to at most a minute, and the work stops only after failures have kept repeating for 10 minutes; see [transient engine failures](docs/features/failures-and-cancellation/index.md#transient-engine-failures). Worker questions are reserved for genuine user decisions and require question text plus every option in the selected chat language (English or Russian); worker briefs and reports stay English. The runtime relays those strings verbatim, without automatic translation or a guarantee of model compliance. Answers never override policy or widen the OS jail; see [orchestration](docs/features/orchestration/index.md#worker-questions-and-additional-access). Worker briefs keep objectives, scope and dependency report references complete; long task goals and review evidence use marked previews with links to the full source. Plan verification commands are literal argv from documented project commands or scripts; shell syntax is rejected before work starts. The runtime runs them once after review, each until it exits, so the project's whole suite belongs there; workers run only the tests covering their own change. A worker check is marked passed only when its exact same-attempt `command_run` or user-confirmed `outside_command` receipt proves a complete, nontrivial command exited 0. An exact argv/cwd rerun may close a failed check across `command_run` and `outside_command` in either direction; same-operation profiles must still match and both receipts remain visible. A supported syntax, regex or statically proven literal-expectation error in the worker's own standalone Python probe can be retracted only by a later verified passing correction; the failure stays as history and never counts as a pass. Literal-data corrections change one wrong expected literal, not a product assertion; project test/lint/build and runtime-verification failures cannot be retracted. Engine shell calls, reads and incomplete output cannot verify a check; older reports remain intact and weak historic evidence is marked separately when read.
-
-To close a task immediately at your own decision, send `/cortex-finish` with no arguments, even while a Paseo turn is active. Cortex stops its owned work and records the closure as terminal `CANCELLED`, **not** verified `COMPLETED`; unfinished review, checks, and synthesis are not claimed as passed. An explicit close-as-is answer to a task-closure question has the same effect. See [completion and lifecycle](docs/features/task-lifecycle/index.md).
-
-Questions from coordinator, worker, or runtime fallback flows use the same structured question contract: worker cards require meaningful selectable choices, and Paseo presents an answer form with an "Other..." field. Related questions can be grouped into one paginated form and submitted together; every member must be answered. Tabs use short topics rather than ids; colliding labels gain a bounded numeric suffix, and header-keyed answers map back to exact question identities. Text fallback numbers follow the current open-question order used by `/cortex-answer`, with blank lines between questions; remaining questions renumber after an answer. Free-text answers and chat replies remain available, and dismissing a form does not answer or close the pending question. Hosts without the required structured-question UI may present the prompt and choices as chat text instead. After an answer is recorded, the Paseo chat echoes the pair as `Question: <question> → Answer: <answer>`, one line per batch member and prefixed with its topic when it has one. This is a runtime/UI contract, not proof that a model will always recognize when it should ask or that every ACP host renders a form. See [questions and steering](docs/features/steering-and-questions/index.md).
-
-A real answer to a runtime recovery question starts a fresh bounded planning
-cycle, including when answered within the same host turn. The three-prompt
-limit still applies; an answer does not manufacture a missing model proposal.
-A repaired recovery-counter defect had previously caused follow-up recovery
-answers to reblock without another engine prompt; a focused regression now
-checks that an answered recovery can continue into a scripted plan. This does
-not explain or prevent a model from failing to submit a proposal within its
-three prompts, and it is not evidence that every live task will complete.
-A prior isolated Desktop run remains partial: its coordinator question rendered
-and its answer mapped, but the task stopped at `structured_proposal_missing`;
-batch and worker scenarios were not reached. See
-[question recovery verification](docs/project/verification.md#question-and-submission-regressions).
-
-When a planned step cannot start because another worker holds overlapping paths (in this chat or another chat of the same project) or the chat's worker slots are full, the chat shows a "Waiting" card naming the holder, the overlapping paths and when the wait began; it closes when the step starts. While the holder is a worker observed alive, the task keeps waiting rather than stopping on the 30-minute scheduler deadline. See [orchestration](docs/features/orchestration/index.md).
-
-ACP timeline updates use bounded display projections to avoid repeatedly sending growing worker transcripts. Worker cards keep a 20-action, 4 KiB tail for generic clients; per-update and field size limits and a fixed per-card event budget (forward-only status transitions plus at most 8 progress updates, one per 30 s, so at most 13 updates per worker whatever its size) bound host event volume. Coordinator cards send changed fields only, suppress no-op updates, omit an identical MCP text mirror, and reference repeated identical outputs, even across intervening compact context receipts while the matching projection remains cached; unchanged context polls return a compact receipt. Coordinator and engine tool cards also have a per-task total budget: the first 150 distinct calls (or 4 MiB of card updates) get their own card with at most 10 updates each; later calls are counted on one aggregate card, sent at most 20 times per task; and up to 50 failed calls past the budget keep their own cards. The budget persists across turns and restarts, and `session/load` replays older journals within the same bound. In the scale test, 1,500 coordinator calls over four turns and a restart sent 324 card updates and 187,517 bytes, against 312 updates for 500 calls. In the recorded scale test, repeated polls were 481–483 bytes, and each Paseo worker card sent 3 updates and 16,959 bytes for 10-, 60- and 300-tool workloads. These limits reduce emitted event volume; they do not cap durable task history or guarantee constant total daemon memory. See [ACP observability and resource limits](docs/features/observability/index.md#bounded-acp-event-projections).
-
-Automatic routing uses only explicit version-2 owner settings plus currently observed engine catalogs; no model identity receives a built-in tier, effort policy, or automatic membership by name. The coordinator receives route options from that same effective settings/catalog view. `list_route_options` preserves named policy migration/validation diagnostics and their corrective action, rather than reporting a storage failure. New or renamed model IDs remain ineligible until configured. Preferences rank only within already eligible routes and do not grant eligibility. See [configuration](docs/configuration.md#settings-only-model-policy) and [routing and fallback](docs/features/routing-and-fallback/index.md#settings-only-routing).
-
-Explicit user requests must name the complete case-sensitive `engine/model`
-identity or an owner-configured request label. Keep an exact identity
-whitespace-delimited, quote it (`Use "engine/unit".`) or put it in parentheses
-after its name (`Claude Opus (engine/unit)`); attached unquoted
-punctuation is ambiguous identity data, never authorization for a shorter ID.
-Plan hints alone cannot promote a flagship. Confirmed requests in recorded
-user messages/answers select that exact model first on covered nodes in every
-tier, including retries/fixes, ahead of pins, preferences and usage ranking.
-Hard policy or unavailable routes refuse visibly rather than substitute.
-The runtime-created mandatory reviewer honors a recorded purpose-scoped model
-request; otherwise owner pins, then automatic ranking, decide its route.
-The policy-only preflight assumes no such request. Before a requested paid CLI run, the
-[route preflight](docs/project/dev-environment.md#route-preflight-before-a-paid-cli-run)
-refuses when a stage would not use the selected route.
-Plan usage only breaks the last tie between otherwise equal candidates, and
-unknown usage is unavailable. See the routing guidance above.
-
-New route audits use the neutral `stretch` policy key and `stretch:<tier>` effort basis for any configured stretch model; stored historical audits remain readable and are not rewritten.
-
-Owner profiles now capture the complete supported set of user-level settings—not just routing—including defaults and owner ceiling, MCP usage policy and connection session limits. Save edits explicitly to the selected profile or save them as a new profile; activating one materializes its captured settings into the existing user configuration files. Project settings, MCP installation commands/arguments/environment and connection credentials are excluded. Project and `$CORTEX_ROUTING` files still shadow user routing. See [user routing profiles](docs/configuration.md#user-routing-profiles).
-
-Within an eligible routing tier, owner `preferred_for` model choices now rank ahead of plan hints, plan-usage heuristics and retry diversification. Preferences do not grant a route: pins, deny rules, automatic model membership, providers, tier eligibility, availability and quota safety still apply.
-
-A model's preference can also carry an owner-written `preferred_when` condition (for example "frontend changes without design work"). The coordinator judges each plan node against it and names the model only where it holds; elsewhere the model is an ordinary candidate. In Settings, preferred work kinds are now chosen from the work-kind list instead of typed. See [model policy](docs/configuration.md).
-
-Implementation routing distinguishes backend, frontend without design, and frontend with UI design. The coordinator can classify design work explicitly through the plan schema; retries and fixes retain that classification. The default preset makes Astra flagship-only and lists frontend-with-design only for Opus, retaining the existing conditional-preference and quota rules. Legacy `implementation` settings expand to all three kinds only in effective routing views; editable source values retain their spelling across unrelated Settings saves. See [implementation work classification](docs/configuration.md#implementation-work-classification).
-
-The current Codex adapter is codex-acp 2.0.1 with Codex CLI 0.159.1, with a separately observed offline catalog. The supported Claude fallback is claude-agent-acp 0.88.0. Codex 1.12.0 and 1.13.0 remain supported fallbacks; later Codex adapters still need explicit compatibility support. This one-time update does not change the existing background installer. See [adapter compatibility](docs/features/codex-engine/index.md).
-
-OpenCode v2 (`opencode acp`, any `2.x.x` release) is an optional third engine.
-It uses your native OpenCode logins and your configured custom providers
-together, with Cortex's own `cortex` agent; no alternate database or extracted
-login is used. Cortex removes OpenCode's built-in `build`/`plan` agent plugins so
-that ACP offers `cortex`; see [native logins](docs/features/opencode-engine/index.md#native-logins-and-the-2020-catalog-snapshot).
-It is never discovered at startup and runs only after the explicit
-`python3 -B scripts/cortex_acp_setup.py add-opencode-connection` step. Automatic
-worker routing skips it unless `routing.json` opts in. It runs only inside the
-engine jail, in its own user/PID/IPC namespaces, with Cortex's own configuration
-(one `cortex` agent that asks permission for every native tool) and the Cortex
-gateway reached through its `execute` tool. Catalog refresh refuses observations
-without the required `cortex` mode and preserves the previous snapshot. Imported
-provider substitutions stay in read-only jail files, not process environment values. The
-[OpenCode adapter page](docs/features/opencode-engine/index.md) lists what works, what
-does not, and the no-paid evidence; no paid or live OpenCode run was made.
-
-Claude Cortex sessions disallow native shell, file/search/edit, notebook edit and
-Skill alternatives through adapter options, leaving the scoped Cortex MCP tools
-and granted code-index MCP tools for that work. This does not change Codex's
-native tool policy. Effective behavior in Claude 0.81.2 remains subject to a
-fresh owner-authorized live check.
-
-Project/user skills listed in the session prompt are readable through Cortex
-MCP `read_skill` using exactly the displayed `SKILL.md` path. The runtime
-binds each coordinator or worker channel to its own observed engine session;
-fallback and recovery use fresh channels and catalogs. Unlisted paths and
-revoked or stale session bindings fail closed. See
-[skill reads](docs/features/unified-system-prompt/index.md).
-
-The unified role prompt keeps everyday Cortex procedures inlined. Conditional
-procedures are named with action triggers in the role and `read_skill` tool
-descriptions; the model is told to call Cortex MCP `read_skill` only when a
-trigger arises, before that action. Documentation-impact planning as well as
-affected edits trigger `documentation-sync`. The prompt distinguishes Cortex MCP
-reports, skills, checks and submissions from external code-index MCP queries and
-native workspace tools; argument contracts remain in the live tool schemas.
-This is an instruction and advertised
-contract, not proof that either model complies in a live turn. See the
-[role delivery contract](docs/features/roles-and-delegation/index.md#instruction-delivery).
-
-Every engine's prompt also carries the working-economy rules that Codex's own
-base prompt states and Claude follows unprompted: act once you know enough,
-do not re-read material already read or repeat a successful call, read a
-matching skill once per session, continue after a compaction without redoing
-work, make routine choices yourself, and keep a writing worker's tests to the
-change. Codex sessions additionally get code-mode lines (batch independent
-calls in one `exec`, take arguments from the schema-derived cheat sheet, which
-now covers every offered Cortex tool, instead of querying `ALL_TOOLS`). See
-[working economy and code mode](docs/features/unified-system-prompt/index.md#working-economy-and-code-mode).
-
-Runtime safeguards from real sessions: `command_run` stops after 30 minutes by default
-and stops everything a command started; read-only roles can run suites whose project
-writes are discarded; a change by another Cortex task in the same project triggers a new
-review and verification instead of a question; every question offers "Stop the task";
-a failed verification check removed before completion needs the user's answer; and a
-model the owner named for a role is used, or the chat says why not. See
-[orchestration](docs/features/orchestration/index.md),
-[permissions and containment](docs/features/permissions-and-containment/index.md),
-[steering and questions](docs/features/steering-and-questions/index.md) and
-[routing](docs/features/routing-and-fallback/index.md#owner-model-requests-in-plain-words).
-
-## Install
-
-### Paseo
-
-The plugin lockfile currently retains an unpatched `braces` advisory propagated
-through React Native tooling (15 npm package entries, one advisory). See the
-[dependency disposition](docs/project/paseo-dependency-audit.md); passing plugin tests
-or listing packages as dev dependencies does not mean a clean security audit.
-
-If rendering fails in a plugin panel, the composer popover, or a timeline card, Paseo shows a themed fallback for that surface with reopen guidance. If the thrown value cannot safely provide text, the fallback uses `unknown error`.
-
-When reopening a persisted Cortex session, Paseo uses the configuration restored by Cortex instead of reapplying cached composer selections. New-session selections and explicit later configuration requests remain validated.
-
-Paseo installs can prepare Cortex automatically: the plugin manifest’s supported `build` hook runs the setup command before activation.
-
-Install the current GitHub version:
+The simplest path is a Git-hosted install straight from GitHub — no local
+clone needed. With Paseo running:
 
 ```bash
 paseo plugin install github:igovet/cortex-orch-acp:integrations/paseo
 ```
 
-Install from a branch, tag, or commit by adding `--ref`:
+This installs from the repository's default branch (`main`). Use
+`--ref <branch|tag|commit>` to track a different ref instead — for example
+`--ref dev` for the active development branch.
+
+If you already have (or want) a local checkout instead of a GitHub-hosted
+install, clone the repository and run the local-checkout setup command
+instead, which validates the repository-owned `integrations/paseo` plugin,
+installs or reloads it in your Paseo daemon, and verifies it comes up
+`running`:
 
 ```bash
-paseo plugin install github:igovet/cortex-orch-acp:integrations/paseo --ref dev
+git clone https://github.com/igovet/cortex-orch-acp.git
+cd cortex-orch-acp
+python3 -B scripts/cortex_acp_setup.py install-paseo-plugin
 ```
 
+Both commands are idempotent and safe to rerun; neither touches unrelated
+Paseo plugins or configuration. After either one, Paseo exposes Cortex as a
+native provider named `cortex` for new chats — no separate generic ACP agent
+registration is needed. See
+[the Paseo provider plugin](docs/project/packaging.md#paseo-provider-plugin)
+for the full Git-hosted install and update reference.
 
-Apply plugin updates between active tasks until session recovery has been qualified for the version being deployed. A transport disconnect preserves task state and recovery reconciles saved Cortex state, but a host `SIGKILL` without `SIGTERM` cannot be recorded, and native engine actions do not have retained command receipts.
+### 2. Connect an engine
 
-On stdin EOF or a failed stdout write, Cortex waits for the corresponding reader or writer disconnect callback to finish before shutting down the runtime; observing the transport event alone does not prove the disconnect record is complete. A failed stdout write does not wait for a reader blocked on still-open stdin.
+Registering a connection needs an **install record**: a small JSON file that
+names the exact files (Node binary, adapter entry point, package hashes)
+Cortex is allowed to execute for that engine. Prepare it once per engine by
+following [the Codex install record](docs/features/codex-engine/index.md#current-runtime-gateway-policy)
+or [the Claude install record](docs/features/claude-engine/index.md#pinned-install-requirements-manual-recipe-placeholder) —
+both link the exact template Cortex verifies against. The record never
+contains a credential.
 
-Update an installed Git plugin:
+An API-key secret is always read from a file or stdin — never put it on the
+command line:
+
+```bash
+# Native account login (Codex or Claude's own CLI login, run outside Cortex)
+python3 -B scripts/cortex_acp_setup.py add-connection \
+    --name work --engine codex-acp --provider openai \
+    --auth-mode native_account \
+    --install-record /path/to/codex-install-record.json
+
+# Or an API key, read from a file (never inline on argv)
+python3 -B scripts/cortex_acp_setup.py add-connection \
+    --name work --engine claude-agent-acp --provider anthropic \
+    --auth-mode api_key --key-kind anthropic_api_key \
+    --api-key-file /path/to/key.txt \
+    --install-record /path/to/claude-install-record.json
+```
+
+Both commands print a `connection_id` (`cn_xxxxxxxxxxxx`) — save it; the
+steps below need it.
+
+For `native_account`, `add-connection` does not import an existing login by
+itself: it prints non-secret instructions naming an isolated directory and
+environment variable (for example `CODEX_HOME=...`). Run that engine's own
+native login with exactly that variable set, as instructed — this is where
+the actual authentication happens, entirely outside Cortex — then confirm
+the connection is ready:
+
+```bash
+python3 -B scripts/cortex_acp_setup.py validate-connection \
+    --connection cn_xxxxxxxxxxxx
+```
+
+Re-run `validate-connection` until it reports a qualified, ready state before
+pinning a route. `api_key` connections are generally ready immediately after
+`add-connection`, but running `validate-connection` once is still a safe
+sanity check.
+
+Then pin a default route so a new chat picks a model automatically, with no
+further per-task action:
+
+```bash
+python3 -B scripts/cortex_acp_setup.py pin-route \
+    --connection cn_xxxxxxxxxxxx --model gpt-5-codex
+```
+
+See [first-run setup](docs/project/packaging.md#first-run-setup) for the
+full command reference, including `record-observation` for a route built
+from a real observed engine configuration.
+
+### 3. Verify it works
+
+```bash
+python3 -B scripts/cortex_acp_setup.py status
+```
+
+This only reads and reports current connection/route state — it is always
+safe to run. Then open Paseo, start a new chat, and select the `cortex`
+provider; you should be talking to the Cortex coordinator.
+
+### Update
+
+For the Git-hosted install:
 
 ```bash
 paseo plugin update cortex-acp --check
-paseo plugin update cortex-acp --ref dev --yes
+paseo plugin update cortex-acp --yes
 ```
 
-For a local checkout, install the plugin directory by its absolute path and reload it after editing:
+Add `--ref dev` (or whichever ref you installed with) to both commands if you
+tracked a non-default ref.
+
+For a local checkout, reinstall and reload instead — local directory sources
+are reloaded, not updated with `plugin update`:
 
 ```bash
-paseo plugin install /absolute/path/to/cortex-orch-acp/integrations/paseo
-paseo plugin reload cortex-acp
+python3 -B scripts/cortex_acp_setup.py install-paseo-plugin
 ```
 
-Git installs run their declared preparation hook. Local directory installs use the checkout directly; use the setup helper for a managed local Paseo installation when needed. See [Paseo onboarding and diagnostics](docs/project/packaging.md).
+An update restarts the plugin process, which closes every open Cortex chat's
+connection; reopening a chat shows a notice with its saved state, and
+in-flight work is reconciled, not lost. See
+[Paseo update and existing MCP registries](docs/project/packaging.md#paseo-update-and-existing-mcp-registries).
 
-The Paseo plugin shows per-worker context and token usage on worker cards. Cards also refresh their route from the durable dispatch audit through the same compact poll, preferring it over the timeline title; active cards without a known route say "Route pending", and settled cards without one say "Route unavailable". It does not add a separate provider plan-usage button.
+### Uninstall
 
-Asynchronous worker cards do not break coordinator prose into separate rows.
-Text streams immediately, unchanged; card insertions and updates arriving during
-one logical message wait until its next timeline/message boundary or engine-message
-completion (or, for runtime notices written while workers run, the next scheduler
-pass), not until the outer ACP prompt finishes waiting for workers. An empty
-runtime marker releases the cards without adding a displayed message.
-Cancellation, errors and completed history loads also release pending cards in
-arrival order. Previously saved split message identities are not rewritten.
+```bash
+python3 -B scripts/cortex_uninstall.py                                   # dry run, deletes nothing
+python3 -B scripts/cortex_uninstall.py --remove-user-scope --i-confirm-removal
+python3 -B scripts/cortex_uninstall.py --project /path/to/project \
+    --remove-project-store --i-confirm-removal
+```
 
-In Paseo's coordinator conversation, worker cards stay compact: role, status, task title, the actual engine · model · effort route, at most one fixed attention category (never the failure text itself), labelled usage and an **Open worker** action, with a neutral border that no state highlights (keyboard focus underlines **Open worker** instead); while a worker is executing only its small marker and status icon pulse gently (static under reduced motion, and the card itself never animates); a status transition is announced once with the worker's identity. A worker's terminal summary and its checks (dispositions, blockers, weak-evidence markers) appear only in the opened Workers tab for that exact attempt; the coordinator card keeps just the verdict and open-issue count, including when an older saved session is replayed. A failed assignment remains Failed even after publishing a report or later replan/Stop cleanup; successful work with unresolved checks reads Completed with issues; clean success stays Completed and cancellation stays Cancelled. The Workers tab also shows, collapsed above the Result, the assignment prompt the runtime sent to the selected attempt (its dispatched brief and acceptance line, never system instructions), marked sent only when the runtime's per-attempt sent record matches that exact text and otherwise labelled queued, unrecorded, withheld or unavailable; the Result paragraph is no longer repeated by its identical activity row. Coverage is no-paid automated tests and, for the earlier card and tab behavior, a fixture rendering, not Paseo Desktop evidence. See [bounded ACP event projections](docs/features/observability/index.md#bounded-acp-event-projections).
-Post-result releases with no reported tokens use existing usage-record columns,
-so existing stores need no schema migration. Paseo omits their false token alarm;
-genuine unknown/failed calls remain visible. Missing usage is not zero/free.
-Read-only timeline aggregates separate token coverage by engine and role;
-coordinator subtotals never fill missing worker or reviewer cost. Complete call
-reporting is not complete token expenditure: last-request-only adapter totals
-remain reported subtotals, not whole verified-result cost. Synthesis aggregates
-count unfinished reconciliation separately and withhold its share while pending;
-see [synthesis outcomes](docs/features/observability/index.md#runtime-composed-synthesis-share-and-fallback-reasons).
-See [usage attribution](docs/features/observability/index.md#2-usagecost-attribution-observabilityusage).
+This removes only Cortex's own `$XDG_CONFIG_HOME/cortex`,
+`$XDG_STATE_HOME/cortex`, and (with `--project`) that one project's `.cortex`
+store. It never touches engine installs, real credentials outside those
+Cortex-owned roots, your project files, or Git history. See
+[uninstall](docs/project/packaging.md#uninstall).
 
-### Other ACP clients
+## Other ACP clients
 
-Register Cortex as an ACP stdio agent with this command, adapting the absolute path to your checkout:
+Paseo is the recommended client, but any ACP stdio client can register
+Cortex as a secondary provider:
 
 ```text
 python3 -B /absolute/path/to/cortex-orch-acp/src/cortex_acp.py
 ```
 
-Use the client’s ACP agent registration settings. See [the ACP documentation index](docs/project/architecture.md).
+- **[Zed](docs/features/zed-agent/index.md)** — Custom Agent setup, including
+  the exact `settings.json` snippet.
+- **[codeg](docs/features/codeg-agent/index.md)** — Custom Agent recipe
+  (partly unverified; see that page's status note).
 
 ## Configuration
 
-See the [configuration guide](docs/configuration.md) for JSON configuration files and their locations, MCP server setup, engine connections, routing rules, and explicit version-2 per-model eligibility and policy settings. The plugin implements a Cortex Settings screen for supported owner and project configuration, including a Models section that switches individual models on or off for Cortex (OpenCode models start off) and refreshes every engine's model list without a prompt, model tiers, automatic-ranking membership, work-kind preferences and user routing profiles, with per-field help and recommendations in English, Russian or both. A live Paseo 0.10.0 check did not find it in the rendered Settings navigation or command palette; do not assume it is reachable there. Cortex files and the project SQLite configuration row remain authoritative, and fields the typed form cannot safely represent are read-only rather than rewritten. See [the configuration guide](docs/configuration.md#manage-settings-in-paseo) for details and limitations. SSH from workers uses your own ssh-agent and `~/.ssh/config`; see [ssh from workers](docs/configuration.md#ssh-from-workers).
+See the [configuration guide](docs/configuration.md) for connections,
+routing policy, MCP server setup, and per-model eligibility. Paseo's Cortex
+Settings screen exposes some of this; Cortex's own JSON configuration files
+and project SQLite row remain authoritative either way. Cortex also
+discovers project skills under `.agents/skills` (Codex) and, through a
+guarded symlink, `.claude/skills` (Claude Code) — see
+[skill management](docs/features/skill-management/index.md).
 
-### Project skills
+## Documentation
 
-Codex can discover repository skills under `.agents/skills`; Claude Code discovers project skills under `.claude/skills`. Cortex's [`/skill-management <request>` workflow](docs/features/skill-management/index.md) stores each skill in `.agents/skills/<name>/` and can expose it to Claude through a guarded relative symlink. Proactive skill proposals require an explicit user choice from runtime-validated approval and decline labels; reversed or ambiguous labels cannot authorize a change. Availability does not guarantee an engine will select or use a skill; that depends on the engine, its session policy, the model, and the task.
+- [Project overview](docs/project/index.md) — start here for project-wide pages
+- [Feature index](docs/features/index.md) — one page per product feature
+- [Packaging, onboarding and diagnostics](docs/project/packaging.md)
+- [Orchestration](docs/features/orchestration/index.md) — scheduling, review, verification in depth
+- [Roles and delegation](docs/features/roles-and-delegation/index.md) — the 23 specialist roles
+- [Routing and fallback](docs/features/routing-and-fallback/index.md)
+- [Permissions and execution containment](docs/features/permissions-and-containment/index.md)
+- [Storage and recovery](docs/project/storage.md)
+- [Verification](docs/project/verification.md)
 
-## Further documentation
+## Development
 
-- [Packaging and onboarding](docs/project/packaging.md): install, first-run setup, diagnostics
-- [Configuration guide](docs/configuration.md): connections, routing, MCP servers, ssh
-- [Codex adapter](docs/features/codex-engine/index.md), [Claude adapter](docs/features/claude-engine/index.md) and the optional [OpenCode adapter](docs/features/opencode-engine/index.md): how Cortex runs each engine
-- [Routing and fallback](docs/features/routing-and-fallback/index.md): worker routing and multi-provider fallback
-- [Project storage and recovery](docs/project/storage.md): task storage, format upgrades, recovery
-- [Security](SECURITY.md): the sandbox and permission boundary
-- [Project skill management](docs/features/skill-management/index.md): the explicit `/skill-management <request>` command, user-approved skill proposals from repeated work, and guarded Codex/Claude skill layout
-- [Verification guidance](docs/project/verification.md): check evidence rules and test commands
-- [Orchestration and worker briefs](docs/features/orchestration/index.md): scheduling, review and bounded assignment context
-- [ACP documentation index](docs/project/architecture.md): full reference
+Contributing to Cortex itself — running the test suite, the isolated dev
+Paseo environment, and live qualification — is covered separately from this
+end-user install guide:
 
+- [Verification](docs/project/verification.md) — release-readiness checks
+- [Automated test matrix](docs/project/test-matrix.md) — commands and CI
+- [Isolated dev Paseo environment](docs/project/dev-environment.md) — a
+  separate `~/.paseo-dev` daemon and disposable project for plugin
+  development; it never touches a production Paseo install
+- [Conventions](docs/project/conventions.md)
 
-Quota-window model applicability is also settings-only: configure exact per-engine reported labels under `quota_windows`; missing/unmapped labels conservatively remain shared, never inferred from a model family. Typed controls and independent CLI migration are described in [configuration](docs/configuration.md#exact-quota-window-associations). Automated component/API tests do not establish installed settings-screen reachability or production adoption.
+## Security
 
-A crashed brokered Cortex MCP server is now detected separately from engine completion; an indeterminate channel loss cannot authorize route fallback or a same-session publication follow-up through closed tools. A replacement relay discards old readiness/tool evidence and cannot clear the known loss until its own complete `tools/list` is observed; delayed old replies and exits are fenced. Non-JSON replies and non-UTF-8 filenames no longer terminate stdio response serialization. These are implemented protections with no-paid regression coverage, not attribution of a particular production incident or proof of deployment. See [failure boundaries](docs/features/failures-and-cancellation/index.md).
+See [SECURITY.md](SECURITY.md) for the current ACP sandboxing and permission
+boundary, and [PRIVACY.md](PRIVACY.md) for data handling. Report
+vulnerabilities as described there rather than in a public issue.
 
-Captured image steering includes a `read_source` reference and hint, including
-an identical retry after source capture committed but before steering was recorded.
-Retries preserve one steering event and requirement revision; they do not edit history.
+## License
 
-A message sent while workers, review or verification run takes effect after the
-runtime verification passed and returns the verified work to planning before
-completion. The coordinator then either plans the requested changes (a new
-reviewed and verified revision) or closes the verified work with a final summary;
-the runtime completes that summary only if the work still passes every
-completion gate. Unresolved worker checks must be disclosed with their blockers
-in the final summary, just as in ordinary reconciliation. Before this, such a
-message left the coordinator with refused
-`synthesis_submit` calls until the task asked the user (`structured_proposal_missing`).
-Coverage is no-paid controller tests, not a paid live run. See
-[steering](docs/features/steering-and-questions/index.md).
-
-A worker that steering leaves running keeps a running card in Paseo until Cortex reports its real outcome. The installed Paseo ACP bridge settles every open tool call when a turn ends, which showed such a worker as Failed (`Tool call failed: <title>`); Paseo 0.11.4's bridge shows them as Canceled instead. The Cortex provider now withholds either settlement for worker cards Cortex still reports running, unless the prompt itself failed, and the runtime keeps sending a worker card's updates after Paseo cancels the turn that created it. Genuine worker failures, a Stop's cancellation and a failed prompt keep their status. Coverage is no-paid provider/bundle tests, not rendered Desktop evidence. See [worker cards across steering](docs/features/steering-and-questions/index.md#worker-cards-across-steering).
-
-Owners can stop an exact brokered worker command without cancelling its worker: use **Running commands → Stop** in the selected Paseo Workers panel, `/cortex-kill <command-ref> <reason>` (send it as a chat message with Paseo CLI `paseo send`), or the owner-local CLI (`python3 -B scripts/cortex_commands.py list …` or `… stop …`, with `--project-root` and `--task-id`). The reason is required and delivered to the worker, which continues without rerunning the same command unchanged. These controls do not cover native Codex `apply_patch` or OpenCode `execute` actions. The UI and CLI have automated coverage; live Paseo Desktop/CLI qualification was not run. See [command stop and user-input controls](docs/features/steering-and-questions/index.md#stop-one-worker-command-with-a-reason).
-
-Owner-uploaded Paseo files referenced by absolute path or file URI are retained
-as task attachments. Workers use `list_sources`/`read_source`, not an
-outside-project `project_read`. Capture is read-only and confined to the
-launching Paseo home's uploads directory, with regular-file, containment and
-size checks; rejected references retain diagnostics. See
-[uploaded-file sources](docs/features/input-history-and-replay/index.md#paseo-uploaded-files).
-
-Paseo's native composer queue is distinct from Cortex's captured steering. In default `steer` mode, Enter delivers immediately, so that chat bubble has no Edit icon. Use Ctrl/Cmd+Enter while Cortex works, then the **pencil on the queued chip above the composer** to edit before delivery; Edit then clear text/attachments cancels the draft. Cortex explains this after the first successful busy-turn send and refuses changed payloads reusing an already-captured message id; send a new correction instead. Edit overwrites an existing draft; native enqueue trims surrounding whitespace. Installed 0.10.2 helper tests cover edit/resubmit and consumed identities, not rendered GUI, complete attachment restoration or reload persistence. No simulated Cortex Cancel/Edit controls were added; see [the ownership boundary](docs/features/steering-and-questions/index.md#native-composer-queue-versus-captured-steering).
-
-## Runtime store ignore protection
-
-Root `.gitignore` writes through Cortex keep a final `/.cortex/` rule,
-including after negations. Command edits are reconciled at completion and
-native edits before a fresh writable worker result is published; there is no
-universal native pre-action hook. See [the boundary and tracked-file limits](docs/features/permissions-and-containment/index.md#runtime-store-ignore-protection).
-
-Independent review can start once all execution results are accepted, while
-finished workers' engine turns wind down. Their MCP authority is revoked at
-acceptance; capacity remains occupied until confirmed exit. Review and completion
-remain bound to project digests. Verification can overlap the running reviewer;
-only an unchanged, approved binding credits its result. Stale or rejected
-candidates are discarded, and stops cancel their command sequence. Execution-start
-metadata alone never closes a deferred check; only authoritative verification on
-the approved digest can do so, with exact argv and the same gap-author and current
-project digest regardless of execution order. The retained output body must also
-be safely readable at its exact recorded length; metadata alone is insufficient. See
-[orchestration](docs/features/orchestration/index.md#speculative-verification-during-review).
-Project digest captures reuse bounded in-memory hashes of unchanged files on
-recognized local filesystems without changing the manifest or drift gates;
-see [project digest caching](docs/features/workspaces-and-integration/index.md).
-
-## Orchestration timing
-
-Use `python3 -B scripts/cortex_timeline.py --project "$PROJECT" --task "$TASK" --json`
-for a read-only, metadata-only phase breakdown of a checkpointed project store.
-Missing milestones stay missing; worker overlaps are not summed. Adding `--aggregate` (optionally with repeated `--task`) prints counts, ratios and decision-gate inputs in separate engine/route/effort cohorts; incomplete chains and missing approved inputs withhold verdicts rather than becoming zero. The reinvestigation gate counts dependent-attempt reads only, over all eligible worker execution time; independent repeats remain diagnostic. The owner runs it outside the worker sandbox on a checkpointed store.
-See [timing observations and limits](docs/features/observability/index.md#orchestration-phase-measurement).
-
-Developer debugging can opt in to private dev-only wire traces through the
-guarded wrapper, only when starting the isolated dev daemon:
-
-```bash
-python3 -B scripts/cortex_paseo_dev.py --wire-trace -- daemon start --timeout 60 --json
-python3 -B scripts/cortex_trace_view.py --task "$TASK" --pretty
-```
-
-Tracing is off by default; ordinary wrapper launches strip inherited opt-in.
-The guarded switch is accepted only for `~/.paseo-dev` daemon start, and the
-runtime refuses installed production payload/state. Redacted traces live in
-private capped files below the dev home, outside project stores and Git; stop
-the dev daemon to avoid concurrent rotation while analyzing exact history.
-Records can contain sensitive project/model content even after redaction, so
-treat the files as confidential and remove them only under the dev-home's
-normal retention procedure. See [wire-trace boundaries and limits](docs/features/observability/index.md#developer-only-wire-tracing).
+[MIT](LICENSE)
