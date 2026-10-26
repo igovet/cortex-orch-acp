@@ -1,6 +1,15 @@
 # Changelog
 
-## 1.0.0 (unreleased)
+## 1.0.1 (unreleased)
+
+Since 1.0.0, orchestration and recovery fixes improve steering, worker
+visibility and evidence handling. In Paseo, the busy-steering acknowledgement
+is now kept within its own message boundary, so it cannot consume or hide the
+following worker-card update; worker cards remain visible while their workers
+continue. The release also includes the routing, lifecycle, storage-inspection,
+qualification and packaging safeguards detailed below. These changes do not
+establish live qualification or release readiness.
+
 
 A model requirement naming a dotted identity now routes to that identity. A
 period inside a token (`codex-acp/gpt-6.1-sol`, `AGENTS.md`, `1.0.0`) no longer

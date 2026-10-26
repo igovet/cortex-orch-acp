@@ -16,7 +16,7 @@ regression passes do not clear a nonzero audit, and `devDependencies` is not
 a security boundary. See the [dependency disposition](docs/project/paseo-dependency-audit.md)
 for exact paths, artifact-test limits and the next upstream-fix decision.
 
-## Current ACP boundary (1.0.0)
+## Current ACP boundary (1.0.1)
 
 Model-route consent requires an actual request in recorded user messages or
 answers. Descriptive model remarks and coordinator `model_reason` text never
