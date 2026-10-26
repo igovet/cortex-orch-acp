@@ -213,7 +213,11 @@ exception), the controller emits an empty `agent_message_chunk` with a unique
 (a route notice, a worker question or other notice) has no engine turn after it:
 the next scheduler pass emits the same marker after its notices and before its
 worker cards, at most one per pass and only when text was written since the last
-marker. The installed SDK preserves this empty chunk; the provider consumes it without displaying an empty row, clears its
+marker. The busy-steering acknowledgement is emitted before the controller's
+text tracker exists, so the runtime closes that complete message immediately,
+before entering the worker continuation. Otherwise later dependent worker starts
+and earlier outcomes remain queued even though their ACP cards were emitted.
+The installed SDK preserves this empty chunk; the provider consumes it without displaying an empty row, clears its
 streaming-message state and releases queued cards. Later workers then appear
 immediately instead of waiting for another coordinator message or the whole task.
 The marker is retained in ordered display replay, not engine input. Old journals

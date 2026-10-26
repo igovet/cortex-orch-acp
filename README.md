@@ -154,7 +154,9 @@ client for Cortex: it has a native Cortex provider plugin, shows per-worker
 cards with live status and token usage, and is what orchestration is
 qualified against. The steps below are exact commands from this repository;
 for the local-checkout path, replace `/absolute/path/to/cortex-orch-acp` with
-where you cloned it.
+where you cloned it. Busy-message acknowledgements close their display message
+before worker waiting resumes, so later worker cards do not wait behind that
+acknowledgement for the whole task to end.
 
 ### Prerequisites
 

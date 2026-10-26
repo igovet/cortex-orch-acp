@@ -608,8 +608,10 @@ then releases every event in arrival order at the next message/timeline boundary
 engine-message completion, turn end, load completion, cancellation, failure or close.
 Engine-message completion uses an empty ACP text chunk with a unique reserved
 `__cortex_message_boundary__:` message identity, also sent by the scheduler after
-runtime notices written while workers run, retained in ordered display history
-and consumed by the provider without a display row. It is not worker completion
+runtime notices written while workers run. The runtime also closes a complete
+busy-steering acknowledgement before entering the controller, whose text tracker
+cannot observe that earlier preamble. These markers are retained in ordered
+display history and consumed by the provider without a display row. It is not worker completion
 or a permission/result signal; it prevents the longer outer ACP prompt from
 holding cards after the coordinator stopped writing. Text is neither buffered
 nor rewritten. Durable journals keep the original event order and text; this

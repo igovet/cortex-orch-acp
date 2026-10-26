@@ -2923,6 +2923,11 @@ class OrchestratingRuntime:
             acknowledgement = acp_steering.busy_acknowledgement(self._store, task_id, language)
             if acknowledgement:
                 emit_update("\n\n" + acknowledgement + "\n\n")
+                # This complete runtime message precedes the controller's
+                # text tracker. Close it before waiting on existing workers,
+                # or Paseo holds their later cards behind the acknowledgement.
+                from ..orchestration.controller import _finish_coordinator_message
+                _finish_coordinator_message(emit_display_update)
         return self._continuation_loop(
             task_id, session_id, channel, session_ref, answer_text, emit_update, cancel_event, language, host_elicitor,
             emit_tool_call=emit_tool_call,

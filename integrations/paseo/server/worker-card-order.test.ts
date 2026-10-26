@@ -149,6 +149,33 @@ test("a completed coordinator message releases workers before the long ACP turn 
   await f.wrapped.close();
 });
 
+test("a busy steering acknowledgement cannot hide sequential worker handoffs", async () => {
+  for (const withBoundary of [false, true]) {
+    const f = fixture();
+    f.card("previous");
+    f.text("\n\nReceived. I will apply this after the current step.\n\n", "ack");
+    if (withBoundary) f.emit({ type: "timeline.item", sessionId: "s", item: {
+      type: "assistant_message", id: "__cortex_message_boundary__:steering",
+      messageId: "__cortex_message_boundary__:steering", text: "",
+    } });
+    // Existing work finishes, then two dependent workers start without another
+    // coordinator engine message or ACP turn end (the retained failure shape).
+    f.card("first");
+    f.card("previous", "completed");
+    f.card("first", "completed");
+    f.card("next");
+    const cards = f.seen.filter(event => event.item?.type === "plugin");
+    assert.deepEqual(cards.map(event => [event.item.data.callId, event.item.data.status]),
+      withBoundary ? [
+        ["worker:previous", "running"], ["worker:first", "running"],
+        ["worker:previous", "completed"], ["worker:first", "completed"], ["worker:next", "running"],
+      ] : [["worker:previous", "running"]], "an unterminated acknowledgement reproduces the hidden cards");
+    assert.deepEqual(hostRows(f.seen).filter(row => row.kind === "assistant_message").map(row => row.text),
+      ["\n\nReceived. I will apply this after the current step.\n\n"]);
+    await f.wrapped.close();
+  }
+});
+
 for (const boundary of ["completed", "canceled", "failed", "ready", "closed", "runtime_failed", "message", "tool", "close"]) {
   test(`pending cards flush on ${boundary} without dropping or duplicating text`, async () => {
     const f = fixture();
