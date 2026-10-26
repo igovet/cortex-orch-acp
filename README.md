@@ -6,7 +6,7 @@
 <p align="center"><strong>Multi-agent coordination for software work, as an ACP agent.</strong></p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Cortex-1.0.0-7c3aed" alt="Cortex 1.0.0" />
+  <img src="https://img.shields.io/badge/Cortex-1.0.1-7c3aed" alt="Cortex 1.0.1" />
   <img src="https://img.shields.io/badge/Python-3.11%2B-3776ab" alt="Python 3.11+" />
   <img src="https://img.shields.io/badge/Protocol-ACP%20v1-111827" alt="Agent Client Protocol v1" />
   <img src="https://img.shields.io/badge/Storage-Markdown%20%2B%20SQLite-0f766e" alt="Markdown files and SQLite metadata" />
@@ -154,7 +154,9 @@ client for Cortex: it has a native Cortex provider plugin, shows per-worker
 cards with live status and token usage, and is what orchestration is
 qualified against. The steps below are exact commands from this repository;
 for the local-checkout path, replace `/absolute/path/to/cortex-orch-acp` with
-where you cloned it.
+where you cloned it. Busy-message acknowledgements close their display message
+before worker waiting resumes, so later worker cards do not wait behind that
+acknowledgement for the whole task to end.
 
 ### Prerequisites
 

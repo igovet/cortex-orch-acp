@@ -807,7 +807,16 @@ including exception cleanup, and after runtime notices written while workers run
 provider consumes it as a flush boundary, not a
 display row. It neither ends the ACP turn nor changes worker status. No timer or
 punctuation heuristic is involved; token-sized prose stays together. Old saved
-history without these markers is not rewritten. See
+history without these markers is not rewritten.
+
+A follow-up message during busy work also emits a complete acknowledgement
+before the controller starts tracking text. That preamble must send its own
+boundary immediately: the scheduler cannot detect text written before its tracker
+existed. Without it, sequential worker starts and completed outcomes can remain
+queued for hours despite correct ACP card emission. The runtime closes this
+acknowledgement before entering the continuation; the provider's ordering rule
+is unchanged. This does not repair an already running installed process or old
+host history. See
 [worker-card ordering](../features/observability/index.md#bounded-acp-event-projections).
 
 ## Paseo 0.12.0 worker cards: per-turn tool rows, Stop status and Space (2026-10-21)
