@@ -1,8 +1,17 @@
 # Security policy
 
 Fresh-install model settings use the owner's refreshed portable default-profile
-routing policy, `codex-acp/gpt-6.1-sol` coordinator at medium effort, and Russian
-message language. Existing owner settings are never replaced. Account/connection
+routing policy, `claude-agent-acp/opus[1m]` coordinator at medium effort, and Russian
+message language. The 2026-10-27 preset sync adds `codex-acp/gpt-6.1-terra`
+as an enabled standard-tier automatic candidate with medium-to-high effort and
+first-ranked standard-tier writing, testing and debugging preferences, not a pin
+or proof of live availability. Competing purpose preferences are removed from
+Sonnet/Sol and testing from Haiku/Luna, without removing fallback membership.
+Missing, unavailable or exhausted Terra permits eligible fallback; purpose preference
+yields at known usage >=95% when more than 10 points worse than an available
+alternative. Provider choices and hard eligibility remain controlling, and ordinary
+light-tier technical writing is unchanged. This is not live qualification. Existing owner
+settings are never replaced. Account/connection
 identities and machine-specific MCP definitions/paths are not cloned; see
 [the install snapshot boundary](docs/configuration.md#fresh-install-owner-default-snapshot).
 
@@ -17,6 +26,18 @@ a security boundary. See the [dependency disposition](docs/project/paseo-depende
 for exact paths, artifact-test limits and the next upstream-fix decision.
 
 ## Current ACP boundary (1.0.1)
+
+Startup and approved engine updates may advance existing Codex/Claude launch
+commands to newer source-qualified, exactly registered owned installations.
+This is an explicit runtime policy, not project-supplied command approval.
+Only the launch command and its derived fingerprint change; account references,
+endpoints, providers, routes and model settings remain intact. Selection remains
+subject to launch-time integrity/private-adapter checks, never accepts an
+unregistered release and never downgrades automatically. Registry writes are
+locked, revision-checked and atomic with a private 0600 previous-config backup.
+There is no per-connection pin field; `CORTEX_ENGINE_FOLLOW=off` opts out for
+rollback, separately from disabling downloads. See
+[configuration and rollback](docs/configuration.md#approved-adapter-following-and-rollback).
 
 Model-route consent requires an actual request in recorded user messages or
 answers. Descriptive model remarks and coordinator `model_reason` text never
@@ -316,6 +337,17 @@ not an empty successful comparison. Reviewers publish inline through the existin
 immutable-report path. Their independence, worker report access and mandatory
 digest-bound verification remain unchanged. See
 [reviewer handoff](docs/features/orchestration/index.md#reviewer-handoff).
+
+Codex ACP **2.3.0** and Claude ACP **0.97.0** have separate exact-source
+instruction-delivery registrations, alongside the retained older releases.
+Cortex still negotiates ACP v1. The 2.3.0 private adapter checks its complete
+distribution SHA-256 and exact patch sites; it translates existing role metadata
+to upstream append-style instructions without changing the installed package.
+No-paid initialization and fake-App-Server traces are not paid/native-tool
+enforcement or GUI evidence. Neither production nor dev connection files are
+rewritten by these registrations. See
+[Codex](docs/features/codex-engine/index.md#current-support-230-2026-10-27) and
+[Claude](docs/features/claude-engine/index.md#current-support-0970-2026-10-27).
 
 Claude ACP 0.88.0 is separately source-qualified for system instruction delivery;
 0.78.0 and 0.87.0 remain independently registered. A Desktop check on 0.88.0 observed its resumed scenario complete without an instruction-delivery refusal; it does not establish native-tool enforcement (see [Claude adapter support](docs/features/claude-engine/index.md#current-support-0880-2026-10-08)). Unknown installed Claude

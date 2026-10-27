@@ -8,8 +8,8 @@ discovered and recorded by a human operator following the manual recipe in
 ``docs/features/claude-engine/index.md``* -- this module never discovers or
 installs anything itself; connections.engine_update owns installation.
 
-The current fallback release is 0.88.0 (Claude Agent SDK 0.3.293,
-ACP SDK 1.7.0). Exact 0.78.0 and 0.87.0 registrations remain supported;
+The current fallback release is 0.97.0 (Claude Agent SDK 0.3.310,
+ACP SDK 2.0.2, using ACP v1). Exact 0.78.0, 0.87.0 and 0.88.0 registrations remain supported;
 0.87.0's side-by-side SDK 0.3.293 refresh is retained without overwriting it.
 package.json still declares
 dist/index.js as its bin.

@@ -56,6 +56,26 @@ and the profile-generation check below) and package payload
 it belongs in `plan.verification`, which the runtime runs once after review,
 with no time limit.
 
+## Exact adapter qualification
+
+Codex ACP 2.3.0 and Claude ACP 0.97.0 retain the outgoing ACP v1 contract.
+Run the bounded registration, discovery and protocol checks without a model call:
+
+```bash
+env PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -B -m pytest -q tests/test_engine_adapter_versions.py tests/test_engine_version_resolution.py tests/test_instruction_delivery_qualification.py tests/test_engine_codex_launch.py tests/test_engine_claude_evidence.py
+env PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -B -m pytest -q tests/test_engine_update.py tests/test_connections_discovery.py tests/test_route_availability.py tests/test_auto_route_delegation.py tests/test_engine_option_mapping_dispatch.py tests/test_generation_instruction_binding.py tests/test_context_generations.py
+```
+
+Installed-package checks skip explicitly when the named local distribution is
+absent; a skip is not qualification. `tests/test_codex_developer_instructions.py`
+additionally runs the actual private bundle against a fake App Server when
+`CORTEX_CODEX_ACP_TEST_PACKAGE` names the inspected package directory.
+Exercise both 2.3.0 and retained 2.1.1 separately. The real-adapter initialization
+tests use empty isolated account directories and send no prompt. None of these
+checks establishes paid CLI/desktop behavior or real inference cancellation.
+See the [engine evidence](../features/codex-engine/index.md#current-support-230-2026-10-27)
+and [Claude evidence](../features/claude-engine/index.md#current-support-0970-2026-10-27).
+
 ## Model hint notice checks
 
 Run the no-paid routing/notice and native fake-engine regressions:

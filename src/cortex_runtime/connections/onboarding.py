@@ -556,9 +556,6 @@ def sync_discovered_connections(discovered: dict, *, environ: dict[str, str] | N
     except PortableError:
         return []
     created = []
-    upgraded = _upgrade_cortex_owned_connections(discovered, environ=environ)
-    if upgraded:
-        existing_engines = {record.engine for record in registry.read_registry(environ).connections.values()}
     for engine, info in discovered.items():
         if engine in existing_engines:
             continue
@@ -576,61 +573,6 @@ def sync_discovered_connections(discovered: dict, *, environ: dict[str, str] | N
             continue
         created.append(record)
     return created
-
-
-def _upgrade_cortex_owned_connections(discovered: dict, *, environ: dict[str, str] | None = None) -> list[str]:
-    """Repoint a connection Cortex itself built, back when Cortex installed
-    and authenticated its own engine copy, at the client's install and the
-    client's own credentials.
-
-    Covers both halves of keeping a connection pointed at the client:
-    migrating one that still holds an *owned* (Cortex-created) credential
-    copy, and keeping an already-referencing one's launch command in step
-    with the client's current install -- an engine the editor updates, or
-    a node binary that resolves somewhere new, otherwise leaves the
-    connection pointing at something that no longer launches. A connection
-    with its own secret or keyring entry is a deliberate configuration and
-    is never rewritten.
-
-    Why this exists: those connections keep their own credential copy, and
-    that copy expires on its own schedule while the client's install stays
-    signed in. Live: every new session refused with "OAuth session expired
-    and could not be refreshed" on a machine where the same editor's own
-    agent was working fine. Re-authenticating a second copy is not the
-    answer -- the engine the user already authorised is
-    ("использоваться должен acp от zed, там все авторизовано").
-
-    The connection keeps its id and name, so tasks and route history that
-    already name it keep working. Returns the ids actually changed.
-    """
-    changed: list[str] = []
-    with registry.transaction(environ) as state:
-        for record in list(state.connections.values()):
-            info = discovered.get(record.engine)
-            if info is None:
-                continue
-            ref = record.credential_ref
-            if not isinstance(ref, EngineNativeDir):
-                # A connection the user pointed at their own secret or
-                # keyring entry is a deliberate configuration; never
-                # rewritten.
-                continue
-            native = str(registry.client_native_dir(record.engine, environ))
-            if not ref.owned and ref.path != native:
-                # Already referencing, but somewhere else the user chose.
-                continue
-            launch = tuple(info.launch_command)
-            if tuple(record.launch_command or ()) == launch and ref.path == native:
-                continue
-            state.connections[record.id] = replace(
-                record,
-                launch_command=launch,
-                credential_ref=EngineNativeDir(path=native, owned=False),
-                approved_fingerprint=trust.fingerprint(record.engine, record.provider, None, launch),
-                updated_at=_now_iso(),
-            )
-            changed.append(record.id)
-    return changed
 
 
 def resolve_connection_for_route(connection_id: str, *, environ: dict[str, str] | None = None) -> ConnectionRecord:

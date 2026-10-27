@@ -3,6 +3,39 @@
 > Status: migrated from the former ACP reference. Statements were not re-verified line by line against source in this pass; claims without a source path are unverified until reviewed.
 
 
+## Adapter inventory observation (2026-10-27)
+
+Read-only npm registry and installed-package checks found current releases
+[codex-acp 2.3.0](https://github.com/agentclientprotocol/codex-acp/releases/tag/v2.3.0)
+and [claude-agent-acp 0.97.0](https://github.com/agentclientprotocol/claude-agent-acp/releases/tag/v0.97.0)
+already installed side by side in the owner's Cortex engine directories; both
+`--version` checks exited 0. Subsequent exact-source qualification registered
+both versions in this checkout, retaining **2.1.1** and **0.88.0** for rollback.
+The new Codex private patch is pinned to its complete distribution digest;
+instruction delivery, structured config, MCP conversion and event patches
+have installed-bundle no-paid coverage. Claude's retained metadata instruction
+and SDK-option channels were inspected independently. Both real adapters passed
+prompt-free initialization with isolated empty account directories. See the
+[Codex](../features/codex-engine/index.md#current-support-230-2026-10-27) and
+[Claude](../features/claude-engine/index.md#current-support-0970-2026-10-27)
+evidence and limits. No connection file was changed or paid turn run during
+source qualification; dev activation must explicitly select the new paths
+before isolated CLI qualification. Both new releases use ACP SDK 2.0.2;
+Codex 2.3.0 adds ACP v2 support and Claude added experimental v2 support in
+0.95.0. Cortex remains an ACP v1 client.
+
+The optional standalone OpenCode's upstream v2 release is
+[2.2.0](https://github.com/anomalyco/opencode/releases/tag/v2.2.0);
+`npm view opencode-ai version` instead reports the separate **1.19.4** line,
+which is not a suitable update for this v2 integration. The first
+installed-version check hit a read-only native log; a separately
+authorized read-only check then reported installed **2.2.0**, already current.
+Cortex's existing 2.x policy needs no exact-version guard change for it.
+This is version evidence, not new OpenCode protocol qualification.
+No adapter installation, connection file, production Paseo installation or
+plugin was changed. No-paid startup and focused adapter/discovery tests do not
+exercise paid engine turns or rendered client behavior.
+
 ## Installed Paseo version boundary
 
 > On 2026-10-23, a read-only `/opt/Paseo/resources/bin/paseo --version`

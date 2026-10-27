@@ -60,8 +60,8 @@ SUPPORTED_ENGINES: tuple[str, ...] = tuple(_PACKAGE_NAME)
 # 2026-09-22). Claude also requires exact instruction-delivery evidence;
 # an auto-installed but unregistered release must not displace a qualified one.
 QUALIFIED_ADAPTER_VERSIONS: dict[str, tuple[str, ...] | None] = {
-    "codex-acp": ("1.12.0", "1.13.0", "2.0.1", "2.1.1"),
-    "claude-agent-acp": ("0.78.0", "0.87.0", "0.88.0"),
+    "codex-acp": ("1.12.0", "1.13.0", "2.0.1", "2.1.1", "2.3.0"),
+    "claude-agent-acp": ("0.78.0", "0.87.0", "0.88.0", "0.97.0"),
     # OpenCode v2 is accepted by major version. Keep the range visible to
     # settings clients; do not interpret it as an exact-version allowlist.
     "opencode": ("2.x.x",),

@@ -45,9 +45,46 @@ Use the setup command to add or change connections; do not hand-edit `connection
 
 The supported engines are `codex-acp`, `claude-agent-acp` and the optional `opencode` (OpenCode v2, see [OpenCode adapter](features/opencode-engine/index.md)).
 
+### Approved adapter following and rollback
+
+At incoming ACP startup, before constructing the production runtime, Cortex
+advances existing Codex/Claude connections to the newest **approved installed**
+adapter when its declared version is strictly newer than the recorded package.
+Approved means source-qualified by `discovery.is_qualified` /
+`QUALIFIED_ADAPTER_VERSIONS` and exact instruction-delivery/private-adapter
+registrations, actually installed in Cortex's owned engine root with a valid
+declared bin. A newer unregistered npm release never wins. Existing byte/digest
+and private-patch checks still run before launch; selection is not live qualification.
+
+The same selection runs after a qualified `engine_update.update_engine`
+installation. It changes only the launch command and its derived trust
+fingerprint, preserving connection IDs, account/credential references, endpoint,
+provider, timestamps, limits and all route/model settings. The former startup
+credential-copy migration is no longer automatic. Running processes are not
+reconfigured; later launches use the new command. An unreadable old package or
+nonstandard command is left unchanged rather than guessing its version.
+
+Writes use the existing registry lock, current content-revision check and private
+atomic replacement. Exact previous bytes are retained as owner-only `0600`
+`connections.adapter-backup.json` beside `connections.json` (latest automatic
+change only). Stale revisions abort without a partial change. A sanitized stderr
+diagnostic names only engine, old version and new version; startup failures defer
+selection and retain existing configuration.
+
+There is no per-connection explicit version-pin field. To opt out for rollback,
+set `CORTEX_ENGINE_FOLLOW=off` in the Cortex child environment **before restarting**.
+This disables local selection, independently of `CORTEX_ENGINE_UPDATE=off`,
+which only disables background downloads. With Cortex stopped and following off,
+restore the private backup to `connections.json`, preserving owner-only mode,
+or use the existing operator install-record/setup workflow for a retained older
+qualified install. Do not restore a backup over newer unrelated settings without
+reconciling them. Automatic selection never downgrades. OpenCode records a stable
+standalone binary command, not a versioned owned npm path, so no analogous
+connection rewrite is needed; its existing version checks still apply.
+
 ### Claude ACP adapter updates and instruction-delivery qualification
 
-Claude engine auto-updates may install an adapter release before Cortex has an exact instruction-delivery registration for it. Discovery therefore selects the newest installed version with an exact registration ahead of newer unregistered versions, and pruning retains registered installs as fallbacks. If no registered install is available, diagnostics can still identify the installed version, but critical-role dispatch refuses it before launch. This qualification applies to instruction delivery, not proof of effective model/tool enforcement. See [Claude adapter support](features/claude-engine/index.md#current-support-0880-2026-10-08) for the current registration and limits. One owner-requested Desktop check on 0.88.0 (2026-10-08) completed a resumed scenario; its bounded, not-clean evidence is on the Desktop evidence page.
+Claude engine auto-updates may install an adapter release before Cortex has an exact instruction-delivery registration for it. Discovery therefore selects the newest installed version with an exact registration ahead of newer unregistered versions, and pruning retains registered installs as fallbacks. If no registered install is available, diagnostics can still identify the installed version, but critical-role dispatch refuses it before launch. This qualification applies to instruction delivery, not proof of effective model/tool enforcement. Exact current registrations include Codex ACP 2.3.0 and Claude ACP 0.97.0, retaining 2.1.1 and 0.88.0 for rollback. Startup follows newer approved installed adapters for existing connections; see the following policy. See [Claude adapter support](features/claude-engine/index.md#current-support-0970-2026-10-27) and [Codex adapter support](features/codex-engine/index.md#current-support-230-2026-10-27) for the current registrations and limits. One owner-requested Desktop check on 0.88.0 (2026-10-08) completed a resumed scenario; its bounded, not-clean evidence is on the Desktop evidence page.
  Authentication modes are `native_account` and `api_key`; `gateway` is represented in the type enum but has no implemented launch path and is not usable. Codex API-key kind is `openai_api_key`; Claude accepts `anthropic_api_key` or `claude_oauth_token`. Native account connections may reference the user's existing `~/.codex` or `~/.claude` directory, or use Cortex-managed isolated engine state. OpenCode supports only `native_account`, referencing the login `opencode auth login` wrote to `~/.local/share/opencode`, and is added only with `add-opencode-connection` (below). The supported combinations come from `connections.model.SUPPORT_MATRIX`; onboarding is in `connections.onboarding`.
 
 Typical setup:
@@ -78,7 +115,7 @@ The closed fields and defaults are enforced by `connections.registry._parse_regi
 
 There is no installer for any engine. OpenCode is a standalone binary, not an npm package, and takes no install record: `python3 -B scripts/cortex_acp_setup.py add-opencode-connection [--binary PATH]` finds a trusted binary, reads its version in a network-less sandbox and registers the connection. `$CORTEX_OPENCODE_BINARY` names a binary for that search. For the npm engines: `add-connection --install-record FILE` takes an operator-recorded install of an engine you already installed by other means (for example `npm install @agentclientprotocol/codex-acp`). It holds absolute paths without symlink components and the SHA-256 of each pinned file. `verify_install()` re-hashes every file before launch. The JSON shape follows `engine.codex_install.CodexAcpInstall` or `engine.claude_install.ClaudeAcpInstall`: `node_binary`, `adapter_entry`, `package_json`, `package_version` (must equal the package's own `"version"`) and their digests, plus the bundled Codex binary and version for Codex only. `tests/fixtures/engine/codex/install-record.template.json` shows the shape without real hashes. The field-by-field recipes are in the [Codex adapter](features/codex-engine/index.md#current-runtime-gateway-policy) and [Claude adapter](features/claude-engine/index.md#pinned-install-requirements-manual-recipe-placeholder) pages.
 
-Accepted adapter versions (`connections.discovery.QUALIFIED_ADAPTER_VERSIONS`): codex-acp exactly `1.12.0` or `1.13.0` (an allowlist, not a floor; any other version is refused). claude-agent-acp has no allowlist, and `pinned-dependencies.json` records the last tested version. OpenCode accepts any `2.x.x` release, checked from the sandboxed `--version` output before launch and again from the engine's own `initialize` `agentInfo.version`; 1.x, 3.x and malformed versions are refused.
+Accepted adapter versions (`connections.discovery.QUALIFIED_ADAPTER_VERSIONS`): Codex exactly `1.12.0`, `1.13.0`, `2.0.1`, `2.1.1` and `2.3.0`; Claude requires exact instruction-delivery registration (`0.78.0`, `0.87.0`, `0.88.0`, `0.97.0`). These are not minimum-version floors. OpenCode accepts any `2.x.x` release, checked from the sandboxed `--version` output before launch and again from the engine's own `initialize` `agentInfo.version`; 1.x, 3.x and malformed versions are refused.
 
 ## Defaults and policy ceiling
 
@@ -489,11 +526,31 @@ Reads never rewrite the source file or profile; the policy version remains 2. Th
 
 ### Fresh-install owner default snapshot
 
+Synced from the owner's 2026-10-27 production `default` profile update,
+`codex-acp/gpt-6.1-terra` is appended to both enabled and automatic membership,
+with only the `standard` tier, `effort_floor: medium`, `max_effort: high` and
+`preferred_for: [writing, testing, debugging]`. No request labels, quota-window
+mapping, ordered per-kind lists or pin are added. The portable coordinator now
+matches production's `claude-agent-acp/opus[1m]` at medium effort; all other
+preset values remain unchanged except for the priority refinement below.
+Terra is now ranked first for standard-tier testing, debugging and writing by
+removing those competing `preferred_for` entries from Sonnet and Sol, and testing
+from Haiku and Luna (which still have `also_standard_for: [testing]`). Terra's
+own policy is unchanged; list order is not a priority mechanism. Sol retains
+review preference. No model is removed from fallback eligibility.
+Unavailable, missing-catalog or exhausted Terra can fall back to other eligible
+models; purpose preference also yields when known usage is at least 95% and
+more than 10 percentage points worse than an available alternative. Higher-priority
+provider choices and hard eligibility rules still apply. Normal-complexity
+technical writers remain light-tier; Terra's writing preference applies only at
+standard tier (for example, genuinely high-complexity writing).
+This is configuration synchronization and offline ranking, not live model qualification.
+
 The public install asset is based on the saved production `default` profile from
 2026-10-12 at 14:23 UTC, with the implementation-kind and tier refinements below. Its routing is a non-secret snapshot, including
 multi-tier memberships, effort floors/ceilings, preferences, request labels and
 quota-window associations. The portable coordinator is
-`codex-acp/gpt-6.1-sol` with `thought_level: medium` (refreshed from the saved
+`claude-agent-acp/opus[1m]` with `thought_level: medium` (refreshed from the saved
 `default` profile); no mode override is
 added. New `defaults.json` files also set `language: ru`. The install envelope
 remains schema version 1 with optional `language` (`en` or `ru`); coordinator
@@ -529,8 +586,8 @@ against the owner's preference, and the owner's eligible Sonnet/Sol preferences
 serve that tier instead. Opus still serves `design`, `implementation_backend` and
 `implementation_frontend` through its remaining `deep`/`flagship` tiers once
 work escalates or is otherwise eligible for those tiers. Sol's (`gpt-6.1-sol`)
-`preferred_for` also gains `testing`, `investigation` and `writing` in this
-sync. The latest refresh removes Sol's free-text condition (`preferred_when: null`),
+`preferred_for` also gained `testing`, `investigation` and `writing` in that
+sync; the 2026-10-27 priority refinement removes testing, debugging and writing again. The latest refresh removes Sol's free-text condition (`preferred_when: null`),
 so its listed `preferred_for` kinds apply without a route hint, including on
 quality retries. With equal quota and no provider preference, unhinted standard
 `design` and `implementation_frontend` now select Sol rather than Sonnet;

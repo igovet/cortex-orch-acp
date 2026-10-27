@@ -14,9 +14,9 @@ claude-agent-acp configuration failure here
 native path, silently or otherwise, and no Codex-specific env var or
 option id is ever referenced from here.
 
-Supported instruction-delivery releases are 0.78.0, 0.87.0 and 0.88.0 (current
-fallback), each inspected independently; see instruction_delivery_registry.
-0.88.0 bundles Claude Agent SDK 0.3.293 and ACP SDK 1.7.0, while retaining
+Supported instruction-delivery releases are 0.78.0, 0.87.0, 0.88.0 and 0.97.0
+(current fallback), each inspected independently; see instruction_delivery_registry.
+0.97.0 bundles Claude Agent SDK 0.3.310 and ACP SDK 2.0.2, while retaining
 ACP v1 and the model/effort/mode option ids. Model names and effort choices
 remain session-observed, not inferred from the package version.
 """

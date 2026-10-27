@@ -28,7 +28,8 @@
       "codex-acp": [
         "gpt-6.1-sol",
         "gpt-6-astra",
-        "gpt-6-luna"
+        "gpt-6-luna",
+        "gpt-6.1-terra"
       ],
       "opencode": []
     },
@@ -88,11 +89,8 @@
             "preferred_for": [
               "implementation_backend",
               "implementation_frontend",
-              "debugging",
-              "testing",
               "investigation",
               "review",
-              "writing",
               "analysis",
               "operations"
             ],
@@ -122,7 +120,6 @@
               "writing",
               "implementation_backend",
               "implementation_frontend",
-              "testing",
               "debugging",
               "investigation",
               "operations"
@@ -155,7 +152,8 @@
         "auto": [
           "gpt-6.1-sol",
           "gpt-6-astra",
-          "gpt-6-luna"
+          "gpt-6-luna",
+          "gpt-6.1-terra"
         ],
         "tiers": {
           "gpt-6-astra": [
@@ -167,6 +165,9 @@
           "gpt-6.1-sol": [
             "standard",
             "deep"
+          ],
+          "gpt-6.1-terra": [
+            "standard"
           ]
         },
         "policy": {
@@ -199,7 +200,6 @@
               "writing",
               "implementation_backend",
               "implementation_frontend",
-              "testing",
               "debugging",
               "investigation",
               "operations"
@@ -217,15 +217,21 @@
               "planning",
               "design",
               "review",
-              "debugging",
               "operations",
               "analysis",
-              "testing",
-              "investigation",
-              "writing"
+              "investigation"
             ],
             "preferred_when": null,
             "request_names": null
+          },
+          "gpt-6.1-terra": {
+            "effort_floor": "medium",
+            "max_effort": "high",
+            "preferred_for": [
+              "writing",
+              "testing",
+              "debugging"
+            ]
           }
         }
       },
@@ -288,8 +294,8 @@
     }
   },
   "coordinator": {
-    "engine": "codex-acp",
-    "model": "gpt-6.1-sol",
+    "engine": "claude-agent-acp",
+    "model": "opus[1m]",
     "parameters": {
       "thought_level": "medium"
     }

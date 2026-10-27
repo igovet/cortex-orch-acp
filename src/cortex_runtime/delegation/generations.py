@@ -147,6 +147,7 @@ _TIER_REGISTRY: dict[tuple[str, str], CompactionTier] = {
     ("codex-acp", "1.13.0"): CompactionTier("codex-acp", "1.13.0", AUTOMATIC, _AUTOMATIC_LIMITATION),
     ("codex-acp", "2.0.1"): CompactionTier("codex-acp", "2.0.1", AUTOMATIC, _AUTOMATIC_LIMITATION),
     ("codex-acp", "2.1.1"): CompactionTier("codex-acp", "2.1.1", AUTOMATIC, _AUTOMATIC_LIMITATION),
+    ("codex-acp", "2.3.0"): CompactionTier("codex-acp", "2.3.0", AUTOMATIC, _AUTOMATIC_LIMITATION),
     # 0.87.0's non-AIR reporter uses _meta.claudeCode.toolName == "compact"
     # (dist/tool-calls/reporters/compaction.js); session_manager translates
     # this explicit engine marker, not the display title.
@@ -157,6 +158,11 @@ _TIER_REGISTRY: dict[tuple[str, str], CompactionTier] = {
     ),
     ("claude-agent-acp", "0.88.0"): CompactionTier(
         "claude-agent-acp", "0.88.0", AUTOMATIC,
+        "The adapter reports compaction reactively through tool_call/tool_call_update "
+        "with _meta.claudeCode.toolName=compact; no pre-compaction hook is available.",
+    ),
+    ("claude-agent-acp", "0.97.0"): CompactionTier(
+        "claude-agent-acp", "0.97.0", AUTOMATIC,
         "The adapter reports compaction reactively through tool_call/tool_call_update "
         "with _meta.claudeCode.toolName=compact; no pre-compaction hook is available.",
     ),

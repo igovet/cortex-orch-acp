@@ -103,6 +103,10 @@ def update_engine(engine: str, *, environ: dict[str, str] | None = None) -> str 
             if old.name in keep or discovery.is_pinned(engine, old.name):
                 continue
             shutil.rmtree(old, ignore_errors=True)
+        if discovery.is_qualified(engine, latest):
+            from ..configuration.management import follow_approved_adapters
+
+            follow_approved_adapters(environ=environ)
         return latest
 
 

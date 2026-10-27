@@ -452,6 +452,14 @@ _CODEX_SEND_PROMPT_BY_VERSION = {
         _CODEX_SEND_PROMPT_SOURCE.replace(*_CODEX_SEND_PROMPT_1_13_RENAME),
         _CODEX_SEND_PROMPT_PATCHED.replace(*_CODEX_SEND_PROMPT_1_13_RENAME),
     ),
+    "2.3.0": (
+        _CODEX_SEND_PROMPT_SOURCE.replace(*_CODEX_SEND_PROMPT_1_13_RENAME).replace(
+            b"      serviceTier\n", b"      serviceTier,\n      ...clientUserMessageId !== void 0 ? { clientUserMessageId } : {}\n",
+        ),
+        _CODEX_SEND_PROMPT_PATCHED.replace(*_CODEX_SEND_PROMPT_1_13_RENAME).replace(
+            b"      serviceTier\n", b"      serviceTier,\n      ...clientUserMessageId !== void 0 ? { clientUserMessageId } : {}\n",
+        ),
+    ),
     "2.1.1": (
         _CODEX_SEND_PROMPT_SOURCE.replace(*_CODEX_SEND_PROMPT_1_13_RENAME),
         _CODEX_SEND_PROMPT_PATCHED.replace(*_CODEX_SEND_PROMPT_1_13_RENAME),
@@ -464,7 +472,8 @@ _CODEX_SEND_PROMPT_BY_VERSION = {
 
 # 2.0.1 renamed the mode label and replaced the response-item/history helpers
 # with typed reporters. 2.1.1 has byte-identical patched sites (npm bundle
-# comparison, 2026-10-07); only these exact versions use the v2 patch.
+# comparison, 2026-10-07). 2.3.0 retains those reporters but uses separately
+# guarded session/config/MCP/turn-start sites below.
 _CODEX_AGENT_REVIEWER_2_SOURCE = _CODEX_AGENT_REVIEWER_SOURCE.replace(b'"Approve for me"', b'"Auto review"')
 _CODEX_AGENT_REVIEWER_2_MANUAL = _CODEX_AGENT_REVIEWER_MANUAL.replace(b'"Approve for me"', b'"Auto review"')
 _CODEX_CUSTOM_TOOL_HELPERS_2_INSERT = (
@@ -496,6 +505,83 @@ _CODEX_COMPACTION_2_PATCHED = b'''    const fields = {
       } : {}
     };'''
 _CODEX_HELPERS_2_SOURCE = b'function stripShellPrefix(command) {'
+
+
+# 2.3.0 uses append-style session instructions and a structured session config.
+# Keep the old metadata wire contract, translating only in this exact bundle.
+_CODEX_2_3_SHA256 = "d584cb7df74847661c3cf69d34de6ad3a24f6bc69787faeaff49a1fd9a3d8870"
+_CODEX_NEW_SESSION_2_3_SOURCE = b'''    const instructions = await this.resolveSessionInstructions(request, void 0, true);
+    const additionalDirectories = readAdditionalDirectories(request.cwd, request.additionalDirectories, request._meta);
+    const developerInstructions = instructions?.developerInstructions;
+    await this.refreshSkills(request.cwd, additionalDirectories);
+    const sessionConfig = await this.createSessionConfig(request.cwd, additionalDirectories, request.mcpServers ?? []);
+    const response = await this.codexClient.threadStart({
+      config: sessionConfig.config,
+      modelProvider: this.getModelProvider(),
+      cwd: request.cwd,
+      ...developerInstructions !== void 0 && { developerInstructions }
+    });'''
+_CODEX_NEW_SESSION_2_3_PATCHED = b'''    const cortexRole = request._meta?.cortexRole;
+    if (cortexRole !== undefined && cortexRole !== "coordinator" && cortexRole !== "worker") {
+      throw RequestError.invalidParams({}, "Unsupported Cortex role");
+    }
+    const cortexInstructions = request._meta?.systemPrompt;
+    if (cortexInstructions !== void 0) {
+      if (typeof cortexInstructions !== "string" || cortexInstructions.trim().length === 0) {
+        throw RequestError.invalidParams({}, "Cortex systemPrompt must be a non-empty string");
+      }
+      const nativeResponse = await this.codexClient.configRead({ includeLayers: false, cwd: request.cwd });
+      if (!nativeResponse || !nativeResponse.config) {
+        throw new Error("Could not verify native Codex developer instructions");
+      }
+      request = { ...request, systemPrompt: { mode: "append", content: [{ type: "text", text: cortexInstructions }] } };
+    }
+    const instructions = await this.resolveSessionInstructions(request, void 0, true);
+    const additionalDirectories = readAdditionalDirectories(request.cwd, request.additionalDirectories, request._meta);
+    const developerInstructions = instructions?.developerInstructions;
+    await this.refreshSkills(request.cwd, additionalDirectories);
+    const sessionConfig = await this.createSessionConfig(request.cwd, additionalDirectories, request.mcpServers ?? []);
+    const cortexBaseInstructions = request._meta?.cortexBaseInstructions;
+    if (cortexBaseInstructions !== void 0 && typeof cortexBaseInstructions !== "string") {
+      throw RequestError.invalidParams({}, "Cortex base instructions must be a string");
+    }
+    const cortexNativeContext = request._meta?.cortexNativeContext;
+    if (cortexNativeContext !== void 0 && typeof cortexNativeContext !== "boolean") {
+      throw RequestError.invalidParams({}, "Cortex native context flag must be a boolean");
+    }
+    if (cortexNativeContext === false) {
+      Object.assign(sessionConfig.config, {
+        include_permissions_instructions: false,
+        include_apps_instructions: false,
+        include_collaboration_mode_instructions: false,
+        include_environment_context: false,
+        skills: { ...(sessionConfig.config.skills ?? {}), include_instructions: false }
+      });
+    }
+    const response = await this.codexClient.threadStart({
+      config: sessionConfig.config,
+      modelProvider: this.getModelProvider(),
+      cwd: request.cwd,
+      ...developerInstructions !== void 0 && { developerInstructions },
+      ...(cortexBaseInstructions === void 0 ? {} : { baseInstructions: cortexBaseInstructions })
+    });
+    this.cortexSessionRoles ??= new Map();
+    this.cortexSessionRoles.set(response.thread.id, cortexRole);'''
+_CODEX_SESSION_CONFIG_2_3_SOURCE = _CODEX_SESSION_CONFIG_SOURCE.replace(b"isJsonObject(", b"isJsonObject3(")
+_CODEX_SESSION_CONFIG_2_3_PATCHED = _CODEX_SESSION_CONFIG_PATCHED.replace(b"isJsonObject(", b"isJsonObject3(")
+_CODEX_MCP_ENTRY_2_3_SOURCE = _CODEX_MCP_ENTRY_SOURCE.replace(
+    b"this.createMcpSeverConfig(mcp.server)", b"toCodexMcpServerConfig(normalizeMcpServer(mcp.server))",
+)
+_CODEX_MCP_ENTRY_2_3_PATCHED = _CODEX_MCP_ENTRY_2_PATCHED.replace(
+    b"this.createMcpSeverConfig(mcp.server)", b"toCodexMcpServerConfig(normalizeMcpServer(mcp.server))",
+)
+_CODEX_TURN_STARTED_2_3_SOURCE = b'''      case "turn/started":
+        this.sessionState.interruptTurnId = notification.params.turn.id;
+        this.sessionState.currentTurnId ??= notification.params.turn.id;
+'''
+_CODEX_TURN_STARTED_2_3_PATCHED = _CODEX_TURN_STARTED_2_3_SOURCE.replace(
+    b'      case "turn/started":\n', b'      case "turn/started":\n        this.resetCustomToolState();\n',
+)
 
 
 def _private_verified_file(path: Path, content: bytes, *, mode: int = 0o600) -> None:
@@ -548,7 +634,17 @@ def _prepare_codex_manual_review_adapter(install, connection_id: str, environ=No
             + ", ".join(sorted(_CODEX_SEND_PROMPT_BY_VERSION)) + ".",
         )
     send_prompt_source, send_prompt_patched = send_prompt
-    reporter_v2 = install.package_version in ("2.0.1", "2.1.1")
+    reporter_v2 = install.package_version in ("2.0.1", "2.1.1", "2.3.0")
+    adapter_2_3 = install.package_version == "2.3.0"
+    new_session_source = _CODEX_NEW_SESSION_2_3_SOURCE if adapter_2_3 else _CODEX_NEW_SESSION_SOURCE
+    new_session_patched = _CODEX_NEW_SESSION_2_3_PATCHED if adapter_2_3 else _CODEX_NEW_SESSION_PATCHED
+    config_source = _CODEX_SESSION_CONFIG_2_3_SOURCE if adapter_2_3 else _CODEX_SESSION_CONFIG_SOURCE
+    config_patched = _CODEX_SESSION_CONFIG_2_3_PATCHED if adapter_2_3 else _CODEX_SESSION_CONFIG_PATCHED
+    mcp_source = _CODEX_MCP_ENTRY_2_3_SOURCE if adapter_2_3 else _CODEX_MCP_ENTRY_SOURCE
+    mcp_patched = (_CODEX_MCP_ENTRY_2_3_PATCHED if adapter_2_3 else
+                   _CODEX_MCP_ENTRY_2_PATCHED if reporter_v2 else _CODEX_MCP_ENTRY_PATCHED)
+    turn_source = _CODEX_TURN_STARTED_2_3_SOURCE if adapter_2_3 else _CODEX_TURN_STARTED_SOURCE
+    turn_patched = _CODEX_TURN_STARTED_2_3_PATCHED if adapter_2_3 else _CODEX_TURN_STARTED_PATCHED
     reviewer_source = _CODEX_AGENT_REVIEWER_2_SOURCE if reporter_v2 else _CODEX_AGENT_REVIEWER_SOURCE
     reviewer_manual = _CODEX_AGENT_REVIEWER_2_MANUAL if reporter_v2 else _CODEX_AGENT_REVIEWER_MANUAL
     package_dir = Path(install.package_json).parent
@@ -563,14 +659,15 @@ def _prepare_codex_manual_review_adapter(install, connection_id: str, environ=No
     if (
         hashlib.sha256(source).hexdigest() != install.adapter_entry_sha256
         or source.count(reviewer_source) != 1
-        or source.count(_CODEX_NEW_SESSION_SOURCE) != 1
-        or source.count(_CODEX_SESSION_CONFIG_SOURCE) != 1
+        or (adapter_2_3 and hashlib.sha256(source).hexdigest() != _CODEX_2_3_SHA256)
+        or source.count(new_session_source) != 1
+        or source.count(config_source) != 1
         or source.count(_CODEX_MCP_DEDUP_SOURCE) != 1
-        or source.count(_CODEX_MCP_ENTRY_SOURCE) != 1
+        or source.count(mcp_source) != 1
         or source.count(send_prompt_source) != 1
         or source.count(_CODEX_UPDATE_EVENT_SOURCE) != 1
         or source.count(_CODEX_RAW_RESPONSE_CASE_SOURCE) != 1
-        or source.count(_CODEX_TURN_STARTED_SOURCE) != 1
+        or source.count(turn_source) != 1
         or source.count(_CODEX_ITEM_EVENT_SWITCH_SOURCE) != 1
         or source.count(_CODEX_COMPLETE_ITEM_EVENT_SWITCH_SOURCE) != 1
         or (reporter_v2 and (
@@ -589,10 +686,10 @@ def _prepare_codex_manual_review_adapter(install, connection_id: str, environ=No
             "The verified codex-acp adapter call sites do not match the supported shape.",
         )
     patched = source.replace(reviewer_source, reviewer_manual, 1)
-    patched = patched.replace(_CODEX_NEW_SESSION_SOURCE, _CODEX_NEW_SESSION_PATCHED, 1)
-    patched = patched.replace(_CODEX_SESSION_CONFIG_SOURCE, _CODEX_SESSION_CONFIG_PATCHED, 1)
+    patched = patched.replace(new_session_source, new_session_patched, 1)
+    patched = patched.replace(config_source, config_patched, 1)
     patched = patched.replace(_CODEX_MCP_DEDUP_SOURCE, _CODEX_MCP_DEDUP_PATCHED, 1)
-    patched = patched.replace(_CODEX_MCP_ENTRY_SOURCE, _CODEX_MCP_ENTRY_2_PATCHED if reporter_v2 else _CODEX_MCP_ENTRY_PATCHED, 1)
+    patched = patched.replace(mcp_source, mcp_patched, 1)
     patched = patched.replace(send_prompt_source, send_prompt_patched, 1)
     if reporter_v2:
         patched = patched.replace(_CODEX_HELPERS_2_SOURCE, _CODEX_CUSTOM_TOOL_HELPERS_2_INSERT + _CODEX_HELPERS_2_SOURCE, 1)
@@ -602,7 +699,7 @@ def _prepare_codex_manual_review_adapter(install, connection_id: str, environ=No
         patched = patched.replace(_CODEX_FUNCTION_CALL_SOURCE, _CODEX_CUSTOM_TOOL_HELPERS_INSERT + _CODEX_FUNCTION_CALL_SOURCE, 1)
     patched = patched.replace(_CODEX_UPDATE_EVENT_SOURCE, _CODEX_RAW_RESPONSE_METHOD_INSERT + _CODEX_UPDATE_EVENT_SOURCE, 1)
     patched = patched.replace(_CODEX_RAW_RESPONSE_CASE_SOURCE, _CODEX_RAW_RESPONSE_CASE_PATCHED, 1)
-    patched = patched.replace(_CODEX_TURN_STARTED_SOURCE, _CODEX_TURN_STARTED_PATCHED, 1)
+    patched = patched.replace(turn_source, turn_patched, 1)
     patched = patched.replace(_CODEX_ITEM_EVENT_SWITCH_SOURCE, _CODEX_ITEM_EVENT_SWITCH_PATCHED, 1)
     patched = patched.replace(_CODEX_COMPLETE_ITEM_EVENT_SWITCH_SOURCE, _CODEX_COMPLETE_ITEM_EVENT_SWITCH_PATCHED, 1)
     if not reporter_v2:

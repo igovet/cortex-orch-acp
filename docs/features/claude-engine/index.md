@@ -3,7 +3,46 @@
 > Status: migrated from the former ACP reference. Statements were not re-verified line by line against source in this pass; claims without a source path are unverified until reviewed.
 
 
-## Current support: 0.88.0 (2026-10-08)
+## Current support: 0.97.0 (2026-10-27)
+
+Exact **0.97.0** is registered alongside **0.88.0**, **0.87.0** and **0.78.0**.
+This installed adapter uses Claude Agent SDK **0.3.310** and ACP SDK **2.0.2**;
+Cortex still negotiates **ACP v1**. Experimental v2 is not enabled.
+`dist/acp-agent.js` SHA-256:
+`c569a914b2b9c75127193139a69bca3ca4ae6b2ebd6728de0330a16689fdc268`.
+
+Read-only inspection confirmed the existing `_meta.systemPrompt` string
+override / preset-append channel at `acp-agent.js:8714-8728`, separate
+`options.systemPrompt` at 8846 and `query({prompt: input, options})` at 9057.
+Resume/load forward metadata at 1498, 1549 and 8583. The new spec
+`systemPrompt` takes precedence only if supplied; Cortex supplies no
+conflicting field. The SDK separately forwards system/append instructions
+through its initialize control request.
+
+The options spread, explicit disallowed tools, strict MCP, empty plugins and
+managed hook/memory restrictions retain their existing channel. Model,
+effort and mode remain select options; the extra ultracode option is not
+mapped or selected by Cortex. Root cancellation still awaits
+`cancelTurns`/`query.interrupt()`; child-session cancellation and background
+subagent behavior are not requested or qualified. Non-AIR compaction still
+uses `_meta.claudeCode.toolName=compact`, not the display title.
+
+No-paid tests inspect these exact installed sources and initialize the real
+adapter with empty isolated account/config directories, without a prompt.
+They do not prove model execution, effective native-tool enforcement,
+cancellation during real inference or GUI behavior. Discovery prefers the
+newest registered installation and retains all earlier registered versions
+for rollback. Incoming ACP startup and approved engine installations now advance
+existing connections to strictly newer approved owned installs, preserving accounts,
+routes and model settings. The source path is
+`configuration.management.follow_approved_adapters`. There is no per-connection
+pin; `CORTEX_ENGINE_FOLLOW=off` disables following for rollback. See
+[selection, private backups and rollback](../../configuration.md#approved-adapter-following-and-rollback).
+Selection is not a substitute for isolated live qualification.
+
+## Previous support: 0.88.0 (2026-10-08)
+
+<a id="current-support-0880-2026-10-08"></a>
 
 Cortex now has an exact instruction-delivery registration for the installed
 `@agentclientprotocol/claude-agent-acp` **0.88.0**, bundled Claude Agent SDK

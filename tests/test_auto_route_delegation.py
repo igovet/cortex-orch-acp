@@ -1045,7 +1045,7 @@ def test_delivery_refusal_blocks_every_model_on_same_engine_version_for_dispatch
     [entry] = availability.active(store)
     assert entry["reason"] == "instruction_delivery_unqualified"
     assert entry["model"] is None and entry["scope"] == "connection"
-    assert entry["evidence"] == "claude-agent-acp@0.88.0"
+    assert entry["evidence"] == "claude-agent-acp@0.97.0"
     assert entry["attempt_id"] == first.attempt_id
     adapter.terminate_owned(first.attempt_id)
     before_b = list(_read_log(log_b))

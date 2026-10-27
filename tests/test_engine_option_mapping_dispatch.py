@@ -365,9 +365,10 @@ def test_claude_0_87_preserves_role_effort_and_native_tool_metadata(role, unifie
 
 @pytest.mark.parametrize("role", ("worker", "coordinator"))
 @pytest.mark.parametrize("unified", (True, False))
-def test_codex_2_1_1_preserves_production_instruction_metadata(role, unified):
+@pytest.mark.parametrize("version", ("2.1.1", "2.3.0"))
+def test_codex_qualified_2_x_preserves_production_instruction_metadata(role, unified, version):
     environ = {} if unified else {"CORTEX_UNIFIED_BASE_PROMPT": "0"}
-    meta = _session_new_meta_for("codex-acp", "2.1.1", "Role instructions",
+    meta = _session_new_meta_for("codex-acp", version, "Role instructions",
                                 role=role, environ=environ)
     expected_system_prompt = _with_cheat_sheet(role, "Role instructions")
     assert meta["systemPrompt"] == expected_system_prompt
@@ -382,8 +383,9 @@ def test_codex_2_1_1_preserves_production_instruction_metadata(role, unified):
 
 @pytest.mark.parametrize("role", ["worker", "coordinator"])
 @pytest.mark.parametrize("instructions", [None, "Cortex role"])
-def test_claude_0_88_dispatch_includes_native_tool_policy(role, instructions):
-    meta = _session_new_meta_for("claude-agent-acp", "0.88.0", instructions, role=role, effort="high")
+@pytest.mark.parametrize("version", ("0.88.0", "0.97.0"))
+def test_claude_registered_dispatch_includes_native_tool_policy(role, instructions, version):
+    meta = _session_new_meta_for("claude-agent-acp", version, instructions, role=role, effort="high")
     options = meta["claudeCode"]["options"]
     assert options["strictMcpConfig"] is True
     assert options["disallowedTools"] == GATEWAY_ONLY["disallowedTools"]
