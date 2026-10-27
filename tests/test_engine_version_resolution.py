@@ -27,7 +27,7 @@ def test_an_unregistered_claude_version_does_not_borrow_qualification(tmp_path):
 
 
 def test_registered_claude_versions_name_the_actual_install(tmp_path):
-    for version in ("0.78.0", "0.87.0", "0.88.0"):
+    for version in ("0.78.0", "0.87.0", "0.88.0", "0.97.0"):
         record = _record(tmp_path, "claude-agent-acp", "@agentclientprotocol/claude-agent-acp", version)
         assert _pinned_version_for("claude-agent-acp", record) == version
         plan = delivery_for("claude-agent-acp", version).plan(load_role("worker-debugger"), [])
@@ -36,7 +36,7 @@ def test_registered_claude_versions_name_the_actual_install(tmp_path):
 
 
 def test_a_registered_installed_version_is_the_one_named(tmp_path):
-    for version in ("1.13.0", "2.0.1", "2.1.1"):
+    for version in ("1.13.0", "2.0.1", "2.1.1", "2.3.0"):
         record = _record(tmp_path, "codex-acp", "@agentclientprotocol/codex-acp", version)
         assert _pinned_version_for("codex-acp", record) == version
         plan = delivery_for("codex-acp", version).plan(load_role("worker-debugger"), [])
@@ -44,8 +44,8 @@ def test_a_registered_installed_version_is_the_one_named(tmp_path):
 
 
 def test_no_record_resolves_the_pinned_version():
-    assert _pinned_version_for("claude-agent-acp") == "0.88.0"
-    assert _pinned_version_for("codex-acp") == "2.1.1"
+    assert _pinned_version_for("claude-agent-acp") == "0.97.0"
+    assert _pinned_version_for("codex-acp") == "2.3.0"
 
 
 def test_a_worker_failure_names_its_code_and_line():

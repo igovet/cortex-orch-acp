@@ -9,7 +9,7 @@ from paseo_integrity import payload_digest as paseo_payload_digest
 
 ROOT = Path(__file__).resolve().parents[1]
 PLUGIN = ROOT
-BASE = '1.0.1'
+BASE = '1.0.2'
 
 # What actually ships. Named explicitly because the repository root is no
 # longer a container for the payload -- it *is* the project (the plugin

@@ -82,6 +82,25 @@ class CodexAcp2_1Delivery(CodexAcpDelivery):
 
 
 @dataclass(frozen=True)
+class CodexAcp2_3Delivery(CodexAcpDelivery):
+    """Exact 2.3.0, inspected 2026-10-27; dist/index.js SHA-256
+    d584cb7df74847661c3cf69d34de6ad3a24f6bc69787faeaff49a1fd9a3d8870.
+
+    ACP SDK 2.0.2 retains the v1 transport. The private adapter translates
+    Cortex _meta.systemPrompt to the native append-style systemPrompt at
+    newSession (40074), then resolveSessionInstructions (40103) preserves
+    effective developer instructions in thread/start. Structured config,
+    MCP conversion, turn-start state and clientUserMessageId require their
+    own guarded patches. Model discovery remains model/list unless an ACP
+    providers/set gateway explicitly narrows it (40559); Cortex does not
+    configure that gateway. Paid execution and native compaction survival
+    remain unverified.
+    """
+
+    version: str = "2.3.0"
+
+
+@dataclass(frozen=True)
 class ClaudeAgentAcp0_78Delivery:
     """The pinned claude-agent-acp 0.78.0 mechanism: ``session/new``'s own
     ``params._meta.systemPrompt`` -- QUALIFIED (T026, upgraded on fresh,
@@ -247,6 +266,29 @@ class ClaudeAgentAcp0_88Delivery(ClaudeAgentAcp0_78Delivery):
 
 
 @dataclass(frozen=True)
+class ClaudeAgentAcp0_97Delivery(ClaudeAgentAcp0_78Delivery):
+    """Exact 0.97.0 / SDK 0.3.310, inspected read-only 2026-10-27.
+
+    dist/acp-agent.js SHA-256:
+    c569a914b2b9c75127193139a69bca3ca4ae6b2ebd6728de0330a16689fdc268.
+    ACP SDK 2.0.2 still negotiates v1 (1399). The legacy metadata channel
+    remains at 8714-8728: string override or locked preset append, separate
+    options.systemPrompt (8846) on query({prompt: input, options}) (9057).
+    The new spec systemPrompt takes precedence only when supplied (8733);
+    Cortex supplies no conflicting field. Resume/load retain metadata
+    (1498,1549,8583). SDK sdk.mjs separates systemPrompt/appendSystemPrompt
+    and forwards both through initialize. Strict MCP, plugins, managed
+    settings and disallowedTools forwarding remain intact (8868,8910).
+    The non-AIR compaction reporter still marks claudeCode.toolName=compact.
+    Root cancel awaits cancelTurns/query.interrupt; child-session and
+    ultracode extensions are not requested by Cortex. Static qualification
+    does not establish paid turns, effective native-tool enforcement or GUI.
+    """
+
+    version: str = "0.97.0"
+
+
+@dataclass(frozen=True)
 class ClaudeAgentAcpUnrecognizedVersionDelivery:
     """Any claude-agent-acp version without an exact registration: no static
     evidence has been read for it, so it is always UNSUPPORTED -- never a
@@ -309,9 +351,11 @@ _REGISTRY: dict[tuple[str, str], InstructionDelivery] = {
     ("codex-acp", "1.13.0"): CodexAcpDelivery(version="1.13.0"),
     ("codex-acp", "2.0.1"): CodexAcpDelivery(version="2.0.1"),
     ("codex-acp", "2.1.1"): CodexAcp2_1Delivery(),
+    ("codex-acp", "2.3.0"): CodexAcp2_3Delivery(),
     ("claude-agent-acp", "0.78.0"): ClaudeAgentAcp0_78Delivery(),
     ("claude-agent-acp", "0.87.0"): ClaudeAgentAcp0_87Delivery(),
     ("claude-agent-acp", "0.88.0"): ClaudeAgentAcp0_88Delivery(),
+    ("claude-agent-acp", "0.97.0"): ClaudeAgentAcp0_97Delivery(),
     ("claude-agent-acp", "*"): ClaudeAgentAcpUnrecognizedVersionDelivery(),
 }
 

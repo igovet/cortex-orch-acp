@@ -22,6 +22,7 @@ import pytest
 from cortex_runtime.engine.process import (
     _CODEX_AGENT_REVIEWER_MANUAL, _CODEX_AGENT_REVIEWER_2_MANUAL,
     _CODEX_NEW_SESSION_PATCHED, _CODEX_SESSION_CONFIG_PATCHED,
+    _CODEX_NEW_SESSION_2_3_PATCHED, _CODEX_SESSION_CONFIG_2_3_PATCHED,
     _CODEX_SEND_PROMPT_BY_VERSION, CODEX_MCP_TOOL_SCHEMA_MAX_BYTES,
     _prepare_codex_manual_review_adapter,
 )
@@ -242,7 +243,7 @@ def test_installed_adapter_keeps_explicit_mcp_on_disabled_native_name(tmp_path):
         assert config["mcp_servers"]["native"] == {
             "command": "/bin/true", "args": [], "env": {}, "enabled": True, "default_tools_approval_mode": "approve",
             "tool_timeout_sec": 31536000,
-            **({"tool_input_schema_max_bytes": CODEX_MCP_TOOL_SCHEMA_MAX_BYTES} if version in ("2.0.1", "2.1.1") else {}),
+            **({"tool_input_schema_max_bytes": CODEX_MCP_TOOL_SCHEMA_MAX_BYTES} if version in ("2.0.1", "2.1.1", "2.3.0") else {}),
         }
     finally:
         proc.terminate()
@@ -271,9 +272,9 @@ def test_installed_private_adapter_forwards_and_preserves_native_developer_instr
     )
     environ = isolated_environ(tmp_path)
     copied = Path(_prepare_codex_manual_review_adapter(install, new_connection_id(), environ))
-    assert (_CODEX_AGENT_REVIEWER_2_MANUAL if version in ("2.0.1", "2.1.1") else _CODEX_AGENT_REVIEWER_MANUAL) in copied.read_bytes()
-    assert _CODEX_NEW_SESSION_PATCHED in copied.read_bytes()
-    assert _CODEX_SESSION_CONFIG_PATCHED in copied.read_bytes()
+    assert (_CODEX_AGENT_REVIEWER_2_MANUAL if version in ("2.0.1", "2.1.1", "2.3.0") else _CODEX_AGENT_REVIEWER_MANUAL) in copied.read_bytes()
+    assert (_CODEX_NEW_SESSION_2_3_PATCHED if version == "2.3.0" else _CODEX_NEW_SESSION_PATCHED) in copied.read_bytes()
+    assert (_CODEX_SESSION_CONFIG_2_3_PATCHED if version == "2.3.0" else _CODEX_SESSION_CONFIG_PATCHED) in copied.read_bytes()
     adapter_text = copied.read_bytes()
     assert _CODEX_SEND_PROMPT_BY_VERSION[version][1] in adapter_text
     assert b'sandboxPolicy: { type: "dangerFullAccess" }' in adapter_text

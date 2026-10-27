@@ -6,7 +6,7 @@
 <p align="center"><strong>Multi-agent coordination for software work, as an ACP agent.</strong></p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Cortex-1.0.1-7c3aed" alt="Cortex 1.0.1" />
+  <img src="https://img.shields.io/badge/Cortex-1.0.2-7c3aed" alt="Cortex 1.0.2" />
   <img src="https://img.shields.io/badge/Python-3.11%2B-3776ab" alt="Python 3.11+" />
   <img src="https://img.shields.io/badge/Protocol-ACP%20v1-111827" alt="Agent Client Protocol v1" />
   <img src="https://img.shields.io/badge/Storage-Markdown%20%2B%20SQLite-0f766e" alt="Markdown files and SQLite metadata" />
@@ -54,6 +54,11 @@ outgoing ACP sessions against other coding agents —
 [Claude Code](docs/features/claude-engine/index.md), and the optional
 [OpenCode v2](docs/features/opencode-engine/index.md) — and drives them
 itself, inside the exact project your client has open.
+
+Exact adapter support includes Codex ACP **2.3.0** and Claude ACP **0.97.0**,
+with **2.1.1** and **0.88.0** retained for rollback. Both newer adapters retain
+Cortex's ACP v1 path; source qualification and no-paid initialization do not
+establish paid CLI or desktop behavior. See the engine pages above.
 
 The runtime, not any model, owns the task lifecycle: scheduling, dependency
 resolution, write-conflict serialization, permissions, mandatory independent
@@ -334,6 +339,24 @@ python3 -B /absolute/path/to/cortex-orch-acp/src/cortex_acp.py
   (partly unverified; see that page's status note).
 
 ## Configuration
+
+Existing Codex/Claude connections follow newer source-approved adapters already
+installed in Cortex's owned engine root at startup and after approved updates.
+Accounts, routes and model settings are preserved; unregistered versions never
+replace approved ones, and automatic downgrades are forbidden.
+See [adapter following and rollback](docs/configuration.md#approved-adapter-following-and-rollback)
+for private backups and `CORTEX_ENGINE_FOLLOW=off`.
+
+The [fresh-install preset](docs/configuration.md#fresh-install-owner-default-snapshot)
+includes `codex-acp/gpt-6.1-terra` for standard-tier automatic routing at medium-to-high
+effort, now ranked first for standard-tier writing, testing and debugging by
+removing competing purpose preferences (not by list order or a pin). Other models
+remain eligible when Terra is unavailable or exhausted; purpose preference yields
+at known usage >=95% when more than 10 points worse than an available alternative.
+Provider choices and hard eligibility still apply. Normal-complexity technical
+writers remain light-tier. The 2026-10-27 sync also
+sets the portable coordinator to `claude-agent-acp/opus[1m]` at medium effort.
+Existing owner settings are unchanged; the preset is not live model qualification.
 
 See the [configuration guide](docs/configuration.md) for connections,
 routing policy, MCP server setup, and per-model eligibility. Paseo's Cortex

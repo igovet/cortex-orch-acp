@@ -20,7 +20,8 @@ propose plans, analyze evidence and submit reports/results. Keep tool argument
 contracts in advertised schemas and property descriptions, never in skills or
 profile instructions. One narrow exception: the `codex-acp` tool cheat sheet
 (`src/cortex_runtime/delegation/codex_tool_cheat_sheet.py`) may restate required
-and optional fields, enum values, array item fields and an example call, because it is rendered mechanically from the live
+and optional fields, enum values, array item fields, schema-derived numeric/length
+bounds and an example call, because it is rendered mechanically from the live
 channel tool schemas (`channeled_base_tools()` plus `tool_definitions()`) at session start and appended only to `codex-acp`
 sessions, whose code mode lists nested tools by name and description only. It
 is derived output, not authored prose: never hand-edit contract text into it,
@@ -85,7 +86,7 @@ After behavior changes update README.md, SECURITY.md and affected documentation;
 check links and commands against source. Keep secrets, private reports and raw
 host logs out of repository documents and diagnostics. Report unrun checks.
 
-For this release use semantic version 1.0.1. After any package payload
+For this release use semantic version 1.0.2. After any package payload
 edit, regenerate its complete content hash with
 `python3 -B scripts/cortex_package.py stamp` before release-sensitive checks.
 Run package, profile-generation and test checks sequentially in the same

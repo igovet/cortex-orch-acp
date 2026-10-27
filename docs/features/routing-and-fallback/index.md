@@ -267,7 +267,24 @@ availability and quota rules remain controlling. Preferences cannot promote
 a model into a different tier. See [configuration](../../configuration.md#user-routing-profiles).
 
 The current install snapshot follows the refreshed saved default profile:
-explicit OpenCode denial and a `codex-acp/gpt-6.1-sol` coordinator at medium effort.
+explicit OpenCode denial and a `claude-agent-acp/opus[1m]` coordinator at medium effort.
+The 2026-10-27 sync adds `codex-acp/gpt-6.1-terra` to enabled and automatic
+membership for `standard` only, with medium-to-high effort and
+`preferred_for: [writing, testing, debugging]`. It also syncs the portable
+coordinator to production's Opus medium default. It adds no pin, ordered per-kind
+lists, request labels or quota-window mapping; installed route availability
+still gates selection. Preferences rank eligible candidates; they do not guarantee
+Terra selection. The same day's priority refinement makes Terra the sole
+unconditional standard-tier preference for testing, debugging and writing:
+remove these kinds from Sonnet/Sol `preferred_for`, and testing from Haiku/Luna
+while retaining their `also_standard_for` testing eligibility. This ranks Terra
+first in ordinary automatic selection, not by list order or a pin. Sol retains
+review preference. Missing, unavailable or exhausted Terra falls back to other
+eligible candidates; purpose preference yields when known usage is >=95% and
+more than 10 points worse than an available alternative. Provider preferences
+and hard eligibility still control. Normal-complexity technical writers remain
+light-tier; only standard-tier writing prefers Terra. This configuration and
+offline ranking change is not live qualification.
 The 2026-10-21 production routing refresh removes Opus from the `standard` tier:
 its configured tiers are now `flagship` and `deep` only. Standard-tier generic
 `design` and `implementation_frontend` work cannot select Opus, even with an
@@ -277,7 +294,8 @@ create a strict role pin or override tier eligibility.
 Opus retains the `opus`/`опус` request labels and its UI/UX condition, including
 frontend layout and styling (`implementation_frontend_design`); its
 `preferred_for` also regains `implementation_backend` and `implementation_frontend`.
-Sol's `preferred_for` gains `testing`, `investigation` and `writing`. The latest
+Sol's `preferred_for` gained `testing`, `investigation` and `writing` in that sync;
+the 2026-10-27 priority refinement removes testing, debugging and writing again. The latest
 refresh removes Sol's free-text condition (`preferred_when: null`), so its listed
 preferences apply without a route hint, including on quality retries. At equal
 quota and without a provider preference, unhinted standard-tier generic design

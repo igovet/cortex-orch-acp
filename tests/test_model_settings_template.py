@@ -1,4 +1,4 @@
-"""Public install data is explicit, safe, and preserves the retained seven-route baseline."""
+"""Public install data is explicit, safe, and preserves the synced owner baseline."""
 from copy import deepcopy
 import json
 import hashlib
@@ -19,7 +19,7 @@ def entry(engine, model, efforts=("low", "medium", "high", "xhigh", "max", "ultr
 def test_public_asset_preserves_exact_baseline_tiers_efforts_and_coordinator():
     template = defaults.load_model_settings_template()
     routing = template["routing"]
-    assert template["coordinator"] == {"engine": "codex-acp", "model": "gpt-6.1-sol",
+    assert template["coordinator"] == {"engine": "claude-agent-acp", "model": "opus[1m]",
                                        "parameters": {"thought_level": "medium"}}
     assert template["language"] == "ru"
     # Complete portable production default snapshot, saved 2026-10-12 at 14:23 UTC;
@@ -40,7 +40,41 @@ def test_public_asset_preserves_exact_baseline_tiers_efforts_and_coordinator():
     # Latest sync: Sol preferences are unconditional; the saved default coordinator
     # uses medium effort (confirmed by the owner), not the session-selected route.
     assert routing["models"]["codex-acp"]["policy"]["gpt-6.1-sol"]["preferred_when"] is None
-    canonical = json.dumps(template, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+    # 2026-10-27: Terra prefers writing/testing/debugging; coordinator is Opus medium.
+    # Remove competing standard-tier preferences, not tiers or fallback membership.
+    changes = [
+        ("claude-agent-acp", "claude-sonnet-5",
+         ["implementation_backend", "implementation_frontend", "debugging", "testing",
+          "investigation", "review", "writing", "analysis", "operations"]),
+        ("codex-acp", "gpt-6.1-sol",
+         ["implementation_backend", "implementation_frontend", "planning", "design",
+          "review", "debugging", "operations", "analysis", "testing", "investigation", "writing"]),
+        ("claude-agent-acp", "haiku",
+         ["analysis", "writing", "implementation_backend", "implementation_frontend",
+          "testing", "debugging", "investigation", "operations"]),
+        ("codex-acp", "gpt-6-luna",
+         ["analysis", "writing", "implementation_backend", "implementation_frontend",
+          "testing", "debugging", "investigation", "operations"]),
+    ]
+    # Undo exactly the priority, Terra additions and coordinator sync for preservation.
+    baseline = deepcopy(template)
+    baseline["coordinator"] = {"engine": "codex-acp", "model": "gpt-6.1-sol",
+                               "parameters": {"thought_level": "medium"}}
+    baseline_routing = baseline["routing"]
+    for engine, model, previous in changes:
+        removed = {"testing"} if model in ("haiku", "gpt-6-luna") else {"testing", "debugging", "writing"}
+        policy = baseline_routing["models"][engine]["policy"][model]
+        assert policy["preferred_for"] == [kind for kind in previous if kind not in removed]
+        policy["preferred_for"] = previous
+    assert baseline_routing["enabled"]["codex-acp"].pop() == "gpt-6.1-terra"
+    codex = baseline_routing["models"]["codex-acp"]
+    assert codex["auto"].pop() == "gpt-6.1-terra"
+    assert codex["auto"] == baseline_routing["enabled"]["codex-acp"]
+    assert codex["tiers"].pop("gpt-6.1-terra") == ["standard"]
+    assert codex["policy"].pop("gpt-6.1-terra") == {
+        "effort_floor": "medium", "max_effort": "high",
+        "preferred_for": ["writing", "testing", "debugging"]}
+    canonical = json.dumps(baseline, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
     assert hashlib.sha256(canonical.encode()).hexdigest() == "ffa81eb0c8e3e7cd7401860828faa60746d2f81dd1bee17f9dbf1afee6cd3c30"
     expected = {
         ("claude-agent-acp", "default"): ("deep",),
@@ -51,6 +85,7 @@ def test_public_asset_preserves_exact_baseline_tiers_efforts_and_coordinator():
         ("codex-acp", "gpt-6.1-sol"): ("deep", "standard"),
         ("codex-acp", "gpt-6-astra"): ("flagship",),
         ("codex-acp", "gpt-6-luna"): ("light",),
+        ("codex-acp", "gpt-6.1-terra"): ("standard",),
     }
     assert {(e, m) for e, models in routing["enabled"].items() for m in models} == set(expected)
     for (engine, model), tiers in expected.items():
@@ -66,6 +101,7 @@ def test_public_asset_preserves_exact_baseline_tiers_efforts_and_coordinator():
                 "gpt-6.1-sol": ("medium", "high", "xhigh"),
                 "gpt-6-astra": ("low", "medium", "high"),
                 "gpt-6-luna": ("high", "xhigh", "max"),
+                "gpt-6.1-terra": ("medium", "high"),
             }[model]
             assert auto_route.permitted_efforts(entry(engine, model), tier, policy) == efforts
     assert routing["enabled"]["opencode"] == []
@@ -84,6 +120,52 @@ def test_public_asset_preserves_exact_baseline_tiers_efforts_and_coordinator():
     assert routing["models"]["claude-agent-acp"]["policy"]["claude-fable-5-1[1m]"]["request_names"] == ["fable", "фейбл", "фэйбл"]
     assert routing["models"]["claude-agent-acp"]["policy"]["opus[1m]"]["request_names"] == ["opus", "опус"]
     assert all(v == "configured" for (e, m) in expected for v in model_policy.policy_for(e, m, routing).attribute_sources.values())
+
+
+@pytest.mark.parametrize("kind", ["testing", "debugging", "writing"])
+@pytest.mark.parametrize("availability", ["available", "missing", "excluded", "exhausted", "hot"])
+def test_default_terra_priority_and_fallback(kind, availability):
+    routing = defaults.load_model_settings_template()["routing"]
+    entries = [entry(engine, model) for engine, models in routing["enabled"].items() for model in models]
+    terra = "codex-acp/gpt-6.1-terra"
+    if availability == "missing":
+        entries = [e for e in entries if e.route.id != terra]
+    # Include the light models that also compete for standard testing.
+    stretch = frozenset(e.route.id for e in entries
+                        if kind in (routing["models"][e.route.engine]["policy"][e.route.model]
+                                    .get("also_standard_for") or ()))
+    def usage(e):
+        if e.route.engine == "codex-acp":
+            return 100.0 if availability == "exhausted" else 96.0 if availability == "hot" else 7.0
+        return 6.0
+    picked, decision = auto_route.rank(
+        "standard", entries, usage, role="worker-backend-dev",
+        work_kind_override=kind, models=routing["models"],
+        excluded=frozenset({terra}) if availability == "excluded" else frozenset(),
+        stretch_standard=stretch)
+    assert picked is not None and decision["tier"] == "standard"
+    assert (picked.route.id == terra) is (availability == "available")
+    if availability == "available":
+        assert decision["purpose"]["preferred"] == [terra]
+        assert decision["purpose"]["status"] == "honoured"
+        assert decision["candidates"][0]["route"] == terra
+    else:
+        assert decision["purpose"]["status"] == ("ignored:near_quota_limit" if availability == "hot" else "none")
+        assert decision["usage"]["scope"] == "none"
+        if availability in ("hot", "exhausted"):
+            assert picked.route.engine == "claude-agent-acp"
+
+
+def test_default_terra_writing_preference_does_not_promote_light_writer():
+    routing = defaults.load_model_settings_template()["routing"]
+    entries = [entry(engine, model) for engine, models in routing["enabled"].items() for model in models]
+    role = "worker-technical-writer"
+    for complexity, expected_tier in (("normal", "light"), ("high", "standard")):
+        picked, decision = auto_route.rank(
+            auto_route.tier_for(role, complexity=complexity), entries, lambda e: 6.0,
+            role=role, models=routing["models"])
+        assert decision["tier"] == expected_tier
+        assert (picked.route.model == "gpt-6.1-terra") is (expected_tier == "standard")
 
 
 def test_arbitrary_renames_order_new_and_withdrawn_ids():

@@ -54,7 +54,7 @@ _HEADER = (
     "Code mode shows each tool's name and description only, and `ALL_TOOLS` returns the same two fields. "
     "This sheet is rendered from the live schemas: each Cortex tool offered to this session with its required "
     "fields, then `optional:` fields; enum values follow `=`, `?` marks an optional item field, and a field without a `: type` is a string. The most-used tools also show one example "
-    "call with placeholder values; it is not code to execute literally. Call a tool with its real arguments "
+    "call with placeholder values; it is not code to execute literally. Numeric bounds follow the type (inclusive a..b, >=a, <=b; exclusive >a, <b). Call a tool with its real arguments "
     "as `await tools.mcp__cortex__<name>({...})`.\n\n"
 )
 
@@ -98,16 +98,36 @@ def _type_suffix(prop: Mapping[str, Any]) -> str:
     return ""
 
 
+def _bounds_suffix(prop: Mapping[str, Any]) -> str:
+    """Compact numeric bounds, copied only from the advertised schema."""
+    if prop.get("type") not in ("integer", "number"):
+        return ""
+    if "minimum" in prop and "maximum" in prop and not any(
+        key in prop for key in ("exclusiveMinimum", "exclusiveMaximum")
+    ):
+        return f" {prop['minimum']}..{prop['maximum']}"
+    bounds = [
+        f"{operator}{prop[key]}"
+        for key, operator in (
+            ("minimum", ">="), ("maximum", "<="),
+            ("exclusiveMinimum", ">"), ("exclusiveMaximum", "<"),
+        )
+        if key in prop
+    ]
+    return " " + " ".join(bounds) if bounds else ""
+
+
 def _field(name: str, prop: Mapping[str, Any], *, nested: bool = True, optional: bool = False) -> str:
     """``name``, ``name=a|b`` for an enum, ``name[{x, y?}]`` for an array of
     objects (one level deep; ``?`` marks an optional item field), otherwise
-    ``name`` with a ``: type`` suffix unless the field is a string."""
+    ``name`` with a ``: type`` suffix unless the field is a string, plus
+    numeric bounds when advertised."""
     mark = "?" if optional else ""
     enum = prop.get("enum")
     if isinstance(enum, list) and enum:
         shown = "|".join(str(value) for value in enum[:_MAX_ENUM_VALUES])
         more = len(enum) - _MAX_ENUM_VALUES
-        return f"{name}{mark}={shown}" + (f"|(+{more} more)" if more > 0 else "")
+        return f"{name}{mark}={shown}" + (f"|(+{more} more)" if more > 0 else "") + _bounds_suffix(prop)
     items = prop.get("items")
     if nested and prop.get("type") == "array" and isinstance(items, Mapping) and items.get("properties"):
         item_props = items["properties"]
@@ -116,7 +136,7 @@ def _field(name: str, prop: Mapping[str, Any], *, nested: bool = True, optional:
         fields += [_field(field, item_props[field], nested=False, optional=True)
                    for field in item_props if field not in item_required]
         return f"{name}{mark}[{{{', '.join(fields)}}}]"
-    return name + mark + _type_suffix(prop)
+    return name + mark + _type_suffix(prop) + _bounds_suffix(prop)
 
 
 def _tool_entry(tool: Mapping[str, Any], *, example: bool) -> str:

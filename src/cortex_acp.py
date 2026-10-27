@@ -58,16 +58,21 @@ def _ensure_first_run_configuration():
     # D-T035-02: an engine the user already configured in their client (e.g.
     # Zed) needs no separate Cortex setup step -- discover it and, iff
     # Cortex has no connection for it yet, register one that references the
-    # user's own native credential directory. Never overwrites or mutates a
-    # connection the user already has, and a discovery problem here never
-    # blocks startup -- the agent still runs with whatever connections
-    # already existed.
+    # user's own native credential directory. Discovery only creates missing
+    # connections; approved adapter following below handles existing commands
+    # separately, without changing accounts. Failures never block startup.
     try:
         from cortex_runtime.connections import discovery, onboarding
 
         onboarding.sync_discovered_connections(discovery.discover_all())
     except Exception:  # noqa: BLE001 - startup is never blocked by this
         pass
+    try:
+        from cortex_runtime.configuration.management import follow_approved_adapters
+
+        follow_approved_adapters()
+    except Exception:  # noqa: BLE001 - keep existing config on conflict/failure
+        print("cortex: approved adapter selection deferred", file=sys.stderr)
     # Cortex's own engine copies: updated in the background, used from the
     # next session on; offline or any npm failure keeps the current version.
     try:

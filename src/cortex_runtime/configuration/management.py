@@ -1360,6 +1360,65 @@ def _connections_view(data: bytes | None) -> dict[str, object]:
                 operations=list(CONNECTION_OPERATIONS), max_concurrent_sessions_limit=MAX_CONCURRENT_SESSIONS_LIMIT)
 
 
+def follow_approved_adapters(*, environ: Mapping[str, str] | None = None) -> list[dict[str, str]]:
+    """Advance existing connections, never downgrade or change account policy."""
+    from ..connections import discovery, trust
+    from ..engine.instruction_delivery_registry import has_exact_registration
+
+    env = dict(os.environ if environ is None else environ)
+    if env.get("CORTEX_ENGINE_FOLLOW", "").strip().lower() in {"off", "0", "false", "no"}:
+        return []
+    data = _registry_bytes(env)
+    expected = _revision(data)
+    state = registry._parse_registry_bytes(data or b"")
+    changes = {}
+    events = []
+    for record in state.connections.values():
+        if record.engine not in discovery.SUPPORTED_ENGINES or not record.launch_command:
+            continue
+        info = discovery.discover_engine(record.engine, environ=env)
+        if info is None or not discovery.is_qualified(record.engine, info.version):
+            continue
+        if not has_exact_registration(record.engine, info.version):
+            continue
+        if not Path(info.launch_command[1]).is_relative_to(discovery.owned_root(env).resolve()):
+            continue
+        # Read the recorded package identity, never execute an old adapter.
+        command = record.launch_command
+        if len(command) != 2:
+            continue
+        entry = Path(command[1])
+        old = None
+        for parent in entry.parents:
+            manifest = parent / "package.json"
+            declared = discovery._declared_bin(manifest)
+            if declared and (parent / declared[1]).resolve() == entry.resolve():
+                old = declared[0]
+                break
+        if old is None or not discovery.version_key(old):
+            continue
+        if discovery.version_key(info.version) <= discovery.version_key(old):
+            continue
+        launch = tuple(info.launch_command)
+        changes[record.id] = replace(
+            record, launch_command=launch,
+            approved_fingerprint=trust.fingerprint(record.engine, record.provider, record.endpoint, launch),
+        )
+        events.append(dict(engine=record.engine, old_version=old, new_version=info.version))
+    if not changes:
+        return []
+    with registry.transaction(env) as current:
+        _check("connections", expected, _revision(_registry_bytes(env)))
+        # Retain exact pre-change bytes privately before the atomic replacement.
+        path = registry.registry_path(env)
+        registry.atomic_write_private(path.with_name("connections.adapter-backup.json"), data, directory=path.parent)
+        current.connections.update(changes)
+    for event in events:
+        print("cortex: approved adapter " + event["engine"] + " " +
+              event["old_version"] + " -> " + event["new_version"], file=sys.stderr)
+    return events
+
+
 def read_connections(environ: Mapping[str, str] | None = None) -> dict[str, object]:
     """Connection metadata; credential values and paths are never included."""
     return _connections_view(_registry_bytes(_env(environ)))

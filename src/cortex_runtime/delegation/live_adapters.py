@@ -59,8 +59,8 @@ from typing import Callable, Mapping
 # falling through to a wildcard entry. Any other/unknown engine name still
 # resolves to ``"*"`` -- never a guessed/interpolated version.
 _PINNED_ENGINE_VERSION: dict[str, str] = {
-    "codex-acp": "2.1.1",
-    "claude-agent-acp": "0.88.0",
+    "codex-acp": "2.3.0",
+    "claude-agent-acp": "0.97.0",
     # Placeholder only when a connection is not available to probe; all 2.x
     # versions are accepted, and actual sessions use their binary's version.
     "opencode": "2.0.0",

@@ -25,9 +25,52 @@ tool schema rather than guessing. Individual tools and normal bootstrap loading
 remain unchanged. Native exec can already combine independent calls in one
 model turn: no additional turn, token or cost saving is established there.
 
-## Current support: 2.1.1 (2026-10-07)
+## Approved installed adapter selection
 
-The npm latest release is **2.1.1**. Its exact registration is separate from
+Incoming ACP startup and approved engine installations advance existing connections
+to strictly newer approved owned installs, preserving accounts, routes and model
+settings. Unregistered versions never displace a registered install; launch-time
+digest/private-patch checks remain mandatory. There is no per-connection pin;
+`CORTEX_ENGINE_FOLLOW=off` disables following for rollback. See
+[selection, private backups and rollback](../../configuration.md#approved-adapter-following-and-rollback).
+The source path is `configuration.management.follow_approved_adapters`.
+
+## Current support: 2.3.0 (2026-10-27)
+
+Exact **2.3.0** is registered alongside **2.1.1**, **2.0.1**, **1.13.0** and
+**1.12.0**; unknown releases still fail closed. The inspected distribution's
+`dist/index.js` SHA-256 is
+`d584cb7df74847661c3cf69d34de6ad3a24f6bc69787faeaff49a1fd9a3d8870`.
+This installed copy resolves Codex **0.164.0** and ACP SDK **2.0.2**.
+
+Cortex still negotiates **ACP v1**, not the adapter's new v2 transport.
+The private adapter translates Cortex's existing `_meta.systemPrompt` into
+the new append-style session instruction channel. Upstream
+`resolveSessionInstructions` preserves the effective native developer
+instructions before the role text. The exact private patch now handles the
+structured session config, renamed MCP converter, turn-start interrupt state
+and optional `clientUserMessageId`, while retaining the manual reviewer,
+native-context controls, scoped MCP schema budget and custom-tool/compaction
+reporting. Both the original pinned install digest and every patch site are
+checked before launch; the original package is never edited.
+
+Model choices remain native `model/list` results. The new gateway filtering
+only applies after an explicit ACP `providers/set`; Cortex does not send
+that request. No static model list or v2/subagent capability is introduced.
+
+No-paid checks initialize the real adapter with an empty isolated account
+directory, and run the installed private bundle against a fake App Server:
+instruction preservation/replacement, MCP configuration, model/effort/mode
+options, custom tools and compaction. The same trace still passes on 2.1.1.
+These are not paid model turns, native-tool enforcement or rendered client
+evidence. Existing owner/dev launch commands are not rewritten by source
+qualification; activation and isolated CLI qualification are separate.
+
+## Previous support: 2.1.1 (2026-10-07)
+
+<a id="current-support-211-2026-10-07"></a>
+
+The npm latest release observed on 2026-10-07 was **2.1.1**. Its exact registration is separate from
 the historical 1.x/2.0.1 evidence below; unknown releases remain unsupported.
 All 14 guarded private-adapter patch sites are byte-identical to 2.0.1
 (`dist/index.js` SHA-256
@@ -75,7 +118,7 @@ version. An install outside this qualified set fails closed with
 `codex_manual_review_adapter_unsupported` rather than running unverified
 patch sites.
 
-Qualified versions: **1.12.0**, **1.13.0**, **2.0.1** and **2.1.1**. What was verified for 1.13.0,
+Previously qualified versions: **1.12.0**, **1.13.0**, **2.0.1** and **2.1.1**. What was verified for 1.13.0,
 against the installed bundle rather than assumed:
 
 - All 15 patched call sites match; exactly one differs from 1.12.0
@@ -522,7 +565,13 @@ with its required fields, then its `optional:` fields; enum values follow `=`
 (at most six, the rest counted), an array of objects shows its item fields one
 level deep, `?` marking an optional one, and every field that is not a string
 carries a `: type` suffix (`edits[{old_string, new_string, replace_all?:
-boolean}]`, `command?: string[]`). The type suffix was added after a live
+boolean}]`, `command?: string[]`). Numeric fields also show advertised inclusive
+`minimum`/`maximum` as `1..2000`, one-sided bounds as `>=1` or `<=2000`,
+and exclusive bounds as `>1` or `<2000`; unbounded fields add nothing.
+For example, `project_read` shows `limit: integer 1..2000` from its live
+schema, not a copied limit. Length/item-count bounds and field descriptions
+remain in the full schema. This is argument guidance, not a validation or
+permission change, and does not update existing sessions. The type suffix was added after a live
 2026-10-22 Codex worker sent the argv-array `checks[].command`, then shown by
 name only, as a string and was refused. The first six tools in a fixed order (`result_submit`,
 `command_run`, `project_read`, `project_edit`, `plan_submit`,
@@ -530,13 +579,13 @@ name only, as a string and was refused. The first six tools in a fixed order (`r
 `read_skill` when offered, then the rest in name order) also get one example
 call in code mode's own shape, `await tools.mcp__cortex__<tool>({...})`, with
 placeholder values for the required fields only. Field descriptions stay in the
-advertised schema. Rendered sheets are 2,900 to 3,700 characters; the text is
+advertised schema. The text is
 bounded to 8,000: a tool whose entry would exceed the budget is omitted
 together with the rest, and an explicit note states how many were omitted.
 Because it is rendered from the schemas rather than written by hand, it cannot
 drift from the advertised contract; `tests/test_codex_tool_cheat_sheet.py`
 checks the budget, the codex-only delivery, coverage of the whole channel
-catalogue with optional fields, enum and item-field rendering, that a schema
+catalogue with optional fields, enum, numeric-bound and item-field rendering, that a schema
 change changes the rendered text, and that review-stage required fields and
 example calls include `verdict`. The Codex base prompt tells the model to take
 Cortex arguments from this sheet instead of querying `ALL_TOOLS` (see

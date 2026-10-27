@@ -1,6 +1,15 @@
 # Changelog
 
-## 1.0.1 (unreleased)
+## 1.0.2 (unreleased)
+
+This release refreshes Terra routing preferences in the fresh-install default
+preset, adds exact support for codex-acp 2.3.0 and claude-agent-acp 0.97.0,
+and automatically follows newer approved installed adapters. Set
+`CORTEX_ENGINE_FOLLOW=off` to opt out; the startup environment handling is
+corrected. These changes do not establish live qualification or release
+readiness.
+
+## 1.0.1
 
 Since 1.0.0, orchestration and recovery fixes improve steering, worker
 visibility and evidence handling. In Paseo, the busy-steering acknowledgement
