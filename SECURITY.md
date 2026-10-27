@@ -25,7 +25,7 @@ regression passes do not clear a nonzero audit, and `devDependencies` is not
 a security boundary. See the [dependency disposition](docs/project/paseo-dependency-audit.md)
 for exact paths, artifact-test limits and the next upstream-fix decision.
 
-## Current ACP boundary (1.0.1)
+## Current ACP boundary (1.0.2)
 
 Startup and approved engine updates may advance existing Codex/Claude launch
 commands to newer source-qualified, exactly registered owned installations.
