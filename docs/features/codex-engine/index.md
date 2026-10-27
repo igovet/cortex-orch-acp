@@ -565,7 +565,13 @@ with its required fields, then its `optional:` fields; enum values follow `=`
 (at most six, the rest counted), an array of objects shows its item fields one
 level deep, `?` marking an optional one, and every field that is not a string
 carries a `: type` suffix (`edits[{old_string, new_string, replace_all?:
-boolean}]`, `command?: string[]`). The type suffix was added after a live
+boolean}]`, `command?: string[]`). Numeric fields also show advertised inclusive
+`minimum`/`maximum` as `1..2000`, one-sided bounds as `>=1` or `<=2000`,
+and exclusive bounds as `>1` or `<2000`; unbounded fields add nothing.
+For example, `project_read` shows `limit: integer 1..2000` from its live
+schema, not a copied limit. Length/item-count bounds and field descriptions
+remain in the full schema. This is argument guidance, not a validation or
+permission change, and does not update existing sessions. The type suffix was added after a live
 2026-10-22 Codex worker sent the argv-array `checks[].command`, then shown by
 name only, as a string and was refused. The first six tools in a fixed order (`result_submit`,
 `command_run`, `project_read`, `project_edit`, `plan_submit`,
@@ -573,13 +579,13 @@ name only, as a string and was refused. The first six tools in a fixed order (`r
 `read_skill` when offered, then the rest in name order) also get one example
 call in code mode's own shape, `await tools.mcp__cortex__<tool>({...})`, with
 placeholder values for the required fields only. Field descriptions stay in the
-advertised schema. Rendered sheets are 2,900 to 3,700 characters; the text is
+advertised schema. The text is
 bounded to 8,000: a tool whose entry would exceed the budget is omitted
 together with the rest, and an explicit note states how many were omitted.
 Because it is rendered from the schemas rather than written by hand, it cannot
 drift from the advertised contract; `tests/test_codex_tool_cheat_sheet.py`
 checks the budget, the codex-only delivery, coverage of the whole channel
-catalogue with optional fields, enum and item-field rendering, that a schema
+catalogue with optional fields, enum, numeric-bound and item-field rendering, that a schema
 change changes the rendered text, and that review-stage required fields and
 example calls include `verdict`. The Codex base prompt tells the model to take
 Cortex arguments from this sheet instead of querying `ALL_TOOLS` (see

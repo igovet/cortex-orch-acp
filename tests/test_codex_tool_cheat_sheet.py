@@ -175,3 +175,56 @@ def test_cheat_sheet_renders_enums_and_array_item_fields():
                   if tool["name"] == "result_submit")
     outcomes = schema["properties"]["checks"]["items"]["properties"]["outcome"]["enum"]
     assert "outcome=" + "|".join(outcomes) in text
+
+
+@pytest.mark.parametrize("schema,expected", [
+    ({"type": "integer", "minimum": 1, "maximum": 2000}, "value: integer 1..2000"),
+    ({"type": "integer", "minimum": 0}, "value: integer >=0"),
+    ({"type": "integer", "maximum": 2000}, "value: integer <=2000"),
+    ({"type": "integer"}, "value: integer"),
+    ({"type": "number", "exclusiveMinimum": -0.5}, "value: number >-0.5"),
+    ({"type": "number", "exclusiveMaximum": 2.5}, "value: number <2.5"),
+    ({"type": "number", "minimum": 0, "exclusiveMaximum": 1}, "value: number >=0 <1"),
+    ({"type": "integer", "minimum": 0, "maximum": 10,
+      "exclusiveMinimum": 1, "exclusiveMaximum": 9}, "value: integer >=0 <=10 >1 <9"),
+])
+def test_field_renders_numeric_bounds(schema, expected):
+    assert cheat_sheet_module._field("value", schema) == expected
+
+
+def test_bounds_render_for_nested_optional_and_enum_fields():
+    assert cheat_sheet_module._field("values", {
+        "type": "array", "items": {
+            "type": "object", "properties": {
+                "count": {"type": "integer", "minimum": 1},
+            },
+        },
+    }) == "values[{count?: integer >=1}]"
+    assert cheat_sheet_module._field("count", {
+        "type": "integer", "enum": [1, 2], "minimum": 1,
+    }) == "count=1|2 >=1"
+
+
+def test_project_read_limit_bounds_follow_live_schema(monkeypatch):
+    real_tool_definitions = mcp_tools.tool_definitions
+    schema = next(tool["inputSchema"] for tool in real_tool_definitions("worker")
+                  if tool["name"] == "project_read")
+    limit = schema["properties"]["limit"]
+    assert (limit["minimum"], limit["maximum"]) == (1, 2000)
+    baseline = codex_tool_cheat_sheet("worker")
+    entry = next(line for line in baseline.splitlines() if line.startswith("- project_read:"))
+    assert f"limit: integer {limit['minimum']}..{limit['maximum']}" in entry
+
+    def patched(role_kind, *, role_id=None, stage=None):
+        tools = copy.deepcopy(real_tool_definitions(role_kind, role_id=role_id, stage=stage))
+        for tool in tools:
+            if tool["name"] == "project_read":
+                tool["inputSchema"]["properties"]["limit"].update(minimum=3, maximum=47)
+        return tools
+
+    monkeypatch.setattr(cheat_sheet_module.mcp_tools, "tool_definitions", patched)
+    changed = codex_tool_cheat_sheet("worker")
+    entry = next(line for line in changed.splitlines() if line.startswith("- project_read:"))
+    assert "limit: integer 3..47" in entry
+    assert "limit: integer 1..2000" not in entry
+    assert changed != baseline

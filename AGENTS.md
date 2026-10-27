@@ -20,7 +20,8 @@ propose plans, analyze evidence and submit reports/results. Keep tool argument
 contracts in advertised schemas and property descriptions, never in skills or
 profile instructions. One narrow exception: the `codex-acp` tool cheat sheet
 (`src/cortex_runtime/delegation/codex_tool_cheat_sheet.py`) may restate required
-and optional fields, enum values, array item fields and an example call, because it is rendered mechanically from the live
+and optional fields, enum values, array item fields, schema-derived numeric/length
+bounds and an example call, because it is rendered mechanically from the live
 channel tool schemas (`channeled_base_tools()` plus `tool_definitions()`) at session start and appended only to `codex-acp`
 sessions, whose code mode lists nested tools by name and description only. It
 is derived output, not authored prose: never hand-edit contract text into it,
