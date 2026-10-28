@@ -43,7 +43,7 @@ The catalog fills the way it does for the other engines:
 - on each session open, from the `configOptions` OpenCode reports;
 - on demand, with `refresh-catalog`, which opens a prompt-free session inside a read-only jail.
 
-Efforts are read per model, because OpenCode offers different effort values per model and none at all for some.
+Efforts are read per model, because OpenCode offers different effort values per model and none at all for some. The Paseo Routing editor offers each OpenCode model's own observed levels for pins, floors, caps and ladders; a model that reports no effort selector offers only engine default or neutral, and a model not yet observed shows a marked global fallback (see [settings controls](../../configuration.md#manage-settings-in-paseo)).
 
 OpenCode observations must also offer `cortex` in the `mode` selector before
 either refresh or session capture saves a snapshot. Otherwise refresh reports
