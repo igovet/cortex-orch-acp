@@ -15,6 +15,8 @@ settings are never replaced. Account/connection
 identities and machine-specific MCP definitions/paths are not cloned; see
 [the install snapshot boundary](docs/configuration.md#fresh-install-owner-default-snapshot).
 
+Routing effort controls read cached per-model observations only; they do not start engines, grant model access or change authorization. Unknown/conflicting observations are labeled, and unsupported stored values are preserved rather than silently repaired. Runtime dispatch validation remains authoritative. See [settings](docs/configuration.md#manage-settings-in-paseo).
+
 ## Paseo dependency findings (2026-10-04)
 
 The plugin lockfile retains GHSA-vfj7-8cjw-p6xm in `braces@3.0.3`,
@@ -25,7 +27,7 @@ regression passes do not clear a nonzero audit, and `devDependencies` is not
 a security boundary. See the [dependency disposition](docs/project/paseo-dependency-audit.md)
 for exact paths, artifact-test limits and the next upstream-fix decision.
 
-## Current ACP boundary (1.0.2)
+## Current ACP boundary (1.0.3)
 
 Startup and approved engine updates may advance existing Codex/Claude launch
 commands to newer source-qualified, exactly registered owned installations.

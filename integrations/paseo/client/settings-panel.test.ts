@@ -452,6 +452,55 @@ test("routing: a per-model effort is edited as a typed pin and saved to its own 
   }]);
 });
 
+test("routing: observed model efforts constrain pins, policy and ordered ladders without rewriting stored values", async () => {
+  const data = fixtures() as any;
+  data.routing.builtin.model_efforts = { opencode: { "provider/one": ["low", "high"], "provider/two": ["medium"], "provider/default": [] } };
+  const rules = data.routing.sources.find((source: any) => source.source === "user").rules;
+  rules.pin = { "*": "opencode/provider/one:medium" };
+  rules.models = { opencode: { policy: {
+    "provider/one": { effort_floor: "medium", max_effort: "medium", effort_ladder: ["medium", "high"] },
+    "provider/default": {}, "provider/unknown": {},
+  } } };
+  const screen = await openScreen(data);
+  await screen.section("Routing");
+  assert.ok(!screen.has("Pin 1 effort: medium"));
+  const unsupported = "medium (not supported by this model)";
+  assert.deepEqual(screen.find(`Pin 1 effort: ${unsupported}`, "Pressable").props.accessibilityState, { checked: true, disabled: true });
+  assert.ok(screen.has("Pin 1 effort: low"));
+  assert.ok(screen.has("Pin 1 effort: high"));
+  for (const key of ["effort_floor", "max_effort"]) {
+    assert.ok(!screen.has(`${key} for opencode/provider/one: medium`));
+    assert.ok(screen.has(`${key} for opencode/provider/one: ${unsupported}`));
+    assert.ok(!screen.has(`${key} for opencode/provider/default: high`));
+    assert.ok(screen.has(`${key} for opencode/provider/unknown: high`));
+    assert.ok(screen.has(`${key} for opencode/provider/default: Neutral (unset)`));
+  }
+  assert.ok(screen.texts().some((text) => text.includes("real effort levels are unknown")));
+  assert.ok(screen.texts().some((text) => text.includes("engine default only")));
+  assert.ok(screen.texts().some((text) => text.includes(unsupported)));
+  assert.ok(!screen.has("Add medium to effort_ladder for opencode/provider/one"));
+  assert.ok(!screen.has("Add high to effort_ladder for opencode/provider/default"));
+  assert.ok(screen.has("Add high to effort_ladder for opencode/provider/unknown"));
+  await screen.press("Save user routing");
+  assert.deepEqual((screen.updates[0].rules as any).models, rules.models);
+  assert.deepEqual((screen.updates[0].rules as any).pin, rules.pin);
+  await screen.press("Add low to effort_ladder for opencode/provider/one");
+  await screen.press("Move low up");
+  await screen.press("Remove medium from effort_ladder for opencode/provider/one");
+  await screen.press("Move low up");
+  await screen.press("Save user routing");
+  assert.deepEqual((screen.updates[1].rules as any).models.opencode.policy["provider/one"].effort_ladder, ["low", "high"]);
+  await screen.type("Pin 1 model (full id)", "provider/two");
+  assert.ok(screen.has("Pin 1 effort: medium"));
+  assert.ok(!screen.has("Pin 1 effort: low"));
+  await screen.type("Pin 1 model (full id)", "provider/default");
+  assert.ok(!screen.has("Pin 1 effort: high"));
+  assert.ok(screen.has("Pin 1 effort: Engine default"));
+  await screen.type("Pin 1 model (full id)", "hand/typed");
+  assert.ok(screen.has("Pin 1 effort: low"));
+  assert.ok(screen.has("Pin 1 effort: medium"));
+});
+
 test("routing: adding a deny entry and reordering engines produce the typed lists", async () => {
   const screen = await openScreen();
   await screen.section("Routing");
@@ -1210,7 +1259,7 @@ test("portable save re-reads resolution, keeps exact parameters and clearing con
   const rules = data.routing.sources.find((source: any) => source.source === "user").rules;
   rules.models = { "codex-acp": { auto: [], tiers: {}, policy: { "NEUTRAL@9": { effort_ladder: ["medium"], request_names: ["owner-choice"] } } } };
   await screen.section("Routing");
-  await screen.press("Remove effort_ladder for codex-acp/NEUTRAL@9 1");
+  await screen.press("Remove medium from effort_ladder for codex-acp/NEUTRAL@9");
   await screen.press("Remove request_names for codex-acp/NEUTRAL@9 1");
   await screen.press("Save user routing");
   assert.deepEqual((screen.updates[1].rules as any).models["codex-acp"].policy["NEUTRAL@9"], { effort_ladder: null, request_names: null });

@@ -1,6 +1,14 @@
 # Changelog
 
-## 1.0.2 (unreleased)
+## 1.0.3 (unreleased)
+
+Routing settings now offer each exact model's observed effort levels for effort
+pins, `effort_floor`, `max_effort` and ordered `effort_ladder` values.
+Unknown models use a marked global fallback, while stored unsupported values
+remain visible and unchanged. These changes do not establish live qualification
+or release readiness.
+
+## 1.0.2
 
 This release refreshes Terra routing preferences in the fresh-install default
 preset, adds exact support for codex-acp 2.3.0 and claude-agent-acp 0.97.0,

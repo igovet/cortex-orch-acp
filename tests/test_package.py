@@ -20,7 +20,7 @@ from generate_agent_profiles import (
 
 
 def test_stamped_package_and_profiles():
-    assert validate().startswith('1.0.2+sha256.')
+    assert validate().startswith('1.0.3+sha256.')
     assert len(list((PLUGIN/'skills').glob('worker-*/SKILL.md')))==23
     assert 'agents' not in PAYLOAD_ENTRIES
     assert not (PLUGIN/'agents').exists()
@@ -177,7 +177,7 @@ def test_coordinator_handoffs_use_retained_runtime_results():
     assert 'result_submit' in schemas_for('worker')
     assert 'publish_result' not in schemas_for('worker')
     package_version=json.loads((PLUGIN/'package-identity.json').read_text())['version']
-    assert package_version.startswith('1.0.2+sha256.')
+    assert package_version.startswith('1.0.3+sha256.')
     assert payload_digest(PLUGIN).startswith(package_version.rsplit('.',1)[-1])
 
 

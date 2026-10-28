@@ -6,7 +6,7 @@
 <p align="center"><strong>Multi-agent coordination for software work, as an ACP agent.</strong></p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Cortex-1.0.2-7c3aed" alt="Cortex 1.0.2" />
+  <img src="https://img.shields.io/badge/Cortex-1.0.3-7c3aed" alt="Cortex 1.0.3" />
   <img src="https://img.shields.io/badge/Python-3.11%2B-3776ab" alt="Python 3.11+" />
   <img src="https://img.shields.io/badge/Protocol-ACP%20v1-111827" alt="Agent Client Protocol v1" />
   <img src="https://img.shields.io/badge/Storage-Markdown%20%2B%20SQLite-0f766e" alt="Markdown files and SQLite metadata" />
@@ -28,6 +28,8 @@ against your project's own checks, and keeps a durable, recoverable record
 next to your project.
 
 ---
+
+Routing settings use each exact model's observed effort levels, including ordered effort ladders. Unknown levels are marked; saved unsupported values remain visible and unchanged. See [configuration](docs/configuration.md#manage-settings-in-paseo).
 
 ## Table of contents
 

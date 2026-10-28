@@ -43,6 +43,8 @@ import {
   removeEnabledModel,
   setModelInCortex,
   composePin,
+  modelEffortChoices,
+  modelEffortOptions,
   connectionAction,
   engineAutomaticIn,
   engineDisabledIn,
@@ -348,15 +350,15 @@ function StringListField({ label, values, onChange, theme, errors, errorKey, pla
 }
 
 /** An ordered list whose entries come from fixed options (e.g. engines). */
-function OrderedChoiceList({ label, values, options, onChange, theme, errors, errorKey }: {
+function OrderedChoiceList({ label, values, options, onChange, theme, errors, errorKey, storedLabel }: {
   label: string; values: readonly string[]; options: readonly string[]; onChange: (values: string[]) => void; theme: Theme;
-  errors?: FieldErrors; errorKey: string;
+  errors?: FieldErrors; errorKey: string; storedLabel?: (value: string) => string;
 }) {
   const remaining = options.filter((option) => !values.includes(option));
   return <View style={{ gap: 6 }}>
     {values.length === 0 ? <Text style={{ color: theme.colors.foregroundMuted, fontSize: 12 }}>No entries.</Text> : null}
     {values.map((value, index) => <View key={`${value}-${index}`} style={{ flexDirection: "row", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
-      <Text style={{ color: theme.colors.foreground, fontSize: 13, minWidth: 140 }}>{index + 1}. {value}</Text>
+      <Text style={{ color: theme.colors.foreground, fontSize: 13, minWidth: 140 }}>{index + 1}. {storedLabel ? storedLabel(value) : value}</Text>
       <Button title="Up" icon="ChevronUp" accessibilityLabel={`Move ${value} up`} theme={theme} tone="muted" disabled={index === 0}
         onPress={() => onChange(move(values, index, -1))} />
       <Button title="Down" icon="ChevronDown" accessibilityLabel={`Move ${value} down`} theme={theme} tone="muted" disabled={index === values.length - 1}
@@ -787,13 +789,15 @@ function PolicyEditor({ form, onChange, vocabulary, theme, errors }: {
       {[...new Set([...(rules.auto ?? []), ...Object.keys(rules.tiers), ...Object.keys(rules.policy)])].map((modelId) => {
         const policy = rules.policy[modelId] ?? {};
         const id = `${engineId}/${modelId}`;
+        const effortChoices = modelEffortChoices(vocabulary, engineId, modelId, true);
         return <Group key={modelId} title={id} theme={theme}>
           <MultiChoiceField label={`Policy tiers for ${id}`} values={typeof rules.tiers[modelId] === "string" ? [rules.tiers[modelId] as string] : rules.tiers[modelId] ?? []}
             options={vocabulary.tiers.map((value) => ({ value, label: value }))} theme={theme}
             onChange={(values) => onChange(setModelTiers(form, engineId, modelId, values, vocabulary.tiers))} />
+          <Hint text={effortChoices.hint} theme={theme} />
           {["effort_floor", "max_effort"].map((key) => typeof policy[key] === "string" || policy[key] == null
             ? <ChoiceField key={key} label={`${key} for ${id}`} value={policy[key] as string ?? ""} theme={theme}
-              options={[{ value: "", label: "Neutral (unset)" }, ...(vocabulary.policyEfforts ?? vocabulary.efforts).map((value) => ({ value, label: value }))]}
+              options={[{ value: "", label: "Neutral (unset)" }, ...modelEffortOptions(vocabulary, engineId, modelId, [policy[key] as string ?? ""], true)]}
               onChange={(value) => put(engineId, modelId, key, value || null)} />
             : <ReadOnlyNotice key={key} theme={theme} text={`${key} has unsupported data; kept unchanged.`} />)}
           {["also_standard_for", "preferred_for"].map((key) => policy[key] == null || (Array.isArray(policy[key]) && (policy[key] as unknown[]).every((item) => typeof item === "string"))
@@ -805,9 +809,15 @@ function PolicyEditor({ form, onChange, vocabulary, theme, errors }: {
               placeholder="e.g. frontend changes without design work" error={errorAt(errors, `rules.models.${engineId}.policy.${modelId}.preferred_when`)}
               onChangeText={(text) => onChange(setModelPreferredWhen(form, engineId, modelId, text))} />
             : <ReadOnlyNotice theme={theme} text="preferred_when has unsupported data; kept unchanged." />}
-          {["effort_ladder", "request_names"].map((key) => policy[key] == null || (Array.isArray(policy[key]) && (policy[key] as unknown[]).every((item) => typeof item === "string"))
+          {policy.effort_ladder == null || (Array.isArray(policy.effort_ladder) && (policy.effort_ladder as unknown[]).every((item) => typeof item === "string"))
+            ? <OrderedChoiceList label={`effort_ladder for ${id}`} values={policy.effort_ladder as string[] ?? []}
+              options={effortChoices.levels} theme={theme} errors={errors} errorKey={`rules.models.${engineId}.policy.${modelId}.effort_ladder`}
+              storedLabel={(value) => modelEffortOptions(vocabulary, engineId, modelId, [value], true).find((option) => option.value === value)?.label ?? value}
+              onChange={(value) => put(engineId, modelId, "effort_ladder", value.length ? value : null)} />
+            : <ReadOnlyNotice theme={theme} text="effort_ladder has unsupported data; kept unchanged." />}
+          {["request_names"].map((key) => policy[key] == null || (Array.isArray(policy[key]) && (policy[key] as unknown[]).every((item) => typeof item === "string"))
             ? <StringListField key={key} errorKey={`rules.models.${engineId}.policy.${modelId}.${key}`} label={`${key} for ${id}`} values={policy[key] as string[] ?? []} theme={theme}
-              ordered={key === "effort_ladder"} onChange={(value) => put(engineId, modelId, key, value.length === 0 && (key === "effort_ladder" || key === "request_names") ? null : value)} />
+              onChange={(value) => put(engineId, modelId, key, value.length === 0 ? null : value)} />
             : <ReadOnlyNotice key={key} theme={theme} text={`${key} has unsupported data; kept unchanged.`} />)}
           {Object.keys(policy).filter((key) => !["effort_floor", "max_effort", "effort_ladder", "also_standard_for", "preferred_for", "preferred_when", "request_names"].includes(key)).map((key) => <ReadOnlyNotice key={key} theme={theme} text={`${key} is not supported here; kept unchanged.`} />)}
         </Group>;
@@ -860,8 +870,8 @@ function RoutingEditor({ form, onChange, vocabulary, theme, errors }: {
             placeholder={row.engine === "opencode" ? "provider/model" : "model id"}
             onChangeText={(model) => update({ ...row, model })} />
           <ChoiceField label={`Pin ${index + 1} effort`} value={row.effort} theme={theme}
-            options={[{ value: "", label: "Engine default" }, ...vocabulary.efforts.map((effort) => ({ value: effort, label: effort })),
-              ...(row.effort && !vocabulary.efforts.includes(row.effort) ? [{ value: row.effort, label: `${row.effort} (unknown)` }] : [])]}
+            hint={modelEffortChoices(vocabulary, row.engine, row.model).hint}
+            options={[{ value: "", label: "Engine default" }, ...modelEffortOptions(vocabulary, row.engine, row.model, [row.effort])]}
             onChange={(effort) => update({ ...row, effort })} />
           <ReadOnlyRow label="Pinned route" value={composePin(row) || "—"} theme={theme} />
         </View>} />}

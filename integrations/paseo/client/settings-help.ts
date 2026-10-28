@@ -206,8 +206,8 @@ export const HELP = {
   ),
   modelPolicy: helpBlock(
     h(
-      "Per-engine, per-model rules for automatic worker routing. Models are matched by exact id; nothing is guessed from names. A model without automatic membership and a tier is never picked automatically (it stays usable by hand).",
-      "Правила по движкам и моделям для автоматического выбора исполнителей. Модели сравниваются по точному id, по названию ничего не угадывается. Модель без автоматического членства и уровня автоматически не выбирается (вручную доступна).",
+      "Per-engine, per-model rules for automatic worker routing. Effort choices use that exact model's observed levels; no selector means engine default only. Unknown levels use a visibly marked global fallback. Stored unsupported values stay unchanged until you remove or replace them. Models are matched by exact id; nothing is guessed from names. A model without automatic membership and a tier is never picked automatically (it stays usable by hand).",
+      "Правила по движкам и моделям для автоматического выбора исполнителей. Effort выбирается из наблюдённых уровней точной модели; без селектора доступен только default движка. Неизвестные уровни явно отмечены: показан общий список. Сохранённые неподдерживаемые значения не меняются до удаления или замены. Модели сравниваются по точному id, по названию ничего не угадывается. Модель без автоматического членства и уровня автоматически не выбирается (вручную доступна).",
     ),
     [
       ["Policy engine / Policy model + Add model policy", h(
@@ -231,8 +231,8 @@ export const HELP = {
         "Максимальный effort; без него flagship останавливается на high. Рекомендация: не задавать или xhigh/max только для модели, дороговизна которой допустима.",
       )],
       ["effort_ladder", h(
-        "For a light model: 1–3 ascending efforts for light work, standard work, and a retry after falling short. Recommended: for example high, xhigh for a fast model that also does standard work.",
-        "Для light-модели: 1–3 возрастающих effort для лёгкой работы, обычной работы и повтора после неудачи. Рекомендация: например high, xhigh для быстрой модели, которая берёт и обычную работу.",
+        "For a light model: 1–3 ascending efforts for light work, standard work, and a retry after falling short. Choose only this model's observed levels with Add, then reorder or remove entries. Clearing the list writes Neutral (unset).",
+        "Для light-модели: 1–3 возрастающих effort для лёгкой работы, обычной работы и повтора после неудачи. Добавляйте только наблюдённые уровни модели, меняйте порядок или удаляйте их. Очистка списка сохраняет Neutral (unset).",
       )],
       ["also_standard_for", h(
         "Work kinds where a light model also counts as a standard candidate (for example testing).",
@@ -278,7 +278,7 @@ export const HELP = {
     [
       ["Pin N role", h("Worker role (for example worker-security-auditor) or * for all roles.", "Роль исполнителя (например worker-security-auditor) или * для всех.")],
       ["Pin N engine / model", h("Exact engine and model id; OpenCode models are provider/model.", "Точные движок и id модели; у OpenCode — provider/model.")],
-      ["Pin N effort", h("Fixed effort, or Engine default.", "Фиксированный effort или Engine default.")],
+      ["Pin N effort", h("Fixed effort from this exact model’s observed levels, or Engine default. Unknown levels show a marked global fallback; saved unsupported values are preserved.", "Фиксированный effort из наблюдённых уровней точной модели или Engine default. Неизвестные уровни отмечены общим списком; сохранённые неподдерживаемые значения сохраняются.")],
       ["Recommended", h(
         "no pins — automatic routing balances cost, quota and quality. Pin only a role that must always use one model.",
         "без закреплений — автоматика сама балансирует цену, лимиты и качество. Закрепляйте только роль, которой всегда нужна одна модель.",

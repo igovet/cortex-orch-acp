@@ -5,6 +5,8 @@
 
 > **Current contract:** former built-in name/family/position-based model rules described in historical sections below are removed. Current automatic and coordinator routing requires explicit version-2 owner settings and observed catalog identities. See [settings-only routing](#settings-only-routing).
 
+The Paseo Routing editor offers cached per-model observed efforts for pins, floors, caps and ordered effort ladders. Unknown models use a marked global fallback; observed default-only models do not. Stored unsupported values are retained visibly, not rewritten. Conflicting connection observations are unknown. See [settings controls](../../configuration.md#manage-settings-in-paseo); dispatch policy and authorization remain unchanged.
+
 Cortex automatically selects worker engine, model, and effort from the runtime's
 current model catalog, task tier, work kind, routing policy and each engine's
 observed subscription plan usage; how often an engine was chosen before is not
