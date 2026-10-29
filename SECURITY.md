@@ -1,5 +1,9 @@
 # Security policy
 
+Paseo history replay checks the original assistant message identity even when
+the host derives a different timeline item ID; ordering, text and manifest
+checks remain required. See [history recovery](integrations/paseo/HISTORY.md).
+
 Fresh-install model settings use the owner's refreshed portable default-profile
 routing policy, `claude-agent-acp/opus[1m]` coordinator at medium effort, and Russian
 message language. The 2026-10-27 preset sync adds `codex-acp/gpt-6.1-terra`

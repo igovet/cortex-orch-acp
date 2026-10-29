@@ -27,6 +27,10 @@ every change through a reviewer who did not write it, verifies the result
 against your project's own checks, and keeps a durable, recoverable record
 next to your project.
 
+Paseo history restoration validates message identity and replay completeness;
+the 0.14.0 SDK's derived message IDs are supported by the replay gate. See
+[history recovery](integrations/paseo/HISTORY.md) for verification limits.
+
 ---
 
 Routing marks stored references to disabled models as inactive without deleting them; its enabled-model picker excludes denied models. Routing settings use each exact model's observed effort levels, including ordered effort ladders. Unknown levels are marked; saved unsupported values remain visible and unchanged. See [configuration](docs/configuration.md#manage-settings-in-paseo).
