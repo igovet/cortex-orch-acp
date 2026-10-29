@@ -19,7 +19,8 @@ const BARRIER = "__cortex_replay_barrier__";
 export function replayItemMatches(expected: {type: string; id?: string; text?: string}, item: any): boolean {
   return item.type === expected.type &&
     (expected.id === undefined || item.id === expected.id ||
-      (item.type === "assistant_message" && item.messageId === expected.id)) &&
+      (item.type === "assistant_message" && item.messageId === expected.id) ||
+      (item.type === "reasoning" && item.id === JSON.stringify(["agent_thought_chunk", expected.id]))) &&
     (expected.text === undefined || (typeof item.text === "string" && item.text.endsWith(expected.text)));
 }
 
