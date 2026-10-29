@@ -494,6 +494,59 @@ function workerHistoryFixture(input: Record<string, unknown>) {
 }
 
 for (const platformOs of ["android", "web"] as const) {
+  test(`worker usage unknown states and real snapshots (${platformOs})`, async () => {
+    let provider = "opencode";
+    let status = "running";
+    let context: { used: number; size: number } | undefined;
+    let planUsedPercent: number | null = null;
+    let hasTokens = false;
+    const history = () => Promise.resolve({
+      available: true, truncated: false, nextCursor: null, nextAssignmentCursor: null,
+      assignments: [{ taskId: "t_1", id: "wa_1", assignmentRef: "ref1", nodeKey: "n1", status,
+        attempts: [{ id: "xa_1", attemptNo: 1, status, failureReason: null, events: [], context,
+          route: { provider, model: "provider/model", effort: null,
+            selection: { tier: "standard", hint: null, decidedBy: "usage", planUsedPercent } },
+          tokens: hasTokens ? { input: 123, output: 456, cachedRead: 0, cachedWrite: 0, total: 579, knownCalls: 1, unknownCalls: 0 } : undefined,
+        }] }],
+    });
+    const { runtime, captured, cleanup } = await loadClient(platformOs, { "cortex.worker-history.read": history });
+    const mount = () => runtime.mount(() => ({ type: captured["worker-row"].Component, props: {
+      theme, host: { id: "h1", label: "Local" }, layout: { compact: true, platform: platformOs }, agentId: "a1",
+      item: { id: "worker-row:worker:ref1", kind: "worker-row", version: 1,
+        data: { callId: "worker:ref1", assignmentRef: "ref1", title: "Worker: debugger — Fix it", status: status === "failed" ? "failed" : "running" } },
+    } }), { press: false });
+    try {
+      for (status of ["running", "failed"]) {
+        await mount();
+        assert.match(runtime.text(), /Context unknown until turn end.*OpenCode reports it only when a turn finishes; errors may leave it unavailable/);
+        assert.ok(runtime.text().includes("plan usage unknown (at route selection) — OpenCode does not report provider plan usage to Cortex; check your provider's account usage page."));
+        if (hasTokens) assert.match(runtime.text(), /↑ 123/);
+        hasTokens = true;
+        assert.doesNotMatch(runtime.text(), /Context 0%/);
+      }
+      context = { used: 10, size: 0 };
+      await mount();
+      assert.match(runtime.text(), /Context unknown until turn end/);
+      context = { used: 25000, size: 100000 };
+      planUsedPercent = 42;
+      await mount();
+      assert.ok(runtime.text().includes("Context 25%, 25k / 100k tokens"));
+      assert.doesNotMatch(runtime.text(), /Context unknown|Context unavailable/);
+      assert.ok(runtime.text().includes("plan usage 42% (at route selection)"));
+      assert.doesNotMatch(runtime.text(), /check your provider/);
+      provider = "codex-acp";
+      context = undefined;
+      planUsedPercent = null;
+      hasTokens = false;
+      await mount();
+      assert.match(runtime.text(), /Context unavailable/);
+      assert.doesNotMatch(runtime.text(), /Context unknown until turn end|OpenCode does not report/);
+    } finally {
+      runtime.unmountAll();
+      cleanup();
+    }
+  });
+
   test(`coordinator card renders no result body or checks, even from a legacy payload (${platformOs})`, async () => {
     const { runtime, captured, cleanup, rpcCalls } = await loadClient(platformOs, { "cortex.worker-history.read": workerHistoryFixture });
     const host = { theme, host: { id: "h1", label: "Local" }, layout: { compact: platformOs !== "web", platform: platformOs } };
@@ -515,7 +568,7 @@ for (const platformOs of ["android", "web"] as const) {
         }
         // How the route was chosen is its own line; the plan's usage never
         // reads as a bare `usage` beside the worker's own context meter.
-        assert.match(text, /^flagship · by user_request · plan usage 25%$/m);
+        assert.match(text, /^flagship · by user_request · plan usage 25% \(at route selection\)$/m);
         assert.doesNotMatch(text, /(?<!plan )usage 25%/);
         assert.match(text, /Completed with issues\n · 1/);
         assert.match(text, /1 open issue · details in the worker tab/);
@@ -725,11 +778,12 @@ test("an available:false first read explains itself instead of an empty worker l
 for (const platformOs of ["android", "web"] as const) {
   test(`worker card refreshes a missing route from its compact poll (${platformOs})`, async () => {
     let route: Record<string, unknown> | undefined;
+    let context: { used: number; size: number } | undefined;
     const { runtime, captured, cleanup, rpcCalls } = await loadClient(platformOs, {
       "cortex.worker-history.read": () => Promise.resolve({
         available: true, truncated: false, nextCursor: null, nextAssignmentCursor: null,
         assignments: [{ taskId: "t_1", id: "wa_1", nodeKey: "n1", status: "running",
-          attempts: [{ id: "xa_1", attemptNo: 1, status: "running", failureReason: null, events: [], ...(route ? { route } : {}) }] }],
+          attempts: [{ id: "xa_1", attemptNo: 1, status: "running", failureReason: null, events: [], context, ...(route ? { route } : {}) }] }],
       }),
     });
     const data = { callId: "worker:ref1", assignmentRef: "ref1", title: "Worker: debugger — Fix it", status: "running" };
@@ -744,6 +798,13 @@ for (const platformOs of ["android", "web"] as const) {
       assert.doesNotMatch(runtime.text(), /Route pending|Route unavailable/);
       assert.match(runtime.text(), /Observed Sol.*Open worker/);
       assert.deepEqual(runtime.liveRegions(), [""], "route polling is not a status announcement");
+      assert.match(runtime.text(), /Context unavailable/);
+      context = { used: 25000, size: 100000 };
+      await new Promise((resolve) => setTimeout(resolve, 3100));
+      await runtime.settle();
+      assert.ok(runtime.text().includes("Context 25%, 25k / 100k tokens"));
+      assert.doesNotMatch(runtime.text(), /Context unavailable/);
+      assert.deepEqual(runtime.liveRegions(), [""], "context polling is not a status announcement");
       for (const call of rpcCalls) {
         assert.equal(call.name, "cortex.worker-history.read");
         assert.equal(call.input.compact, true);

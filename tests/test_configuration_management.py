@@ -602,6 +602,53 @@ def _catalog_fixture(home, monkeypatch):
     return codex, claude, opencode
 
 
+def test_routing_exposes_only_observed_per_model_efforts(home, monkeypatch):
+    from cortex_runtime.catalog import discovery, store as catalog_store
+
+    _codex, _claude, opencode = _catalog_fixture(home, monkeypatch)
+    raw = [dict(id="model", name="Model", type="select", category="model", currentValue="provider/one",
+                options=[dict(value=model, name=model) for model in ("provider/one", "provider/two", "provider/default")])]
+    observation = discovery.parse_observation(raw).with_model_thought_levels({
+        "provider/one": ("low", "high"), "provider/two": ("medium",), "provider/default": (),
+    })
+    catalog_store.save_snapshot(discovery.build_catalog({opencode.id: opencode}, {opencode.id: observation}))
+    registry_before = registry.registry_path(None).read_bytes()
+    efforts = management.read_routing()["builtin"]["model_efforts"]
+    assert efforts["opencode"] == {
+        "provider/one": ["low", "high"], "provider/two": ["medium"], "provider/default": [],
+    }
+    assert "provider/unobserved" not in efforts["opencode"]
+    assert registry.registry_path(None).read_bytes() == registry_before
+
+
+def test_routing_efforts_missing_or_seeded_catalog_is_unknown(home):
+    from cortex_runtime.catalog import discovery, store as catalog_store
+
+    codex = _api_key_connection()
+    assert management.read_routing()["builtin"]["model_efforts"] == {}
+    # A synthetic seed must never be presented as an observed empty selector.
+    catalog_store.save_snapshot(discovery.build_catalog(
+        {codex.id: codex}, {codex.id: discovery.seed_observation(codex.engine)},
+        seeded_connection_ids={codex.id}))
+    assert codex.engine not in management.read_routing()["builtin"]["model_efforts"]
+
+
+def test_routing_efforts_conflicting_connections_are_unknown(home):
+    from cortex_runtime.catalog import discovery, store as catalog_store
+
+    first = _api_key_connection()
+    second = onboarding.create_connection(
+        name="Other catalog", engine="codex-acp", provider="openai", auth_mode=AuthMode.API_KEY,
+        key_kind="openai_api_key", launch_command=("/usr/bin/node", "/opt/codex-acp/index.js"),
+    )
+    raw = [dict(id="model", name="Model", type="select", category="model", currentValue="exact-model",
+                options=[dict(value="exact-model", name="Exact model")])]
+    for record, levels in ((first, ("low", "high")), (second, ("medium",))):
+        observation = discovery.parse_observation(raw).with_model_thought_levels({"exact-model": levels})
+        catalog_store.save_snapshot(discovery.build_catalog({record.id: record}, {record.id: observation}))
+    assert management.read_routing()["builtin"]["model_efforts"]["codex-acp"]["exact-model"] is None
+
+
 def _routes(view):
     return {f"{item['engine']}/{item['model']}": item for item in view["routes"]}
 

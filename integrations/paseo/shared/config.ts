@@ -207,6 +207,8 @@ export const routingResult = z.object({
     model_policy_version: z.number().optional(),
     policy_attributes: z.array(z.string()).optional(),
     policy_efforts: z.array(z.string()).optional(),
+    // Missing/null = unknown; [] = observed engine-default-only.
+    model_efforts: z.record(z.string(), z.record(z.string(), z.array(z.string()).nullable())).optional(),
     selection_modes: z.array(z.string()).optional(),
     tier_sources: z.array(z.string()).optional(),
     max_request_names: z.number().optional(),

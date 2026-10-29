@@ -718,8 +718,38 @@ def _routing_file_view(source: str, path: Path) -> dict[str, object]:
     return view
 
 
-def _routing_builtin() -> dict[str, object]:
+def _routing_model_efforts(environ) -> dict[str, dict[str, list[str] | None]]:
+    """Observed selectors only: missing/conflicting data is unknown, [] is default-only."""
+    from ..acp.config_options import build_thought_level_option
+    from ..catalog.evidence import Fact, ProvenanceSource
+
+    result: dict[str, dict[str, list[str] | None]] = {}
+    records = registry._parse_registry_bytes(_registry_bytes(environ) or b"").connections.values()
+    for record in records:
+        try:
+            entries, _ = _catalog_entries(record, environ)
+        except PortableError:
+            # A damaged snapshot cannot establish this model's supported levels.
+            continue
+        for entry in entries:
+            provenance = entry.evidence.facts.get(Fact.CATALOG_OBTAINED)
+            if provenance is None or provenance.source == ProvenanceSource.SEED:
+                continue
+            option = build_thought_level_option(entry, {}, None, None)
+            levels = [item["value"] for item in option["options"]] if option else []
+            models = result.setdefault(entry.route.engine, {})
+            model = entry.route.model
+            if model in models and models[model] != levels:
+                # Different connections can advertise different capabilities.
+                models[model] = None
+            else:
+                models[model] = levels
+    return result
+
+
+def _routing_builtin(environ=None) -> dict[str, object]:
     return dict(
+        model_efforts=_routing_model_efforts(environ),
         supported_engines=list(SUPPORTED_ENGINES),
         optional_engines=list(OPTIONAL_ENGINES),
         model_policy_version=2, default_auto_deny_engines=[],
@@ -750,7 +780,7 @@ def read_routing(project_root: str | None = None, environ: Mapping[str, str] | N
         sources=views, effective_source=effective["source"] if effective is not None else "missing",
         effective_valid=effective is not None and bool(effective.get("valid")),
         effective_rules=effective_rules,
-        builtin=_routing_builtin(),
+        builtin=_routing_builtin(env),
     )
 
 

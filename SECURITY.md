@@ -1,5 +1,10 @@
 # Security policy
 
+Paseo history replay checks the original assistant message identity even when
+the host derives a different timeline item ID; ordering, text and manifest
+checks remain required. Reasoning uses the exact host-derived ID tuple. See
+[history recovery](integrations/paseo/HISTORY.md).
+
 Fresh-install model settings use the owner's refreshed portable default-profile
 routing policy, `claude-agent-acp/opus[1m]` coordinator at medium effort, and Russian
 message language. The 2026-10-27 preset sync adds `codex-acp/gpt-6.1-terra`
@@ -15,6 +20,8 @@ settings are never replaced. Account/connection
 identities and machine-specific MCP definitions/paths are not cloned; see
 [the install snapshot boundary](docs/configuration.md#fresh-install-owner-default-snapshot).
 
+Routing effort controls read cached per-model observations only; they do not start engines, grant model access or change authorization. Unknown/conflicting observations are labeled, and unsupported stored values are preserved rather than silently repaired. Runtime dispatch validation remains authoritative. See [settings](docs/configuration.md#manage-settings-in-paseo).
+
 ## Paseo dependency findings (2026-10-04)
 
 The plugin lockfile retains GHSA-vfj7-8cjw-p6xm in `braces@3.0.3`,
@@ -25,7 +32,11 @@ regression passes do not clear a nonzero audit, and `devDependencies` is not
 a security boundary. See the [dependency disposition](docs/project/paseo-dependency-audit.md)
 for exact paths, artifact-test limits and the next upstream-fix decision.
 
-## Current ACP boundary (1.0.2)
+## Current ACP boundary (1.0.3)
+
+Paseo Routing model choices exclude models disabled in the file being edited.
+Stored pins and policy references remain intact and carry an inactive warning;
+this presentation does not enable models or change runtime authorization.
 
 Startup and approved engine updates may advance existing Codex/Claude launch
 commands to newer source-qualified, exactly registered owned installations.
@@ -1479,6 +1490,12 @@ read-only: it never creates storage or repairs permissions. No format migration,
 new authority or relaxation of independent review is involved.
 
 ## Usage-record compatibility
+
+Worker usage explanations use retained route/context evidence only. OpenCode's
+missing context and provider plan usage remain unknown; no percentage or window
+size is inferred from token totals. Plan percentages are labelled as snapshots
+at route selection, not live account meters. These UI states add no quota reader,
+credential access or network request.
 
 Post-result releases retain the original closed SQLite basis vocabulary and
 use existing `failed`/`stop_reason` columns; no table rebuild or format change

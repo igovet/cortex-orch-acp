@@ -8,7 +8,7 @@ import { PipelinePanel } from "./client/pipeline-panel.js";
 import { SettingsScreen } from "./client/settings-panel.js";
 import { selectWorker } from "./client/worker-selection.js";
 import { isWorkerTimelineRunning } from "./client/worker-timeline-status.js";
-import { resolveDurableWorkerCardStatus, workerCardIdentity, workerCardRouteText, workerStatusPresentation, type WorkerStatusTone } from "./client/worker-display.ts";
+import { contextUnavailableText, resolveDurableWorkerCardStatus, workerCardIdentity, workerCardRouteText, workerStatusPresentation, type WorkerStatusTone } from "./client/worker-display.ts";
 import { coalesced } from "./client/coalesce.ts";
 import { UsageMeter, useWorkerUsage } from "./client/usage-meter.tsx";
 import { isWorkerCardCallId, WORKER_ROW_KIND, WORKER_ROW_VERSION, workerRowData, workerRowId } from "./shared/worker-card-item.ts";
@@ -171,7 +171,7 @@ function WorkerTimelineRow({ theme, layout, agentId, item, workspaceId, onOpen }
         <Text numberOfLines={1} ellipsizeMode="tail" style={{ color: statusColor, fontSize: 12, lineHeight: 18, flexShrink: 1, minWidth: 0 }}>{attention}</Text>
       </View>}
       <View style={{ flexShrink: 1, minWidth: 0 }}>
-        <UsageMeter context={usage?.context} tokens={usage?.tokens} theme={theme} mutedColor={muted} unavailableText={loaded ? "Usage unavailable" : undefined} />
+        <UsageMeter context={usage?.context} tokens={usage?.tokens} theme={theme} mutedColor={muted} unavailableText={contextUnavailableText(usage?.route?.provider)} />
       </View>
       {disabled && <Text style={{ color: muted, fontSize: 12, lineHeight: 18 }}>Worker unavailable</Text>}
     </Pressable>

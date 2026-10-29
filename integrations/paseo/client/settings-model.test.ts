@@ -1,5 +1,25 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+
+test("routing choices follow exact deny and enabled state without modifying stored policy", () => {
+  const form = { ...emptyRoutingForm(), enabled: { opencode: ["provider/one", "provider/two"] },
+    models: { opencode: { auto: ["provider/one"], tiers: { "provider/one": "flagship" }, policy: { "provider/one": { preferred_for: ["review"] } } } } };
+  const snapshot = structuredClone(form.models);
+  for (const deny of ["opencode/provider/one", "provider/one", "opencode/*"]) {
+    const off = { ...form, deny: [deny] };
+    assert.equal(routingModelDisabled(off, "opencode", "provider/one"), true);
+    assert.ok(!routingModelChoices(off, "opencode").includes("provider/one"));
+    assert.deepEqual(off.models, snapshot);
+  }
+  const disabled = setModelInCortex(form, { engine: "opencode", model: "provider/one" }, false, false);
+  assert.equal(routingModelDisabled(disabled, "opencode", "provider/one"), true);
+  assert.deepEqual(routingModelChoices(disabled, "opencode"), ["provider/two"]);
+  const restored = setModelInCortex(disabled, { engine: "opencode", model: "provider/one" }, true, false);
+  assert.equal(routingModelDisabled(restored, "opencode", "provider/one"), false);
+  assert.deepEqual(routingModelChoices(restored, "opencode"), ["provider/two", "provider/one"]);
+  assert.deepEqual(restored.models, snapshot);
+  assert.equal(routingModelDisabled(form, "opencode", "provider/one-new"), true);
+});
 import {
   projectChoices,
   buildProfileSave,
@@ -19,6 +39,7 @@ import {
   setEngineEnabled,
   setModelAutoAllowed,
   setModelEnabled,
+  setModelInCortex,
   setModelAutoSelected,
   modelAutoSelected,
   setModelPreferredFor,
@@ -56,6 +77,10 @@ import {
   routingRulesToForm,
   routingTarget,
   routingVocabulary,
+  modelEffortChoices,
+  modelEffortOptions,
+  routingModelDisabled,
+  routingModelChoices,
   userDefaultsToForm,
   type CeilingView,
   type ConnectionsView,
@@ -108,6 +133,37 @@ function routing(rules: Record<string, unknown> | undefined, extra: Partial<Rout
     },
   };
 }
+
+test("routing effort choices distinguish exact observations, default-only and unknown models", () => {
+  const view = routing({});
+  view.builtin.model_efforts = { opencode: { "provider/one": ["low", "high"], "provider/two": ["medium"], "provider/default": [], "provider/conflict": null } };
+  const vocabulary = routingVocabulary(view);
+  assert.deepEqual(modelEffortChoices(vocabulary, "opencode", "provider/one").levels, ["low", "high"]);
+  assert.deepEqual(modelEffortChoices(vocabulary, "opencode", "provider/two", true).levels, ["medium"]);
+  assert.deepEqual(modelEffortChoices(vocabulary, "opencode", "provider/default").levels, []);
+  assert.equal(modelEffortChoices(vocabulary, "opencode", "provider/default").known, true);
+  for (const model of ["hand-typed", "provider/conflict"]) {
+    assert.equal(modelEffortChoices(vocabulary, "opencode", model).known, false);
+    assert.deepEqual(modelEffortChoices(vocabulary, "opencode", model).levels, vocabulary.efforts);
+    assert.match(modelEffortChoices(vocabulary, "opencode", model).hint!, /unknown/);
+  }
+  assert.equal(modelEffortChoices(vocabulary, "codex-acp", "provider/one").known, false);
+  assert.deepEqual(modelEffortOptions(vocabulary, "opencode", "provider/one", ["medium"]), [
+    { value: "low", label: "low" }, { value: "high", label: "high" },
+    { value: "medium", label: "medium (not supported by this model)", disabled: true },
+  ]);
+  const parsed = routingRulesToForm({ model_policy_version: 2, pin: { "*": "opencode/provider/one:medium" },
+    models: { opencode: { policy: { "provider/one": { effort_floor: "medium", max_effort: "medium", effort_ladder: ["medium", "high"] } } } } });
+  assert.ok(parsed.ok);
+  if (parsed.ok) {
+    const built = buildRoutingRules(parsed.form, vocabulary);
+    assert.ok(built.ok);
+    if (built.ok) {
+      assert.equal(built.value.pin?.["*"], "opencode/provider/one:medium");
+      assert.deepEqual(built.value.models?.opencode.policy?.["provider/one"].effort_ladder, ["medium", "high"]);
+    }
+  }
+});
 
 function catalogRoute(engine: string, model: string, extra: Partial<CatalogRoute> = {}): CatalogRoute {
   return {

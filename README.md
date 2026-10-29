@@ -6,7 +6,7 @@
 <p align="center"><strong>Multi-agent coordination for software work, as an ACP agent.</strong></p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Cortex-1.0.2-7c3aed" alt="Cortex 1.0.2" />
+  <img src="https://img.shields.io/badge/Cortex-1.0.3-7c3aed" alt="Cortex 1.0.3" />
   <img src="https://img.shields.io/badge/Python-3.11%2B-3776ab" alt="Python 3.11+" />
   <img src="https://img.shields.io/badge/Protocol-ACP%20v1-111827" alt="Agent Client Protocol v1" />
   <img src="https://img.shields.io/badge/Storage-Markdown%20%2B%20SQLite-0f766e" alt="Markdown files and SQLite metadata" />
@@ -27,7 +27,13 @@ every change through a reviewer who did not write it, verifies the result
 against your project's own checks, and keeps a durable, recoverable record
 next to your project.
 
+Paseo history restoration validates message identity and replay completeness;
+the 0.14.0 SDK's derived message and reasoning IDs are supported by the replay gate. See
+[history recovery](integrations/paseo/HISTORY.md) for verification limits.
+
 ---
+
+Routing marks stored references to disabled models as inactive without deleting them; its enabled-model picker excludes denied models. Routing settings use each exact model's observed effort levels, including ordered effort ladders. Unknown levels are marked; saved unsupported values remain visible and unchanged. See [configuration](docs/configuration.md#manage-settings-in-paseo).
 
 ## Table of contents
 
@@ -156,8 +162,11 @@ expect to find and fix gaps yourself if you try one.
 
 [Paseo](https://github.com/getpaseo/paseo) is the primary, recommended ACP
 client for Cortex: it has a native Cortex provider plugin, shows per-worker
-cards with live status and token usage, and is what orchestration is
-qualified against. The steps below are exact commands from this repository;
+cards with live status and reported token/context snapshots, and is what
+orchestration is qualified against. Missing context is explicit (OpenCode reports
+it only at turn end); provider plan percentages are route-selection snapshots,
+not live meters. Unsupported OpenCode plan usage stays unknown with a hint to
+check the provider's account usage page. The steps below are exact commands from this repository;
 for the local-checkout path, replace `/absolute/path/to/cortex-orch-acp` with
 where you cloned it. Busy-message acknowledgements close their display message
 before worker waiting resumes, so later worker cards do not wait behind that

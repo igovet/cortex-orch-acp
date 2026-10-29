@@ -43,7 +43,7 @@ The catalog fills the way it does for the other engines:
 - on each session open, from the `configOptions` OpenCode reports;
 - on demand, with `refresh-catalog`, which opens a prompt-free session inside a read-only jail.
 
-Efforts are read per model, because OpenCode offers different effort values per model and none at all for some.
+Efforts are read per model, because OpenCode offers different effort values per model and none at all for some. The Paseo Routing editor offers each OpenCode model's own observed levels for pins, floors, caps and ladders; a model that reports no effort selector offers only engine default or neutral, and a model not yet observed shows a marked global fallback (see [settings controls](../../configuration.md#manage-settings-in-paseo)).
 
 OpenCode observations must also offer `cortex` in the `mode` selector before
 either refresh or session capture saves a snapshot. Otherwise refresh reports
@@ -208,7 +208,7 @@ Native tool requests reach the same permission bridge as the other engines:
 
 - **Recovery.** Cortex never calls `session/load`, `resume`, `fork`, `close` or `delete` on an outgoing engine. Recovery opens a fresh session and process.
 - **Compaction.** OpenCode documents `/compact`, but no compaction signal was observed over ACP. The tier is `controlled_boundary`: Cortex refreshes context only at its own boundaries. A manual `/compact` completes without OpenCode's removed `compaction` helper agent.
-- **Usage.** `usage_update` (`used`, `size`, `cost`) and the prompt result's `usage` are recorded like the other engines. OpenCode reports no plan windows, so plan usage is unknown, never zero.
+- **Usage.** Cortex records genuine `usage_update` (`used`, `size`, `cost`) and prompt-result `usage` when reported. The inspected OpenCode 2.2.0 ACP adapter reports context only at prompt/turn end, not after each model step; its provider-error path skips that final context update and normal token-bearing response. Worker cards without a context snapshot explicitly explain the turn-end reporting and possible error-path loss, even when token totals exist. A genuine snapshot replaces the explanation with the normal Context meter; no occupancy or window size is inferred from cumulative tokens. OpenCode provider plan usage is not reported to Cortex: the route-selection line explicitly says unknown and directs the owner to the provider's account usage page. Any displayed plan percentage is a snapshot at route selection, not a live meter.
 
 ## Can all current Cortex functionality work through OpenCode v2?
 
@@ -224,10 +224,10 @@ The table records the no-paid qualification observations.
 | Model / effort / mode confirm-or-fail | Works; efforts are per model |
 | Native subagent ban | Tool removed by configuration |
 | Guarded deletion confirmation | Works for declared shell `rm` |
-| Usage, cancellation | Works |
+| Usage, cancellation | Earlier qualification passed; inspected 2.2.0 reports context only at turn end and skips it on provider error (see Usage above) |
 | Recovery | Fresh session (the same as the other engines) |
 | Compaction signal | Not observable; controlled boundary only |
-| Plan-window quota | Not reported by OpenCode |
+| Plan-window quota | Not reported to Cortex; UI explicitly shows unknown and a provider-account usage hint |
 | Structured auth/quota failure classification | Not observed; such failures surface as ordinary engine errors |
 | Owner's custom providers and native logins | Works on installed 2.0.20 with the native `opencode.db` once the built-in agent plugins are removed (qualification test and owner-account catalog refresh); no alternate database |
 | OpenCode desktop browser tools | Unavailable in ACP |

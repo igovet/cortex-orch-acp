@@ -160,20 +160,30 @@ const ROUTE_PROVENANCE = /^(?:by|usage|hint)\s|^(?:light|standard|deep|flagship)
 
 /** The chosen plan's usage reads `plan usage 42%`, never a bare `usage`
  * that would look like this worker's own context or token usage. */
-function planUsageLabel(part: string): string {
-  return part.replace(/^usage\s/i, "plan usage ");
+function planUsageLabel(part: string, engine?: string): string {
+  const label = part.replace(/^usage\s/i, "plan usage ") + " (at route selection)";
+  return /unknown/i.test(part) && engine === "opencode"
+    ? `${label} — OpenCode does not report provider plan usage to Cortex; check your provider's account usage page.`
+    : label;
+}
+
+/** Missing context is not zero and cannot be inferred from token totals. */
+export function contextUnavailableText(engine?: string): string {
+  return engine === "opencode"
+    ? "Context unknown until turn end — OpenCode reports it only when a turn finishes; errors may leave it unavailable."
+    : "Context unavailable";
 }
 
 /** How the runtime chose a route, one line: `deep · by usage · plan usage 42%`
  * (`null` without a recorded decision). */
 export function routeSelectionText(selection: {
   tier?: string | null; hint?: string | null; decidedBy?: string | null; planUsedPercent?: number | null;
-} | null | undefined): string | null {
+} | null | undefined, engine?: string): string | null {
   if (!selection) return null;
   const used = selection.planUsedPercent;
   const parts = [selection.tier, selection.hint ? `hint ${selection.hint}` : null,
     selection.decidedBy ? `by ${selection.decidedBy}` : null,
-    `plan usage ${typeof used === "number" && Number.isFinite(used) ? `${Math.round(used)}%` : "unknown"}`];
+    planUsageLabel(`usage ${typeof used === "number" && Number.isFinite(used) ? `${Math.round(used)}%` : "unknown"}`, engine)];
   return parts.filter((part): part is string => Boolean(part)).join(" · ");
 }
 
@@ -184,10 +194,10 @@ export function workerCardIdentity(title: string, durableRoute?: WorkerAssignmen
   const { name, routeParts } = parseWorkerCardTitle(title);
   const role = (routeParts[0] || "worker").replace(/^worker-/i, "");
   const route = routeParts.slice(1).filter((part) => !ROUTE_PROVENANCE.test(part));
-  const selection = routeParts.slice(1).filter((part) => ROUTE_PROVENANCE.test(part)).map(planUsageLabel);
+  const selection = routeParts.slice(1).filter((part) => ROUTE_PROVENANCE.test(part)).map((part) => /^(?:usage)\s/i.test(part) ? planUsageLabel(part, route[0]) : part);
   return { title: name.trim() || role, role, route: durableRoute ? [durableRoute.provider, workerModelDisplay(durableRoute), durableRoute.effort].filter(Boolean).join(" · ")
       : route.length ? route.join(" · ") : null,
-    selection: durableRoute ? routeSelectionText(durableRoute.selection) : selection.length ? selection.join(" · ") : null };
+    selection: durableRoute ? routeSelectionText(durableRoute.selection, durableRoute.provider) : selection.length ? selection.join(" · ") : null };
 }
 
 /** A live card without route evidence is still awaiting dispatch, not unavailable. */

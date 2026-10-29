@@ -5,9 +5,17 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Readable } from "node:stream";
 import { runAcpProvider } from "@getpaseo/plugin/server/acp";
-import { ReplayController } from "./replay-connector.ts";
+import { ReplayController, replayItemMatches } from "./replay-connector.ts";
 import { ReplaySpool, readFrames } from "./replay-spool.mjs";
 import { wrapCortexConnection } from "./provider.ts";
+
+const expectedMessage = {type: "assistant_message", id: "message:1", text: "hello"};
+assert.equal(replayItemMatches(expectedMessage, {type: "assistant_message", id: '["agent_message_chunk","message:1"]', messageId: "message:1", text: "hello"}), true);
+assert.equal(replayItemMatches(expectedMessage, {type: "assistant_message", id: "other", messageId: "other", text: "hello"}), false);
+assert.equal(replayItemMatches(expectedMessage, {type: "assistant_message", id: "other", messageId: "message:1", text: "changed"}), false);
+assert.equal(replayItemMatches({type: "tool_call", id: "card"}, {type: "tool_call", id: "other", messageId: "card"}), false);
+assert.equal(replayItemMatches({type: "reasoning", id: "thought:1", text: "think"}, {type: "reasoning", id: '["agent_thought_chunk","thought:1"]', text: "think"}), true);
+assert.equal(replayItemMatches({type: "reasoning", id: "thought:1", text: "think"}, {type: "reasoning", id: '["agent_thought_chunk","other"]', text: "think"}), false);
 
 async function collect<T>(values: AsyncIterable<T>): Promise<T[]> {
   const result: T[] = []; for await (const value of values) result.push(value); return result;
@@ -69,6 +77,13 @@ for line in sys.stdin:
     elif req.get("method") == "session/load":
         sid = req["params"]["sessionId"]
         if sid == "crash-before": os._exit(7)
+
+        if sid == "reasoning":
+            send({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":sid,"update":{
+                "sessionUpdate":"agent_thought_chunk","messageId":"thought:1",
+                "content":{"type":"text","text":"thinking"}}}})
+            send({"jsonrpc":"2.0","id":req["id"],"result":{}})
+            continue
 
         if sid == "code-mode":
             for cid, tool, args, inner_status, result in [
@@ -155,6 +170,10 @@ async function load(nativeId: string | null, staleConfig = false, configureAfter
   } finally { await connection.close(); }
 }
 try {
+
+  const reasoning = await load("reasoning");
+  assert.equal(reasoning.filter(e => e.type === "request.failed").length, 0, JSON.stringify(reasoning.slice(-2)));
+  assert.equal(reasoning.at(-1).type, "session.ready");
 
   const codeMode = await load("code-mode");
   assert.equal(codeMode.filter(e => e.type === "request.failed").length, 0);

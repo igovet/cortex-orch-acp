@@ -551,17 +551,54 @@ export function composePin(row: Pick<PinRow, "engine" | "model" | "effort">): st
   return row.effort ? `${route}:${row.effort}` : route;
 }
 
-export type RoutingVocabulary = { engines: string[]; optionalEngines: string[]; efforts: string[]; tiers: string[]; workKinds: string[]; policyEfforts?: string[] };
+export type RoutingVocabulary = { engines: string[]; optionalEngines: string[]; efforts: string[]; tiers: string[]; workKinds: string[]; policyEfforts?: string[]; modelEfforts?: Record<string, Record<string, string[] | null>> };
 
 export function routingVocabulary(view: RoutingView): RoutingVocabulary {
   return {
     engines: [...new Set([...view.builtin.supported_engines, ...view.builtin.optional_engines])],
     optionalEngines: [...view.builtin.optional_engines],
     efforts: [...view.builtin.efforts],
+    modelEfforts: view.builtin.model_efforts,
     policyEfforts: [...(view.builtin.policy_efforts ?? view.builtin.efforts)],
     tiers: [...view.builtin.tiers],
     workKinds: [...view.builtin.work_kinds, "*"],
   };
+}
+
+/** Keep unknown observations distinct from observed default-only models. */
+export function modelEffortChoices(vocabulary: RoutingVocabulary, engine: string, model: string, policy = false) {
+  const models = vocabulary.modelEfforts?.[engine];
+  const observed = models && Object.prototype.hasOwnProperty.call(models, model) ? models[model] : undefined;
+  const known = Array.isArray(observed);
+  const levels = known ? observed : policy ? vocabulary.policyEfforts ?? vocabulary.efforts : vocabulary.efforts;
+  return {
+    known, levels,
+    hint: known
+      ? levels.length === 0 ? "This model reports no effort selector; engine default only." : undefined
+      : "This model's real effort levels are unknown. Showing the global vocabulary; refresh Models to obtain observations.",
+  };
+}
+
+/** Settings-file status only, not dispatch eligibility (catalog, quota and
+ * provider authorization are checked by the runtime). Exact matching mirrors
+ * routing's _listed / model_enabled, including OpenCode's provider/model ids. */
+export function routingModelDisabled(form: RoutingForm, engine: string, model: string): boolean {
+  return (form.deny ?? []).some((token) => token === model || token === routeToken(engine, model) || token === engineToken(engine))
+    || !(form.enabled?.[engine] ?? []).includes(model);
+}
+
+export function routingModelChoices(form: RoutingForm, engine: string): string[] {
+  return [...new Set(form.enabled?.[engine] ?? [])].filter((model) => !routingModelDisabled(form, engine, model));
+}
+
+export function modelEffortOptions(vocabulary: RoutingVocabulary, engine: string, model: string, stored: readonly string[], policy = false) {
+  const { known, levels } = modelEffortChoices(vocabulary, engine, model, policy);
+  return [
+    ...levels.map((value) => ({ value, label: value })),
+    ...[...new Set(stored)].filter((value) => value && !levels.includes(value)).map((value) => ({
+      value, label: `${value} (${known ? "not supported by this model" : "unknown"})`, disabled: true,
+    })),
+  ];
 }
 
 /** Version-2 work-kind spellings the runtime still reads, with the current kinds
