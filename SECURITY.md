@@ -1482,6 +1482,12 @@ new authority or relaxation of independent review is involved.
 
 ## Usage-record compatibility
 
+Worker usage explanations use retained route/context evidence only. OpenCode's
+missing context and provider plan usage remain unknown; no percentage or window
+size is inferred from token totals. Plan percentages are labelled as snapshots
+at route selection, not live account meters. These UI states add no quota reader,
+credential access or network request.
+
 Post-result releases retain the original closed SQLite basis vocabulary and
 use existing `failed`/`stop_reason` columns; no table rebuild or format change
 is needed. Paseo hides only the token alarm for non-failed, explicitly marked

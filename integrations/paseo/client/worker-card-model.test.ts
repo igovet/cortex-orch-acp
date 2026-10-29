@@ -8,10 +8,10 @@ import { attemptResultView } from "./worker-attempt-result.ts";
 test("card identity separates role, actual route, how the route was chosen and title", () => {
   const identity = workerCardIdentity("Worker: technical-writer · claude · Opus 5.5 · high · flagship · by user_request · usage 25% — Rewrite the audit");
   assert.deepEqual(identity, { title: "Rewrite the audit", role: "technical-writer", route: "claude · Opus 5.5 · high",
-    selection: "flagship · by user_request · plan usage 25%" });
+    selection: "flagship · by user_request · plan usage 25% (at route selection)" });
   const crossTier = workerCardIdentity("Worker: debugger · codex · gpt (alias) · light→standard · hint ignored · by usage · usage unknown — Fix · Interrupted");
   assert.equal(crossTier.route, "codex · gpt (alias)");
-  assert.equal(crossTier.selection, "light→standard · hint ignored · by usage · plan usage unknown");
+  assert.equal(crossTier.selection, "light→standard · hint ignored · by usage · plan usage unknown (at route selection)");
   assert.equal(crossTier.title, "Fix");
   assert.deepEqual(workerCardIdentity("Worker: explorer — Look"), { title: "Look", role: "explorer", route: null, selection: null });
   // A very long title is kept whole (the card clips visually, the accessible name keeps it).
@@ -32,7 +32,7 @@ test("route arrives through the compact poll without a title or usage update", (
   assert.ok(!sameCardUsage(after, cardUsageSnapshot({ status: "running", route: { ...route, selection: { ...route.selection, planUsedPercent: 43 } } })));
   const identity = workerCardIdentity(title, after.route);
   assert.equal(identity.route, "codex-acp · Observed Model · high");
-  assert.equal(identity.selection, "standard · by usage · plan usage 42%");
+  assert.equal(identity.selection, "standard · by usage · plan usage 42% (at route selection)");
   assert.equal(workerCardIdentity("Worker: explorer · old · stale · low — Look", after.route).route, identity.route);
   assert.equal(workerCardIdentity(title, { ...route, modelName: null, selection: undefined }).route, "codex-acp · model-id (alias) · high");
   assert.equal(workerCardIdentity("Worker: explorer · old · stale — Look").route, "old · stale");

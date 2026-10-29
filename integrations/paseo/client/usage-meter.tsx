@@ -9,18 +9,19 @@ type Attempt = WorkerHistory["assignments"][number]["attempts"][number];
 type Theme = PluginHostProps["theme"];
 
 /** Context fill as a short bar plus percent, then Claude Code's `↑ in ↓ out`
- * token counts. Renders nothing until the engine has reported either. */
+ * token counts. Callers can explain missing context independently of tokens. */
 export function UsageMeter({ context, tokens, theme, unavailableText, mutedColor }: { context?: Attempt["context"]; tokens?: Attempt["tokens"] | null; theme: Theme; unavailableText?: string;
   /** The caller's own readable secondary text colour (the coordinator card
    * derives one that holds 4.5:1 on its hover background). */
   mutedColor?: string }) {
   const summary = contextSummary(context);
   const mutedText = mutedColor ?? theme.colors.foregroundMuted;
-  // Missing usage is unknown, never zero: say so only when asked to.
-  if (!summary && !tokens) return unavailableText ? <Text style={{ color: mutedText, fontSize: 11 }}>{unavailableText}</Text> : null;
+  // Missing context stays explicit even when token totals are known.
+  if (!summary && !tokens && !unavailableText) return null;
   const color = summary?.level === "danger" ? theme.colors.statusDanger : summary?.level === "warning" ? theme.colors.statusWarning : theme.colors.accent;
   const muted = { color: mutedText, fontSize: 11 };
   return <View style={{ flexDirection: "row", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+    {!summary && unavailableText && <Text style={{ ...muted, flexShrink: 1 }}>{unavailableText}</Text>}
     {summary && <View accessibilityLabel={`Context ${summary.percent}%, ${summary.detail} tokens`} style={{ flexDirection: "row", alignItems: "center", gap: 5 }}>
       <View style={{ width: 32, height: 4, borderRadius: 2, backgroundColor: theme.colors.surface2, overflow: "hidden" }}>
         <View style={{ width: `${summary.percent}%`, height: 4, backgroundColor: color }} />

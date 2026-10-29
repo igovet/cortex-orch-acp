@@ -11,7 +11,7 @@ import { groupWorkerEvents, withoutShownResult, type WorkerEvent } from "./worke
 import { presentTool } from "./worker-panel-tool.js";
 import { diffBlocks, diffLines, type DiffRow } from "./worker-panel-diff.js";
 import { chatToolIcon, groupToolRuns, isToolEvent, nativeRow, toolSemantics, type TranscriptItem } from "./worker-panel-groups.ts";
-import { routeSelectionText, workerAssignmentLine, workerDisplayName, workerModelDisplay, workerTerminalState } from "./worker-display.js";
+import { contextUnavailableText, routeSelectionText, workerAssignmentLine, workerDisplayName, workerModelDisplay, workerTerminalState } from "./worker-display.js";
 import { workerPopoverStatus } from "./worker-popover-status.js";
 import { openWorkspaceFile } from "./open-workspace-file.ts";
 import { UsageMeter } from "./usage-meter.tsx";
@@ -451,7 +451,7 @@ export function WorkerPanel({ theme, host, layout, workspaceId, agentId, navigat
     return <Pressable key={assignment.id} accessibilityRole="button" accessibilityLabel={`Open worker ${line.workerName}`} onPress={() => attempt && setSelected(attempt.id)} style={[styles.card, { borderColor: theme.colors.border, backgroundColor: theme.colors.surface1 }]}>
       <Text numberOfLines={2} ellipsizeMode="tail" style={{ color: theme.colors.foreground, fontSize: 14, fontWeight: "600" }}>{line.workerName}</Text>
       <Text numberOfLines={1} ellipsizeMode="tail" style={{ color: theme.colors.foregroundMuted, fontSize: 12 }}>{line.subtitle}</Text>
-      <UsageMeter context={attempt?.context} tokens={attempt?.tokens} theme={theme} />
+      <UsageMeter context={attempt?.context} tokens={attempt?.tokens} theme={theme} unavailableText={contextUnavailableText(attempt?.route?.provider ?? assignment.route?.provider)} />
       {attempt && assignment.attempts.length > 1 && <Text style={[styles.muted, { color: theme.colors.foregroundMuted }]}>Attempt {attempt.attemptNo} · {assignment.attempts.length} attempts</Text>}
     </Pressable>;
   };
@@ -513,8 +513,8 @@ export function WorkerPanel({ theme, host, layout, workspaceId, agentId, navigat
             </WorkingPulse>
             <Text style={[styles.muted, { color: selectedStatusColor }]}>· {selectedTerminal.label}{selectedTerminal.issueCount > 0 ? ` · ${selectedTerminal.issueCount} issue${selectedTerminal.issueCount === 1 ? "" : "s"}` : ""}</Text>
           </View>
-          {routeSelectionText(route?.selection) && <Text style={[styles.muted, { color: theme.colors.foregroundMuted }]}>Route choice: {routeSelectionText(route?.selection)}</Text>}
-          <UsageMeter context={selectedAttempt.context} tokens={selectedAttempt.tokens} theme={theme} />
+          {routeSelectionText(route?.selection, route?.provider) && <Text style={[styles.muted, { color: theme.colors.foregroundMuted }]}>Route choice: {routeSelectionText(route?.selection, route?.provider)}</Text>}
+          <UsageMeter context={selectedAttempt.context} tokens={selectedAttempt.tokens} theme={theme} unavailableText={contextUnavailableText(route?.provider)} />
           {selectedAssignment && selectedAssignment.attempts.length > 1 && <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6 }}>
             {selectedAssignment.attempts.map((attempt) => <Pressable key={attempt.id} accessibilityRole="button" accessibilityState={{ selected: attempt.id === selectedAttempt.id }} onPress={() => { setExpandedEvent(null); setSelected(attempt.id); }} style={[styles.button, { backgroundColor: attempt.id === selectedAttempt.id ? theme.colors.surface2 : theme.colors.surface1, borderWidth: 1, borderColor: theme.colors.border }]}><Text style={[styles.muted, { color: attempt.id === selectedAttempt.id ? theme.colors.foreground : theme.colors.foregroundMuted }]}>Attempt {attempt.attemptNo}</Text></Pressable>)}
           </View>}
