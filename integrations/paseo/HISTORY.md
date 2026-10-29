@@ -1,5 +1,12 @@
 # Paseo history recovery
 
+Paseo 0.14.0 assigns a derived timeline item ID to assistant messages while
+retaining the original ACP identity in `messageId`. The replay gate accepts
+that exact identity for assistant messages and still checks message text,
+ordering, counts and the final manifest. Other item types retain their ID checks.
+The installed 0.14.0 SDK passes the scripted replay integration test; this is
+not a rendered desktop qualification.
+
 Paseo 0.9.1 loads the entire ACP session before applying its timeline cursors.
 Those cursors cannot page the initial ACP `session/load`. The repository uses
 the installed plugin SDK's connector, `session.opened`, `session.ready` and
