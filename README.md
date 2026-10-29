@@ -158,8 +158,11 @@ expect to find and fix gaps yourself if you try one.
 
 [Paseo](https://github.com/getpaseo/paseo) is the primary, recommended ACP
 client for Cortex: it has a native Cortex provider plugin, shows per-worker
-cards with live status and token usage, and is what orchestration is
-qualified against. The steps below are exact commands from this repository;
+cards with live status and reported token/context snapshots, and is what
+orchestration is qualified against. Missing context is explicit (OpenCode reports
+it only at turn end); provider plan percentages are route-selection snapshots,
+not live meters. Unsupported OpenCode plan usage stays unknown with a hint to
+check the provider's account usage page. The steps below are exact commands from this repository;
 for the local-checkout path, replace `/absolute/path/to/cortex-orch-acp` with
 where you cloned it. Busy-message acknowledgements close their display message
 before worker waiting resumes, so later worker cards do not wait behind that

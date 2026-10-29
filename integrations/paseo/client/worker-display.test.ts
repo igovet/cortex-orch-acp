@@ -147,8 +147,10 @@ assert.equal(
 // The worker page's route choice: the same parts as the card's line, with
 // the chosen plan's usage never shown as a bare `usage`.
 assert.equal(routeSelectionText({ tier: "light→standard", hint: "ignored:pinned", decidedBy: "usage", planUsedPercent: 42.4 }),
-  "light→standard · hint ignored:pinned · by usage · plan usage 42%");
-assert.equal(routeSelectionText({ tier: "deep", hint: null, decidedBy: null, planUsedPercent: null }), "deep · plan usage unknown");
+  "light→standard · hint ignored:pinned · by usage · plan usage 42% (at route selection)");
+assert.equal(routeSelectionText({ tier: "deep", hint: null, decidedBy: null, planUsedPercent: null }), "deep · plan usage unknown (at route selection)");
+assert.match(routeSelectionText({ planUsedPercent: null }, "opencode")!, /plan usage unknown \(at route selection\).*OpenCode does not report provider plan usage to Cortex; check your provider's account usage page/);
+assert.equal(routeSelectionText({ planUsedPercent: 12 }, "opencode"), "plan usage 12% (at route selection)");
 assert.equal(routeSelectionText(null), null);
 assert.equal(routeSelectionText(undefined), null);
 console.log("usage meter token label tests passed");
