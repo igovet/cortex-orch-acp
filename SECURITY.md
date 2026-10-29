@@ -29,6 +29,10 @@ for exact paths, artifact-test limits and the next upstream-fix decision.
 
 ## Current ACP boundary (1.0.3)
 
+Paseo Routing model choices exclude models disabled in the file being edited.
+Stored pins and policy references remain intact and carry an inactive warning;
+this presentation does not enable models or change runtime authorization.
+
 Startup and approved engine updates may advance existing Codex/Claude launch
 commands to newer source-qualified, exactly registered owned installations.
 This is an explicit runtime policy, not project-supplied command approval.

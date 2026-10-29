@@ -1,5 +1,25 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+
+test("routing choices follow exact deny and enabled state without modifying stored policy", () => {
+  const form = { ...emptyRoutingForm(), enabled: { opencode: ["provider/one", "provider/two"] },
+    models: { opencode: { auto: ["provider/one"], tiers: { "provider/one": "flagship" }, policy: { "provider/one": { preferred_for: ["review"] } } } } };
+  const snapshot = structuredClone(form.models);
+  for (const deny of ["opencode/provider/one", "provider/one", "opencode/*"]) {
+    const off = { ...form, deny: [deny] };
+    assert.equal(routingModelDisabled(off, "opencode", "provider/one"), true);
+    assert.ok(!routingModelChoices(off, "opencode").includes("provider/one"));
+    assert.deepEqual(off.models, snapshot);
+  }
+  const disabled = setModelInCortex(form, { engine: "opencode", model: "provider/one" }, false, false);
+  assert.equal(routingModelDisabled(disabled, "opencode", "provider/one"), true);
+  assert.deepEqual(routingModelChoices(disabled, "opencode"), ["provider/two"]);
+  const restored = setModelInCortex(disabled, { engine: "opencode", model: "provider/one" }, true, false);
+  assert.equal(routingModelDisabled(restored, "opencode", "provider/one"), false);
+  assert.deepEqual(routingModelChoices(restored, "opencode"), ["provider/two", "provider/one"]);
+  assert.deepEqual(restored.models, snapshot);
+  assert.equal(routingModelDisabled(form, "opencode", "provider/one-new"), true);
+});
 import {
   projectChoices,
   buildProfileSave,
@@ -19,6 +39,7 @@ import {
   setEngineEnabled,
   setModelAutoAllowed,
   setModelEnabled,
+  setModelInCortex,
   setModelAutoSelected,
   modelAutoSelected,
   setModelPreferredFor,
@@ -58,6 +79,8 @@ import {
   routingVocabulary,
   modelEffortChoices,
   modelEffortOptions,
+  routingModelDisabled,
+  routingModelChoices,
   userDefaultsToForm,
   type CeilingView,
   type ConnectionsView,
