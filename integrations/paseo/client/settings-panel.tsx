@@ -45,6 +45,8 @@ import {
   composePin,
   modelEffortChoices,
   modelEffortOptions,
+  routingModelDisabled,
+  routingModelChoices,
   connectionAction,
   engineAutomaticIn,
   engineDisabledIn,
@@ -762,6 +764,12 @@ function ProjectCeilingSection({ theme, workspaceId }: { theme: Theme; workspace
 
 // --- Routing ----------------------------------------------------------------------
 
+function DisabledModelNotice({ form, engine, model, theme }: { form: RoutingForm; engine: string; model: string; theme: Theme }) {
+  return model && routingModelDisabled(form, engine, model)
+    ? <Banner theme={theme} tone="warning" text={`${engine}/${model} — disabled in this file (denied or not enabled). Stored references are kept, not used for routing under these rules. Re-enable in Models or edit the reference explicitly.`} />
+    : null;
+}
+
 function PolicyEditor({ form, onChange, vocabulary, theme, errors }: {
   form: RoutingForm; onChange: (form: RoutingForm) => void; vocabulary: RoutingVocabulary; theme: Theme; errors: FieldErrors;
 }) {
@@ -781,8 +789,9 @@ function PolicyEditor({ form, onChange, vocabulary, theme, errors }: {
   return <Group title="Exact model policy" theme={theme} hint={HELP.modelPolicy}>
     <TextField label="Policy engine (exact id)" value={engine} onChangeText={setEngine} theme={theme} />
     <TextField label="Policy model (exact id)" value={model} onChangeText={setModel} theme={theme} />
-    <Button title="Add model policy" theme={theme} disabled={!vocabulary.engines.includes(engine) || !model.trim()}
+    <Button title="Add model policy" theme={theme} disabled={!vocabulary.engines.includes(engine) || !model.trim() || routingModelDisabled(form, engine, model.trim())}
       onPress={() => put(engine, model.trim(), "request_names", form.models?.[engine]?.policy[model.trim()]?.request_names ?? null)} />
+    <DisabledModelNotice form={form} engine={engine} model={model.trim()} theme={theme} />
     {Object.entries(form.models ?? {}).map(([engineId, rules]) => <Group key={engineId} title={engineId} theme={theme}>
       <StringListField errorKey={`rules.models.${engineId}.auto`} label={`Automatic members for ${engineId}`} values={rules.auto ?? []} theme={theme}
         onChange={(auto) => onChange({ ...form, models: { ...form.models, [engineId]: { ...rules, auto } } })} />
@@ -791,6 +800,7 @@ function PolicyEditor({ form, onChange, vocabulary, theme, errors }: {
         const id = `${engineId}/${modelId}`;
         const effortChoices = modelEffortChoices(vocabulary, engineId, modelId, true);
         return <Group key={modelId} title={id} theme={theme}>
+          <DisabledModelNotice form={form} engine={engineId} model={modelId} theme={theme} />
           <MultiChoiceField label={`Policy tiers for ${id}`} values={typeof rules.tiers[modelId] === "string" ? [rules.tiers[modelId] as string] : rules.tiers[modelId] ?? []}
             options={vocabulary.tiers.map((value) => ({ value, label: value }))} theme={theme}
             onChange={(values) => onChange(setModelTiers(form, engineId, modelId, values, vocabulary.tiers))} />
@@ -866,6 +876,11 @@ function RoutingEditor({ form, onChange, vocabulary, theme, errors }: {
           <ChoiceField label={`Pin ${index + 1} engine`} value={row.engine} options={row.engine && !vocabulary.engines.includes(row.engine)
             ? [...engineOptions, { value: row.engine, label: `${row.engine} (unknown)` }] : engineOptions} theme={theme}
             onChange={(engine) => update({ ...row, engine })} />
+          <ChoiceField label={`Pin ${index + 1} enabled model`} value={row.model} theme={theme}
+            options={routingModelChoices(form, row.engine).map((value) => ({ value, label: value }))}
+            hint="Only models enabled and not denied in the file being edited. An exact id can still be entered below; this does not enable it."
+            onChange={(model) => update({ ...row, model })} />
+          <DisabledModelNotice form={form} engine={row.engine} model={row.model} theme={theme} />
           <TextField label={`Pin ${index + 1} model (full id)`} value={row.model} theme={theme}
             placeholder={row.engine === "opencode" ? "provider/model" : "model id"}
             onChangeText={(model) => update({ ...row, model })} />
@@ -895,6 +910,12 @@ function RoutingEditor({ form, onChange, vocabulary, theme, errors }: {
       {(rows) => <RowList<TierRow> label="Tier" rows={rows} onChange={(tiers) => set({ tiers })} theme={theme} errors={errors} errorKey="rules.tiers"
         addLabel="Add model tier" newRow={() => ({ model: "", tier: vocabulary.tiers[0] ?? "" })}
         renderRow={(row, update, index) => <View style={{ gap: 6 }}>
+          {vocabulary.engines.map((engine) => {
+            const prefix = `${engine}/`;
+            const qualified = vocabulary.engines.some((item) => row.model.startsWith(`${item}/`));
+            return qualified && !row.model.startsWith(prefix) ? null
+              : <DisabledModelNotice key={engine} form={form} engine={engine} model={qualified ? row.model.slice(prefix.length) : row.model} theme={theme} />;
+          })}
           <TextField label={`Tier ${index + 1} model id`} value={row.model} theme={theme} onChangeText={(model) => update({ ...row, model })} />
           <ChoiceField label={`Tier ${index + 1} tier`} value={row.tier} theme={theme} onChange={(tier) => update({ ...row, tier })}
             options={vocabulary.tiers.map((tier) => ({ value: tier, label: tier }))} />
@@ -971,6 +992,8 @@ function RoutingSection({ theme, workspaceId, onWritten }: { theme: Theme; works
           <ChoiceField label="File to edit" value={target} theme={theme} help={HELP.routingFile} onChange={(value) => setTarget(value)}
             options={[{ value: "user", label: "User routing file" }, { value: "project", label: "Project routing file", disabled: !workspaceId }]}
             hint={workspaceId ? undefined : "Select a project workspace above to edit its routing file."} />
+          {shadowingSource(result, target) && <Banner theme={theme} tone="warning"
+            text={`The ${shadowingSource(result, target)} routing file takes precedence (files are never merged). Model status below describes the ${target} file, not the effective rules.`} />}
           {current.ignoredKeys.length > 0 && <ReadOnlyNotice theme={theme} text={`Kept unchanged (not managed here): ${current.ignoredKeys.join(", ")}`} />}
           {current.source?.valid === false && current.editable && current.source.error &&
             <Banner theme={theme} tone="warning" text={`This file is currently invalid: ${current.source.error.message}`} />}

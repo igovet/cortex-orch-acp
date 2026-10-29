@@ -579,6 +579,18 @@ export function modelEffortChoices(vocabulary: RoutingVocabulary, engine: string
   };
 }
 
+/** Settings-file status only, not dispatch eligibility (catalog, quota and
+ * provider authorization are checked by the runtime). Exact matching mirrors
+ * routing's _listed / model_enabled, including OpenCode's provider/model ids. */
+export function routingModelDisabled(form: RoutingForm, engine: string, model: string): boolean {
+  return (form.deny ?? []).some((token) => token === model || token === routeToken(engine, model) || token === engineToken(engine))
+    || !(form.enabled?.[engine] ?? []).includes(model);
+}
+
+export function routingModelChoices(form: RoutingForm, engine: string): string[] {
+  return [...new Set(form.enabled?.[engine] ?? [])].filter((model) => !routingModelDisabled(form, engine, model));
+}
+
 export function modelEffortOptions(vocabulary: RoutingVocabulary, engine: string, model: string, stored: readonly string[], policy = false) {
   const { known, levels } = modelEffortChoices(vocabulary, engine, model, policy);
   return [
