@@ -28,7 +28,7 @@ against your project's own checks, and keeps a durable, recoverable record
 next to your project.
 
 Paseo history restoration validates message identity and replay completeness;
-the 0.14.0 SDK's derived message IDs are supported by the replay gate. See
+the 0.14.0 SDK's derived message and reasoning IDs are supported by the replay gate. See
 [history recovery](integrations/paseo/HISTORY.md) for verification limits.
 
 ---
