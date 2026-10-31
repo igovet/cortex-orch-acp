@@ -213,7 +213,8 @@ def dispatch(store, channel, operation, args):
                                      "again as a failed check with the same tool_call_ref, then close it with a passed "
                                      "check citing a verified later rerun of exactly the same argv, retract a supported "
                                      "own Python probe error with invocation_error, withdraw your own exploratory probe "
-                                     "with probe_withdrawn, or send assignment_outcome=\"failed\". "
+                                     "with probe_withdrawn, supersede a supported invocation mistake with command_correction, "
+                                     "or send assignment_outcome=\"failed\". "
                                      "Relabelling it not_run or unverified, or a different argv, does not count. No "
                                      "result was recorded or published; your channel remains active and the same "
                                      "request_key may be reused.")
@@ -234,7 +235,7 @@ def dispatch(store, channel, operation, args):
                         raise StoreError('open_failed_check',f'arguments.checks[{index}]',
                                          f"{check['name'][:80]} ({check.get('tool_call_ref') or 'no receipt'})",
                                          'a later passed check citing a verified rerun of exactly this argv, a '
-                                         'supported invocation_error retraction, or assignment_outcome="failed"',
+                                         'supported invocation_error retraction or command_correction supersession, or assignment_outcome="failed"',
                                          f"This check remains failed: {diagnosis}. {correction}"
                                          + (f" {others} later check(s) of this result also remain failed." if others else '')
                                          + " A supported standalone Python probe syntax/regex invocation error may "
@@ -295,7 +296,7 @@ def dispatch(store, channel, operation, args):
             node_status=db.execute('SELECT status FROM runtime_nodes WHERE task_id=? AND assignment_ref=?',
                                    (channel.task_id,provision['idempotency_key'])).fetchone()[0]
         # The receipt shows the worker every check the runtime did not accept as claimed.
-        result = dict(result, node_status=node_status, report_ref=accepted['report_ref'], checks=[{key: check[key] for key in ('name', 'outcome', 'claimed_outcome', 'evidence_gap', 'blocker', 'closed_by', 'invocation_error', 'retracted_by')
+        result = dict(result, node_status=node_status, report_ref=accepted['report_ref'], checks=[{key: check[key] for key in ('name', 'outcome', 'claimed_outcome', 'evidence_gap', 'blocker', 'closed_by', 'invocation_error', 'retracted_by', 'command_correction', 'superseded_by', 'not_attributable')
                                        if key in check} for check in accepted['checks']])
         with store.connection() as db:
             db.execute('BEGIN IMMEDIATE')

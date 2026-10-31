@@ -330,6 +330,30 @@ def test_read_api_metadata_and_inner_observations_are_bound_and_private(worker_b
     assert files(project) == before
 
 
+def test_activity_offload_metadata_is_observable_without_reading_body(bound):
+    from cortex_runtime.acp.orchestrating_runtime import OrchestratingRuntime
+
+    project, store, sid, task, epoch = bound
+    runtime = OrchestratingRuntime.__new__(OrchestratingRuntime)
+    runtime._store = store
+    for ref, body in (("small", "short"), ("large", "private-body-sentinel " * 10000)):
+        assert runtime._record_worker_activity(task, "assignment", "attempt", ref, "Tool: Run",
+                                               output_value={"stdout": body}, kind="execute")
+    page = read_binding_page(str(project), sid, task, epoch, limit=200)
+    rows = page['rows']
+    while page['next_cursor']:
+        page = read_binding_page(str(project), sid, task, epoch, cursor=page['next_cursor'], limit=200)
+        rows.extend(page['rows'])
+    activity = [row for row in rows if row.get('kind') == 'worker_activity']
+    assert len(activity) == 2
+    assert 'payload_offloaded' not in activity[0]
+    assert activity[1]['payload_offloaded'] is True
+    assert activity[1]['large_output_id'].startswith('lo_')
+    assert len(activity[1]['sha256']) == 64
+    assert activity[1]['byte_count'] > 65536
+    assert 'private-body-sentinel' not in json.dumps(rows)
+
+
 def test_oversized_evidence_is_refused_before_materializing_history(bound, monkeypatch):
     import cortex_runtime.storage.inspection as inspector
     project, store, sid, task, epoch = bound

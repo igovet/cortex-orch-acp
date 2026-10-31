@@ -49,14 +49,18 @@ def test_codex_code_mode_declaration_keeps_every_field_and_description(tool):
     schema = tool["inputSchema"]
     assert codex_code_mode.normalized_size(schema) <= CODEX_MCP_TOOL_SCHEMA_MAX_BYTES
     declaration = codex_code_mode.render(schema, CODEX_MCP_TOOL_SCHEMA_MAX_BYTES)
+    # Descriptions may say "unknown paths"; only unknown TypeScript types
+    # indicate schema loss. Keep checking every description separately below.
+    types = "\n".join(line for line in declaration.splitlines()
+                      if not line.lstrip().startswith("//"))
     if tool["name"] == "read_batch":
         # Intentionally dynamic native arguments, preflighted against live
         # schemas; not an accidentally untyped root or item union.
-        assert declaration.count("unknown") == 1
+        assert types.count("unknown") == 1
         assert "arguments: { [key: string]: unknown; };" in declaration
         assert "id: string;" in declaration and "tool:" in declaration
     else:
-        assert "unknown" not in declaration
+        assert "unknown" not in types
     missing = [path for path, text in _described(schema)
                if f"// {text.splitlines()[0].strip()}" not in declaration]
     assert not missing

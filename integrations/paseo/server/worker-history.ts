@@ -422,7 +422,7 @@ try:
                     text = ' · '.join(parts) or ev['event_type']
                     if not isinstance(text, str): text = json.dumps(text, ensure_ascii=False)
                     event_result = {'id': ev['id'], 'type': ev['event_type'], 'createdAt': ev['created_at'], 'text': scrub(text)}
-                    for field in ('activity_ref', 'input', 'output', 'status', 'error', 'diff', 'tool_kind', 'title', 'locations', 'content', 'raw_input', 'raw_output', 'message_id'):
+                    for field in ('activity_ref', 'input', 'output', 'status', 'error', 'diff', 'tool_kind', 'title', 'locations', 'content', 'raw_input', 'raw_output', 'message_id', 'payload_offloaded', 'large_output_id', 'sha256', 'byte_count'):
                         value = payload.get(field)
                         if value is None:
                             continue

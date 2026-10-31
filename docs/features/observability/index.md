@@ -72,7 +72,7 @@ not an INFO log or a record of prompt text.
 Worker-panel history uses the existing durable `task_events` stream rather
 than a second transcript store. Each redacted `progress` row carrying
 `kind=worker_activity` is bound to the task and worker attempt, and the panel
-reads it in event-id order with an `after` cursor and bounded page size.
+reads it in event-id order with an `after` cursor and bounded page size. An activity envelope over 64 KiB is offloaded: the row keeps a bounded preview, the `large_output_id`, and the byte count and SHA-256 of the full redacted body. The panel shows a preview notice and does not load the body eagerly (see [storage](../../project/storage.md#runtime-indexes-and-offloaded-worker-activity)).
 While a worker is active, the host panel refreshes that cursor incrementally
 about every 750 ms. Exact lifecycle updates for one logical tool coalesce in
 the panel, while worker deltas are held until a tool boundary or turn end and

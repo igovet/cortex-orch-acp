@@ -256,6 +256,14 @@ transaction ends. A gateway file effect (`project_write`, `project_edit`,
 exclusively, so such an effect still cannot land between the scan and the
 decision. Native engine tools were never excluded by either lock.
 
+### Contended writes and transient lock errors
+
+Scheduler and lifecycle writes run through `Store.immediate_write`: event append and claim, delivery and release marks, `return_to_coordinator`, coordinator turn start and end events, and assignment cancellation. It begins with `BEGIN IMMEDIATE`, so the busy timeout applies to the write lock itself. It retries a still-contended lock up to eight attempts, sleeping 20 ms and doubling up to 0.4 s between attempts. A read on the same connection before `BEGIN IMMEDIATE` can fail at once with `SQLITE_BUSY_SNAPSHOT` regardless of the timeout, so these writers never read before taking the lock. Their transaction bodies must be replayable, because they can run more than once, and they neither begin nor commit a transaction themselves.
+
+The controller treats a storage-contention error (`database is locked` or `storage_busy`) raised during a turn as a transient failed pass. It waits from 0.5 s, doubling up to 10 s, on the turn's cancellation event, then resumes from durable state. The turn is not unwound, so running workers are not torn down for it. The controller re-raises the error after 900 s of contention, when the turn is cancelled, or when the host transport is lost. Contention met while reconciling results, completing the task or retrying a lost worker is re-raised as well, instead of becoming a `BLOCKED` stop or a coordinator return that cancels the siblings.
+
+A coordinator prompt that returned normally is not a failed engine call, even when recording its turn end is contended. Its bookkeeping writes (the `COORDINATOR_TURN_ENDED` event, the authorization-recovered mark, the delivered mark for the claimed events and the context-delivery confirmation) sit outside the prompt's failure handler. On contention they retry in place with the same backoff and one shared 900 s allowance (`orchestration.controller._StorageContention`), and the failure handler's own release, turn-end and delivery writes do too. Re-entering the pass instead would prompt the coordinator again. When the allowance is spent, the turn is cancelled or the transport is lost, the error ends the turn without a re-entry; it never becomes `coordinator_prompt_failed`, a `BLOCKED` stop or a sibling cancellation.
+
 ## 3. Cancellation (`session/cancel`)
 
 `session/cancel` interrupts the current turn, revokes current worker channels,
@@ -285,7 +293,7 @@ That worker gets only its `assignment_cancelled` event, never an
 `assignment_failed` as well. Its runtime node is durably `cancelled` first. A
 later user
 prompt can resume planning from durable state. That RECOVERING pass cancels
-the same assignments again (reason `replanning`); the work graph keeps an
+only the assignments that were live at the stop (reason `replanning`); the work graph keeps an
 attempt that is already failed with its first reason and records no
 `work_attempt_sync_failed` for the repeat. It does not cancel unrelated tasks.
 
@@ -298,6 +306,12 @@ A worker opened concurrently with cancellation is closed before its first prompt
 Reservations release only on observed process absence. Unknown engine liveness
 remains a blocker; a terminal event alone never proves process exit. Terminal card
 updates are retained and replayed if the client disconnected before seeing them.
+
+### Recovery cancels only live assignments
+
+Every path that stops or replans live work records the live set in the same transaction that cancels the pending and running nodes: `session/cancel` interruption, `propose_replan`, `return_to_coordinator` and both stop-question branches. Each writes a `LIVE_ASSIGNMENTS_CANCELLED` event naming the assignment references it cancelled. The RECOVERING step (`orchestration/controller.py`, `_recover`) reads the captures not yet settled, cancels and terminates exactly those assignments, and sweeps only the owned provisioning attempts whose idempotency keys match them. Completed and failed assignments, and any assignment an earlier recovery already settled, are not touched. A completed worker still settling its result is left to its own settlement.
+
+The captures survive a restart in RECOVERING. The RECOVERING-to-PLANNING transaction writes `LIVE_CANCELLATIONS_SETTLED` for the captures it covered. If a live worker's termination is not confirmed, the task moves to BLOCKED with `replanning_worker_termination_unconfirmed`, and a later recovery rechecks the same captured attempts. A node cancelled by a stop recorded before captures existed is captured on its first recovery with reason `unrecorded` and handled the same way.
 
 ### Stopping one worker command
 
@@ -397,6 +411,7 @@ host-owned and cannot be suppressed from inside the plugin. Inside Cortex:
   whose engine the teardown kills, even one whose turn event the
   disconnect cannot reach, is not recorded as `engine_failure`, is not
   routed to fallback and is not re-dispatched during teardown.
+- A coordinator turn that ends with an unhandled error tears down its workers the same way. The task is marked host-disconnected before its cancellation, so a worker that teardown kills is recorded as transport loss, never `engine_failure`, and gets no fallback. Its work stays as persisted for recovery.
 - The durable record is a `progress` event of kind `host_disconnected`
   (`recovery.worker_reconciliation.record_host_disconnect`) with the exact `session_id`,
   `task_id`, `coordinator_attempt_id`, each interrupted worker's

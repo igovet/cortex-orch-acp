@@ -58,6 +58,64 @@ _RECONCILE_SECONDS = 2.0
 # Allow owned post-result settlement teardown plus exit cleanup, never an
 # unbounded wait for an arbitrary live or unknown worker.
 _SYNTHESIS_SETTLE_SECONDS = 10.0
+# A contended store fails one controller pass, not the turn: the pass is run
+# again after a capped backoff, while cancellation still ends the turn. Only
+# contention lasting this long ends the turn as before.
+_STORAGE_BUSY_FIRST_DELAY = 0.5
+_STORAGE_BUSY_MAX_DELAY = 10.0
+_STORAGE_BUSY_BUDGET_SECONDS = 900.0
+
+
+def _storage_contention(error):
+    """A contended SQLite write lock, or the store's own bounded access-lock
+    wait running out: transient, never a reason to end a turn or its workers."""
+    if isinstance(error, sqlite3.OperationalError):
+        message = str(error).lower()
+        return 'locked' in message or 'busy' in message
+    return isinstance(error, StoreError) and str(error) == 'storage_busy'
+
+
+class _StorageContention:
+    """One turn's bounded allowance for a contended store.
+
+    A failed controller pass is re-entered from durable state (``run``). An
+    engine call that already returned is not durable state: re-entering would
+    prompt the coordinator again. Its bookkeeping writes therefore retry in
+    place (``retry``) on the same backoff and budget; once the budget is spent,
+    the turn ends instead of being re-entered."""
+
+    def __init__(self, runtime, task_id, cancel_event):
+        self.runtime, self.task_id, self.cancel_event = runtime, task_id, cancel_event
+        self.since = None
+        self.delay = _STORAGE_BUSY_FIRST_DELAY
+        self.exhausted = False
+
+    def backoff(self, error, *, progressed):
+        """Wait out one contended write; False when the error must propagate."""
+        if (self.exhausted or not _storage_contention(error) or self.cancel_event.is_set()
+                or _transport_lost(self.runtime, self.task_id)):
+            return False
+        failed_at = time.monotonic()
+        if self.since is None or progressed:
+            self.since, self.delay = failed_at, _STORAGE_BUSY_FIRST_DELAY
+        elif failed_at - self.since > _STORAGE_BUSY_BUDGET_SECONDS:
+            self.exhausted = True
+            return False
+        self.cancel_event.wait(self.delay)
+        self.delay = min(self.delay * 2, _STORAGE_BUSY_MAX_DELAY)
+        return True
+
+    def retry(self, write):
+        """Run a replayable write after a completed engine call. Reaching it
+        is progress, so its first contention starts a fresh allowance."""
+        progressed = True
+        while True:
+            try:
+                return write()
+            except Exception as error:
+                if not self.backoff(error, progressed=progressed):
+                    raise
+                progressed = False
 
 
 _VERIFICATION_OUTPUT_TAIL_BYTES = 2500
@@ -568,12 +626,24 @@ def run(runtime, task_id, session_id, channel, session_ref, content, emit_update
         emit_display_update=None, prompt_blocks=None, initial_project_docs_context=None):
     speculation = _SpeculativeVerification(runtime, task_id, emit_tool_call)
     wait_cards = {}
+    contention = _StorageContention(runtime, task_id, cancel_event)
     try:
-        return _run(runtime, task_id, session_id, channel, session_ref, content, emit_update,
-                    cancel_event, language, host_elicitor, emit_tool_call=emit_tool_call,
-                    emit_display_update=emit_display_update, prompt_blocks=prompt_blocks,
-                    initial_project_docs_context=initial_project_docs_context, speculation=speculation,
-                    wait_cards=wait_cards)
+        while True:
+            entered = time.monotonic()
+            try:
+                return _run(runtime, task_id, session_id, channel, session_ref, content, emit_update,
+                            cancel_event, language, host_elicitor, emit_tool_call=emit_tool_call,
+                            emit_display_update=emit_display_update, prompt_blocks=prompt_blocks,
+                            initial_project_docs_context=initial_project_docs_context, speculation=speculation,
+                            wait_cards=wait_cards, contention=contention)
+            except Exception as error:
+                # Unwinding the turn tears down every live worker of the task
+                # (a crash once killed four). The durable state is the
+                # source of truth, so the loop resumes from it after a
+                # backoff; _run's next pass also observes a cancellation.
+                progressed = time.monotonic() - entered > _STORAGE_BUSY_BUDGET_SECONDS
+                if not contention.backoff(error, progressed=progressed):
+                    raise
     finally:
         speculation.close()
         if wait_cards:
@@ -581,12 +651,43 @@ def run(runtime, task_id, session_id, channel, session_ref, content, emit_update
             close_all(task_id, emit_tool_call, language, wait_cards)
 
 
+def _recover(runtime, task_id, machine, emit_tool_call):
+    """RECOVERING: revoke, then terminate owned work before a new plan.
+
+    Only the assignments that were live when their nodes were cancelled
+    (captured in that same transaction) are cancelled and waited for, never
+    one that had already completed, failed or been settled by an earlier
+    recovery. True once the task is back in PLANNING."""
+    from .state import recovery_cancellations_tx
+    settled = runtime._store.immediate_write(lambda db: recovery_cancellations_tx(db, task_id))
+    for assignment_ref in settled[1]:
+        runtime._cancel_assignment(task_id,assignment_ref,'replanning',emit_tool_call=emit_tool_call)
+    with runtime._store.connection() as db:
+        attempts = [row for row in db.execute(
+            "SELECT attempt_id,idempotency_key FROM delegation_provisioning "
+            "WHERE task_id=? AND role_id!='orchestrator'", (task_id,))
+            if row['idempotency_key'] in settled[1]]
+    # Finish off what is still owned before judging it: otherwise an
+    # answer to the resulting question re-enters this same check forever.
+    for row in attempts:
+        if runtime._engine.lookup_owned(row['attempt_id']) != 'absent':
+            try: runtime._engine.terminate_owned(row['attempt_id'])
+            except Exception: pass
+    if any(runtime._engine.lookup_owned(row['attempt_id']) != 'absent' for row in attempts):
+        machine.move(task_id,'BLOCKED',blocker='replanning_worker_termination_unconfirmed')
+        return False
+    from .policy import resume_planning
+    resume_planning(runtime._store,task_id,settled=settled)
+    return True
+
+
 def _run(runtime, task_id, session_id, channel, session_ref, content, emit_update,
         cancel_event, language, host_elicitor=None, *, emit_tool_call=None,
         emit_display_update=None, prompt_blocks=None, initial_project_docs_context=None,
-        speculation=None, wait_cards=None):
+        speculation=None, wait_cards=None, contention=None):
     machine = TaskMachine(runtime._store)
     wait_cards = {} if wait_cards is None else wait_cards
+    contention = contention or _StorageContention(runtime, task_id, cancel_event)
     # Runtime text outside an engine message (notices, worker questions) also
     # opens a message that holds later worker cards; the worker loop ends it.
     open_text = threading.Event()
@@ -597,6 +698,8 @@ def _run(runtime, task_id, session_id, channel, session_ref, content, emit_updat
         try:
             reconcile_results(runtime._store, task_id)
         except StoreError as error:
+            if _storage_contention(error):
+                raise
             machine.move(task_id, 'BLOCKED', blocker=str(error))
             context = machine.context(task_id)
     context = machine.context(task_id)
@@ -645,24 +748,7 @@ def _run(runtime, task_id, session_id, channel, session_ref, content, emit_updat
             runtime._set_state(task_id,'accepted',wait_reason=None)
             return StopReason.END_TURN
         if state == 'RECOVERING':
-            # Explicit cancellation/replanning revokes first, then terminates
-            # owned work before accepting a new plan.
-            for node in context['nodes']:
-                if node['assignment_ref']:
-                    runtime._cancel_assignment(task_id,node['assignment_ref'],'replanning',emit_tool_call=emit_tool_call)
-            with runtime._store.connection() as db:
-                attempts=db.execute("SELECT attempt_id FROM delegation_provisioning WHERE task_id=? AND role_id!='orchestrator'",(task_id,)).fetchall()
-            # Finish off what is still owned before judging it: otherwise an
-            # answer to the resulting question re-enters this same check forever.
-            for row in attempts:
-                if runtime._engine.lookup_owned(row['attempt_id']) != 'absent':
-                    try: runtime._engine.terminate_owned(row['attempt_id'])
-                    except Exception: pass
-            if any(runtime._engine.lookup_owned(row['attempt_id']) != 'absent' for row in attempts):
-                machine.move(task_id,'BLOCKED',blocker='replanning_worker_termination_unconfirmed')
-            else:
-                from .policy import resume_planning
-                resume_planning(runtime._store,task_id)
+            if _recover(runtime, task_id, machine, emit_tool_call):
                 # Recovery returns to PLANNING, not the question's
                 # RECOVERING resume phase. Its exhausted prompt count must
                 # not block the newly answered decision before an engine turn.
@@ -809,11 +895,9 @@ def _run(runtime, task_id, session_id, channel, session_ref, content, emit_updat
                     flush()
                 if emit_display_update:
                     return emit_display_update(update)
-            with runtime._store.connection() as db:
-                db.execute('BEGIN IMMEDIATE')
-                event(db, task_id, 'COORDINATOR_TURN_STARTED',
-                      dict(revision=context['revision'], state=state, engine_session_id=session_ref))
-                db.commit()
+            runtime._store.immediate_write(lambda db: event(
+                db, task_id, 'COORDINATOR_TURN_STARTED',
+                dict(revision=context['revision'], state=state, engine_session_id=session_ref)))
             try:
                 # No clock bound: a silent engine is woken by the engine
                 # adapter's stall nudge, never killed (see live_adapters.prompt).
@@ -824,33 +908,24 @@ def _run(runtime, task_id, session_id, channel, session_ref, content, emit_updat
                 )
                 from .. import _fault_injection as fault_injection
                 fault_injection.checkpoint('t023_after_continuation_prompt')
-                # G6: pairs with COORDINATOR_TURN_STARTED above -- this
-                # prompt() call returned normally.
-                with runtime._store.connection() as db:
-                    db.execute('BEGIN IMMEDIATE')
-                    event(db, task_id, 'COORDINATOR_TURN_ENDED',
-                          dict(engine_session_id=session_ref, stop_reason=outcome.stop_reason.value))
-                    db.commit()
             except Exception as error:
                 # The prompt raised (or was cancelled by raising): its delivery
                 # is unconfirmed, so the claimed events (worker results, user
                 # messages) are released for the next prompt instead of being
                 # lost for the rest of this process. At-least-once, as
                 # mark_delivered documents.
-                events.release_claim(runtime._store, task_id, delivery_marker)
+                contention.retry(lambda: events.release_claim(runtime._store, task_id, delivery_marker))
                 # G6: pairs with COORDINATOR_TURN_STARTED above -- this
                 # prompt() call raised instead of returning.
-                with runtime._store.connection() as db:
-                    db.execute('BEGIN IMMEDIATE')
-                    event(db, task_id, 'COORDINATOR_TURN_ENDED',
-                          dict(engine_session_id=session_ref, failure_kind=type(error).__name__))
-                    db.commit()
+                contention.retry(lambda: runtime._store.immediate_write(lambda db: event(
+                    db, task_id, 'COORDINATOR_TURN_ENDED',
+                    dict(engine_session_id=session_ref, failure_kind=type(error).__name__))))
                 flush()
                 if tool_emitter:
                     tool_emitter.close_group()
                 _finish_coordinator_message(emit_display_update, open_text)
-                runtime._finalize_generation_delivery(session_ref, delivery_id,
-                                                     failure_kind=type(error).__name__, stop_reason=None)
+                contention.retry(lambda: runtime._finalize_generation_delivery(
+                    session_ref, delivery_id, failure_kind=type(error).__name__, stop_reason=None))
                 if cancel_event.is_set() or _transport_lost(runtime, task_id):
                     return _stop_turn(runtime, task_id, machine, emit_tool_call, emit_update, language)
                 else:
@@ -917,12 +992,21 @@ def _run(runtime, task_id, session_id, channel, session_ref, content, emit_updat
                                 continue
                     machine.move(task_id, 'BLOCKED', blocker=str(error) if isinstance(error,StoreError) else ('engine_failure:'+kind if kind else f'coordinator_prompt_failed:{type(error).__name__}'))
                 continue
+            # The prompt returned: what follows is bookkeeping, never an
+            # engine failure. Contention retries it in place; re-entering the
+            # pass would prompt the coordinator again.
+            # G6: pairs with COORDINATOR_TURN_STARTED above -- this
+            # prompt() call returned normally.
+            contention.retry(lambda: runtime._store.immediate_write(lambda db: event(
+                db, task_id, 'COORDINATOR_TURN_ENDED',
+                dict(engine_session_id=session_ref, stop_reason=outcome.stop_reason.value))))
             if outcome.stop_reason == StopReason.END_TURN:
                 from .auth_recovery import coordinator_recovered
-                coordinator_recovered(runtime._store, task_id)
+                contention.retry(lambda: coordinator_recovered(runtime._store, task_id))
             if pending_events:
-                events.mark_delivered(runtime._store,task_id,delivery_marker)
-            runtime._finalize_generation_delivery(session_ref, delivery_id, failure_kind=None, stop_reason=outcome.stop_reason)
+                contention.retry(lambda: events.mark_delivered(runtime._store,task_id,delivery_marker))
+            contention.retry(lambda: runtime._finalize_generation_delivery(
+                session_ref, delivery_id, failure_kind=None, stop_reason=outcome.stop_reason))
             flush()
             if tool_emitter:
                 # Turn end: the aggregate tool-call card gets its final count.
@@ -957,6 +1041,8 @@ def _run(runtime, task_id, session_id, channel, session_ref, content, emit_updat
                             raise StoreError('workers_still_live_or_unknown')
                         machine.move(task_id, 'COMPLETED')
                     except StoreError as error:
+                        if _storage_contention(error):
+                            raise
                         others = (machine.recheck_after_foreign_change(task_id, str(error))
                                   if str(error) == 'completion_project_revision_changed' else None)
                         if others:
@@ -1089,6 +1175,8 @@ def _run(runtime, task_id, session_id, channel, session_ref, content, emit_updat
                     for node in nodes:
                         if node['status']=='running': retry_lost(runtime,task_id,node)
                 except StoreError as error:
+                    if _storage_contention(error):
+                        raise
                     # Retries used up: the coordinator decides how to get the
                     # work done (another approach, another role, a smaller
                     # step) before the user is asked.
@@ -1149,9 +1237,12 @@ def _run(runtime, task_id, session_id, channel, session_ref, content, emit_updat
                 _verification(runtime, task_id, machine, emit_tool_call, cancel_event)
             continue
         if state == 'WAITING_USER':
-            for node in context['nodes']:
-                if node['status']=='cancelled' and node['assignment_ref']:
-                    runtime._cancel_assignment(task_id,node['assignment_ref'],'worker_question',emit_tool_call=emit_tool_call)
+            # A stop question cancelled the live nodes: end exactly those
+            # workers now, not every assignment an earlier recovery settled.
+            from .state import recovery_cancellations_tx
+            for assignment_ref in runtime._store.immediate_write(
+                    lambda db: recovery_cancellations_tx(db, task_id))[1]:
+                runtime._cancel_assignment(task_id,assignment_ref,'worker_question',emit_tool_call=emit_tool_call)
             from .questions import pending, resume_answered
             question = pending(runtime._store, task_id)
             if question.get('blocker'):

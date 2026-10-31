@@ -1429,6 +1429,193 @@ def test_a_failed_worker_returns_to_the_coordinator_a_bounded_number_of_times(ma
     assert not state.return_to_coordinator(channel.task_id, 'worker_failed')  # then the user is asked
 
 
+@pytest.mark.parametrize('with_answers', [False, True])
+def test_failed_workers_in_successive_revisions_keep_returning_to_coordinator(machine, with_answers):
+    from cortex_runtime.orchestration.questions import request, resume_answered
+    from cortex_runtime.acp.questions_store import answer
+
+    state, channel = machine
+    for revision in range(1, 5):
+        assert state.submit_plan(channel, plan(), f'p-{revision}')['revision'] == revision
+        state.move(channel.task_id, 'EXECUTING')
+        with state.store.connection() as db:
+            db.execute("UPDATE runtime_nodes SET status='failed' WHERE task_id=? AND revision=?",
+                       (channel.task_id, revision))
+            db.commit()
+        # The controller escalates to BLOCKED only when this returns False.
+        assert state.return_to_coordinator(channel.task_id, 'worker_failed')
+        assert state.context(channel.task_id)['state'] == 'RECOVERING'
+        state.move(channel.task_id, 'PLANNING')
+        if with_answers:
+            question = request(state.store, channel, dict(
+                question='Choose the next approach.', options=['Retry', 'Investigate'],
+                request_key=f'q-{revision}'))
+            assert answer(state.store, question['question_id'], 'Investigate', 'text')
+            assert resume_answered(state.store, channel.task_id)
+
+    with state.store.connection() as db:
+        types = [r[0] for r in db.execute(
+            "SELECT type FROM runtime_events WHERE task_id=? ORDER BY id", (channel.task_id,))]
+    assert types.count('RETURNED_TO_COORDINATOR') == 4
+    assert types.count('USER_ANSWER_RECEIVED') == (4 if with_answers else 0)
+    assert 'ASK_USER_REQUIRED' not in types
+
+
+def test_new_plans_alone_cannot_renew_returns_forever(machine):
+    """A coordinator that answers every return with a new plan of failing
+    work (each PLAN_ACCEPTED renews the per-revision allowance) still stops
+    for the user; only the user's answer renews the allowance."""
+    from cortex_runtime.orchestration.state import MAX_AUTONOMOUS_COORDINATOR_RETURNS
+    from cortex_runtime.orchestration.questions import request, resume_answered
+    from cortex_runtime.acp.questions_store import answer
+
+    state, channel = machine
+    for revision in range(1, MAX_AUTONOMOUS_COORDINATOR_RETURNS + 2):
+        state.submit_plan(channel, plan(), f'p-{revision}')
+        state.move(channel.task_id, 'EXECUTING')
+        returned = state.return_to_coordinator(channel.task_id, 'worker_failed')
+        assert returned is (revision <= MAX_AUTONOMOUS_COORDINATOR_RETURNS)
+        if not returned:
+            state.move(channel.task_id, 'RECOVERING')
+        state.move(channel.task_id, 'PLANNING')
+    question = request(state.store, channel, dict(
+        question='Choose the next approach.', options=['Retry', 'Investigate'], request_key='q'))
+    assert answer(state.store, question['question_id'], 'Investigate', 'text')
+    assert resume_answered(state.store, channel.task_id)
+    state.submit_plan(channel, plan(), 'p-after-answer')
+    state.move(channel.task_id, 'EXECUTING')
+    assert state.return_to_coordinator(channel.task_id, 'worker_failed')
+
+
+@pytest.mark.parametrize('guidance', ['answer', 'steering'])
+def test_new_user_guidance_resets_exhausted_return_budget_without_a_new_revision(machine, guidance):
+    from cortex_runtime.orchestration.state import MAX_COORDINATOR_RETURNS
+    from cortex_runtime.orchestration.policy import steer, apply_pending_steering
+    from cortex_runtime.orchestration.questions import request, resume_answered
+    from cortex_runtime.acp.questions_store import answer
+
+    state, channel = machine
+    state.submit_plan(channel, plan(), 'p')
+    state.move(channel.task_id, 'EXECUTING')
+    for _ in range(MAX_COORDINATOR_RETURNS):
+        assert state.return_to_coordinator(channel.task_id, 'worker_failed')
+        state.move(channel.task_id, 'EXECUTING')
+    assert not state.return_to_coordinator(channel.task_id, 'worker_failed')
+    state.move(channel.task_id, 'RECOVERING')
+    state.move(channel.task_id, 'PLANNING')
+    if guidance == 'answer':
+        question = request(state.store, channel, dict(
+            question='Choose the next approach.', options=['Retry', 'Investigate'], request_key='q'))
+        assert answer(state.store, question['question_id'], 'Investigate', 'text')
+        assert resume_answered(state.store, channel.task_id)
+    else:
+        assert steer(state.store, channel.task_id, 'Use another approach.', 'user:new-approach')
+        assert apply_pending_steering(state.store, channel.task_id)
+    state.move(channel.task_id, 'RECOVERING')
+    state.move(channel.task_id, 'EXECUTING')
+    # No process-local counter: a fresh machine sees the persisted reset.
+    state = TaskMachine(state.store)
+    assert state.context(channel.task_id)['revision'] == 1
+    for _ in range(MAX_COORDINATOR_RETURNS):
+        assert state.return_to_coordinator(channel.task_id, 'worker_failed')
+        state.move(channel.task_id, 'EXECUTING')
+    assert not state.return_to_coordinator(channel.task_id, 'worker_failed')
+
+
+@pytest.mark.parametrize('exhaust_current_revision', [False, True])
+def test_worker_failure_waits_for_running_sibling_even_with_exhausted_returns(
+        tmp_path, monkeypatch, exhaust_current_revision):
+    import threading
+    from cortex_runtime.acp.orchestrating_runtime import OrchestratingRuntime, PromptOutcome
+    from cortex_runtime.delegation import mcp_tools
+    from cortex_runtime.orchestration import controller
+    from cortex_runtime.orchestration.state import MAX_COORDINATOR_RETURNS, event
+    from cortex_runtime.portable.engine_contract import StopReason
+    from orchestration_fakes import FakeConfigSnapshotSource, FakeSessionRuntime, FakeWorkspace
+
+    store = Store(tmp_path / '.cortex', project_root=tmp_path)
+    task = bootstrap_task(store, SourceEvent(origin='test', event_id='siblings'), 'Implement feature', 'owner')
+    state = TaskMachine(store)
+    sibling_started = threading.Event()
+    release_sibling = threading.Event()
+    waited = []
+
+    def seed_returns():
+        with store.connection() as db:
+            for _ in range(MAX_COORDINATOR_RETURNS):
+                # Legacy persisted returns have no revision in their payload.
+                event(db, task.task_id, 'RETURNED_TO_COORDINATOR', dict(reason='worker_failed'))
+            db.commit()
+
+    def coordinator(store, channel, session_ref, message, call_index):
+        if state.context(task.task_id)['revision'] == 0:
+            if not exhaust_current_revision:
+                seed_returns()
+            mcp_tools.dispatch(store, channel, 'plan_submit', dict(plan=plan(2), request_key='plan'))
+            if exhaust_current_revision:
+                seed_returns()
+        else:
+            nodes = state.context(task.task_id)['nodes']
+            assert {n['node_id']: n['status'] for n in nodes} == {'N0': 'failed', 'N1': 'completed'}
+            mcp_tools.dispatch(store, channel, 'ask_question', dict(
+                question='Choose the repair approach.', options=['Retry', 'Investigate'], request_key='repair'))
+        return PromptOutcome(StopReason.END_TURN, '')
+
+    def worker(store, channel, session_ref, message, call_index):
+        with store.connection() as db:
+            node = db.execute(
+                "SELECT n.node_id FROM runtime_nodes n JOIN delegation_provisioning p "
+                "ON p.idempotency_key=n.assignment_ref WHERE p.attempt_id=?", (channel.attempt_id,),
+            ).fetchone()[0]
+        if node == 'N0':
+            assert sibling_started.wait(10)
+        else:
+            sibling_started.set()
+            assert release_sibling.wait(10)
+        args = dict(report='# Result\n\nObserved worker result.', summary='Observed result',
+                    checks=[], request_key='result')
+        if node == 'N0':
+            args['assignment_outcome'] = 'failed'
+        mcp_tools.dispatch(store, channel, 'result_submit', args)
+        return PromptOutcome(StopReason.END_TURN, '')
+
+    def wait_for_change(runtime, machine, task_id, *args, **kwargs):
+        nodes = machine.context(task_id)['nodes']
+        if {n['node_id']: n['status'] for n in nodes} == {'N0': 'failed', 'N1': 'running'}:
+            with store.connection() as db:
+                assert db.execute(
+                    "SELECT revoked_at FROM trusted_channels WHERE attempt_id="
+                    "(SELECT attempt_id FROM delegation_provisioning WHERE idempotency_key=?)",
+                    (next(n['assignment_ref'] for n in nodes if n['node_id'] == 'N1'),),
+                ).fetchone()[0] is None
+            waited.append(True)
+            release_sibling.set()
+        return original_wait(runtime, machine, task_id, *args, **kwargs)
+
+    original_wait = controller._wait_for_change
+    monkeypatch.setattr(controller, '_wait_for_change', wait_for_change)
+    engine = FakeSessionRuntime(store, lambda s, c, sr, launch, instructions:
+                                coordinator if c.role == 'coordinator' else worker)
+    runtime = OrchestratingRuntime(
+        store, engine, FakeWorkspace(), FakeConfigSnapshotSource(),
+        allow_unqualified_delivery=True, wait_timeout_seconds=10)
+    try:
+        assert runtime.start_prompt(task.task_id, 'incoming', 'Implement feature', lambda _: None,
+                                    threading.Event()) == StopReason.END_TURN
+    finally:
+        release_sibling.set()
+        runtime.shutdown()
+
+    assert waited
+    with store.connection() as db:
+        rows = db.execute("SELECT id,type FROM runtime_events WHERE task_id=? ORDER BY id",
+                          (task.task_id,)).fetchall()
+    finished = next(r['id'] for r in rows if r['type'] == 'WORKER_COMPLETED')
+    handoff_type = 'ASK_USER_REQUIRED' if exhaust_current_revision else 'RETURNED_TO_COORDINATOR'
+    assert finished < max(r['id'] for r in rows if r['type'] == handoff_type)
+    assert sum(r['type'] == 'ASK_USER_REQUIRED' for r in rows) == int(exhaust_current_revision)
+
+
 def test_a_decision_left_after_verification_keeps_the_task_open_until_the_user_answers(machine):
     """A proposed plan used to go out as synthesis text, and the task showed
     as finished while the user still had to approve it."""

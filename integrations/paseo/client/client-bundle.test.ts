@@ -206,6 +206,17 @@ function createRuntime() {
         const press = () => (onPress as () => void)();
         presses.push(press);
         if (typeof element.props.accessibilityLabel === "string") labeledPresses.set(element.props.accessibilityLabel, press);
+        else {
+          // Native badges are named by their visible Text descendants.
+          const visibleText = (node: unknown): string => {
+            if (typeof node === "string" || typeof node === "number") return String(node);
+            if (Array.isArray(node)) return node.map(visibleText).join("");
+            return node && typeof node === "object" && "props" in node
+              ? visibleText((node as Element).props.children) : "";
+          };
+          const label = visibleText(element.props.children);
+          if (label) labeledPresses.set(label, press);
+        }
       }
     });
     lastText = texts;
@@ -671,6 +682,36 @@ for (const platformOs of ["android", "web"] as const) {
     }
   });
 }
+
+test("worker tab labels offloaded activity without hiding inline history", async () => {
+  const reference = "lo_0123456789abcdef0";
+  const digest = "a".repeat(64);
+  const { runtime, captured, cleanup } = await loadClient("web", {
+    "cortex.worker-history.read": async (input) => {
+      const history = await workerHistoryFixture(input);
+      const preview = { id: 2, type: "progress", createdAt: "2026-10-21T00:00:01Z",
+        text: "Tool: Run", title: "Run command", tool_kind: "execute", activity_ref: "tool:run",
+        status: "completed", raw_output: { stdout: "bounded preview" },
+        payload_offloaded: true, large_output_id: reference, sha256: digest, byte_count: 100000 };
+      history.assignments[0].attempts[0].events.push(preview);
+      return history;
+    },
+  });
+  try {
+    await runtime.mount(() => ({ type: captured.workers.Component, props: {
+      theme, host: { id: "h1", label: "Local" }, layout: { compact: false, platform: "web" },
+      workspaceId: "ws1", agentId: "a1", context: "agent",
+    } }));
+    await runtime.press(/^(Ran 1 command|Used 1 other tool)$/);
+    const text = runtime.text();
+    for (const shown of ["ACTIVITY ROW", "Preview only", reference, digest, "100000 bytes"]) {
+      assert.ok(text.includes(shown), `worker tab must render ${shown}`);
+    }
+  } finally {
+    runtime.unmountAll();
+    cleanup();
+  }
+});
 
 const panelHost = { theme, host: { id: "h1", label: "Local" }, layout: { compact: false, platform: "web" } };
 const workerRow = (data: Record<string, unknown>) => ({ ...panelHost, agentId: "a1",

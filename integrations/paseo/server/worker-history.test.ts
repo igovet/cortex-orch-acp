@@ -650,4 +650,30 @@ function makeHostLossFixture(): { root: string; cleanup: () => void } {
   }
 }
 
+// The real RPC parser must preserve offload metadata, without loading bodies.
+{
+  const { root, cleanup } = makeFixture();
+  try {
+    const offload = { payload_offloaded: true, large_output_id: "lo_0123456789abcdef0",
+      sha256: "a".repeat(64), byte_count: 100000 };
+    execSqlite(join(root, ".cortex", "cortex.sqlite3"), [false, true].map((large) =>
+      `insert into task_events (task_id,event_type,assignment_ref,payload_json,created_at) values ${sqlValues([
+        TASK_ID, "progress", "xa_1", JSON.stringify({ kind: "worker_activity", text: "Tool: Run",
+          title: "Run", activity_ref: large ? "large" : "small", tool_kind: "execute",
+          raw_output: { stdout: large ? "preview [truncated]" : "complete" },
+          ...(large ? offload : {}) }), "now",
+      ])};`).join("\n"));
+    const history = await getWorkerHistory({ workspaceId: WORKSPACE_ID, agentId: AGENT_ID },
+      mockContext(WORKSPACE_ID, AGENT_ID, root, SESSION_ID));
+    const activity = history.assignments[0].attempts[0].events.filter(e => e.activity_ref);
+    assert.equal(activity.length, 2);
+    assert.equal(activity[0].payload_offloaded, undefined);
+    assert.deepEqual(activity[0].raw_output, { stdout: "complete" });
+    for (const [key, value] of Object.entries(offload)) {
+      assert.equal((activity[1] as Record<string, unknown>)[key], value);
+    }
+    assert.deepEqual(activity[1].raw_output, { stdout: "preview [truncated]" });
+  } finally { cleanup(); }
+}
+
 console.log("worker-history: ok");

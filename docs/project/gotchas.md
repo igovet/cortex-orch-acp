@@ -437,7 +437,9 @@ A background engine auto-update can install a new `claude-agent-acp` adapter ver
   worker on 2026-10-07 instead cited `generate_agent_profiles.py --check` (exit 2)
   and failed an otherwise verified assignment. Once cited, it can no longer be
   dropped (next entry). Accepted receipts include
-  `node_status`; this is not task acceptance. No `supersedes` policy was introduced.
+  `node_status`; this is not task acceptance. A supported invocation mistake can now be superseded by an explicit `command_correction`, which keeps the failed receipt as `superseded` history and never passes the original argv (see [check history](../features/orchestration/index.md#check-history-and-current-outcome)).
+- **Read-then-`BEGIN IMMEDIATE` on one connection is a lock trap.** A SELECT before the write lock is a read-to-write upgrade. Under contention SQLite fails it at once with `database is locked` (`SQLITE_BUSY_SNAPSHOT`), ignoring the busy timeout. Write paths take the lock first through `Store.immediate_write`, whose body must be replayable.
+- **Correlated event-JSON lookups stall the write lock.** The writer-holdings query checked each node's released event with a correlated `NOT EXISTS` over `runtime_events` JSON, evaluated for every access request and scheduler pass inside `BEGIN IMMEDIATE`. It took 6-8 seconds on a copy of an affected store. The current form is a decorrelated, NULL-safe row-value `NOT IN` anti-join with the additive indexes `runtime_events_type(type,task_id,id)` and `capacity_by_attempt(attempt_id)`. Database-only writer scopes are computed before the write lock and reused only while `PRAGMA data_version` is unchanged. Overlap, authority and persistence checks still run under the lock. `tests/test_access_holdings_scale.py` pins the query plan and the result equivalence.
 - **A refusal must say when no rerun can close a failure.** On 2026-10-14 a
   worker's oversized `command_run` result was rejected by its host, so it
   wrapped checks in `bash -lc '... > /tmp/log 2>&1; code=$?; ...; exit $code'`.

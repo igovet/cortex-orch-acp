@@ -32,7 +32,7 @@ regression passes do not clear a nonzero audit, and `devDependencies` is not
 a security boundary. See the [dependency disposition](docs/project/paseo-dependency-audit.md)
 for exact paths, artifact-test limits and the next upstream-fix decision.
 
-## Current ACP boundary (1.0.3)
+## Current ACP boundary (1.0.4)
 
 Paseo Routing model choices exclude models disabled in the file being edited.
 Stored pins and policy references remain intact and carry an inactive warning;
@@ -1296,7 +1296,7 @@ the former model controls (`delegate`, `decide`, `cancel`, candidate/check
 assessment and model-driven integration) are not advertised or dispatched.
 Internal runtime services make their own transactional state changes and append
 an event in the same transaction. A worker cannot submit a coordinator proposal
-through its channel.
+through its channel. Worker-panel activity envelopes are redacted before persistence. Those over 64 KiB are kept whole in the private large-output store under coordinator owner scope; the offload adds no channel read permission, and the preview event keeps only bounded fields and the reference.
 
 Each result binds to the exact provisioned worker attempt and its own immutable
 report publication. A report submitted inline with `result_submit` is published

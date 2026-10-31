@@ -415,9 +415,15 @@ def test_mistyped_check_invocation_guidance_keeps_exact_identity_closure():
     outcome=tool['inputSchema']['properties']['checks']['items']['properties']['outcome']['description']
     for description in (tool['description'],outcome):
         assert 'never started' in description and 'mistyped' in description
-    assert 'a different argv never closes it' in outcome
+    # Exact reruns close a failure; an explicitly supported changed command
+    # supersedes the invocation instead, without passing the original argv.
+    assert 'same argv and cwd' in outcome and 'closed_by' in outcome
+    assert 'a different argv needs an explicit supported command_correction' in outcome
+    assert 'superseded history, never a pass of the original argv' in outcome
     assert 'always a real failed check' in outcome
-    assert 'changing argv never closes a failure' in tool['description']
+    assert 'exact argv and cwd' in tool['description']
+    assert 'explicit supported command_correction' in tool['description']
+    assert 'never pass the original argv' in tool['description']
 
 
 def test_plan_scope_is_a_write_reservation_not_read_access():

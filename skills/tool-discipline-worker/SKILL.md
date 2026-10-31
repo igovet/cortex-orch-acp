@@ -16,3 +16,5 @@ Run reportable checks through Cortex MCP `command_run` or its approved outside
 route and retain terminal receipts for the structured result. Native workspace
 aids, where permitted, do not produce Cortex command evidence. Writing workers
 verify edits; read-only workers run only authorized non-mutating checks.
+Scope diff/whitespace checks to owned paths. Retain and attribute sibling-owned
+failures separately; never call them passed or abandon otherwise verified work.

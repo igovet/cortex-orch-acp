@@ -483,3 +483,89 @@ def test_worker_activity_keeps_full_redacted_acp_tool_io_across_status_updates(t
     assert first["content"][0]["text"] == "content\n" + ("x" * 5000)
     assert second["raw_output"] == raw_output
     assert second["status"] == "completed"
+
+
+@pytest.mark.parametrize("oversized", [False, True])
+def test_worker_activity_offload_roundtrip_through_scoped_reader(tmp_path, oversized):
+    import base64
+    import hashlib
+    from types import SimpleNamespace
+    from cortex_runtime.delegation import events
+    from cortex_runtime.delegation.mcp_tools import _shared_read_large_output
+    from cortex_runtime.recovery.worker_activity import INLINE_MAX_BYTES
+
+    store = Store(tmp_path / ".cortex", project_root=tmp_path)
+    task = bootstrap_task(store, SourceEvent(origin="test", event_id=str(uuid.uuid4())), "Inspect.", "owner")
+    runtime = OrchestratingRuntime.__new__(OrchestratingRuntime)
+    runtime._store = store
+    body = "🙂 evidence " * (10000 if oversized else 10)
+    kwargs = dict(task_id=task.task_id, assignment_ref="assignment", attempt_id="attempt-offload",
+                  activity_ref="tool:run", text="Tool: Run", status="completed",
+                  input_value={"command": "echo evidence"}, output_value={"stdout": body, "password": "fixture-secret"})
+    assert runtime._record_worker_activity(**kwargs)
+    assert runtime._record_worker_activity(**kwargs)
+    with store.connection() as db:
+        rows = db.execute("SELECT payload_json FROM task_events WHERE task_id=? AND assignment_ref=?",
+                          (task.task_id, "attempt-offload")).fetchall()
+        outputs = db.execute("SELECT * FROM large_outputs WHERE task_id=?", (task.task_id,)).fetchall()
+    assert len(rows) == 1
+    inline = rows[0]["payload_json"].encode("utf-8")
+    payload = json.loads(inline)
+    assert len(inline) <= INLINE_MAX_BYTES
+    assert payload["kind"] == "worker_activity" and payload["status"] == "completed"
+    # The Python event reader retains the reference/preview without expanding it.
+    activity = [e for e in events.list_since(store, task.task_id) if e.assignment_ref == "attempt-offload"]
+    assert activity[0].payload == payload
+    if not oversized:
+        assert not outputs and "payload_offloaded" not in payload
+        full = payload
+    else:
+        assert len(outputs) == 1 and outputs[0]["owner_scope"] == "coordinator"
+        assert payload["payload_offloaded"] is True
+        assert payload["large_output_id"] in payload["text"]
+        channel = SimpleNamespace(role="coordinator", task_id=task.task_id)
+        collected, offset = b"", 0
+        while True:
+            page = _shared_read_large_output(store, channel, dict(
+                large_output_id=payload["large_output_id"], offset=offset, limit=997))
+            collected += (base64.b64decode(page["chunk"]) if page["encoding"] == "base64"
+                          else page["chunk"].encode("utf-8"))
+            assert page["byte_count"] == payload["byte_count"]
+            assert page["truncated"] is False
+            if page["next_offset"] is None:
+                break
+            offset = page["next_offset"]
+        assert len(collected) == payload["byte_count"] > INLINE_MAX_BYTES
+        assert hashlib.sha256(collected).hexdigest() == payload["sha256"]
+        assert b"fixture-secret" not in collected
+        full = json.loads(collected)
+    assert full["raw_output"]["stdout"] == body
+    assert full["raw_output"]["password"] != "fixture-secret"
+
+
+def test_worker_activity_offload_byte_boundary_and_storage_failure(tmp_path, monkeypatch):
+    from cortex_runtime.recovery import worker_activity
+
+    store = Store(tmp_path / ".cortex", project_root=tmp_path)
+    task = bootstrap_task(store, SourceEvent(origin="test", event_id=str(uuid.uuid4())), "Inspect.", "owner")
+    # At the exact UTF-8 byte bound, keep the original envelope; one byte over
+    # it must use the durable store, irrespective of character count.
+    payload = {"kind": "worker_activity", "text": ""}
+    overhead = len(json.dumps(payload).encode("utf-8"))
+    payload["text"] = "x" * (worker_activity.INLINE_MAX_BYTES - overhead)
+    exact = json.dumps(payload).encode("utf-8")
+    assert len(exact) == worker_activity.INLINE_MAX_BYTES
+    assert worker_activity.offload_activity(store, task.task_id, "boundary", payload, exact) is payload
+    payload = dict(payload, text=payload["text"] + "x")
+    over = worker_activity.offload_activity(store, task.task_id, "over", payload, json.dumps(payload).encode("utf-8"))
+    assert over["payload_offloaded"] and over["byte_count"] == len(exact) + 1
+
+    def fail(*args, **kwargs):
+        raise OSError("fixture storage failure")
+    monkeypatch.setattr(worker_activity, "persist_output", fail)
+    runtime = OrchestratingRuntime.__new__(OrchestratingRuntime)
+    runtime._store = store
+    assert not runtime._record_worker_activity(task.task_id, "assignment", "attempt-fail", "tool:run",
+                                                "Tool: Run", output_value="x" * 100000)
+    with store.connection() as db:
+        assert not db.execute("SELECT 1 FROM task_events WHERE assignment_ref='attempt-fail'").fetchone()

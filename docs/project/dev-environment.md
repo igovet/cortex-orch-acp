@@ -55,6 +55,142 @@ exercise paid engine turns or rendered client behavior.
 > not requalify the 0.11.x, 0.10.x or 0.9.x observations below. Per-run
 > isolation and route preflights still apply before each live launch.
 
+> On 2026-10-31, a read-only `/opt/Paseo/resources/bin/paseo --version`
+> check reported installed Paseo **0.14.0**; the guarded wrapper's `run`,
+> `send`, `permit`, `wait`, `inspect` and `logs` help each exited 0 with the
+> options listed above (`send` also advertises `--behavior`; `permit allow`
+> advertises `--input <json>`). An owner-requested paid `cli` qualification
+> that day used only `codex-acp/gpt-6-luna:high` (saved coordinator default,
+> plus temporary dev-profile `*` and `worker-code-reviewer` pins, restored
+> afterwards) through the isolated `~/.paseo-dev` daemon and new disposable
+> projects. Four bound tasks reached `COMPLETED` with an approved runtime
+> review and passed `scripts/cortex_qualification_assert.py`: a two-node
+> baseline; three parallel workers issuing access requests (no
+> `database is locked`, no new `agent-crashes` file); five plan revisions
+> each with a deliberate worker failure that returned to the coordinator
+> after its running sibling finished, with user answers between; and a
+> worker `replan_request` after a sibling completed, which cancelled only
+> the live assignment. The baseline also showed a superseded
+> `command_correction` (argparse flag mistake) with the node completed, and
+> one worker activity row over 64 KiB offloaded to a coordinator-scope large
+> output whose body matched the recorded SHA-256. A Paseo question card was
+> answered with `permit allow AGENT REQUEST --input
+> '{"answers":{"Cortex":"1. yes"}}'`; a plain `send` reply was also recorded
+> as an answer. `USER_STEERING` was not separately exercised. This qualifies
+> CLI runtime/protocol behavior on 0.14.0 only, not rendered desktop/GUI
+> behavior.
+
+> Later on 2026-10-31, a second owner-requested paid `cli` run re-qualified
+> package `1.0.3+sha256.086447048e070e00`, which adds the autonomous
+> coordinator-return bound, on the same Paseo 0.14.0 and the same route and
+> temporary pins, restored afterwards. Five new disposable projects each
+> reached `COMPLETED` with an approved review and passed
+> `scripts/cortex_qualification_assert.py`. A coordinator told to replan after
+> every deliberate failure, without asking, got exactly six
+> `RETURNED_TO_COORDINATOR` events. The seventh failure recorded
+> `ASK_USER_REQUIRED` (`worker_failed`) and a question. After the answer, the
+> next failure returned to the coordinator again. With a user answer between
+> rounds, seven failure rounds returned seven times with no stop, and each
+> running sibling finished first. The run also repeated the baseline checks:
+> nine parallel access requests were granted with no `database is locked` and
+> no new `agent-crashes` file; a worker `replan_request` cancelled only the
+> live assignment; a superseded `command_correction` left its node
+> completed; and an activity row over 64 KiB was offloaded with a matching
+> SHA-256. Rendered desktop/GUI behavior was not run.
+
+> Later on 2026-10-31, an owner-requested paid `desktop` check qualified package
+> `1.0.3+sha256.086447048e070e00` (confirmed unchanged by `cortex_package.py
+> validate` before launch) on the same installed Paseo 0.14.0, after the paid
+> `cli` re-qualification above passed. The GUI was launched detached
+> (`setsid nohup ... gui --xvfb &`) against the isolated `~/.paseo-dev` daemon
+> and a new disposable project; the temporary dev-profile `*` and
+> `worker-code-reviewer` pins for `codex-acp/gpt-6-luna:high` were reapplied
+> with explicit dev `XDG_CONFIG_HOME`/`XDG_STATE_HOME` and restored afterwards
+> (byte-identical hash before and after). A first attempt without those
+> explicit XDG variables wrote the pin to the production
+> `~/.config/cortex/routing.json` instead of the dev file; this was caught
+> immediately by comparing both files' hashes and reverted from the pre-pin
+> backup before any further step, with production and dev hashes verified
+> equal afterwards. The private Xvfb display (a new `/tmp/.X11-unix` socket,
+> distinct from the real desktop's) was captured with `ffmpeg -f x11grab` and
+> driven with `xdotool`; screenshots were copied into the git-ignored
+> `.design-evidence/` for inline viewing and deleted afterwards, per the
+> design-visual-qa capture convention. In the rendered window: a new
+> disposable project was added via the in-app "Search for directory" picker
+> (no OS file dialog needed), a multi-node prompt was submitted on the
+> `codex-acp`/`gpt-6-luna`/`High` route already selected by the dev profile,
+> two parallel `technical-writer` worker cards ran and completed, a
+> `code-reviewer` returned findings that produced a fix node (no completed
+> card was relabelled cancelled), a mid-run chat replan added a changelog
+> node and was reflected in the rendered plan text, and the task reached a
+> rendered final answer after about 4m33s with no crash or stall. The
+> disposable project's own `.cortex/cortex.sqlite3`, read read-only, recorded
+> the task state `COMPLETED` and the route selection
+> `codex-acp · codex-live · gpt-6-luna`, matching the rendered screenshots.
+> This qualifies rendered desktop/GUI behavior for this scenario only; it does
+> not repeat the full CLI scenario matrix above.
+
+> On 2026-11-01 (UTC 2026-10-31 evening), a third owner-requested paid `cli`
+> run qualified package `1.0.3+sha256.e613d331a93d1c0b`, which keeps
+> contended bookkeeping writes after a completed coordinator turn from being
+> treated as a coordinator failure. `cortex_package.py validate` returned that
+> identity before and after the run. It used the same installed Paseo 0.14.0,
+> the `codex-acp/gpt-6-luna:high` route for every role, and the temporary dev
+> `*` and `worker-code-reviewer` pins. The pins were written only with explicit
+> dev `XDG_CONFIG_HOME`/`XDG_STATE_HOME` and restored byte for byte afterwards.
+> A saved copy of the production `~/.config/cortex/routing.json` compared equal
+> (`cmp`, exit 0) right after pinning and again after cleanup. Five new
+> disposable projects each reached `COMPLETED` with an approved review and
+> passed `scripts/cortex_qualification_assert.py --require-review`:
+> - a two-node baseline;
+> - nine parallel access requests, all granted;
+> - seven failure rounds with an answer between rounds: seven returns, no stop,
+>   no cancellation, and each sibling finished first;
+> - the autonomous bound: six returns, then `ASK_USER_REQUIRED`, a question,
+>   an answer, one more accepted return and completion;
+> - a worker `replan_request` that cancelled only the live assignment.
+>
+> No file written during the run under `~/.paseo-dev` or the projects contained
+> `database is locked`, `coordinator_prompt_failed` or `storage_busy`. No new
+> `agent-crashes` file appeared, and no task entered `BLOCKED`. Rendered
+> desktop/GUI behavior was not run.
+
+> On 2026-11-01, an owner-requested paid `desktop` check qualified package
+> `1.0.3+sha256.e613d331a93d1c0b` (confirmed unchanged by `cortex_package.py
+> validate` before launch) on the same installed Paseo 0.14.0, after the paid
+> `cli` re-qualification above (all five scenarios) passed for this exact
+> identity. The GUI was launched detached (`setsid nohup ... gui --xvfb &`)
+> against the isolated `~/.paseo-dev` daemon and a new disposable project. The
+> temporary dev-profile `pin: {"*": ..., "worker-code-reviewer": ...}` for
+> `codex-acp/gpt-6-luna:high` was applied only with explicit dev
+> `XDG_CONFIG_HOME`/`XDG_STATE_HOME` passed to `management.update_routing`, no
+> production-write incident this time: `cmp` against the saved production
+> backup matched immediately after pinning and again after cleanup, and the
+> dev file was restored byte for byte afterwards (all three checks against
+> the original hash `41d0b7dd…cc88`). The private Xvfb display (a new
+> `/tmp/.X11-unix` socket, created at GUI launch, distinct from the real
+> desktop's older sockets) was captured with `ffmpeg -f x11grab` and driven
+> with `xdotool`; screenshots were copied into the git-ignored
+> `.design-evidence/` for inline viewing and deleted afterwards. In the
+> rendered window: a new disposable project was added via the in-app "Search
+> for directory" picker, a multi-node prompt (two parallel `general` worker
+> nodes writing `status.txt`/`notes.txt`, then a `general` node combining them
+> into `summary.txt`) was submitted on the `codex-acp`/`gpt-6-luna`/`High`
+> route already selected by the dev profile; both parallel nodes completed,
+> a mid-run chat replan ("add a fourth node ... changelog.txt") was delivered
+> while the summary node was still working and was reflected in the rendered
+> plan text, a `code-reviewer` ran (pinned route) and stayed `Completed` (no
+> completed card was relabelled cancelled), and the task reached a rendered
+> final answer after about 2m34s with no crash or stall. The disposable
+> project's own `.cortex/cortex.sqlite3`, read read-only, recorded the task
+> state `COMPLETED` and the route selection
+> `codex-acp · codex-live · gpt-6-luna`, matching the rendered screenshots;
+> `task_events` showed 6 `delegation_requested`/`assignment_ready`/
+> `worker_result` rows and no failure-type events. The four expected files
+> (`status.txt`, `notes.txt`, `summary.txt`, `changelog.txt`) existed on disk
+> with the expected content. This qualifies rendered desktop/GUI behavior for
+> this scenario only; it does not repeat the full CLI scenario matrix above.
+
 > On 2026-10-13 the installed CLI reported 0.11.2. Its CLI help still lists
 > `--home`, and its bundle reads `PASEO_HOME` for the daemon home and
 > `PASEO_ELECTRON_USER_DATA_DIR` for the Electron profile; the desktop daemon

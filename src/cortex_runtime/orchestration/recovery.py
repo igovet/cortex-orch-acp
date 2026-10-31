@@ -289,7 +289,7 @@ def _reconcile_request(store, task_id, request):
     if len(matching) != 1 or matching[0]['origin'] != request['actor']:
         raise StoreError('ambiguous_result_publication')
     observed = json.loads(matching[0]['payload_json'])
-    observed_checks = [{k: c[k] for k in ('name', 'outcome', 'tool_call_ref', 'blocker', 'claimed_outcome', 'evidence_gap', 'closed_by', 'command', 'invocation_error', 'retracted_by')
+    observed_checks = [{k: c[k] for k in ('name', 'outcome', 'tool_call_ref', 'blocker', 'claimed_outcome', 'evidence_gap', 'closed_by', 'command', 'invocation_error', 'retracted_by', 'command_correction', 'superseded_by', 'not_attributable')
                         if k in c and c[k] is not None}
                        for c in observed.get('checks', [])]
     if observed.get('summary') != result['summary'] or observed_checks != result['checks']:

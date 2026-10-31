@@ -574,7 +574,7 @@ point: a worker's own `EngineTurnFailed` (the classified
 never refusal, which is a `PromptOutcome.stop_reason`, not an exception), or a
 `capacity_timeout` `PortableError` from
 `delegation.provisioning.ProvisioningService.delegate`, can call
-`_attempt_worker_route_fallback`. That handler:
+`_attempt_worker_route_fallback`, unless the failure is a runtime teardown. A worker whose engine a teardown killed (a host disconnect, daemon shutdown, or the cleanup of a coordinator turn that ended with an unhandled error) is recorded as transport loss for recovery and receives no fallback. That handler:
 
 1. Reads the active configuration revision's ceiling/route-profile/route-
    details (`configuration_route_extras`) fresh — never a cached/stale

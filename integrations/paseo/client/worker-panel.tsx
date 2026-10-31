@@ -7,7 +7,7 @@ import { readWorkerHistory, type WorkerHistory } from "../shared/worker-history.
 import { savedWorkerView, saveWorkerView, selectedWorker, selectedWorkerDetail, subscribeWorkerSelection } from "./worker-selection.js";
 import { workerSection } from "./worker-panel-status.js";
 import { historyCursor, mergeWorkerHistory, shouldPollWorkerHistory, shouldShowWorkerHistoryLoader, WORKER_HISTORY_POLL_MS } from "./worker-panel-refresh.js";
-import { groupWorkerEvents, withoutShownResult, type WorkerEvent } from "./worker-panel-events.js";
+import { activityPreviewNotice, groupWorkerEvents, withoutShownResult, type WorkerEvent } from "./worker-panel-events.js";
 import { presentTool } from "./worker-panel-tool.js";
 import { diffBlocks, diffLines, type DiffRow } from "./worker-panel-diff.js";
 import { chatToolIcon, groupToolRuns, isToolEvent, nativeRow, toolSemantics, type TranscriptItem } from "./worker-panel-groups.ts";
@@ -150,6 +150,7 @@ export function TranscriptEvent({ event, expanded, onToggle, onOpenFile, theme }
   const failure = event.status === "failed" || (event.status !== "completed" && event.type.toLowerCase().includes("failed"));
   const final = /result|final|complete/.test(event.type.toLowerCase());
   const message = cleanEventText(event);
+  const preview = activityPreviewNotice(event);
   if (!tool) return <View style={{ marginVertical: final ? 13 : 9, gap: 6 }}>
     {message && <MarkdownText text={message} color={theme.colors.foreground} mutedColor={theme.colors.foregroundMuted} surfaceColor={theme.colors.surface1} />}
   </View>;
@@ -198,9 +199,13 @@ export function TranscriptEvent({ event, expanded, onToggle, onOpenFile, theme }
       {shownError && <Text selectable style={[styles.muted, { color: theme.colors.statusDanger }]}>{shownError}</Text>}
     </View>}
   </Badge>;
-  if (!stopped) return badge;
-  return <View>
+  const annotatedBadge = preview ? <View>
     {badge}
+    <Text selectable style={[styles.muted, { color: theme.colors.foregroundMuted, paddingLeft: 38 }]}>{preview}</Text>
+  </View> : badge;
+  if (!stopped) return annotatedBadge;
+  return <View>
+    {annotatedBadge}
     <Text selectable accessibilityLabel={`Stopped by user. Reason: ${stopped.reason}`}
       style={[styles.muted, { color: theme.colors.statusWarning, paddingLeft: 38, paddingRight: 8, marginTop: -2, marginBottom: 6 }]}>
       {`Reason: ${stopped.reason}`}
