@@ -223,7 +223,7 @@ def _worker_publish_result(store, channel: ChannelContext, args: Mapping[str, An
             entry['runtime_command_ref'] = assessed['runtime_command_ref']
         # A pass the runtime did not accept keeps the claim and its gap; a
         # failure an exact later rerun closed keeps the closing ref.
-        for key in ("blocker", "claimed_outcome", "evidence_gap", "closed_by", "command", "invocation_error", "retracted_by"):
+        for key in ("blocker", "claimed_outcome", "evidence_gap", "closed_by", "command", "invocation_error", "retracted_by", "command_correction", "superseded_by", "not_attributable"):
             if item.get(key):
                 entry[key] = item[key]
         checks.append(entry)
@@ -537,7 +537,10 @@ _OPERATION_DESCRIPTIONS = dict(
         "A check that failed, was then fixed, and whose later identical rerun passed is `passed`: cite the passing "
         "rerun's tool_call_ref and describe the failure-then-fix history in the report. An identical rerun repeats "
         "the exact argv and cwd, either on the same operation and profile or across command_run and outside_command "
-        "in either direction; changing argv never closes a failure. `assignment_outcome=failed` is reserved for when "
+        "in either direction. An explicit supported command_correction can supersede a mistaken invocation with a "
+        "same-name later passing correction of this attempt, never pass the original argv. Complete whole-worktree "
+        "git diff --check failures confined to sibling writers\' reserved paths are not attributable to this worker; "
+        "the failed evidence remains visible. Scope diff/whitespace checks to owned paths. `assignment_outcome=failed` is reserved for when "
         "the delivered work itself does not reach the assignment's goal, never merely because an earlier attempt "
         "failed before being fixed. "
         "summary is a short plain-language paragraph -- what was done and the current state -- without internal "

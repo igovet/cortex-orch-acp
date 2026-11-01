@@ -120,6 +120,11 @@ def review_runtime_facts(store, task_id, assignment_ref, root, *, observed=None)
                     checks[-1].update(retracted_by=outcome['retracted_by'],
                                       **{key: check[key] for key in ('invocation_error', 'probe_withdrawn')
                                          if key in check})
+                if outcome['outcome'] == 'superseded':
+                    checks[-1].update(superseded_by=outcome['superseded_by'],
+                                      command_correction=check['command_correction'])
+                if outcome['outcome'] == 'not_attributable':
+                    checks[-1]['not_attributable'] = outcome['not_attributable']
         verification = json.loads(task['plan_json'] or '{}').get('verification', [])
 
     facts = dict(kind='runtime_verified_facts', revision=task['revision'],

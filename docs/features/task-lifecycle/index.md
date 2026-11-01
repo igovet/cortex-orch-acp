@@ -162,7 +162,7 @@ A reviewer, required whenever the project changed, submits APPROVE, REQUEST_CHAN
 fix nodes and another review, with a three-cycle ceiling. A fix node never keeps a read-only role: the runtime gives it a writing role chosen from its scope. Structured review findings confine fixes to the
 named plan tasks when the runtime can verify them. With no findings and multiple
 implementers, the runtime first returns to the coordinator to plan the remedy
-while its return budget remains; otherwise unconfinable or absent findings give
+while its return budget remains ([coordinator return budget](../orchestration/index.md#coordinator-return-budget)); otherwise unconfinable or absent findings give
 every original plan task a fix
 (see [targeted review fixes](../orchestration/index.md#targeted-review-fixes)). Verification is a
 runtime command observation, independent of model review. Nonzero exit, incomplete

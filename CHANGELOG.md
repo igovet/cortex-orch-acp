@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.0.3 (unreleased)
+## 1.0.4 (unreleased)
 
 Routing settings now offer each exact model's observed effort levels for effort
 pins, `effort_floor`, `max_effort` and ordered `effort_ladder` values.

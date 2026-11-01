@@ -44,6 +44,7 @@ CREATE TABLE IF NOT EXISTS runtime_events (
  created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS runtime_events_task ON runtime_events(task_id,id);
+CREATE INDEX IF NOT EXISTS runtime_events_type ON runtime_events(type,task_id,id);
 CREATE TABLE IF NOT EXISTS runtime_requests (
  task_id TEXT NOT NULL, request_key TEXT NOT NULL, actor TEXT NOT NULL,
  operation TEXT NOT NULL, digest TEXT NOT NULL, result_json TEXT NOT NULL,
@@ -78,8 +79,12 @@ MAX_REVIEW_CYCLES = 3
 MAX_REVIEW_REBINDS = 3
 # Automatic returns of a failed verification to the coordinator, per task.
 MAX_VERIFICATION_REPAIRS = 3
-# Automatic returns of a failed worker result to the coordinator, per task.
+# Automatic returns within one plan revision, reset by new user guidance.
 MAX_COORDINATOR_RETURNS = 3
+# Automatic returns since the user last spoke, across plan revisions: a
+# coordinator that answers every return with a new plan of failing work
+# must not loop (and spend engine turns) forever without the user.
+MAX_AUTONOMOUS_COORDINATOR_RETURNS = 6
 # Verification uses exec-style argv, never a shell. These are only tokens that
 # acquire shell control meaning when separated from an argument; embedded
 # characters remain valid literal arguments (for example pytest -k expressions).
@@ -316,6 +321,60 @@ def _coordinator_should_ask(db, task_id, blocker):
     return asked is None or (answered is not None and answered > asked)
 
 
+def cancel_live_nodes_tx(db, task_id, reason):
+    """Cancel every pending/running node of the task in the caller's
+    transaction and durably record which assignments were live then.
+
+    RECOVERING (also after a restart) revokes and terminates exactly these:
+    never an assignment that had already completed or failed, nor one an
+    earlier recovery cancelled (recovery_cancellations_tx)."""
+    refs = [row[0] for row in db.execute(
+        "SELECT assignment_ref FROM runtime_nodes WHERE task_id=? AND status IN ('pending','running') "
+        "AND assignment_ref IS NOT NULL ORDER BY revision,node_id", (task_id,))]
+    db.execute("UPDATE runtime_nodes SET status='cancelled' WHERE task_id=? AND status IN ('pending','running')",
+               (task_id,))
+    if refs:
+        event(db, task_id, 'LIVE_ASSIGNMENTS_CANCELLED', dict(assignment_refs=refs, reason=reason))
+    return refs
+
+
+def recovery_cancellations_tx(db, task_id):
+    """``(through, assignment_refs)``: the live assignments cancelled since
+    the last settled recovery, which RECOVERING must still revoke and see
+    terminated; ``through`` is the newest capture it covers.
+
+    A cancelled node whose assignment was never cancelled nor captured (a
+    stop recorded before captures existed) is captured here first, so it is
+    rechecked like any other until its recovery settles."""
+    settled = db.execute("SELECT payload_json FROM runtime_events WHERE task_id=? "
+                         "AND type='LIVE_CANCELLATIONS_SETTLED' ORDER BY id DESC LIMIT 1", (task_id,)).fetchone()
+    after = json.loads(settled[0]).get('through', 0) if settled else 0
+    def captured():
+        refs, through = {}, after
+        for row in db.execute("SELECT id,payload_json FROM runtime_events WHERE task_id=? "
+                              "AND type='LIVE_ASSIGNMENTS_CANCELLED' AND id>? ORDER BY id", (task_id, after)):
+            through = row['id']
+            refs.update(dict.fromkeys(json.loads(row['payload_json']).get('assignment_refs') or []))
+        return through, refs
+    through, refs = captured()
+    unrecorded = [row[0] for row in db.execute(
+        "SELECT n.assignment_ref FROM runtime_nodes n WHERE n.task_id=? AND n.status='cancelled' "
+        "AND n.assignment_ref IS NOT NULL AND NOT EXISTS (SELECT 1 FROM task_events e "
+        "WHERE e.task_id=n.task_id AND e.assignment_ref=n.assignment_ref AND e.event_type='assignment_cancelled') "
+        "ORDER BY n.revision,n.node_id", (task_id,)) if row[0] not in refs]
+    if unrecorded:
+        event(db, task_id, 'LIVE_ASSIGNMENTS_CANCELLED', dict(assignment_refs=unrecorded, reason='unrecorded'))
+        through, refs = captured()
+    return through, list(refs)
+
+
+def settle_cancellations_tx(db, task_id, through, refs):
+    """Every assignment captured up to ``through`` is cancelled and its
+    owned work observed absent: later recoveries leave them alone."""
+    if through:
+        event(db, task_id, 'LIVE_CANCELLATIONS_SETTLED', dict(through=through, assignment_refs=list(refs)))
+
+
 def _ask_about_stop(db, task_id, source, blocker):
     from ..portable.identity import new_id
     from .worker_waits import cancel_tx
@@ -324,7 +383,7 @@ def _ask_about_stop(db, task_id, source, blocker):
         # The stopped plan's open worker questions end with it: otherwise
         # the next user message is swallowed as a late answer to them.
         cancel_tx(db, task_id, 'task_stopped_for_question')
-        db.execute("UPDATE runtime_nodes SET status='cancelled' WHERE task_id=? AND status IN ('pending','running')", (task_id,))
+        cancel_live_nodes_tx(db, task_id, 'task_stopped_for_question')
         db.execute("UPDATE trusted_channels SET revoked_at=? WHERE task_id=? AND role='worker' AND revoked_at IS NULL",
                    (now(), task_id))
         db.execute('UPDATE runtime_tasks SET state=?,blocker=NULL,updated_at=? WHERE task_id=?',
@@ -335,7 +394,7 @@ def _ask_about_stop(db, task_id, source, blocker):
     # The answer resumes through RECOVERING into a new plan, as above: nothing
     # of the stopped plan may keep holding its scope (a review node left
     # 'running' with scope ** blocked every later plan's dispatch).
-    db.execute("UPDATE runtime_nodes SET status='cancelled' WHERE task_id=? AND status IN ('pending','running')", (task_id,))
+    cancel_live_nodes_tx(db, task_id, 'task_stopped_for_question')
     db.execute("UPDATE trusted_channels SET revoked_at=? WHERE task_id=? AND role='worker' AND revoked_at IS NULL",
                (now(), task_id))
     if source == 'WAITING_USER':
@@ -1543,7 +1602,7 @@ class TaskMachine:
         return tuple(row) if row is not None else None
 
     @staticmethod
-    def _ready_nodes(db, task_id, waits=None, details=None):
+    def _ready_nodes(db, task_id, waits=None, details=None, *, holdings_cache=None):
         """Select reservable nodes without writing; longest remaining chain first.
 
         ``details`` (optional) receives, per waiting node, what holds it:
@@ -1575,8 +1634,11 @@ class TaskMachine:
                     details[candidate['node_id']] = dict(backoff[candidate['node_id']], role_waiting=candidate['role'])
         if not ready:
             return task, []
-        from .access import holdings, effective_scope, absolute_scope, pending
-        active_nodes = holdings(db)
+        from .access import scope_holdings, effective_scope, absolute_scope, pending
+        if holdings_cache is None:
+            holdings_cache = {}
+        if 'scopes' not in holdings_cache:
+            holdings_cache['scopes'] = scope_holdings(db)
         # Start first what unblocks the longest remaining dependency chain;
         # ties keep plan (rowid) order. Graph structure only, no model call.
         dependents = {}
@@ -1597,12 +1659,11 @@ class TaskMachine:
         # Import lazily: gateway imports this module for shared state helpers.
         from .gateway import READ_ONLY
         occupied = [
-            (absolute_scope(db, n['task_id'], effective_scope(db, n)),
+            (absolute_scope(db, n['task_id'], scope),
              dict(kind='worker', task_id=n['task_id'], node=n['node_id'], role=n['role'],
                   objective=n['objective'], running=n['status'] == 'running',
                   assignment_ref=n['assignment_ref']))
-            for n in active_nodes
-            if n['stage'] != 'review' and n['role'] not in READ_ONLY
+            for n, scope in holdings_cache['scopes']
         ]
         occupied.extend((absolute_scope(db, w['task_id'], w['paths']),
                          dict(kind='access_request', task_id=w['task_id'],
@@ -1672,24 +1733,32 @@ class TaskMachine:
         """Reserve dependency-ready nodes atomically.
 
         A plain read looks for candidates first, so an idle scheduler pass
-        never takes the write lock; the selection is repeated under it.
+        never takes the write lock; the selection is repeated under it. Writer
+        scopes from the read snapshot are reused only if no other connection
+        committed before the lock. Time-dependent readiness is always rechecked.
         """
         from .measurement import wait_reason, wait_signature
         with self.store.connection() as db:
+            db.execute('BEGIN')
+            version = db.execute('PRAGMA data_version').fetchone()[0]
+            holdings_cache = {}
             waits, details = {}, {}
-            task, ready = self._ready_nodes(db, task_id, waits, details)
+            task, ready = self._ready_nodes(db, task_id, waits, details, holdings_cache=holdings_cache)
             previous = {}
             for r in db.execute("SELECT payload_json FROM runtime_events WHERE task_id=? "
                                 "AND type='SCHEDULER_WAIT_REASON' ORDER BY id", (task_id,)):
                 payload = json.loads(r[0])
                 previous[payload['identity']] = wait_signature(payload.get('reason'), payload.get('blocked_by'))
+            db.commit()
             if not ready and not any(previous.get(f"node:{task['revision']}:{node}")
                                      != wait_signature(reason, details.get(node))
                                      for node, reason in waits.items()):
                 return []
             db.execute('BEGIN IMMEDIATE')
+            if db.execute('PRAGMA data_version').fetchone()[0] != version:
+                holdings_cache.clear()
             waits, details = {}, {}
-            task, ready = self._ready_nodes(db, task_id, waits, details)
+            task, ready = self._ready_nodes(db, task_id, waits, details, holdings_cache=holdings_cache)
             for node, reason in waits.items():
                 blocked_by = details.get(node) if reason else None
                 wait_reason(db, task_id, f"node:{task['revision']}:{node}", reason,
@@ -2076,13 +2145,31 @@ class TaskMachine:
 
     def return_to_coordinator(self, task_id, reason):
         """Hand the task back to the coordinator (RECOVERING, then PLANNING)
-        instead of stopping, at most MAX_COORDINATOR_RETURNS times per task."""
-        with self.store.connection() as db:
-            db.execute('BEGIN IMMEDIATE')
-            returned = db.execute("SELECT COUNT(*) FROM runtime_events WHERE task_id=? AND type='RETURNED_TO_COORDINATOR'",
-                                  (task_id,)).fetchone()[0]
+        instead of stopping, at most MAX_COORDINATOR_RETURNS times per plan
+        revision or since the latest user answer/steering, and at most
+        MAX_AUTONOMOUS_COORDINATOR_RETURNS times since the user last spoke
+        (a new plan alone does not renew that allowance).
+
+        Called from the scheduler pass: a contended write lock is retried
+        (Store.immediate_write), never raised into the controller loop."""
+        def hand_back(db):
+            # Use event boundaries rather than payload revisions: older return
+            # events have no revision, and must not exhaust every future plan.
+            returned = db.execute(
+                "SELECT COUNT(*) FROM runtime_events WHERE task_id=? AND type='RETURNED_TO_COORDINATOR' "
+                "AND id > COALESCE((SELECT MAX(id) FROM runtime_events WHERE task_id=? "
+                "AND type IN ('PLAN_ACCEPTED','USER_ANSWER_RECEIVED','USER_STEERING')),0)",
+                (task_id, task_id),
+            ).fetchone()[0]
             if returned >= MAX_COORDINATOR_RETURNS:
-                db.commit()
+                return False
+            autonomous = db.execute(
+                "SELECT COUNT(*) FROM runtime_events WHERE task_id=? AND type='RETURNED_TO_COORDINATOR' "
+                "AND id > COALESCE((SELECT MAX(id) FROM runtime_events WHERE task_id=? "
+                "AND type IN ('USER_STEERING','USER_ANSWER_RECEIVED','WORKER_USER_ANSWER_RECEIVED')),0)",
+                (task_id, task_id),
+            ).fetchone()[0]
+            if autonomous >= MAX_AUTONOMOUS_COORDINATOR_RETURNS:
                 return False
             event(db, task_id, 'RETURNED_TO_COORDINATOR', dict(reason=reason))
             # As steering does: nothing of the old plan keeps holding its
@@ -2091,12 +2178,12 @@ class TaskMachine:
             # taken as a late answer to a cancelled worker and swallowed.
             from .worker_waits import cancel_tx
             cancel_tx(db, task_id, 'returned_to_coordinator')
-            db.execute("UPDATE runtime_nodes SET status='cancelled' WHERE task_id=? AND status IN ('pending','running')", (task_id,))
+            cancel_live_nodes_tx(db, task_id, 'returned_to_coordinator')
             db.execute("UPDATE trusted_channels SET revoked_at=? WHERE task_id=? AND role='worker' AND revoked_at IS NULL",
                        (now(), task_id))
             transition(db, task_id, 'RECOVERING')
-            db.commit()
-        return True
+            return True
+        return self.store.immediate_write(hand_back)
 
     def submit_verification(self, channel, verification, request_key, *, authorization=None):
         """Replace only the plan's verification after it failed, and verify

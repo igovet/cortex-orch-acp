@@ -41,4 +41,5 @@ CREATE TABLE IF NOT EXISTS capacity_reservations (
 );
 CREATE INDEX IF NOT EXISTS capacity_by_connection ON capacity_reservations(connection_id, state);
 CREATE INDEX IF NOT EXISTS capacity_by_task ON capacity_reservations(task_id);
+CREATE INDEX IF NOT EXISTS capacity_by_attempt ON capacity_reservations(attempt_id);
 '''

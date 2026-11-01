@@ -61,9 +61,10 @@ def holdings(db):
     WORKER_RELEASED, so a dead worker of an abandoned task locked its scope
     across the whole project for good."""
     return db.execute("""SELECT n.* FROM runtime_nodes n JOIN runtime_tasks t ON t.task_id=n.task_id
-        WHERE (n.assignment_ref IS NOT NULL OR n.revision=t.revision) AND NOT EXISTS (
-            SELECT 1 FROM runtime_events e WHERE e.task_id=n.task_id AND e.type='WORKER_RELEASED'
-            AND json_extract(e.payload_json,'$.assignment_ref')=n.assignment_ref)
+        WHERE (n.assignment_ref IS NOT NULL OR n.revision=t.revision)
+        AND (n.assignment_ref IS NULL OR (n.task_id,n.assignment_ref) NOT IN (
+            SELECT task_id,json_extract(payload_json,'$.assignment_ref') FROM runtime_events
+            WHERE type='WORKER_RELEASED' AND json_extract(payload_json,'$.assignment_ref') IS NOT NULL))
         AND NOT EXISTS (SELECT 1 FROM delegation_provisioning p JOIN capacity_reservations r
             ON r.attempt_id=p.attempt_id AND r.kind='worker' AND r.state='released'
             WHERE p.task_id=n.task_id AND p.idempotency_key=n.assignment_ref
@@ -90,13 +91,19 @@ def pending(db):
     return [w for row in rows if valid(db, w := json.loads(row[0]))]
 
 
-def conflicting(db, task_id, assignment_ref, paths):
+def scope_holdings(db):
+    """Database-only writer scopes, reusable while the read snapshot is current."""
+    return [(node, effective_scope(db, node)) for node in holdings(db)
+            if node['stage'] != 'review' and node['role'] not in READ_ONLY]
+
+
+def conflicting(db, task_id, assignment_ref, paths, *, scope_holders=None):
     requested = absolute_scope(db, task_id, paths)
-    for node in holdings(db):
+    for node, scope in scope_holdings(db) if scope_holders is None else scope_holders:
         if (node['task_id'] == task_id and node['assignment_ref'] == assignment_ref
                 or node['stage'] == 'review' or node['role'] in READ_ONLY):
             continue
-        held = absolute_scope(db, node['task_id'], effective_scope(db, node))
+        held = absolute_scope(db, node['task_id'], scope)
         if any(overlaps(a, b) for a in requested for b in held):
             return True
     return False
@@ -143,7 +150,7 @@ def _directory_form(path):
     return path
 
 
-def predicate(db, binding, paths):
+def predicate(db, binding, paths, *, scope_holders=None):
     node = db.execute('SELECT * FROM runtime_nodes WHERE task_id=? AND assignment_ref=?',
                       (binding['task_id'], binding['assignment_ref'])).fetchone()
     if not node or node['stage'] == 'review' or node['role'] in READ_ONLY:
@@ -160,7 +167,7 @@ def predicate(db, binding, paths):
         (binding['task_id'],)) for path in json.loads(row[0]).get('deny_write', [])]
     if any(overlaps(a, b) for a in paths for b in denied):
         return 'deny_write_policy'
-    if conflicting(db, binding['task_id'], binding['assignment_ref'], paths):
+    if conflicting(db, binding['task_id'], binding['assignment_ref'], paths, scope_holders=scope_holders):
         return 'active_writer_conflict'
     requested = absolute_scope(db, binding['task_id'], paths)
     for wait in pending(db):
@@ -192,7 +199,18 @@ def request(store, channel, args):
     from . import worker_waits
     digest = hashlib.sha256(encoded(args).encode()).hexdigest()
     with store.connection() as db:
+        # End the read transaction before taking the write lock: never upgrade
+        # a WAL snapshot. Any intervening commit invalidates these writer scopes.
+        db.execute('BEGIN')
+        version = db.execute('PRAGMA data_version').fetchone()[0]
+        _authority(db, channel)
+        if channel.role != 'worker':
+            raise StoreError('wrong_channel_role')
+        scope_holders = scope_holdings(db)
+        db.commit()
         db.execute('BEGIN IMMEDIATE')
+        if db.execute('PRAGMA data_version').fetchone()[0] != version:
+            scope_holders = None
         _authority(db, channel)
         if channel.role != 'worker':
             raise StoreError('wrong_channel_role')
@@ -215,7 +233,7 @@ def request(store, channel, args):
                        justification=args['reason'], created_at=now())
         if not worker_waits.valid(db, binding):
             raise StoreError('gateway_assignment_inactive')
-        reason = predicate(db, binding, binding['paths'])
+        reason = predicate(db, binding, binding['paths'], scope_holders=scope_holders)
         if reason is None:
             receipt = dict(_grant(db, binding, binding['paths']), complete=True)
         else:

@@ -531,9 +531,9 @@ def test_retry_deadlines_later_success_and_no_card(bound, monkeypatch):
     monkeypatch.setattr(access, 'now', lambda: clock[0].isoformat(timespec='microseconds'))
     original = access.predicate
     checks = []
-    def counted(*args):
+    def counted(*args, **kwargs):
         checks.append(clock[0])
-        return original(*args)
+        return original(*args, **kwargs)
     monkeypatch.setattr(access, 'predicate', counted)
     _request(store, workers[0], ['part1.txt'])
     runtime = _card_runtime(store)
@@ -721,9 +721,9 @@ def test_backoff_checks_once_per_deadline_without_catchup_loop(bound, monkeypatc
     monkeypatch.setattr(access, 'now', lambda: clock[0].isoformat(timespec='microseconds'))
     original = access.predicate
     checks = []
-    def counted(*args):
+    def counted(*args, **kwargs):
         checks.append(clock[0])
-        return original(*args)
+        return original(*args, **kwargs)
     monkeypatch.setattr(access, 'predicate', counted)
     _request(store, workers[0], ['part1.txt'])
     for attempt, delay in enumerate((1, 2, 4)):

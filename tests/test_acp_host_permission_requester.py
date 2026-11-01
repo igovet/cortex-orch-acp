@@ -73,6 +73,7 @@ def test_outside_consent_requests_host_only_in_guarded_over_real_acp_connection(
     from cortex_runtime.orchestration import consent
 
     observed = {}
+    observed_ready = threading.Event()
 
     def on_worker_prompt(store, channel, session_ref, call_index):
         if call_index >= 1:
@@ -87,6 +88,7 @@ def test_outside_consent_requests_host_only_in_guarded_over_real_acp_connection(
         consent._ask(harness.runtime, channel.task_id, row, "en")
         with store.connection() as db:
             observed["status"] = db.execute("SELECT status FROM consent_requests WHERE id='cr_wire'").fetchone()[0]
+        observed_ready.set()
         return PromptOutcome(StopReason.END_TURN, "Done.")
 
     harness = _Harness2(tmp_path, _delegate_and_wait_router(on_worker_prompt))
@@ -103,6 +105,8 @@ def test_outside_consent_requests_host_only_in_guarded_over_real_acp_connection(
             harness.send_raw(dict(jsonrpc="2.0", id=request["id"],
                                   result={"outcome": {"outcome": "selected", "optionId": answer}}))
         assert harness.response_for(prompt_id)["result"]["stopReason"] == "end_turn"
+        # The coordinator may yield before its background worker finishes.
+        assert observed_ready.wait(10), "worker did not record the consent result"
         assert observed["status"] == ("approved" if mode == "auto" or answer == "allow" else "denied")
         if mode == "auto":
             with harness.stdout._lock:

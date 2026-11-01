@@ -195,6 +195,7 @@
     "src/cortex_runtime/recovery/summarizer_policy.py",
     "src/cortex_runtime/recovery/summary_validation.py",
     "src/cortex_runtime/recovery/token_budget.py",
+    "src/cortex_runtime/recovery/worker_activity.py",
     "src/cortex_runtime/recovery/worker_reconciliation.py",
     "src/cortex_runtime/routing/__init__.py",
     "src/cortex_runtime/routing/authorization.py",

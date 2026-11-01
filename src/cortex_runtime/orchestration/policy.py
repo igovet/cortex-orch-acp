@@ -151,10 +151,8 @@ def interrupt(store, task_id):
             # the next user message is swallowed as a late answer to one.
             from .worker_waits import cancel_tx
             cancel_tx(db, task_id, 'turn_interrupted')
-            db.execute(
-                "UPDATE runtime_nodes SET status='cancelled' WHERE task_id=? AND status IN ('pending','running')",
-                (task_id,),
-            )
+            from .state import cancel_live_nodes_tx
+            cancel_live_nodes_tx(db, task_id, 'turn_interrupted')
             db.execute(
                 "UPDATE trusted_channels SET revoked_at=? WHERE task_id=? AND role='worker' AND revoked_at IS NULL",
                 (now(), task_id),
@@ -163,11 +161,16 @@ def interrupt(store, task_id):
         db.commit()
 
 
-def resume_planning(store,task_id):
+def resume_planning(store,task_id,*,settled=None):
+    """RECOVERING -> PLANNING. ``settled`` is the recovery_cancellations_tx
+    pair whose assignments are now cancelled and observed absent."""
     with store.connection() as db:
         db.execute('BEGIN IMMEDIATE')
         task=db.execute('SELECT state FROM runtime_tasks WHERE task_id=?',(task_id,)).fetchone()
         if task and task['state']=='RECOVERING':
+            if settled is not None:
+                from .state import settle_cancellations_tx
+                settle_cancellations_tx(db,task_id,*settled)
             transition(db,task_id,'PLANNING')
         db.commit()
 
@@ -206,7 +209,8 @@ def propose_replan(store,channel,operation,args):
         transition(db,channel.task_id,'RECOVERING')
         from .worker_waits import cancel_tx
         cancel_tx(db, channel.task_id, 'replanning')
-        db.execute("UPDATE runtime_nodes SET status='cancelled' WHERE task_id=? AND status IN ('pending','running')",(channel.task_id,))
+        from .state import cancel_live_nodes_tx
+        cancel_live_nodes_tx(db, channel.task_id, 'replanning')
         db.execute("UPDATE trusted_channels SET revoked_at=? WHERE task_id=? AND role='worker' AND revoked_at IS NULL",(now(),channel.task_id))
         revision=db.execute('SELECT revision FROM runtime_tasks WHERE task_id=?',(channel.task_id,)).fetchone()[0]
         receipt=dict(accepted=True,state='RECOVERING',decision='senior_consultation' if operation=='escalation_request' else 'replan',scope_granted=False,

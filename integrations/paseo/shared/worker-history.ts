@@ -22,6 +22,11 @@ export const workerEventSchema = z.object({
   content: z.unknown().nullable().optional(),
   raw_input: z.unknown().nullable().optional(),
   raw_output: z.unknown().nullable().optional(),
+  // Oversized redacted activity stays in scoped large-output storage, not RPC.
+  payload_offloaded: z.boolean().optional(),
+  large_output_id: z.string().optional(),
+  sha256: z.string().regex(/^[0-9a-f]{64}$/).optional(),
+  byte_count: z.number().int().nonnegative().optional(),
 });
 
 const route = z.object({

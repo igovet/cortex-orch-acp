@@ -609,6 +609,9 @@ def _gateway_assessment(db, task_id: str, attempt_id: str, ref: str, outcome: st
     detail["output_id"] = output_id
     if outcome == "failed" and "runtime_verification" not in receipt:
         detail["invocation_error"] = _probe_invocation_error(argv, receipt.get("output"), retained["byte_count"])
+        output = receipt.get("output")
+        if isinstance(output, str) and len(output.encode("utf-8")) == retained["byte_count"]:
+            detail["complete_output"] = output
     return dict(strength="verified", gap=None, **detail)
 
 
@@ -899,6 +902,9 @@ def current_outcomes(db, task_id: str, attempt_id: str, checks) -> list[dict]:
     - An explicit, validated own-probe invocation error is ``retracted``,
       never passed, with ``retracted_by`` naming the later observed correction.
       Both checks and the nonzero receipt remain history.
+    - A supported explicit ``command_correction`` yields ``superseded`` with
+      ``superseded_by``, never a pass of the original argv. Complete whole-tree
+      whitespace failures confined to sibling reservations are ``not_attributable``.
     - ``not_run`` and ``unverified`` are kept as claimed.
 
     Ambiguity never closes a failure; nothing here turns a current failure
@@ -967,30 +973,47 @@ def current_outcomes(db, task_id: str, attempt_id: str, checks) -> list[dict]:
         if (isinstance(reason, str) and reason.strip() and check.get("outcome") == "failed"
                 and outcomes[index]["outcome"] == "failed" and assessments[index]["strength"] == "verified"):
             outcomes[index] = dict(outcome="retracted", gap=None, closed_by=None, retracted_by="probe_withdrawn")
+    for index, check in enumerate(checks):
+        if check.get("command_correction"):
+            if history is None:
+                history = command_history(db, task_id, attempt_id)
+            ref = _invocation_retraction(db, task_id, index, checks, assessments, outcomes, history,
+                                         correction_field="command_correction")
+            if ref:
+                outcomes[index] = dict(outcome="superseded", gap=None, closed_by=None, superseded_by=ref)
+        if check.get("outcome") == "failed" and outcomes[index]["outcome"] == "failed":
+            attribution = _sibling_whitespace_failure(db, task_id, attempt_id, assessments[index])
+            if attribution:
+                outcomes[index] = dict(outcome="not_attributable", gap=None, closed_by=None,
+                                       not_attributable=attribution)
     return outcomes
 
 
-def _invocation_retraction(db, task_id, index, checks, assessments, outcomes, history):
-    """Retract only eligible own probes, never project test/lint/build commands
+def _invocation_retraction(db, task_id, index, checks, assessments, outcomes, history, *,
+                           correction_field="invocation_error"):
+    """Retract own probes, or supersede supported probe/CLI invocation mistakes.
+    Never waive real project test/lint/build failures
     or evidence_source == runtime_verification, even with explicit model claims.
     Preserve unique binding, operation/cwd/profile, output and ordering gates.
     """
     check, failed = checks[index], assessments[index]
-    request = check.get("invocation_error")
+    request = check.get(correction_field)
     if (check.get("outcome") != "failed" or not isinstance(request, dict)
             or not isinstance(request.get("reason"), str) or not request["reason"].strip()
-            or failed["strength"] != "verified" or not failed.get("invocation_error")
+            or failed["strength"] != "verified"
             or failed.get("evidence_source") == "runtime_verification" or failed.get("identity") is None):
         return None
     ref = request.get("corrected_by")
-    if "retracted_by" in check and check["retracted_by"] != ref:
+    derived_field = "superseded_by" if correction_field == "command_correction" else "retracted_by"
+    if derived_field in check and check[derived_field] != ref:
         return None
     matches = [i for i, other in enumerate(checks)
                if other.get("outcome") == "passed" and other.get("tool_call_ref") == ref
                and other.get("name") == check.get("name")]
     if len(matches) != 1 or sum(
-            other.get("invocation_error", {}).get("corrected_by") == ref
-            for other in checks if isinstance(other.get("invocation_error"), dict)) != 1:
+            other.get(field, {}).get("corrected_by") == ref
+            for other in checks for field in ("invocation_error", "command_correction")
+            if isinstance(other.get(field), dict)) != 1:
         return None
     target = matches[0]
     passed = assessments[target]
@@ -999,7 +1022,9 @@ def _invocation_retraction(db, task_id, index, checks, assessments, outcomes, hi
             or passed.get("order", 0) <= failed["order"] or passed.get("identity") is None
             or passed["identity"][0] != failed["identity"][0]
             or passed["identity"][2:] != failed["identity"][2:]
-            or not _probe_correction(failed["identity"][1], passed["identity"][1], failed["invocation_error"])):
+            or not (_probe_correction(failed["identity"][1], passed["identity"][1], failed["invocation_error"])
+                    if failed.get("invocation_error") else
+                    correction_field == "command_correction" and _mistyped_script_correction(failed, passed))):
         return None
     from ..orchestration.check_closure import _retained_output_complete
 
@@ -1016,6 +1041,113 @@ def _invocation_retraction(db, task_id, index, checks, assessments, outcomes, hi
            for run in history):
         return None
     return ref
+
+
+def _complete_check_output(db, task_id, assessment):
+    from ..orchestration.check_closure import _retained_output_complete
+
+    if (assessment.get("strength") != "verified"
+            or assessment.get("evidence_source") == "runtime_verification"):
+        return None
+    output = db.execute("SELECT * FROM large_outputs WHERE task_id=? AND id=?",
+                        (task_id, assessment.get("output_id"))).fetchone()
+    if output is None or not _retained_output_complete(db, task_id, output):
+        return None
+    return assessment.get("complete_output")
+
+
+def _mistyped_script_correction(failed, passed):
+    """An argparse startup error, not a test/lint/build result.
+
+    Deliberately narrow: a direct Python script, the same script and interpreter
+    flags on correction, and complete output containing only argparse usage and
+    its unrecognized-argument or missing-required-argument error. Shell/module
+    wrappers remain ineligible.
+    """
+    import re
+    from pathlib import Path
+
+    bad, good = failed["identity"][1], passed["identity"][1]
+    if bad == good or Path(bad[0]).name not in {"python", "python3"}:
+        return False
+    index = 1
+    while index < len(bad) and bad[index] in {"-B", "-I", "-S"}:
+        index += 1
+    if (index >= len(bad) or not bad[index].endswith(".py")
+            or good[:index + 1] != bad[:index + 1] or failed.get("exit_code") != 2):
+        return False
+    name = re.escape(Path(bad[index]).name)
+    output = failed.get("complete_output", "")
+    # Continuation lines of argparse usage are indented; no project diagnostics.
+    return bool(re.fullmatch(r"usage: " + name + r"[^\n]*\n(?:[ \t]+[^\n]*\n)*"
+                             + name + r": error: (?:unrecognized arguments: |"
+                             r"the following arguments are required: )[^\n]+\n?", output))
+
+
+def _sibling_whitespace_failure(db, task_id, attempt_id, assessment):
+    """Attribute only complete, direct whole-tree git whitespace diagnostics.
+
+    No model-supplied paths or check names are trusted. Unknown commands/output,
+    unreserved paths, explicit own writes and runtime verification stay failures.
+    Sibling reservations are taken from this assignment's plan revision, including
+    siblings that finished before submission; reads rederive the attribution.
+    """
+    import json
+    import re
+    from pathlib import PurePosixPath
+    from types import SimpleNamespace
+    from .. import task_workspace
+    from ..orchestration.contracts import READ_ONLY
+    from ..orchestration.gateway import _matches
+    from ..orchestration.skill_gate import _own_gateway_writes
+
+    identity = assessment.get("identity")
+    if (not identity or identity[1] != ("git", "diff", "--check")
+            or identity[2] != str(task_workspace.task_root(db, task_id))
+            or assessment.get("exit_code") != 2):
+        return None
+    output = _complete_check_output(db, task_id, assessment)
+    if not output:
+        return None
+    paths, can_show_line = set(), False
+    for line in output.splitlines():
+        match = re.fullmatch(r"(.+):[1-9][0-9]*: (?:trailing whitespace\.|"
+                             r"space before tab in indent\.|new blank line at EOF\.)", line)
+        if match:
+            path = match[1]
+            parts = PurePosixPath(path).parts
+            if (path.startswith(("/", '"')) or "\\" in path or ".." in parts
+                    or str(PurePosixPath(path)) != path):
+                return None
+            paths.add(path)
+            can_show_line = True
+        elif can_show_line and line.startswith("+"):
+            can_show_line = False
+        else:
+            return None
+    if not paths:
+        return None
+    own = db.execute(
+        "SELECT n.* FROM runtime_nodes n JOIN delegation_provisioning p "
+        "ON n.task_id=p.task_id AND n.assignment_ref=p.idempotency_key "
+        "WHERE p.task_id=? AND p.attempt_id=?", (task_id, attempt_id)).fetchone()
+    if own is None:
+        return None
+    if (any(_matches(path, json.loads(own["scope_json"])) for path in paths)
+            or paths & _own_gateway_writes(db, SimpleNamespace(task_id=task_id, attempt_id=attempt_id))):
+        return None
+    siblings = [row for row in db.execute(
+        "SELECT node_id,scope_json,role,stage FROM runtime_nodes "
+        "WHERE task_id=? AND revision=? AND node_id!=?",
+        (task_id, own["revision"], own["node_id"]))
+        if row["role"] not in READ_ONLY and row["stage"] != "review"]
+    owners = {}
+    for path in sorted(paths):
+        matches = [row["node_id"] for row in siblings if _matches(path, json.loads(row["scope_json"]))]
+        if not matches:
+            return None
+        owners[path] = sorted(matches)
+    return dict(revision=own["revision"], paths=owners)
 
 
 def accept_checks(db, task_id: str, attempt_id: str, checks) -> list[dict]:
@@ -1044,8 +1176,17 @@ def accept_checks(db, task_id: str, attempt_id: str, checks) -> list[dict]:
                              "Retain real failures and use an exact rerun. Retract only your own supported probe invocation error, "
                              "with a nonempty reason and corrected_by naming a passed check of this result with the same name, "
                              "operation, cwd and profile. Claimed, incomplete, foreign and runtime verification checks cannot be retracted.")
+        if "command_correction" in check and current["outcome"] != "superseded":
+            raise StoreError("invalid_check_supersession", f"arguments.checks[{index}].command_correction",
+                             "not bound to a supported invocation mistake and later verified correction",
+                             "a same-name passing correction of this attempt, operation, cwd and profile",
+                             "Keep both receipts. Correct only a supported own Python probe or an argparse "
+                             "argument startup error; real project failures need an exact rerun.")
         if check["outcome"] == "failed":
-            if current["outcome"] == "retracted":
+            if current["outcome"] in {"superseded", "not_attributable"}:
+                key = "superseded_by" if current["outcome"] == "superseded" else "not_attributable"
+                accepted.append(dict(check, **{key: current[key]}))
+            elif current["outcome"] == "retracted":
                 accepted.append(dict(check, retracted_by=current["retracted_by"]))
             else:
                 accepted.append(dict(check, closed_by=current["closed_by"]) if current["closed_by"] else dict(check))
@@ -1077,7 +1218,9 @@ def open_failure(db, task_id: str, attempt_id: str, checks) -> bool:
     for check, current in zip(checks, current_outcomes(db, task_id, attempt_id, checks)):
         if check.get("outcome") == "failed" and not (
                 (current["closed_by"] and check.get("closed_by") == current["closed_by"])
-                or (current["outcome"] == "retracted" and check.get("retracted_by") == current["retracted_by"])):
+                or (current["outcome"] == "retracted" and check.get("retracted_by") == current["retracted_by"])
+                or (current["outcome"] == "superseded" and check.get("superseded_by") == current["superseded_by"])
+                or (current["outcome"] == "not_attributable" and check.get("not_attributable") == current["not_attributable"])):
             return True
         if check.get("outcome") == "passed" and current["outcome"] != "passed":
             return True
@@ -1265,12 +1408,13 @@ def annotate_checks(db, task_id: str, attempt_id: str | None, checks) -> list[di
     else:
         assessments = assess_checks(db, task_id, attempt_id, checks)
     currents = (current_outcomes(db, task_id, attempt_id, checks)
-                if attempt_id and any(check.get("invocation_error") for check in checks)
+                if attempt_id and any(check.get(key) for check in checks
+                                      for key in ("invocation_error", "command_correction", "not_attributable"))
                 else [None] * len(checks))
     annotated = []
     for check, assessment, current in zip(checks, assessments, currents):
         entry = dict(check, evidence_strength=assessment["strength"])
-        if check.get("invocation_error"):
+        if any(check.get(key) for key in ("invocation_error", "command_correction", "not_attributable")):
             entry["current_outcome"] = current["outcome"] if current else "unverified"
         for key in ('evidence_source', 'runtime_command_ref'):
             entry.pop(key, None)

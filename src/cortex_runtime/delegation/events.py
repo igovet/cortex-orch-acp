@@ -142,18 +142,15 @@ def append_event(
     shared-transaction variant).
 
     Returns the (newly inserted or already-existing) :class:`TaskEvent`.
+
+    Every standalone write in this module goes through
+    ``Store.immediate_write``: a contended write lock is retried with
+    backoff instead of surfacing ``database is locked`` to the scheduler,
+    whose unwinding once killed every live worker of a task.
     """
-    with store.connection() as db:
-        db.execute("BEGIN IMMEDIATE")
-        try:
-            event = append_event_tx(
-                db, task_id, event_type, dedup_key, payload, origin, assignment_ref=assignment_ref,
-            )
-            db.commit()
-        except BaseException:
-            db.rollback()
-            raise
-    return event
+    return store.immediate_write(lambda db: append_event_tx(
+        db, task_id, event_type, dedup_key, payload, origin, assignment_ref=assignment_ref,
+    ))
 
 
 def list_since(store, task_id: str, after: int = 0, limit: int = 200) -> list[TaskEvent]:
@@ -192,29 +189,25 @@ def claim_unconsumed(
         f" AND event_type NOT IN ({','.join('?' for _ in exclude_types)})"
         if exclude_types else ""
     )
-    with store.connection() as db:
-        db.execute("BEGIN IMMEDIATE")
-        try:
+    def claim(db):
+        rows = db.execute(
+            "SELECT * FROM task_events WHERE task_id=? AND consumed_by IS NULL AND superseded=0"
+            + exclusions + " ORDER BY id",
+            (task_id, *exclude_types),
+        ).fetchall()
+        ids = [row["id"] for row in rows]
+        if ids:
+            db.executemany(
+                "UPDATE task_events SET consumed_by=? WHERE id=?",
+                [(continuation_id, event_id) for event_id in ids],
+            )
             rows = db.execute(
-                "SELECT * FROM task_events WHERE task_id=? AND consumed_by IS NULL AND superseded=0"
-                + exclusions + " ORDER BY id",
-                (task_id, *exclude_types),
+                f"SELECT * FROM task_events WHERE id IN ({','.join('?' for _ in ids)}) ORDER BY id",
+                ids,
             ).fetchall()
-            ids = [row["id"] for row in rows]
-            if ids:
-                db.executemany(
-                    "UPDATE task_events SET consumed_by=? WHERE id=?",
-                    [(continuation_id, event_id) for event_id in ids],
-                )
-                rows = db.execute(
-                    f"SELECT * FROM task_events WHERE id IN ({','.join('?' for _ in ids)}) ORDER BY id",
-                    ids,
-                ).fetchall()
-            db.commit()
-        except BaseException:
-            db.rollback()
-            raise
-    return [TaskEvent._from_row(row) for row in rows]
+        return [TaskEvent._from_row(row) for row in rows]
+
+    return store.immediate_write(claim)
 
 
 def release_claim(store, task_id: str, continuation_id: str) -> int:
@@ -228,53 +221,27 @@ def release_claim(store, task_id: str, continuation_id: str) -> int:
     row (superseded is a durable, independent terminal marker). Returns the
     number of rows released.
     """
-    with store.connection() as db:
-        db.execute("BEGIN IMMEDIATE")
-        try:
-            cursor = db.execute(
-                "UPDATE task_events SET consumed_by=NULL WHERE task_id=? AND consumed_by=? AND superseded=0",
-                (task_id, continuation_id),
-            )
-            count = cursor.rowcount
-            db.commit()
-        except BaseException:
-            db.rollback()
-            raise
-    return count
+    return store.immediate_write(lambda db: db.execute(
+        "UPDATE task_events SET consumed_by=NULL WHERE task_id=? AND consumed_by=? AND superseded=0",
+        (task_id, continuation_id),
+    ).rowcount)
 
 
 def mark_superseded(store, task_id: str, assignment_ref: str) -> int:
     """Flag every event for ``assignment_ref`` as superseded; returns the count."""
-    with store.connection() as db:
-        db.execute("BEGIN IMMEDIATE")
-        try:
-            cursor = db.execute(
-                "UPDATE task_events SET superseded=1 WHERE task_id=? AND assignment_ref=?",
-                (task_id, assignment_ref),
-            )
-            count = cursor.rowcount
-            db.commit()
-        except BaseException:
-            db.rollback()
-            raise
-    return count
+    return store.immediate_write(lambda db: db.execute(
+        "UPDATE task_events SET superseded=1 WHERE task_id=? AND assignment_ref=?",
+        (task_id, assignment_ref),
+    ).rowcount)
 
 
 def mark_event_superseded(store, task_id: str, event_id: int) -> bool:
     """Supersede one still-unconsumed event by exact id."""
-    with store.connection() as db:
-        db.execute("BEGIN IMMEDIATE")
-        try:
-            cursor = db.execute(
-                "UPDATE task_events SET superseded=1 WHERE task_id=? AND id=? "
-                "AND consumed_by IS NULL AND superseded=0",
-                (task_id, int(event_id)),
-            )
-            db.commit()
-        except BaseException:
-            db.rollback()
-            raise
-    return cursor.rowcount == 1
+    return store.immediate_write(lambda db: db.execute(
+        "UPDATE task_events SET superseded=1 WHERE task_id=? AND id=? "
+        "AND consumed_by IS NULL AND superseded=0",
+        (task_id, int(event_id)),
+    ).rowcount == 1)
 
 
 def mark_delivered(store, task_id: str, continuation_id: str) -> int:
@@ -287,19 +254,10 @@ def mark_delivered(store, task_id: str, continuation_id: str) -> int:
     returning -- "delivered" is at-least-once to the model, but only ever
     recorded here, never assumed. Returns the number of rows marked.
     """
-    with store.connection() as db:
-        db.execute("BEGIN IMMEDIATE")
-        try:
-            cursor = db.execute(
-                "UPDATE task_events SET delivered_at=? WHERE task_id=? AND consumed_by=? AND delivered_at IS NULL",
-                (_now(), task_id, continuation_id),
-            )
-            count = cursor.rowcount
-            db.commit()
-        except BaseException:
-            db.rollback()
-            raise
-    return count
+    return store.immediate_write(lambda db: db.execute(
+        "UPDATE task_events SET delivered_at=? WHERE task_id=? AND consumed_by=? AND delivered_at IS NULL",
+        (_now(), task_id, continuation_id),
+    ).rowcount)
 
 
 def reconcile_undelivered_claims(store, task_id: str | None = None) -> int:
@@ -312,24 +270,17 @@ def reconcile_undelivered_claims(store, task_id: str | None = None) -> int:
     idempotent and safe to call with no crash pending (a no-op). Returns the
     number of rows released back to unconsumed.
     """
-    with store.connection() as db:
-        db.execute("BEGIN IMMEDIATE")
-        try:
-            if task_id is None:
-                cursor = db.execute(
-                    "UPDATE task_events SET consumed_by=NULL WHERE consumed_by IS NOT NULL AND delivered_at IS NULL AND superseded=0",
-                )
-            else:
-                cursor = db.execute(
-                    "UPDATE task_events SET consumed_by=NULL WHERE task_id=? AND consumed_by IS NOT NULL AND delivered_at IS NULL AND superseded=0",
-                    (task_id,),
-                )
-            count = cursor.rowcount
-            db.commit()
-        except BaseException:
-            db.rollback()
-            raise
-    return count
+    def release(db):
+        if task_id is None:
+            return db.execute(
+                "UPDATE task_events SET consumed_by=NULL WHERE consumed_by IS NOT NULL AND delivered_at IS NULL AND superseded=0",
+            ).rowcount
+        return db.execute(
+            "UPDATE task_events SET consumed_by=NULL WHERE task_id=? AND consumed_by IS NOT NULL AND delivered_at IS NULL AND superseded=0",
+            (task_id,),
+        ).rowcount
+
+    return store.immediate_write(release)
 
 
 def has_unconsumed(store, task_id: str) -> bool:

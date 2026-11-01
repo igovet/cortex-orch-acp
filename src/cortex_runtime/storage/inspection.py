@@ -314,7 +314,12 @@ def read_binding_page(project, session_id, task_id, owner_epoch, *, cursor=None,
                                 dedup_sha256=_digest(row['dedup_key']))
                 # Only runtime-created identity fields, never body/title/text,
                 # tool arguments, command output, private logs or credentials.
-                if payload.get('kind') == 'worker_configuration_confirmed':
+                if payload.get('kind') == 'worker_activity':
+                    item['kind'] = 'worker_activity'
+                    if payload.get('payload_offloaded') is True:
+                        for key in ('payload_offloaded', 'large_output_id', 'sha256', 'byte_count'):
+                            item[key] = payload.get(key)
+                elif payload.get('kind') == 'worker_configuration_confirmed':
                     for key in ('kind', 'attempt_id', 'engine_session_ref', 'config_revision_id',
                                 'engine', 'connection_id', 'model'):
                         item[key] = payload.get(key)

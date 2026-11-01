@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { groupWorkerEvents, type WorkerEvent } from "./worker-panel-events.ts";
+import { activityPreviewNotice, groupWorkerEvents, type WorkerEvent } from "./worker-panel-events.ts";
 
 const event = (id: number, changes: Partial<WorkerEvent>): WorkerEvent => ({ id, type: "progress", createdAt: String(id), text: `event ${id}`, ...changes });
 const rows = groupWorkerEvents([
@@ -139,3 +139,20 @@ const filtered = groupWorkerEvents([
   event(85, { text: "[final response] Answer" }),
 ]);
 assert.deepEqual(filtered.map(row => row.event.id), [83, 84, 85]);
+
+const offloaded = {
+  payload_offloaded: true, large_output_id: "lo_0123456789abcdef0",
+  sha256: "a".repeat(64), byte_count: 100000,
+};
+const previews = groupWorkerEvents([
+  event(90, { text: "[worker message] before", message_id: "m" }),
+  event(91, { text: "[worker message] preview", message_id: "m", ...offloaded }),
+  event(92, { text: "[worker message] after", message_id: "m" }),
+  event(93, { activity_ref: "tool:run", tool_kind: "execute", ...offloaded }),
+  event(94, { activity_ref: "tool:run", tool_kind: "execute", status: "completed" }),
+]);
+assert.equal(previews.length, 5, "previews cannot be merged or mistaken for complete prose/tool updates");
+assert.equal(previews[1].event.large_output_id, offloaded.large_output_id);
+assert.equal(previews[4].event.payload_offloaded, undefined, "later inline updates must not inherit old references");
+assert.match(activityPreviewNotice(previews[3].event)!, /Preview only.*lo_0123456789abcdef0.*100000 bytes.*SHA-256/);
+assert.equal(activityPreviewNotice(previews[4].event), null);

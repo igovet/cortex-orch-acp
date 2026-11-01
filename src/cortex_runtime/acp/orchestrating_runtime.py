@@ -4134,6 +4134,10 @@ class OrchestratingRuntime:
         durable panel history and never become coordinator continuation input.
         The panel joins by the worker attempt id; the host card remains the
         live presentation path and is emitted only after this write succeeds.
+        Redacted JSON envelopes over 64 KiB are retained losslessly in the
+        existing large-output store under coordinator scope. The event keeps
+        bounded field previews, full SHA-256, UTF-8 byte size and the reference
+        for paged read_large_output retrieval; small envelopes stay inline.
         """
         if self._store is None or not attempt_id or not text:
             return False
@@ -4182,9 +4186,8 @@ class OrchestratingRuntime:
         if content_value is not None:
             payload["content"] = _client_safe_raw(content_value)
         try:
-            digest = hashlib.sha256(
-                json.dumps(payload, sort_keys=True, ensure_ascii=False, default=str).encode("utf-8")
-            ).hexdigest()[:24]
+            data = json.dumps(payload, sort_keys=True, ensure_ascii=False, default=str).encode("utf-8")
+            digest = hashlib.sha256(data).hexdigest()[:24]
             if provider_event_id is not None:
                 identity = f"{activity_ref}:event:{provider_event_id}"
             elif stream_sequence is not None:
@@ -4192,9 +4195,12 @@ class OrchestratingRuntime:
             else:
                 identity = str(activity_ref)
             stable_ref = f"{identity}:{payload['status']}:{digest}"
+            event_ref = f"worker_activity:{attempt_id}:{stable_ref}"
+            from ..recovery.worker_activity import offload_activity
+            payload = offload_activity(self._store, task_id, event_ref, payload, data)
             delegation_events.append_event(
                 self._store, task_id, "progress",
-                f"worker_activity:{attempt_id}:{stable_ref}", payload, "runtime",
+                event_ref, payload, "runtime",
                 assignment_ref=attempt_id,
             )
             return True
@@ -6521,8 +6527,12 @@ class OrchestratingRuntime:
                 # In particular, never route an interrupted worker to fallback.
                 # Daemon teardown kills the engine: transport loss, left for
                 # restart recovery, never an engine failure or a fallback.
+                # So does the teardown of a failed coordinator turn (its
+                # resource cleanup marks the host lost before it terminates
+                # this task's workers): the worker was interrupted, it did
+                # not fail, and no other route can repair that.
                 from ..orchestration.limits import assignment_current
-                if (cancel_event.is_set() or self._shutting_down.is_set()
+                if (cancel_event.is_set() or self._transport_closed(task_id)
                         or acp_steering.is_stopped(self._store, task_id)
                         or not assignment_current(self._store, task_id, assignment_ref)):
                     with self._lock:
@@ -6595,7 +6605,9 @@ class OrchestratingRuntime:
                 self._finalize_generation_delivery(result.engine_session_ref, generation_delivery_id, failure_kind="unexpected_exception", stop_reason=None)
                 with self._lock:
                     self._worker_recoveries_in_flight.discard(assignment_ref)
-                if self._shutting_down.is_set():
+                # Teardown (daemon or failed coordinator turn) interrupted
+                # this worker: left for recovery, as for EngineTurnFailed.
+                if self._transport_closed(task_id):
                     return
                 if answer_delivery is not None:
                     from ..orchestration import worker_waits
@@ -7111,22 +7123,21 @@ class OrchestratingRuntime:
                 release_observed(self,task_id,row['attempt_id'])
             except Exception:
                 pass
-        with self._store.connection() as db:
-            db.execute("BEGIN IMMEDIATE")
-            try:
-                delegation_events.append_event_tx(
-                    db, task_id, "assignment_cancelled", f"assignment_cancelled:{assignment_ref}",
-                    dict(reason=reason), origin="runtime", assignment_ref=assignment_ref,
-                )
-                # The cancelled worker's open question ends with it, in the
-                # same transaction: left open, the next user message was
-                # taken as a late answer to it and swallowed.
-                from ..orchestration.worker_waits import cancel_tx
-                cancel_tx(db, task_id, reason, assignment_ref=assignment_ref)
-                db.commit()
-            except BaseException:
-                db.rollback()
-                raise
+        from ..orchestration.worker_waits import cancel_tx
+
+        def record_cancellation(db):
+            delegation_events.append_event_tx(
+                db, task_id, "assignment_cancelled", f"assignment_cancelled:{assignment_ref}",
+                dict(reason=reason), origin="runtime", assignment_ref=assignment_ref,
+            )
+            # The cancelled worker's open question ends with it, in the
+            # same transaction: left open, the next user message was
+            # taken as a late answer to it and swallowed.
+            cancel_tx(db, task_id, reason, assignment_ref=assignment_ref)
+
+        # A contended write lock is retried, never raised into the
+        # controller loop that cancels on replanning/interruption.
+        self._store.immediate_write(record_cancellation)
         # Keep the work graph projection aligned with the cancellation event.
         # The engine attempt id and the graph attempt id are different
         # namespaces; resolve the latter through the original delegation

@@ -4,11 +4,18 @@ import type { WorkerHistory } from "../shared/worker-history.js";
 export type WorkerEvent = WorkerHistory["assignments"][number]["attempts"][number]["events"][number];
 export type TranscriptEntry = { event: WorkerEvent; updates: WorkerEvent[] };
 
+/** Explicitly label previews; the full JSON is read through scoped runtime tools. */
+export function activityPreviewNotice(event: WorkerEvent): string | null {
+  return event.payload_offloaded
+    ? `Preview only · full redacted activity: ${event.large_output_id} · ${event.byte_count} bytes · SHA-256 ${event.sha256}`
+    : null;
+}
+
 const MESSAGE_MARKER = "[worker message] ";
 const FINAL_RESPONSE_MARKER = "[final response] ";
 
 function messageChunk(event: WorkerEvent): string | null {
-  if (event.tool_kind != null || (event.type !== "progress" && event.type !== "worker_activity")) return null;
+  if (event.payload_offloaded || event.tool_kind != null || (event.type !== "progress" && event.type !== "worker_activity")) return null;
   const marker = event.text.indexOf(MESSAGE_MARKER);
   return marker < 0 ? null : event.text.slice(marker + MESSAGE_MARKER.length);
 }
@@ -27,7 +34,7 @@ function groupingRef(event: WorkerEvent): string | undefined {
   // Its durable message_id is the actual logical-message identity; grouping
   // by activity_ref would retain only the latest chunk. Legacy rows without
   // message_id are grouped by adjacent timeline position below.
-  if (messageChunk(event) !== null) return undefined;
+  if (event.payload_offloaded || messageChunk(event) !== null) return undefined;
   const ref = event.activity_ref;
   // Runtime's tool-error observation names the same exact tool call with
   // this distinct prefix. Fold it into that call's row, retaining the row.
@@ -108,7 +115,7 @@ export function groupWorkerEvents(events: WorkerEvent[]): TranscriptEntry[] {
     } else if (chunk !== null) {
       transcript.push({ event: { ...row.event, text: chunk }, updates: row.updates });
       shownMessageSegments.push(chunk);
-    } else if (row.event.activity_ref === "final-response") {
+    } else if (!row.event.payload_offloaded && row.event.activity_ref === "final-response") {
       const marker = row.event.text.indexOf(FINAL_RESPONSE_MARKER);
       const body = marker < 0 ? row.event.text : row.event.text.slice(marker + FINAL_RESPONSE_MARKER.length);
       const remainder = finalResponseRemainder(body, shownMessageSegments);
