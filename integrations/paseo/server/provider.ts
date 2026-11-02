@@ -7,7 +7,7 @@ import { codeModePresentation, gatewayPresentation } from "../shared/gateway-pre
 import { shellCommand } from "../shared/shell-command.ts";
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { homedir } from "node:os";
@@ -551,33 +551,83 @@ function shimmedCommand(shim: string, targetArgv: string[], targetEnv?: Record<s
   ]);
 }
 
+type LaunchRecord = { path: string; record: unknown };
+
+function samePath(left: string, right: string): boolean {
+  const canonical = (value: string) => {
+    try {
+      return realpathSync(value);
+    } catch {
+      return resolve(value);
+    }
+  };
+  return canonical(left) === canonical(right);
+}
+
+/** This daemon's own config home when XDG_CONFIG_HOME selects one other than
+ * HOME/.config (an isolated dev daemon, a second installation). */
+function isolatedConfigHome(): string | undefined {
+  const value = process.env.XDG_CONFIG_HOME?.trim();
+  if (!value || !isAbsolute(value)) return undefined;
+  return samePath(value, join(homedir(), ".config")) ? undefined : value;
+}
+
+function readLaunchRecord(path: string): unknown {
+  try {
+    return JSON.parse(readFileSync(path, "utf8"));
+  } catch {
+    throw new Error(`Invalid Cortex Paseo launch configuration: ${path}`);
+  }
+}
+
+/** Setup writes the launch record into the Cortex config root of the
+ * environment it describes (scripts/cortex_acp_setup.py), so a daemon with
+ * its own XDG_CONFIG_HOME finds its record there. */
+function isolatedLaunchRecord(): LaunchRecord | undefined {
+  const configHome = isolatedConfigHome();
+  if (configHome === undefined) return undefined;
+  const path = join(configHome, "cortex", "paseo-plugin-launch.json");
+  return existsSync(path) ? { path, record: readLaunchRecord(path) } : undefined;
+}
+
+/** The conventional HOME/.config record. A daemon with its own config home
+ * uses it only when an older setup wrote it for that same config home; it
+ * never launches another Paseo instance's runtime and storage. */
+function regularLaunchRecord(): LaunchRecord | undefined {
+  const path = join(homedir(), ".config", "cortex", "paseo-plugin-launch.json");
+  if (!existsSync(path)) return undefined;
+  const isolated = isolatedConfigHome();
+  if (isolated === undefined) return { path, record: readLaunchRecord(path) };
+  let record: unknown;
+  try {
+    record = JSON.parse(readFileSync(path, "utf8"));
+  } catch {
+    return undefined;
+  }
+  const env = record && typeof record === "object" ? (record as { env?: unknown }).env : undefined;
+  const configHome = env && typeof env === "object" && !Array.isArray(env)
+    ? (env as Record<string, unknown>).XDG_CONFIG_HOME
+    : undefined;
+  return typeof configHome === "string" && isAbsolute(configHome) && samePath(configHome, isolated)
+    ? { path, record }
+    : undefined;
+}
+
+function recordShim(launch: LaunchRecord | undefined): string | undefined {
+  const record = launch?.record;
+  const shim = record && typeof record === "object" ? (record as { shim?: unknown }).shim : undefined;
+  return typeof shim === "string" ? shim : undefined;
+}
+
 function bundledShimPath(): string {
   const explicit = process.env.CORTEX_PASEO_SHIM?.trim();
   if (explicit) return explicit;
-  const configHomes = [process.env.XDG_CONFIG_HOME].filter(
-    (value): value is string => Boolean(value),
-  );
-  for (const configHome of configHomes) {
-    const launchConfig = join(configHome, "cortex", "paseo-plugin-launch.json");
-    if (!existsSync(launchConfig)) continue;
-    try {
-      const configured = JSON.parse(readFileSync(launchConfig, "utf8")) as LaunchConfig;
-      if (typeof configured.shim === "string") return configured.shim;
-    } catch {
-      throw new Error(`Invalid Cortex Paseo launch configuration: ${launchConfig}`);
-    }
-  }
+  const isolated = recordShim(isolatedLaunchRecord());
+  if (isolated) return isolated;
   const source = sourceTreeLaunch();
   if (source) return source.shim;
-  const homeLaunch = join(homedir(), ".config", "cortex", "paseo-plugin-launch.json");
-  if (existsSync(homeLaunch)) {
-    try {
-      const configured = JSON.parse(readFileSync(homeLaunch, "utf8")) as LaunchConfig;
-      if (typeof configured.shim === "string") return configured.shim;
-    } catch {
-      throw new Error(`Invalid Cortex Paseo launch configuration: ${homeLaunch}`);
-    }
-  }
+  const regular = recordShim(regularLaunchRecord());
+  if (regular) return regular;
   throw new Error("Cortex ACP Paseo load shim is unavailable; configure a launch record or CORTEX_PASEO_SOURCE_ROOT");
 }
 
@@ -632,20 +682,12 @@ function cortexCommand(): CommandArgv {
     return shimmedCommand(bundledShimPath(), [command]);
   }
 
-  // Prefer a launch record in this XDG profile. Production profiles can still
-  // use the normal HOME/.config record when no XDG location is supplied.
-  const isolatedConfigHome = process.env.XDG_CONFIG_HOME;
-  const regularConfigHome = join(homedir(), ".config");
-  const configHomes = [
-    isolatedConfigHome,
-    regularConfigHome,
-  ].filter((value, index, values): value is string =>
-    Boolean(value) && values.indexOf(value) === index,
-  );
-  for (const configHome of configHomes) {
-    const launchConfig = join(configHome, "cortex", "paseo-plugin-launch.json");
-    if (!existsSync(launchConfig)) continue;
-    const configured: unknown = JSON.parse(readFileSync(launchConfig, "utf8"));
+  // Prefer the launch record of this daemon's own XDG profile. The normal
+  // HOME/.config record serves the conventional profile, and an isolated
+  // profile only when it was written for that profile's config home.
+  const found = isolatedLaunchRecord() ?? regularLaunchRecord();
+  if (found !== undefined) {
+    const { path: launchConfig, record: configured } = found;
     if (
       configured &&
       typeof configured === "object" &&

@@ -337,7 +337,12 @@ Paseo stages the complete repository, including `src/cortex_acp.py`; the
 `:integrations/paseo` suffix selects the plugin entry directory. The build
 step retains the launch-critical runtime under
 `$XDG_STATE_HOME/cortex/paseo-runtime/` and writes a `0600` launch record at
-`~/.config/cortex/paseo-plugin-launch.json`.
+`$XDG_CONFIG_HOME/cortex/paseo-plugin-launch.json`, or
+`~/.config/cortex/paseo-plugin-launch.json` when `XDG_CONFIG_HOME` is unset.
+The build step runs in the Paseo daemon's environment, so a second Paseo
+instance with its own `XDG_CONFIG_HOME` writes and reads its own record and
+never replaces the record of the conventional installation. An existing record
+that Cortex did not write is still refused, never overwritten.
 
 Update the installed Git plugin, checking first if desired:
 
@@ -380,11 +385,18 @@ generated SHA-256 integrity record, enables the Paseo daemon plugin switch
 only for this explicit setup action, installs or reloads the `cortex-acp`
 provider, and verifies that the daemon reports it as `running`. It is
 idempotent and preserves unrelated Paseo plugins and configuration keys.
-Setup also writes the owner-private `HOME/.config/cortex/paseo-plugin-launch.json`
-record with the absolute Cortex entrypoint and the non-secret `HOME`,
-`XDG_CONFIG_HOME`, and `XDG_STATE_HOME` roots used by setup. The HOME-based
-locator remains stable when a daemon restarts with a different XDG
-environment. The provider applies those roots when it starts Cortex after a Paseo daemon restart, so the same connection
+Setup also writes the owner-private `paseo-plugin-launch.json` record with the
+absolute Cortex entrypoint and the non-secret `HOME`, `XDG_CONFIG_HOME`, and
+`XDG_STATE_HOME` roots used by setup. The record lives in the Cortex config
+root of that environment: `$XDG_CONFIG_HOME/cortex/` when `XDG_CONFIG_HOME` is
+set to a directory other than `~/.config`, otherwise `~/.config/cortex/`. The
+provider looks first in its own `XDG_CONFIG_HOME` and then in `~/.config`; a
+daemon with its own `XDG_CONFIG_HOME` uses the `~/.config` record only if that
+record names the same `XDG_CONFIG_HOME` (a record written by an older setup),
+so it never launches another installation's runtime and storage. Run setup in
+the same XDG environment as the daemon: a daemon started without
+`XDG_CONFIG_HOME` does not see a record written under a custom one. The
+provider applies the recorded roots when it starts Cortex after a Paseo daemon restart, so the same connection
 registry, catalog, and native-account state remain visible even when Paseo
 was launched from a desktop environment with a different shell environment.
 The record also names the repository-owned Paseo 0.8 `session/load` stdio

@@ -419,6 +419,24 @@ daemon for local directory-plugin loading. It also sets `XDG_CONFIG_HOME` and
 This prevents a user-level Cortex launch record from selecting a packaged runtime;
 the explicit source root takes precedence for this dev-only path.
 
+A Git-installed plugin must run the runtime its own build step staged, not this
+checkout. Pass `--installed-runtime` both to the daemon start that serves it and to
+the install or update command; the wrapper then drops `CORTEX_PASEO_SOURCE_ROOT`,
+including an inherited value. Without the flag, the wrapper refuses `plugin install`
+from a source that is not a local directory and `plugin update`, because the daemon
+would otherwise launch this checkout. The flag cannot be combined with
+`--wire-trace`, which traces this checkout only. The build step writes its launch
+record to `~/.paseo-dev/cortex-xdg/config/cortex/paseo-plugin-launch.json` and
+leaves the owner's `~/.config/cortex/paseo-plugin-launch.json` unchanged:
+
+~~~bash
+python3 -B scripts/cortex_paseo_dev.py --installed-runtime -- start --timeout 60 --json
+python3 -B scripts/cortex_paseo_dev.py --installed-runtime -- plugin install github:igovet/cortex-orch-acp:integrations/paseo --ref dev --json
+python3 -B scripts/cortex_paseo_dev.py gui --installed-runtime
+~~~
+
+Restart the daemon without the flag before going back to a local directory plugin.
+
 Start the isolated daemon, install or inspect the explicitly addressed local plugin,
 then launch Electron Desktop:
 
