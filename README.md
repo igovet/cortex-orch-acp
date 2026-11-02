@@ -165,7 +165,9 @@ client for Cortex: it has a native Cortex provider plugin, shows per-worker
 cards with live status and reported token/context snapshots, and is what
 orchestration is qualified against. Missing context is explicit (OpenCode reports
 it only at turn end); provider plan percentages are route-selection snapshots,
-not live meters. Unsupported OpenCode plan usage stays unknown with a hint to
+not live meters. Claude plan usage uses remaining reported windows such as weekly limits;
+legacy session / 5-hour usage is ignored. Codex's own windows are unchanged.
+Unsupported OpenCode plan usage stays unknown with a hint to
 check the provider's account usage page. The steps below are exact commands from this repository;
 for the local-checkout path, replace `/absolute/path/to/cortex-orch-acp` with
 where you cloned it. Busy-message acknowledgements close their display message

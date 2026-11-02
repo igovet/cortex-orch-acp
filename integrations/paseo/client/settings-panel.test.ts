@@ -1457,7 +1457,8 @@ test("quota typed controls edit exact labels and scopes and retain unrelated dat
   const saved = screen.updates[0].rules as any;
   assert.deepEqual(saved.quota_windows, { "codex-acp": [{ window: "Renamed / Label@8", models: null }] });
   assert.deepEqual(saved.models, rules.models);
-  assert.ok(screen.texts().some((text) => text.includes("Without it every window counts for every model of that engine")));
+  assert.ok(screen.texts().some((text) => text.includes("Without it every applicable window counts for every model of that engine")));
+  assert.ok(screen.texts().some((text) => text.includes("Claude\'s legacy session / 5-hour window is ignored; Codex keeps its own windows.")));
 });
 
 test("unknown quota rule shape remains read-only with no destructive save", async () => {

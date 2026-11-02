@@ -932,7 +932,11 @@ examined. No paid or live OpenCode run has been made.
 Outside the jail, entirely unjailed, `connections.quota` lazily runs the
 installed Claude Code CLI's own local `/usage` command (`claude -p /usage
 --output-format json --restricted --strict-mcp-config`) to learn a
-claude-agent-acp connection's plan-usage percentage. The subprocess
+claude-agent-acp connection's plan-usage percentage. Legacy Claude `five_hour`
+events, cached windows and CLI session lines do not contribute to quota decisions
+or current window display; remaining reported windows still apply, and missing usage
+stays unavailable rather than inferred hot. Codex windows and actual engine-refusal
+handling are unchanged. The subprocess
 environment comes from `connections.environment.build_process_env`, which
 re-verifies the connection against the on-disk registry before trusting its
 `credential_ref` and sets `CLAUDE_CONFIG_DIR` to that connection's own

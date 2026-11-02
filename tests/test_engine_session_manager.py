@@ -179,7 +179,8 @@ def test_acp_context_fill_and_prompt_response_usage_are_carried(tmp_path):
 
 
 
-def test_claude_rate_limit_and_per_turn_tokens_use_installed_adapter_shapes(tmp_path):
+@pytest.mark.parametrize("window", ["seven_day", "five_hour"])
+def test_claude_rate_limit_and_per_turn_tokens_use_installed_adapter_shapes(tmp_path, window):
     """A Claude context notification carries no billable counts; its final
     PromptResponse does, and the forwarded rate limit updates the plan window.
     """
@@ -189,7 +190,7 @@ def test_claude_rate_limit_and_per_turn_tokens_use_installed_adapter_shapes(tmp_
             dict(delay=0.0, sessionUpdate="usage_update", used=80, size=200000),
             dict(delay=0.0, sessionUpdate="usage_update", used=80, size=200000,
                  _meta={"_claude/rateLimit": {
-                     "status": "allowed", "rateLimitType": "five_hour",
+                     "status": "allowed", "rateLimitType": window,
                      "utilization": 0.35, "resetsAt": reset,
                  }}),
         ],
@@ -213,7 +214,8 @@ def test_claude_rate_limit_and_per_turn_tokens_use_installed_adapter_shapes(tmp_
         assert quota.visible_windows(
             SimpleNamespace(engine="claude-agent-acp", id=manager._record.id),
             manager._environ,
-        ) == [{"name": "five_hour", "usedPercent": 35.0, "resetsAt": reset}]
+        ) == ([{"name": "seven_day", "usedPercent": 35.0, "resetsAt": reset}]
+              if window == "seven_day" else [])
     finally:
         manager.shutdown(grace=2.0)
 

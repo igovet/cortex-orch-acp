@@ -39,14 +39,14 @@ def test_native_windows_are_reported_per_provider_and_expired_values_are_unknown
     environ = {"HOME": str(tmp_path), "XDG_STATE_HOME": str(tmp_path / "state")}
     connection_id = "cn_" + "a" * 12
     quota.observe(connection_id, {
-        "rateLimitType": "five_hour", "utilization": 0.4, "resetsAt": future,
+        "rateLimitType": "seven_day", "utilization": 0.4, "resetsAt": future,
     }, environ)
     quota.observe(connection_id, {
         "rateLimitType": "overage", "utilization": 0.9, "resetsAt": future,
     }, environ)
     claude = SimpleNamespace(engine="claude-agent-acp", id=connection_id)
     assert quota.visible_windows(claude, environ, now=time.time()) == [
-        {"name": "five_hour", "usedPercent": 40.0, "resetsAt": future},
+        {"name": "seven_day", "usedPercent": 40.0, "resetsAt": future},
     ]
     assert quota.visible_windows(claude, environ, now=future + 1) == []
 
@@ -71,14 +71,30 @@ _USAGE_TEXT = (
 )
 
 
-def test_claude_usage_cli_text_parses_session_and_week_lines():
+def test_claude_usage_cli_text_ignores_session_and_parses_week_lines():
     now = _now("2026-09-20 00:00")
     windows = quota._parse_usage_text(_USAGE_TEXT, now)
     assert windows == {
-        "five_hour": {"used": 4.0, "resets_at": _now("2026-09-26 13:30")},
         "seven_day": {"used": 50.0, "resets_at": _now("2026-09-29 06:00")},
         "seven_day_fable": {"used": 2.0, "resets_at": _now("2026-09-29 06:00")},
     }
+
+
+@pytest.mark.parametrize("session_line", [
+    "",
+    "Current session: 100% used · resets Sep 26, 1:30pm (UTC)\n",
+])
+def test_claude_weekly_usage_is_valid_without_session_window(tmp_path, monkeypatch, session_line):
+    _fake_claude_binary(monkeypatch)
+    environ = _environ(tmp_path)
+    record = _claude_connection(environ)
+    monkeypatch.setattr(quota, "_run_claude_usage_subprocess", lambda *a, **k: _usage_result(
+        session_line + "Current week (all models): 40% used · resets Sep 29, 6am (UTC)\n"))
+    now = _now("2026-09-20 00:00")
+    assert quota.used_percent(record, "sonnet", environ, now=now) == 40.0
+    assert quota.visible_windows(record, environ, now=now) == [
+        {"name": "seven_day", "usedPercent": 40.0, "resetsAt": _now("2026-09-29 06:00")},
+    ]
 
 
 def test_claude_usage_cli_reset_time_rolls_over_into_next_year():
@@ -91,9 +107,9 @@ def test_claude_usage_cli_reset_time_rolls_over_into_next_year():
 def test_claude_usage_cli_unparseable_reset_leaves_window_used_but_no_reset():
     now = _now("2026-09-20 00:00")
     windows = quota._parse_usage_text(
-        "Current session: 7% used · resets whenever (UTC)\n", now,
+        "Current week (all models): 7% used · resets whenever (UTC)\n", now,
     )
-    assert windows == {"five_hour": {"used": 7.0, "resets_at": None}}
+    assert windows == {"seven_day": {"used": 7.0, "resets_at": None}}
 
 
 @pytest.mark.parametrize("payload", [
@@ -160,7 +176,6 @@ def test_claude_usage_cli_refresh_populates_windows_and_respects_ttl(tmp_path, m
 
     # Still inside the TTL: no second spawn, even from a different accessor.
     assert quota.visible_windows(record, environ, now=now + 60) == [
-        {"name": "five_hour", "usedPercent": 4.0, "resetsAt": _now("2026-09-26 13:30")},
         {"name": "seven_day", "usedPercent": 50.0, "resetsAt": _now("2026-09-29 06:00")},
         {"name": "seven_day_fable", "usedPercent": 2.0, "resetsAt": _now("2026-09-29 06:00")},
     ]
@@ -200,7 +215,7 @@ def test_claude_usage_cli_never_overrides_a_newer_rate_limit_event(tmp_path, mon
     connection_id = record.id
     future = time.time() + 3600
     # observe() stamps this window's observed_at with the real wall clock.
-    quota.observe(connection_id, {"rateLimitType": "five_hour", "utilization": 0.9, "resetsAt": future}, environ)
+    quota.observe(connection_id, {"rateLimitType": "seven_day", "utilization": 0.9, "resetsAt": future}, environ)
 
     monkeypatch.setattr(quota, "_run_claude_usage_subprocess",
                         lambda *a, **k: _usage_result(_USAGE_TEXT))

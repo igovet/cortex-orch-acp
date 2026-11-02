@@ -152,7 +152,7 @@ def test_a_rejected_window_without_resetsat_expires_after_a_bounded_ttl(tmp_path
     environ = {"HOME": str(tmp_path), "XDG_STATE_HOME": str(tmp_path / "state")}
     connection_id = "cn_" + "f" * 12
     now = time.time()
-    quota.observe(connection_id, {"status": "rejected", "rateLimitType": "five_hour"}, environ)
+    quota.observe(connection_id, {"status": "rejected", "rateLimitType": "seven_day"}, environ)
     record = SimpleNamespace(engine="claude-agent-acp", id=connection_id, credential_ref=None)
     assert quota.used_percent(record, "sonnet", environ, now=now) == 100.0
     ttl = quota._REJECTED_WINDOW_DEFAULT_TTL_SECONDS
@@ -164,7 +164,7 @@ def test_a_rejected_window_with_a_real_resetsat_is_unaffected(tmp_path):
     environ = {"HOME": str(tmp_path), "XDG_STATE_HOME": str(tmp_path / "state")}
     connection_id = "cn_" + "g" * 12
     now = time.time()
-    quota.observe(connection_id, {"status": "rejected", "rateLimitType": "five_hour", "resetsAt": now + 3600}, environ)
+    quota.observe(connection_id, {"status": "rejected", "rateLimitType": "seven_day", "resetsAt": now + 3600}, environ)
     record = SimpleNamespace(engine="claude-agent-acp", id=connection_id, credential_ref=None)
     assert quota.used_percent(record, "sonnet", environ, now=now + 3700) is None
 
@@ -185,7 +185,8 @@ def test_a_vanished_cli_window_is_pruned_on_the_next_successful_refresh(tmp_path
     quota.used_percent(record, None, environ, now=now + 301)
     windows = quota._load(record.id, environ)
     assert "seven_day" not in windows and "seven_day_fable" not in windows
-    assert "five_hour" in windows
+    assert "five_hour" not in windows
+    assert quota.used_percent(record, None, environ, now=now + 302) is None
 
 
 def test_an_event_sourced_window_is_never_pruned_by_a_cli_refresh(tmp_path, monkeypatch):

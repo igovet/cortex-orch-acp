@@ -254,8 +254,8 @@ export const HELP = {
   ),
   quotaWindows: helpBlock(
     h(
-      "Ties the plan usage windows an engine reports (5-hour, weekly…) to exact models, so an exhausted window blocks only the models it covers. Without it every window counts for every model of that engine (safe but may block too much).",
-      "Связывает окна лимитов тарифа, которые сообщает движок (5 часов, неделя…), с точными моделями, чтобы исчерпанное окно блокировало только свои модели. Без этого каждое окно считается общим для всех моделей движка (безопасно, но может блокировать лишнее).",
+      "Ties the plan usage windows an engine reports (weekly, per-model weekly…) to exact models, so an exhausted window blocks only the models it covers. Without it every applicable window counts for every model of that engine (safe but may block too much). Claude's legacy session / 5-hour window is ignored; Codex keeps its own windows.",
+      "Связывает окна лимитов тарифа, которые сообщает движок (неделя, неделя для отдельной модели…), с точными моделями, чтобы исчерпанное окно блокировало только свои модели. Без этого каждое учитываемое окно считается общим для всех моделей движка (безопасно, но может блокировать лишнее). Устаревшее сессионное / 5-часовое окно Claude игнорируется; окна Codex сохраняются.",
     ),
     [
       ["<engine> quota windows", h("Turns on explicit rules for that engine.", "Включает явные правила для движка.")],
