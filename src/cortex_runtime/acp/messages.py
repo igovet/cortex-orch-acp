@@ -319,8 +319,8 @@ _CATALOG: dict[str, dict[str, str]] = {
         "ru": "ход координатора завершился сбоем ({detail})",
     },
     "stop_reason.workers_still_live_or_unknown": {
-        "en": "some workers could not be confirmed stopped",
-        "ru": "не удалось подтвердить, что все исполнители остановлены",
+        "en": "some workers could not be confirmed stopped ({detail})",
+        "ru": "не удалось подтвердить, что все исполнители остановлены ({detail})",
     },
     "worker_failed_details": {
         "en": "\n\n{node} ({report_ref}){unpassed}\n\n{summary}",
