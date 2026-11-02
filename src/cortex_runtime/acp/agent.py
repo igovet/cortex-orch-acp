@@ -1711,7 +1711,16 @@ class Agent:
             # disagree with the route recorded for this attempt.  Do not
             # send a fallback surface when no saved route was applied: that
             # would make an unconfigured task look configured.
-            applied_selection = self._propose_pending_selection_for_new_task(store, session, task_id)
+            try:
+                applied_selection = self._propose_pending_selection_for_new_task(store, session, task_id)
+            except PortableError as error:
+                # A saved portable coordinator (for example the seeded
+                # default preset) that no current connection can serve is a
+                # refused selection, not an internal fault: nothing was
+                # applied, so orchestration fails closed below with the
+                # documented -32001 orchestration_unavailable.
+                applied_selection = False
+                observe(self.environ, "session/prompt", f"pending_selection_refused:{error.code}")
             if applied_selection and self.transport is not None and not cancel_event.is_set():
                 self.transport.send_notification(
                     protocol.config_option_update(session_id, self._config_options_for_session(session, store))

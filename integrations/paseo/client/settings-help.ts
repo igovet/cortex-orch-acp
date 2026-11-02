@@ -424,6 +424,14 @@ export const HELP = {
       ["Remove", h("Unregisters the connection; its models disappear from Cortex.", "Удаляет подключение; его модели пропадают из Cortex.")],
     ],
   ),
+  engineSetup: h(
+    "Each engine runs through your own account login; Settings never asks for an API key (key-based connections are set up from the command line). Download engine fetches Cortex's own pinned adapter (up to a minute). Log in once with the engine's own command, then Add connection registers it after you switch on the opt-in. OpenCode v2 is only shown here; enable it in its own section below. Nothing is downloaded or connected without your press.",
+    "Каждый движок работает через ваш собственный вход в аккаунт; Settings никогда не спрашивает API-ключ (подключения по ключу настраиваются из командной строки). «Download engine» скачивает собственный закреплённый адаптер Cortex (до минуты). Войдите один раз командой самого движка, затем «Add connection» зарегистрирует его после включения согласия. OpenCode v2 здесь только показывается; включается он в своём разделе ниже. Без вашего нажатия ничего не скачивается и не подключается.",
+  ),
+  defaultPreset: h(
+    "The bundled default preset: the user routing.json (engines, models and routes) and defaults.json (coordinator default and language). Apply writes only a file that does not exist yet and never replaces one. Reset replaces both files after a private backup of each.",
+    "Встроенный пресет по умолчанию: пользовательские routing.json (движки, модели и маршруты) и defaults.json (координатор по умолчанию и язык). «Apply» записывает только ещё не существующий файл и никогда не заменяет его. «Reset» заменяет оба файла, предварительно сохранив личную резервную копию каждого.",
+  ),
   openCode: h(
     "Optional engine, opt-in only. Registering never changes routing: OpenCode routes stay out of automatic routing until you switch models on under Models and add them to automatic routing. Recommended: enable only if you need models available only through OpenCode.",
     "Необязательный движок, только по явному согласию. Регистрация не меняет маршрутизацию: маршруты OpenCode не участвуют в автоматике, пока вы не включите модели в Models и не добавите их в автоматический выбор. Рекомендация: включайте, только если нужны модели, доступные лишь через OpenCode.",

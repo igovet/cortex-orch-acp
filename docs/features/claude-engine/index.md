@@ -194,7 +194,7 @@ the pinned version.
 
 ## Pinned install requirements (manual recipe placeholder)
 
-The adapter integration implements **no installer**. An operator who has
+Settings > Connections > Download engine installs the manifest-pinned claude-agent-acp into Cortex's owned engine root and needs no install record (see [engine install records](../../configuration.md#engine-install-records)). The recipe below implements **no installer** and is for an adapter installed outside Cortex. An operator who has
 already installed claude-agent-acp by some other means (for example
 following Zed's own npx-based Custom Agent registration, or a manual `npm
 install @agentclientprotocol/claude-agent-acp`) records the resulting

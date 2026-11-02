@@ -200,6 +200,47 @@ def test_different_request_id_identical_text_creates_a_new_source_event(tmp_path
     assert len(events) == 2
 
 
+def test_seeded_default_preset_without_connections_fails_closed_not_internal_error(tmp_path):
+    """First start seeds the default preset (a portable coordinator
+    preference) into the process's own config dir.  With no connection that
+    can serve it, the first prompt must fail closed with the documented
+    -32001 orchestration_unavailable, never escape as -32603, and the
+    seeded preset must remain in place."""
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    project.mkdir()
+    config = home / "config"
+    proc = spawn_production_agent(env=dict(HOME=str(home), XDG_CONFIG_HOME=str(config),
+                                           XDG_STATE_HOME=str(home / "state")))
+    try:
+        _send(proc, dict(jsonrpc="2.0", id=1, method="initialize",
+                          params=dict(protocolVersion=1, clientCapabilities={},
+                                      clientInfo=dict(name="t", version="1"))))
+        _recv(proc)
+        _send(proc, dict(jsonrpc="2.0", id=2, method="session/new",
+                          params=dict(cwd=str(project), mcpServers=[])))
+        session_id = _recv(proc)["result"]["sessionId"]
+        _recv(proc)  # available_commands_update notification
+
+        seeded = json.loads((config / "cortex" / "defaults.json").read_text(encoding="utf-8"))
+        assert seeded["defaults"]["coordinator"]["engine"]
+        assert (config / "cortex" / "routing.json").is_file()
+
+        _send(proc, dict(jsonrpc="2.0", id=3, method="session/prompt",
+                          params=dict(sessionId=session_id, prompt=[dict(type="text", text="hello")])))
+        reply = _recv(proc)
+        assert reply["id"] == 3
+        assert reply["error"]["code"] == -32001, reply
+        assert reply["error"]["message"] == "orchestration_unavailable"
+    finally:
+        proc.stdin.close()
+        proc.wait(timeout=15)
+    assert proc.returncode == 0
+    # The preset is kept: an unavailable coordinator never removes it.
+    after = json.loads((config / "cortex" / "defaults.json").read_text(encoding="utf-8"))
+    assert after == seeded
+
+
 # --- delta review fixes: id-identity collision, worker exception safety,
 #     and a genuinely-in-flight duplicate id -----------------------------
 

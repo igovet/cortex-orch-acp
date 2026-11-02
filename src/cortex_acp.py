@@ -55,6 +55,12 @@ def _ensure_first_run_configuration():
 
     Never fails startup.
     """
+    try:
+        from cortex_runtime.routing import defaults as routing_defaults
+
+        routing_defaults.apply()
+    except Exception:  # noqa: BLE001 - absent-only seeding never blocks startup
+        pass
     # D-T035-02: an engine the user already configured in their client (e.g.
     # Zed) needs no separate Cortex setup step -- discover it and, iff
     # Cortex has no connection for it yet, register one that references the

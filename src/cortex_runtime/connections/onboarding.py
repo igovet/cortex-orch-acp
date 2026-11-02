@@ -30,6 +30,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import datetime, timezone
+import hashlib
 import os
 import stat
 from pathlib import Path
@@ -313,6 +314,7 @@ def create_referenced_connection(
     provider: str,
     launch_command: tuple[str, ...],
     reuse: bool = True,
+    expected_revision: str | None = None,
     environ: dict[str, str] | None = None,
 ) -> ConnectionRecord:
     """Register a connection that *references* the client's own native
@@ -325,13 +327,20 @@ def create_referenced_connection(
     engine install, e.g. via ``connections.discovery``). ``reuse=True`` by
     default: calling this again for the same engine/provider/launch_command
     returns the existing connection rather than erroring, so startup
-    discovery (T035) can call it idempotently.
+    discovery (T035) can call it idempotently. When supplied, the registry
+    byte revision is checked inside the same transaction as creation.
     """
     auth_mode = AuthMode.NATIVE_ACCOUNT
     support = validate_auth_selection(engine, auth_mode, None)
     fingerprint = trust.fingerprint(engine, provider, None, launch_command)
     now = _now_iso()
     with registry.transaction(environ) as state:
+        if expected_revision is not None:
+            data = registry.read_owner_file(registry.registry_path(environ))
+            current = "absent" if data is None else "sha256:" + hashlib.sha256(data).hexdigest()
+            if current != expected_revision:
+                raise _validation_error("revision_conflict", "Connections changed; reload before retrying.",
+                                        field="expected_revision")
         candidate = None
         for _attempt in range(_MAX_ID_ATTEMPTS):
             candidate_id = new_id("cn_")

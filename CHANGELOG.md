@@ -1,6 +1,8 @@
 # Changelog
 
-## 1.0.4 (unreleased)
+## 1.0.5 (unreleased)
+
+First-run setup in Paseo is more complete. Each Cortex agent start now creates a missing `routing.json` or `defaults.json` from the bundled default preset and never replaces an existing file. Paseo Settings shows each engine's status, can download Cortex's pinned `codex-acp` or `claude-agent-acp` adapter, and can add a native-account connection after an explicit opt-in; API-key connections remain setup-command only. The default-preset card applies the preset to a missing file, or resets both user files after confirmation with a private backup of each. The configuration, packaging, security and engine pages describe these paths. These changes do not establish live qualification, paid-model behavior or rendered Paseo GUI behavior.
 
 Routing settings now offer each exact model's observed effort levels for effort
 pins, `effort_floor`, `max_effort` and ordered `effort_ladder` values.

@@ -2,8 +2,13 @@ import type { z } from "zod";
 import type {
   ConfigError,
   ConfigUpdateInput,
+  ConnectionOnboardInput,
+  EngineInstallInput,
   McpOperation,
+  PresetResetInput,
+  connectionsDiscoveryResult,
   connectionsResult,
+  defaultPresetResult,
   mcpServersResult,
   profileSections,
   profileStates,
@@ -57,6 +62,9 @@ export type McpServersView = z.infer<typeof mcpServersResult>;
 export type McpServerView = McpServersView["servers"][number];
 export type ConnectionsView = z.infer<typeof connectionsResult>;
 export type ConnectionView = ConnectionsView["connections"][number];
+export type ConnectionsDiscoveryView = z.infer<typeof connectionsDiscoveryResult>;
+export type EngineDiscoveryView = ConnectionsDiscoveryView["engines"][number];
+export type DefaultPresetView = z.infer<typeof defaultPresetResult>;
 export type CeilingView = UserDefaultsView["ceiling"];
 export type RouteCatalogView = z.infer<typeof routeCatalogResult>;
 export type CatalogRoute = RouteCatalogView["routes"][number];
@@ -1356,6 +1364,112 @@ export function buildConnectionMaxSessions(view: ConnectionsView, connectionId: 
 
 export function connectionAction(view: ConnectionsView, connectionId: string, operation: "validate" | "remove"): ConnectionsInput {
   return { surface: "connections", expected_revision: view.revision, connection_id: connectionId, operation };
+}
+
+// --- first-run engine setup -----------------------------------------------------
+//
+// Each engine is connected through the owner's own native account login
+// (run in a terminal with the engine's own command). Settings never asks for
+// or sends an API key; key-based connections stay a command-line task.
+
+/** The engine's own login command, for the "downloaded, not logged in" hint. */
+export const ENGINE_LOGIN_HINTS: Readonly<Record<string, string>> = {
+  "codex-acp": "run `codex login` in a terminal",
+  "claude-agent-acp": "run `claude` in a terminal and complete /login",
+  opencode: "run `opencode auth login` in a terminal",
+};
+
+/** One line saying where an engine stands and what the owner does next. */
+export function engineStatusText(row: EngineDiscoveryView): string {
+  const version = row.version ? ` ${row.version}` : "";
+  switch (row.status) {
+    case "connected":
+      return `Connected (${row.already_connected ?? "registered"}). Use Validate on its connection to check the login.`;
+    case "not_downloaded":
+      return row.install_supported
+        ? "Not downloaded. Download engine fetches Cortex's own pinned adapter."
+        : "Not found. Install it with its own installer, then press Check again.";
+    case "downloaded_no_login": {
+      const login = ENGINE_LOGIN_HINTS[row.engine] ?? "log in with the engine's own login command";
+      return `Downloaded${version}, not logged in: ${login}, then press Check again.`;
+    }
+    case "ready_to_connect":
+      if (row.engine === "opencode") return `Downloaded${version} and logged in: enable it under "OpenCode v2 (optional engine)" below.`;
+      return row.qualified
+        ? `Downloaded${version} and logged in: ready to connect.`
+        : `Downloaded${version}, but this version is not qualified for Cortex${row.install_supported ? "; Download engine fetches the pinned one" : ""}.`;
+    default:
+      return `Status: ${row.status}.`;
+  }
+}
+
+// OpenCode v2 is left out on purpose: it keeps its one dedicated opt-in
+// ("OpenCode v2" group), which validates the new connection and names the
+// concrete next step; the generic native-account connection does neither.
+const CONNECTABLE_ENGINES: readonly string[] = ["codex-acp", "claude-agent-acp"];
+
+function isConnectableEngine(engine: string): engine is ConnectionOnboardInput["engine"] {
+  return CONNECTABLE_ENGINES.includes(engine);
+}
+
+/** Whether "Add connection" can be offered for the engine at all. */
+export function engineCanConnect(row: EngineDiscoveryView): boolean {
+  return isConnectableEngine(row.engine) && row.status === "ready_to_connect" && row.qualified && row.already_connected === null;
+}
+
+/** Whether "Download engine" is offered: only for a pinned Cortex adapter
+ * that is missing or not a qualified version, and never once connected. */
+export function engineCanDownload(row: EngineDiscoveryView): boolean {
+  return row.install_supported && row.status !== "connected" && (row.status === "not_downloaded" || !row.qualified);
+}
+
+/** A native-account connection: only the engine, the read revision and an
+ * explicit opt-in are ever sent (no key, path or command). */
+export function buildConnectionOnboard(revision: string, engine: string, optIn: boolean): Built<ConnectionOnboardInput> {
+  if (!optIn) return { ok: false, errors: { explicit_opt_in: "Switch on the opt-in first." } };
+  if (!isConnectableEngine(engine)) return { ok: false, errors: { engine: `${engine} cannot be connected from Settings.` } };
+  return { ok: true, value: { engine, expected_revision: revision, explicit_opt_in: true } };
+}
+
+/** Only Cortex's own pinned adapters can be downloaded from Settings. */
+export function buildEngineInstall(engine: string): Built<EngineInstallInput> {
+  if (engine === "codex-acp" || engine === "claude-agent-acp") return { ok: true, value: { engine } };
+  return { ok: false, errors: { engine: `${engine} is installed with its own installer, not from Settings.` } };
+}
+
+/** Apply writes only absent files, so it is offered only while one is absent. */
+export function presetCanApply(view: DefaultPresetView): boolean {
+  return view.files.routing.status === "absent" || view.files.defaults.status === "absent";
+}
+
+/** A reset is sent only after the owner confirmed it, bound to the combined
+ * revision of both files as read. */
+export function buildPresetReset(view: DefaultPresetView, confirmed: boolean): Built<PresetResetInput> {
+  if (!confirmed) return { ok: false, errors: { confirm: "Confirm the reset first." } };
+  return { ok: true, value: { expected_revision: view.revision, confirm: true } };
+}
+
+const PRESET_FILE_NAMES = { routing: "routing.json", defaults: "defaults.json" } as const;
+
+/** Which of the two files exist, in words. */
+export function presetFilesText(view: DefaultPresetView): string {
+  return (Object.keys(PRESET_FILE_NAMES) as Array<keyof typeof PRESET_FILE_NAMES>)
+    .map((name) => `${PRESET_FILE_NAMES[name]}: ${view.files[name].status === "absent" ? "absent" : "present"}`).join(" · ");
+}
+
+/** What an apply or reset did, from its own response. */
+export function presetOutcomeText(view: DefaultPresetView, operation: "apply" | "reset"): string {
+  if (operation === "reset") {
+    const backups = Object.values(view.backups ?? {}).filter((path): path is string => typeof path === "string");
+    const saved = backups.length ? ` Previous files were backed up to ${backups.join(", ")}.` : " There were no previous files to back up.";
+    return view.changed === false ? `Both files already matched the default preset.${saved}` : `Default preset restored.${saved}`;
+  }
+  const parts = (Object.keys(PRESET_FILE_NAMES) as Array<keyof typeof PRESET_FILE_NAMES>).map((name) => {
+    const seed = view.settings?.[name];
+    if (!seed) return null;
+    return `${PRESET_FILE_NAMES[name]} ${seed.status === "created" ? "created" : `left unchanged (${seed.status})`}`;
+  }).filter((part): part is string => part !== null);
+  return view.changed ? `Default preset applied: ${parts.join(", ")}.` : `Nothing to apply: ${parts.join(", ") || "both files already exist"}.`;
 }
 
 /** OpenCode v2 registration: only an explicit opt-in is ever sent. */

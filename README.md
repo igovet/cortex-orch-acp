@@ -6,7 +6,7 @@
 <p align="center"><strong>Multi-agent coordination for software work, as an ACP agent.</strong></p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Cortex-1.0.4-7c3aed" alt="Cortex 1.0.4" />
+  <img src="https://img.shields.io/badge/Cortex-1.0.5-7c3aed" alt="Cortex 1.0.5" />
   <img src="https://img.shields.io/badge/Python-3.11%2B-3776ab" alt="Python 3.11+" />
   <img src="https://img.shields.io/badge/Protocol-ACP%20v1-111827" alt="Agent Client Protocol v1" />
   <img src="https://img.shields.io/badge/Storage-Markdown%20%2B%20SQLite-0f766e" alt="Markdown files and SQLite metadata" />
@@ -218,7 +218,10 @@ python3 -B scripts/cortex_acp_setup.py install-paseo-plugin
 ```
 
 Both commands are idempotent and safe to rerun; neither touches unrelated
-Paseo plugins or configuration. After either one, Paseo exposes Cortex as a
+Paseo plugins or configuration. Each seeds the [default preset](docs/configuration.md#default-preset)
+into `routing.json` and `defaults.json` when those files are absent; the Git-hosted
+install does this in its bootstrap step. Every later Cortex agent start repeats the
+same absent-only seeding and never overwrites an existing file. After either one, Paseo exposes Cortex as a
 native provider named `cortex` for new chats — no separate generic ACP agent
 registration is needed. See
 [the Paseo provider plugin](docs/project/packaging.md#paseo-provider-plugin)
@@ -226,7 +229,25 @@ for the full Git-hosted install and update reference.
 
 ### 2. Connect an engine
 
-Registering a connection needs an **install record**: a small JSON file that
+**From Paseo Settings (native account, `codex-acp` and `claude-agent-acp`).** Open
+Cortex Settings and use *Engines: download and connect* under Connections:
+
+1. *Download engine* installs Cortex's own pinned adapter with npm (up to about a
+   minute) into `$XDG_DATA_HOME/cortex/engines`, or `~/.local/share/cortex/engines`.
+   Nothing else is downloaded.
+2. Log in once with the engine's own command, outside Cortex (for example
+   `claude /login`).
+3. Switch on *Connect <engine> through my own account login*, then press
+   *Add connection*. Cortex registers a native-account connection that references your
+   existing login directory. It copies no credential.
+
+Settings checks only that the engine's login marker file exists, not that the login
+works, so press *Validate* on the new connection. Settings never asks for an API key.
+OpenCode appears in the same list for its status only; enable it with *Enable OpenCode v2*
+in its own section, and Cortex never downloads it. See [Manage settings in Paseo](docs/configuration.md#manage-settings-in-paseo).
+
+**From the command line** (native account or API key). Registering from the command line
+needs an **install record**: a small JSON file that
 names the exact files (Node binary, adapter entry point, package hashes)
 Cortex is allowed to execute for that engine. Prepare it once per engine by
 following [the Codex install record](docs/features/codex-engine/index.md#current-runtime-gateway-policy)
@@ -366,6 +387,9 @@ Provider choices and hard eligibility still apply. Normal-complexity technical
 writers remain light-tier. The 2026-10-27 sync also
 sets the portable coordinator to `claude-agent-acp/opus[1m]` at medium effort.
 Existing owner settings are unchanged; the preset is not live model qualification.
+The **Default preset** card in Settings' User defaults section shows whether `routing.json` and `defaults.json` exist. It
+can apply the preset to a missing file, or reset both files after confirmation; reset
+keeps a private backup of each existing file. See [Default preset](docs/configuration.md#default-preset).
 
 See the [configuration guide](docs/configuration.md) for connections,
 routing policy, MCP server setup, and per-model eligibility. Paseo's Cortex

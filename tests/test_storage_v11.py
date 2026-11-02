@@ -369,7 +369,11 @@ def _wal_churn_worker(directory,iterations,queue):
     import cortex_runtime.store as module
     errors=0
     try:
-        store=module.Store(directory,initialize=False)
+        # Open like the live runtime callers (shared access lock). A plain
+        # initialize=False open is the immutable inspection surface: it needs
+        # the exclusive lock, which the peer workers' continuous shared churn
+        # can starve past SHARED_ACCESS_WAIT_SECONDS (documented storage_busy).
+        store=module.Store(directory,initialize=False,runtime_access=True)
         for _ in range(iterations):
             try:
                 with store.connection() as db:

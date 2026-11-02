@@ -32,7 +32,7 @@ regression passes do not clear a nonzero audit, and `devDependencies` is not
 a security boundary. See the [dependency disposition](docs/project/paseo-dependency-audit.md)
 for exact paths, artifact-test limits and the next upstream-fix decision.
 
-## Current ACP boundary (1.0.4)
+## Current ACP boundary (1.0.5)
 
 Paseo Routing model choices exclude models disabled in the file being edited.
 Stored pins and policy references remain intact and carry an inactive warning;
@@ -46,7 +46,7 @@ endpoints, providers, routes and model settings remain intact. Selection remains
 subject to launch-time integrity/private-adapter checks, never accepts an
 unregistered release and never downgrades automatically. Registry writes are
 locked, revision-checked and atomic with a private 0600 previous-config backup.
-There is no per-connection pin field; `CORTEX_ENGINE_FOLLOW=off` opts out for
+Each agent start also creates a missing `routing.json` or `defaults.json` from the bundled preset and never replaces an existing file; it registers a connection only for an engine that has none. There is no per-connection pin field; `CORTEX_ENGINE_FOLLOW=off` opts out for
 rollback, separately from disabling downloads. See
 [configuration and rollback](docs/configuration.md#approved-adapter-following-and-rollback).
 
@@ -1280,7 +1280,9 @@ account's session tokens) that should stay owner-only.
 
 ## Configuration management UI and RPC boundary
 
-The Paseo plugin's Cortex Settings screen edits only the closed surfaces exposed by the Cortex management API: user defaults, project policy ceiling, routing, MCP servers, and connection metadata. It does not edit Paseo's own plugin settings document or expose arbitrary paths, commands, or executable selection. Project scope is resolved from Paseo's workspace; the owner configuration root comes from the Cortex launch environment.
+The Paseo plugin's Cortex Settings screen edits only the closed surfaces exposed by the Cortex management API: user defaults, project policy ceiling, routing, MCP servers, connection metadata and the first-run actions described below. It does not edit Paseo's own plugin settings document or expose arbitrary paths, commands, or executable selection. Project scope is resolved from Paseo's workspace; the owner configuration root comes from the Cortex launch environment.
+
+The first-run actions are: connection discovery, which reads installed adapter versions and checks whether an engine's native login marker file exists, without creating anything; native-account onboarding of `codex-acp`, `claude-agent-acp` or `opencode`, which needs an explicit opt-in, the current connections revision, a qualified installed adapter and the login marker, and then references the owner's existing native directory without copying it; Download engine, which runs npm to install only the manifest-pinned `codex-acp` or `claude-agent-acp` package into Cortex's owned engine root (`$XDG_DATA_HOME/cortex/engines`), bounded to 60 seconds, with no caller-supplied package, version, path or binary and no npm output returned; and default-preset read, apply (missing files only) and reset (confirmed, revision-checked, with private backups first). Download engine is network access started only by an explicit press. No request field carries an API key, credential, path, binary, command or package version, and API-key connections remain setup-command only. Responses carry no credential value; preset results show configuration paths in display form only.
 
 The plugin RPC handlers rely on Paseo daemon authorization (the installed 0.10.0 implementation requires `daemon.manage` for RPC invocation); the handler itself receives no caller identity for an additional per-call check. Writes use revision preconditions and refuse stale revisions. File and project-configuration writes use the existing lock/SQLite transaction path; lockless external writers may still race the final instant. A timeout does not prove that a write failed; re-read state before retrying.
 

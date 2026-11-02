@@ -1,7 +1,7 @@
-"""Explicit install-only public model defaults and separate legacy cleanup.
+"""Absent-only public model defaults for setup/startup and separate legacy cleanup.
 
 Existing owner files are never patched, merged or replaced by installation.
-Runtime routing does not import or read the installation asset.
+Startup may seed absent files; routing resolution never overlays the asset.
 """
 from __future__ import annotations
 
@@ -245,5 +245,5 @@ def clean_route_policy(environ: Mapping[str, str] | None = None) -> dict:
 
 
 def apply(environ: Mapping[str, str] | None = None) -> dict:
-    """Install only; destructive legacy cleanup requires a separate explicit call."""
+    """Seed absent settings; destructive legacy cleanup is always separate."""
     return dict(ensure_model_settings(environ), route_policy=dict(status="not_requested", changed=False))

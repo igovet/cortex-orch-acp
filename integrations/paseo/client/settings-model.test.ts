@@ -51,9 +51,20 @@ import {
   type RouteCatalogView,
   buildCeiling,
   buildConnectionMaxSessions,
+  buildConnectionOnboard,
   buildConnectionRename,
+  buildEngineInstall,
   buildMcpUpsert,
   buildOnboard,
+  buildPresetReset,
+  engineCanConnect,
+  engineCanDownload,
+  engineStatusText,
+  presetCanApply,
+  presetFilesText,
+  presetOutcomeText,
+  type DefaultPresetView,
+  type EngineDiscoveryView,
   buildProjectCeilingUpdate,
   buildRoutingRules,
   buildRoutingUpdate,
@@ -578,6 +589,78 @@ test("OpenCode v2 registration is sent only with an explicit opt-in", () => {
   assert.equal(buildOnboard(CONNECTIONS, false, "").ok, false);
   assert.deepEqual(buildOnboard(CONNECTIONS, true, ""), { ok: true, value: { expected_revision: REV("c"), explicit_opt_in: true } });
   assert.deepEqual(buildOnboard(CONNECTIONS, true, " OpenCode "), { ok: true, value: { expected_revision: REV("c"), explicit_opt_in: true, name: "OpenCode" } });
+});
+
+// --- first-run engine setup and the default preset ------------------------------
+
+function engineRow(overrides: Partial<EngineDiscoveryView>): EngineDiscoveryView {
+  return { engine: "codex-acp", status: "not_downloaded", version: null, native_login_detected: false, already_connected: null, qualified: false, install_supported: true, ...overrides };
+}
+
+test("engine status text names the next step for every discovery status", () => {
+  assert.equal(engineStatusText(engineRow({})), "Not downloaded. Download engine fetches Cortex's own pinned adapter.");
+  assert.equal(engineStatusText(engineRow({ engine: "opencode", install_supported: false })), "Not found. Install it with its own installer, then press Check again.");
+  assert.equal(engineStatusText(engineRow({ status: "downloaded_no_login", version: "2.0.1", qualified: true })),
+    "Downloaded 2.0.1, not logged in: run `codex login` in a terminal, then press Check again.");
+  assert.equal(engineStatusText(engineRow({ engine: "claude-agent-acp", status: "downloaded_no_login", version: "0.78.0", qualified: true })),
+    "Downloaded 0.78.0, not logged in: run `claude` in a terminal and complete /login, then press Check again.");
+  assert.equal(engineStatusText(engineRow({ status: "ready_to_connect", version: "2.0.1", qualified: true, native_login_detected: true })),
+    "Downloaded 2.0.1 and logged in: ready to connect.");
+  assert.equal(engineStatusText(engineRow({ engine: "opencode", status: "ready_to_connect", version: "1.2.3", qualified: true, install_supported: false })),
+    "Downloaded 1.2.3 and logged in: enable it under \"OpenCode v2 (optional engine)\" below.");
+  assert.match(engineStatusText(engineRow({ status: "ready_to_connect", version: "1.0.0", native_login_detected: true })), /not qualified for Cortex; Download engine fetches the pinned one/);
+  assert.match(engineStatusText(engineRow({ status: "connected", already_connected: "cn_0123456789ab", qualified: true })), /^Connected \(cn_0123456789ab\)\. Use Validate/);
+  assert.equal(engineStatusText(engineRow({ status: "future_state" })), "Status: future_state.");
+});
+
+test("Add connection is offered only for a qualified, logged-in, unconnected engine; Download only for a missing or unqualified pinned adapter", () => {
+  assert.equal(engineCanConnect(engineRow({ status: "ready_to_connect", qualified: true })), true);
+  assert.equal(engineCanConnect(engineRow({ status: "ready_to_connect", qualified: false })), false);
+  assert.equal(engineCanConnect(engineRow({ status: "downloaded_no_login", qualified: true })), false);
+  assert.equal(engineCanConnect(engineRow({ status: "connected", qualified: true, already_connected: "cn_0123456789ab" })), false);
+  // OpenCode v2 keeps its own validated opt-in; the generic Add connection never offers it.
+  assert.equal(engineCanConnect(engineRow({ engine: "opencode", status: "ready_to_connect", qualified: true, install_supported: false })), false);
+  assert.equal(engineCanDownload(engineRow({})), true);
+  assert.equal(engineCanDownload(engineRow({ engine: "opencode", install_supported: false })), false);
+  assert.equal(engineCanDownload(engineRow({ status: "ready_to_connect", qualified: false })), true);
+  assert.equal(engineCanDownload(engineRow({ status: "ready_to_connect", qualified: true })), false);
+  assert.equal(engineCanDownload(engineRow({ status: "connected", qualified: false })), false);
+});
+
+test("a native-account connection needs the opt-in and sends no key, path or command", () => {
+  assert.deepEqual(buildConnectionOnboard(REV("c"), "codex-acp", false), { ok: false, errors: { explicit_opt_in: "Switch on the opt-in first." } });
+  const built = buildConnectionOnboard(REV("c"), "claude-agent-acp", true);
+  assert.deepEqual(built, { ok: true, value: { engine: "claude-agent-acp", expected_revision: REV("c"), explicit_opt_in: true } });
+  assert.deepEqual(Object.keys(built.ok ? built.value : {}).sort(), ["engine", "expected_revision", "explicit_opt_in"]);
+  assert.equal(buildConnectionOnboard(REV("c"), "other-engine", true).ok, false);
+  assert.equal(buildConnectionOnboard(REV("c"), "opencode", true).ok, false);
+  assert.deepEqual(buildEngineInstall("codex-acp"), { ok: true, value: { engine: "codex-acp" } });
+  assert.equal(buildEngineInstall("opencode").ok, false);
+});
+
+function preset(routing: "absent" | "existing", defaults: "absent" | "existing", extra: Partial<DefaultPresetView> = {}): DefaultPresetView {
+  return {
+    surface: "default_preset", revision: REV("d"),
+    files: { routing: { revision: routing === "absent" ? "absent" : REV("r"), status: routing }, defaults: { revision: defaults === "absent" ? "absent" : REV("a"), status: defaults } },
+    ...extra,
+  };
+}
+
+test("default preset: apply only while a file is absent; reset only confirmed and bound to the combined revision", () => {
+  assert.equal(presetCanApply(preset("absent", "absent")), true);
+  assert.equal(presetCanApply(preset("existing", "absent")), true);
+  assert.equal(presetCanApply(preset("existing", "existing")), false);
+  assert.equal(presetFilesText(preset("absent", "existing")), "routing.json: absent · defaults.json: present");
+  assert.deepEqual(buildPresetReset(preset("existing", "existing"), false), { ok: false, errors: { confirm: "Confirm the reset first." } });
+  assert.deepEqual(buildPresetReset(preset("existing", "existing"), true), { ok: true, value: { expected_revision: REV("d"), confirm: true } });
+  assert.equal(presetOutcomeText(preset("existing", "existing", { changed: false, settings: {
+    routing: { path: "~/.config/cortex/routing.json", status: "current", changed: false },
+    defaults: { path: "~/.config/cortex/defaults.json", status: "invalid", changed: false, error: "bad" },
+  } }), "apply"), "Nothing to apply: routing.json left unchanged (current), defaults.json left unchanged (invalid).");
+  assert.equal(presetOutcomeText(preset("existing", "existing", { changed: true, backups: { routing: "~/.config/cortex/routing.json.cortex-backup-7" } }), "reset"),
+    "Default preset restored. Previous files were backed up to ~/.config/cortex/routing.json.cortex-backup-7.");
+  assert.equal(presetOutcomeText(preset("existing", "existing", { changed: true, backups: {} }), "reset"),
+    "Default preset restored. There were no previous files to back up.");
 });
 
 // --- engines & models -----------------------------------------------------------

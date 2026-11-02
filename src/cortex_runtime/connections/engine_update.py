@@ -47,11 +47,13 @@ def _run(args: list[str], timeout: int, environ: dict[str, str] | None) -> str:
                           stdin=subprocess.DEVNULL, check=True).stdout
 
 
-def update_engine(engine: str, *, environ: dict[str, str] | None = None) -> str | None:
-    """Install the latest adapter/qualified dependency build; return the adapter version."""
+def _install_engine(engine: str, *, version: str | None = None, timeout: int = _TIMEOUT_INSTALL,
+                    environ: dict[str, str] | None = None) -> str | None:
+    """Stage and publish an owned adapter, using the same checks for both callers."""
     package = discovery._PACKAGE_NAME[engine]
     npm = _npm(environ)
-    if npm is None:
+    node = discovery._node_binary(environ)
+    if npm is None or node is None:
         return None
     root = discovery.owned_root(environ) / engine
     root.mkdir(parents=True, exist_ok=True)
@@ -62,13 +64,17 @@ def update_engine(engine: str, *, environ: dict[str, str] | None = None) -> str 
             return None  # another Cortex process is already updating
         for stale in root.glob(".tmp-*"):
             shutil.rmtree(stale, ignore_errors=True)
-        latest = json.loads(_run([npm, "view", package, "version", "--json"], _TIMEOUT_VIEW, environ))
+        latest = version or json.loads(_run([npm, "view", package, "version", "--json"], _TIMEOUT_VIEW, environ))
         if not isinstance(latest, str) or not discovery.version_key(latest):
             return None
         sdk_version = _CLAUDE_SDK_OVERRIDES.get(latest) if engine == "claude-agent-acp" else None
         install_name = f"{latest}+sdk.{sdk_version}" if sdk_version else latest
         installed = sorted((p.name for p in discovery._subdirs(root)), key=discovery.version_key)
-        if installed and discovery.version_key(install_name) <= discovery.version_key(installed[-1]):
+        if version is not None and (root / install_name).exists():
+            found = discovery._discover_in([root / install_name], engine, package,
+                                           node, environ)
+            return version if found is not None and found.version == version else None
+        if version is None and installed and discovery.version_key(install_name) <= discovery.version_key(installed[-1]):
             return None
         staging = root / f".tmp-{install_name}"
         if sdk_version:
@@ -77,9 +83,13 @@ def update_engine(engine: str, *, environ: dict[str, str] | None = None) -> str 
                 "private": True, "overrides": {_CLAUDE_SDK_PACKAGE: sdk_version},
             }), encoding="utf-8")
         _run([npm, "install", "--prefix", str(staging), "--no-audit", "--no-fund", "--omit=dev",
-              "--no-save", f"{package}@{latest}"], _TIMEOUT_INSTALL, environ)
+              "--no-save", f"{package}@{latest}"], timeout, environ)
         declared = discovery._declared_bin(staging / "node_modules" / package / "package.json")
         if declared is None or declared[0] != latest:
+            shutil.rmtree(staging, ignore_errors=True)
+            return None
+        if version is not None and discovery._discover_in(
+                [staging], engine, package, node, environ) is None:
             shutil.rmtree(staging, ignore_errors=True)
             return None
         if sdk_version:
@@ -103,11 +113,33 @@ def update_engine(engine: str, *, environ: dict[str, str] | None = None) -> str 
             if old.name in keep or discovery.is_pinned(engine, old.name):
                 continue
             shutil.rmtree(old, ignore_errors=True)
-        if discovery.is_qualified(engine, latest):
+        if version is None and discovery.is_qualified(engine, latest):
             from ..configuration.management import follow_approved_adapters
 
             follow_approved_adapters(environ=environ)
         return latest
+
+
+def update_engine(engine: str, *, environ: dict[str, str] | None = None) -> str | None:
+    """Install the latest adapter/qualified dependency build; return the adapter version."""
+    return _install_engine(engine, environ=environ)
+
+
+def install_pinned_engine(engine: str, *, environ: dict[str, str] | None = None) -> str | None:
+    """Explicit, bounded install of the manifest pin, never an engine from PATH.
+
+    Reuses background-update staging/version/SDK checks, without changing existing
+    connections. Launch-time install integrity and instruction checks still apply.
+    OpenCode has no Cortex-owned pinned installer and is deliberately unsupported.
+    """
+    from ..packaging.pinned import load_manifest
+
+    if engine not in discovery.SUPPORTED_ENGINES:
+        raise ValueError("No pinned installer for this engine.")
+    version = load_manifest().get("engines", {}).get(engine, {}).get("pinned_package_version")
+    if not isinstance(version, str) or not discovery.version_key(version) or not discovery.is_qualified(engine, version):
+        raise ValueError("The manifest does not name a qualified engine pin.")
+    return _install_engine(engine, version=version, timeout=60, environ=environ)
 
 
 def update_all(*, environ: dict[str, str] | None = None) -> dict[str, str]:
