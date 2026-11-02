@@ -94,11 +94,19 @@ def test_temporary_files_go_to_var_tmp_unless_tmpdir_is_explicit(tmp_path):
     assert prefer_disk_tmp(environ) == str(elsewhere)
 
 
-def test_engine_update_can_be_switched_off(monkeypatch):
-    from cortex_runtime.connections import engine_update
+def test_engine_update_can_be_switched_off(tmp_path, monkeypatch):
+    from cortex_runtime.connections import automatic, discovery, engine_update
+    from cortex_runtime.routing import defaults
+
+    env = {"HOME": str(tmp_path), "XDG_CONFIG_HOME": str(tmp_path / "config")}
     called = []
-    monkeypatch.setattr(engine_update, "update_all", lambda **kwargs: called.append(kwargs))
-    assert engine_update.start_background_update(environ={"CORTEX_ENGINE_UPDATE": "off"}) is None
-    thread = engine_update.start_background_update(environ={})
+    monkeypatch.setattr(defaults, "apply", lambda **kwargs: None)
+    monkeypatch.setattr(automatic, "_status", lambda *args: None)
+    monkeypatch.setattr(discovery, "discover_engine", lambda *args, **kwargs: None)
+    monkeypatch.setattr(engine_update, "update_engine", lambda engine, **kwargs: called.append((engine, kwargs)))
+    assert engine_update.start_background_update(environ={**env, "CORTEX_ENGINE_UPDATE": "off"}) is None
+    assert called == []
+    thread = engine_update.start_background_update(environ=env)
     thread.join(5)
-    assert called == [{"environ": {}}]
+    assert not thread.is_alive()
+    assert called == [(engine, {"environ": env}) for engine in discovery.SUPPORTED_ENGINES]
