@@ -778,7 +778,8 @@ def _run(runtime, task_id, session_id, channel, session_ref, content, emit_updat
             if prompted.get(key,0)>=3:
                 machine.move(task_id, 'BLOCKED', blocker='structured_proposal_missing')
                 continue
-            prompted[key]=prompted.get(key,0)+1
+            retried = prompted.get(key,0)
+            prompted[key]=retried+1
             request = (_direct_answer_request(runtime, task_id) +
                        'Explaining how to run tests does not require executing them. '
                        'The coordinator can inspect files but cannot execute commands. Do not expand a description into a defect audit. '
@@ -801,6 +802,8 @@ def _run(runtime, task_id, session_id, channel, session_ref, content, emit_updat
                        'If the user must still decide something (approve a proposed plan, choose between fixes, confirm manual steps), '
                        'do not submit synthesis: write the full details once as message text before the call, then ask with '
                        'user_question_request and end the turn without writing anything after it. ')
+            if retried:
+                request = _missing_submission_request() + request
             delivery_marker=f'runtime-coordinator:{time.monotonic_ns()}'
             pending_events=events.claim_unconsumed(runtime._store,task_id,delivery_marker)
             from ..acp import messages as localized_messages
@@ -1452,7 +1455,21 @@ def _direct_answer_request(runtime, task_id):
     return (('This task was completed and the user\'s new message reopened it. ' if reopened else '') +
             'First determine whether the user wants information or changes. For a simple question or project overview, '
             'read only the relevant files yourself and submit a concise direct answer with answer_submit; do not create '
-            'workers, reports, code review or verification jobs for an explanation. ')
+            'workers, reports, code review or verification jobs for an explanation. '
+            'Message text alone never completes the task: even a one-word answer reaches the user only through '
+            'answer_submit. A user request not to use tools, delegate or create files limits project work; it never '
+            'forbids the answer_submit call that delivers the answer. ')
+
+
+def _missing_submission_request():
+    """Repair note for a planning/reconciling turn that ended without an
+    accepted structured submission: the runtime re-prompts, and the engine
+    must learn that its text-only reply was not recorded."""
+    return ('Your previous turn ended without an accepted structured submission, so the runtime recorded nothing '
+            'from it: message text alone never reaches the user as a final answer and never completes or advances '
+            'the task. In this turn, call the structured cortex tool the instructions below name; do not reply with '
+            'text only. A user request not to use tools, delegate or create files never forbids these cortex '
+            'submission tools. ')
 
 
 def _review_without_findings_request(runtime, task_id):

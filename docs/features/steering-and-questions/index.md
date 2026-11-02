@@ -29,7 +29,12 @@ after the removal, or an exact complete passing verification rerun. Exact retrie
 with the same key fail.
 
 After three planning prompts without a structured proposal, the runtime asks a
-recovery question with `structured_proposal_missing`. A recorded answer resumes
+recovery question with `structured_proposal_missing`. The second and third
+planning or reconciling prompts begin with a repair note: the previous turn's
+message text was not recorded, and this turn must call the named structured
+`cortex` tool. When `answer_submit` is offered, the prompt also says that even a
+one-word answer reaches the user only through it, and that a user request not to
+use tools, delegate or create files never forbids that call. A recorded answer resumes
 `RECOVERING`; after owned-work termination is confirmed, recovery returns to
 `PLANNING` with a fresh three-prompt cycle. This also applies when elicitation
 answers synchronously within the same host turn. Clearing the wrong phase's
