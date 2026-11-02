@@ -423,7 +423,12 @@ exists, then load its models without a prompt. Owner-removed engines stay opted 
 of automatic registration. Settings polls progress and keeps manual download/connect
 and model-refresh actions available. Concurrent startup passes share an owner-private
 lock; npm installs are bounded to 600 seconds each (manual download: 60 seconds),
-model-discovery RPCs to 20 seconds each. A stopped pass retries at the next start;
+model-discovery RPCs to 20 seconds each. A model-discovery failure keeps the
+connection; its per-engine status (`first-run-<engine>.json` in the Cortex config
+root) and Settings name a fixed failure code such as `engine_home_read_only`
+(the engine's account directory, for example `~/.codex`, is read-only for the
+Cortex process; Codex cannot start then) or `engine_unreachable:<error type>`,
+never adapter output. A stopped pass retries at the next start;
 `CORTEX_ENGINE_UPDATE=off` disables the automatic pass. See
 [configuration](../configuration.md#approved-adapter-following-and-rollback). After installation,
 Paseo exposes the native Cortex provider; no separate generic ACP provider

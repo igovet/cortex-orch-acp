@@ -685,6 +685,39 @@ def test_gui_refuses_launch_inside_cortex_sandbox(tmp_path, monkeypatch):
     assert not marker.exists()
 
 
+@pytest.mark.parametrize("account", [".codex", ".claude"])
+def test_cli_refuses_daemon_launch_with_read_only_engine_account(tmp_path, monkeypatch, account):
+    """A command sandbox that keeps the host /var/tmp but mounts ~/.codex
+    read-only made Codex app-server exit at startup, so the daemon's first-run
+    model discovery recorded catalog_failed (live, 2026-11-02)."""
+    home = tmp_path / "owner"
+    monkeypatch.setenv("HOME", str(home))
+    mountinfo = tmp_path / "mountinfo"
+    mountinfo.write_text(
+        "36 25 259:2 / / rw,relatime - ext4 /dev/nvme0n1p2 rw\n"
+        "52 36 259:2 /var/tmp /var/tmp rw,relatime - ext4 /dev/nvme0n1p2 rw\n"
+        f"53 36 259:2 {home}/{account} {home}/{account} rw,relatime - ext4 /dev/nvme0n1p2 rw\n"
+        f"60 36 259:2 {home}/{account} {home}/{account} ro,nosuid,nodev,relatime - ext4 /dev/nvme0n1p2 rw\n")
+    monkeypatch.setenv("CORTEX_PASEO_DEV_MOUNTINFO", str(mountinfo))
+    fake, marker = _launch_recorder(tmp_path)
+    result = subprocess.run(
+        [sys.executable, str(SCRIPT), "--paseo", str(fake), "--home", str(tmp_path / "dev-home"), "--", "start"],
+        capture_output=True, text=True, cwd=str(ROOT),
+    )
+    assert result.returncode == 2
+    assert f"{home}/{account} is mounted read-only" in result.stderr
+    assert not marker.exists()
+    # A writable effective mount of the same directory is not refused.
+    mountinfo.write_text(f"60 36 259:2 {home}/{account} {home}/{account} ro - ext4 /dev/nvme0n1p2 rw\n"
+                         f"61 36 259:2 {home}/{account} {home}/{account} rw - ext4 /dev/nvme0n1p2 rw\n")
+    result = subprocess.run(
+        [sys.executable, str(SCRIPT), "--paseo", str(fake), "--home", str(tmp_path / "dev-home"), "--", "start"],
+        capture_output=True, text=True, cwd=str(ROOT),
+    )
+    assert result.returncode == 0
+    assert marker.read_text().split() == ["--home", str(tmp_path / "dev-home"), "start"]
+
+
 def _mountinfo_root(path: Path) -> str:
     """``path`` as mountinfo reports a bind of it: relative to its own
     filesystem, e.g. without the ``/tmp`` prefix when /tmp is a tmpfs."""
@@ -702,6 +735,8 @@ def test_cli_reads_the_real_sandbox_var_tmp_mount(tmp_path, monkeypatch):
     """The real /proc/self/mountinfo of a bwrap namespace laid out like a Cortex
     command sandbox is refused; the same command with a plain /var/tmp runs."""
     monkeypatch.delenv("CORTEX_PASEO_DEV_MOUNTINFO")
+    # Isolate from read-only native account mounts of a surrounding sandbox.
+    monkeypatch.setenv("HOME", str(tmp_path / "owner"))
     scratch = tmp_path / "cortex-command-real1234" / "var-tmp"
     scratch.mkdir(parents=True)
     fake, marker = _launch_recorder(tmp_path)

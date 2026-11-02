@@ -617,7 +617,11 @@ test("automatic progress and owner removal have actionable status", () => {
   for (const phase of ["downloading", "connecting", "refreshing_models"]) {
     assert.match(engineStatusText(engineRow({ automatic_setup: phase })), /Automatically/);
   }
-  assert.match(engineStatusText(engineRow({ automatic_setup: "catalog_failed" })), /Refresh model lists/);
+  assert.match(engineStatusText(engineRow({ automatic_setup: "catalog_failed" })), /Refresh model lists to retry\.$/);
+  assert.match(engineStatusText(engineRow({ automatic_setup: "catalog_failed", automatic_setup_reason: "engine_home_read_only" })),
+    /Refresh model lists to retry\. Reason: .*read-only/);
+  assert.match(engineStatusText(engineRow({ automatic_setup: "catalog_failed", automatic_setup_reason: "engine_unreachable:EngineTransportClosed" })),
+    /did not start or answer \(engine_unreachable:EngineTransportClosed\)/);
   assert.match(engineStatusText(engineRow({ automatic_setup: "interrupted" })), /interrupted/);
   assert.match(engineStatusText(engineRow({ auto_connect_disabled: true, status: "ready_to_connect",
     native_login_detected: true, qualified: true })), /removed it.*Add connection/);

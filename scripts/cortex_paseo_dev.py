@@ -172,33 +172,61 @@ def _live_singleton_owner(user_data_dir: Path) -> int | None:
 # before the engine starts (live, 2026-10-06).
 _SANDBOX_VAR_TMP = re.compile(r"/cortex-(?:command|engine)-[^/]+/(?:tmp/)?var-tmp(?://deleted)?$")
 _DAEMON_LAUNCHES = (["start"], ["onboard"], ["daemon", "start"], ["daemon", "run"])
+# A command sandbox may instead keep the host /var/tmp and mount the native
+# engine account directories read-only. Codex app-server then exits at startup
+# ("Error: Read-only file system (os error 30)"), so first-run model discovery
+# and every Codex session fail (live, 2026-11-02).
+_ENGINE_ACCOUNT_DIRS = (".codex", ".claude")
 # Tests only: an alternate mountinfo file to inspect.
 MOUNTINFO_OVERRIDE = "CORTEX_PASEO_DEV_MOUNTINFO"
+
+
+def _mountinfo() -> list[list[str]]:
+    path = os.environ.get(MOUNTINFO_OVERRIDE) or "/proc/self/mountinfo"
+    try:
+        lines = Path(path).read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return []
+    return [fields for line in lines if len(fields := line.split(" ")) > 5]
 
 
 def _cortex_sandbox_var_tmp() -> str | None:
     """The Cortex sandbox scratch directory mounted over /var/tmp, or ``None``
     when this process does not run inside a Cortex sandbox."""
-    path = os.environ.get(MOUNTINFO_OVERRIDE) or "/proc/self/mountinfo"
-    try:
-        lines = Path(path).read_text(encoding="utf-8", errors="replace").splitlines()
-    except OSError:
-        return None
     # The last mount on /var/tmp is the one in effect.
-    roots = [fields[3].replace("\\040", " ") for line in lines
-             if len(fields := line.split(" ")) > 4 and fields[4] == "/var/tmp"]
+    roots = [fields[3].replace("\\040", " ") for fields in _mountinfo() if fields[4] == "/var/tmp"]
     return roots[-1] if roots and _SANDBOX_VAR_TMP.search(roots[-1]) else None
+
+
+def _read_only_engine_account() -> str | None:
+    """A native engine account directory whose effective mount is read-only."""
+    home = os.path.expanduser("~")
+    targets = [os.path.join(home, name) for name in _ENGINE_ACCOUNT_DIRS]
+    effective = {}
+    # The last mount on a path is the one in effect.
+    for fields in _mountinfo():
+        point = fields[4].replace("\\040", " ")
+        if point in targets:
+            effective[point] = "ro" in fields[5].split(",")
+    return next((point for point in targets if effective.get(point)), None)
 
 
 def _refused_inside_cortex_sandbox(label: str) -> bool:
     scratch = _cortex_sandbox_var_tmp()
-    if scratch is None:
-        return False
-    print(f"{label}: refusing to start a long-lived Paseo process inside a Cortex sandbox "
-          f"(/var/tmp is its scratch {scratch}, deleted when the command ends, after which every "
-          "engine jail the daemon launches fails in bwrap); run it through outside_command "
-          "or a normal terminal", file=sys.stderr)
-    return True
+    if scratch is not None:
+        print(f"{label}: refusing to start a long-lived Paseo process inside a Cortex sandbox "
+              f"(/var/tmp is its scratch {scratch}, deleted when the command ends, after which every "
+              "engine jail the daemon launches fails in bwrap); run it through outside_command "
+              "or a normal terminal", file=sys.stderr)
+        return True
+    account = _read_only_engine_account()
+    if account is not None:
+        print(f"{label}: refusing to start a long-lived Paseo process inside a Cortex sandbox "
+              f"({account} is mounted read-only, but the daemon's engines use the native accounts "
+              "there; Codex cannot start with a read-only ~/.codex, so its model discovery fails); "
+              "run it through outside_command or a normal terminal", file=sys.stderr)
+        return True
+    return False
 
 
 def _run_route_preflight(args) -> int:

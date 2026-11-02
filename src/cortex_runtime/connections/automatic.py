@@ -8,6 +8,7 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+import re
 import stat
 import tempfile
 
@@ -17,6 +18,13 @@ _PHASES = {"downloading", "connecting", "refreshing_models", "ready", "download_
            "login_required", "opted_out", "catalog_failed", "setup_failed", "downloaded"}
 _BUSY = {"downloading", "connecting", "refreshing_models"}
 _LOCK = "automatic-setup.lock"
+# A failure reason is a fixed code, optionally with an exception type or
+# error-code suffix (see catalog.refresh.RefreshOutcome.reason); never free text.
+_REASON = re.compile(r"[a-z][a-z0-9_]{0,63}(?::[A-Za-z][A-Za-z0-9_]{0,63})?")
+
+
+def _safe_reason(reason):
+    return reason if isinstance(reason, str) and _REASON.fullmatch(reason) else None
 
 
 def _status_path(engine, environ):
@@ -25,10 +33,13 @@ def _status_path(engine, environ):
     return registry.config_root(environ) / f"first-run-{engine}.json"
 
 
-def _status(engine, phase, environ):
+def _status(engine, phase, environ, reason=None):
     path = _status_path(engine, environ)
     registry.ensure_private_dir(path.parent, root=registry.config_root(environ), environ=environ)
-    registry.atomic_write_private(path, json.dumps({"phase": phase}).encode(), directory=path.parent)
+    body = {"phase": phase}
+    if phase == "catalog_failed" and _safe_reason(reason):
+        body["reason"] = reason
+    registry.atomic_write_private(path, json.dumps(body).encode(), directory=path.parent)
 
 
 def read_status(engine, environ=None):
@@ -60,29 +71,47 @@ def read_status(engine, environ=None):
     return phase
 
 
+def read_status_reason(engine, environ=None):
+    """The sanitized reason of a recorded model-discovery failure, else ``None``."""
+    if engine not in discovery.SUPPORTED_ENGINES:
+        return None
+    data = registry.read_owner_file(_status_path(engine, environ))
+    try:
+        body = json.loads(data) if data is not None else None
+    except ValueError:
+        return None
+    if not isinstance(body, dict) or body.get("phase") != "catalog_failed":
+        return None
+    return _safe_reason(body.get("reason"))
+
+
 def refresh_connection(record, *, environ=None):
     """Observe models immediately after registration, never send a model prompt.
 
     Failure never rolls back a valid connection or replaces an older catalog.
-    Return a fixed diagnostic, never adapter errors or credential bytes.
+    Return a fixed diagnostic, never adapter errors or credential bytes; the
+    status file also keeps the outcome's fixed failure code.
     """
     from ..catalog.refresh import perform_refresh
 
+    reason = None
     try:
         with tempfile.TemporaryDirectory(prefix="cortex-first-run-models-") as workspace:
             outcome = perform_refresh(record, workspace, environ=environ, timeout=20)
         phase = "ready" if outcome.success else "catalog_failed"
-    except Exception:  # noqa: BLE001 - the connection remains usable for a later retry
+        reason = getattr(outcome, "reason", None)
+    except Exception as error:  # noqa: BLE001 - the connection remains usable for a later retry
         phase = "catalog_failed"
-    record_status(record.engine, phase, environ)
+        reason = f"refresh_error:{type(error).__name__}"
+    record_status(record.engine, phase, environ, reason=reason)
     return phase
 
 
-def record_status(engine, phase, environ=None):
+def record_status(engine, phase, environ=None, *, reason=None):
     """Best-effort diagnostics never turn a committed manual action into failure."""
     if engine in discovery.SUPPORTED_ENGINES:
         try:
-            _status(engine, phase, environ)
+            _status(engine, phase, environ, reason)
         except Exception:  # noqa: BLE001 - diagnostics are not authoritative state
             pass
 
@@ -162,4 +191,7 @@ def _setup_engine(engine, env):
         _status(engine, "ready", env)
         return
     _status(engine, "refreshing_models", env)
-    _status(engine, refresh_connection(record, environ=env), env)
+    phase = refresh_connection(record, environ=env)
+    # Rewrite so an unwritable status still fails this engine's pass, keeping
+    # the failure code refresh_connection recorded.
+    _status(engine, phase, env, read_status_reason(engine, env))

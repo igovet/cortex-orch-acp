@@ -54,6 +54,7 @@ whatever snapshot is already cached.
 """
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
@@ -172,6 +173,26 @@ def _is_authentication_required_error(error: BaseException) -> bool:
     return False
 
 
+def _engine_home_read_only(record, environ) -> bool:
+    """Whether the connection's engine state directory exists but is read-only here.
+
+    Codex app-server exits at startup when ``CODEX_HOME`` cannot be written
+    (observed with codex-acp 2.3.0: ``Error: Read-only file system (os error
+    30)``), for example when Cortex itself runs inside a sandbox that mounts
+    ``~/.codex`` read-only. Checked only to name an already failed launch;
+    it never blocks or replaces a launch.
+    """
+    from ..connections.environment import credential_directory
+
+    try:
+        directory = credential_directory(record, environ)
+        if not os.path.isdir(directory):
+            return False
+        return not os.access(directory, os.W_OK) or bool(os.statvfs(directory).f_flag & os.ST_RDONLY)
+    except (OSError, ValueError, PortableError):
+        return False
+
+
 def _codex_effort_ceiling(record, install, environ, timeout):
     """Best-effort per-model reasoning-effort supplement (T035 follow-up
     "per-model efforts") for a codex-acp connection with a verified
@@ -230,6 +251,8 @@ def perform_refresh(
     except Exception as error:  # noqa: BLE001 - an engine launch/call failure is never fatal
         if _is_authentication_required_error(error):
             return RefreshOutcome(record.id, True, False, "authorization_required", None, at)
+        if _engine_home_read_only(record, environ):
+            return RefreshOutcome(record.id, True, False, "engine_home_read_only", None, at)
         return RefreshOutcome(record.id, True, False, f"engine_unreachable:{type(error).__name__}", None, at)
     if not raw_options:
         return RefreshOutcome(record.id, True, False, "no_config_options_advertised", None, at)

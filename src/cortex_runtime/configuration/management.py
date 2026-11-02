@@ -1622,6 +1622,7 @@ def discover_connections(*, environ: Mapping[str, str] | None = None) -> dict[st
                             qualified=bool(found and discovery.is_qualified(engine, found.version)),
                             install_supported=engine in discovery.SUPPORTED_ENGINES,
                             automatic_setup=automatic.read_status(engine, env),
+                            automatic_setup_reason=automatic.read_status_reason(engine, env),
                             auto_connect_disabled=engine in state.auto_connect_disabled))
     return dict(surface="connections", revision=view["revision"], engines=engines)
 

@@ -1379,6 +1379,20 @@ export const ENGINE_LOGIN_HINTS: Readonly<Record<string, string>> = {
   opencode: "run `opencode auth login` in a terminal",
 };
 
+/** Plain wording for a model-discovery failure code; unknown codes are shown as-is. */
+export function discoveryFailureText(reason: string | null | undefined): string {
+  if (!reason) return "";
+  const known: Record<string, string> = {
+    engine_home_read_only: "the engine's account folder (for example ~/.codex) is read-only for the Cortex process, so the engine could not start. Run Paseo outside a read-only sandbox.",
+    authorization_required: "the engine reported that its login is required.",
+    no_config_options_advertised: "the engine reported no settings.",
+    no_model_options_advertised: "the engine reported no models.",
+  };
+  if (known[reason]) return ` Reason: ${known[reason]}`;
+  if (reason.startsWith("engine_unreachable:")) return ` Reason: the engine did not start or answer (${reason}).`;
+  return ` Reason: ${reason}.`;
+}
+
 /** One line saying where an engine stands and what the owner does next. */
 export function engineStatusText(row: EngineDiscoveryView): string {
   const version = row.version ? ` ${row.version}` : "";
@@ -1394,6 +1408,7 @@ export function engineStatusText(row: EngineDiscoveryView): string {
   if (row.auto_connect_disabled && row.status !== "connected") {
     return `Automatic connection is off because you removed it. ${row.native_login_detected && row.qualified ? "Use Add connection to restore it explicitly." : "Download the engine and log in to restore it manually."}`;
   }
+  if (row.automatic_setup === "catalog_failed") return progress.catalog_failed + discoveryFailureText(row.automatic_setup_reason);
   if (row.automatic_setup && progress[row.automatic_setup]) return progress[row.automatic_setup];
   switch (row.status) {
     case "connected":

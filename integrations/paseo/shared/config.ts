@@ -484,6 +484,8 @@ export const connectionsDiscoveryResult = z.object({
     qualified: z.boolean(),
     install_supported: z.boolean(),
     automatic_setup: z.string().nullable().optional(),
+    // Fixed failure code of a catalog_failed discovery, never adapter text.
+    automatic_setup_reason: z.string().nullable().optional(),
     auto_connect_disabled: z.boolean().optional(),
   })),
 });

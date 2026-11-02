@@ -1,6 +1,7 @@
 """First-run management: isolated owner storage, no network or paid engine calls."""
 import io
 import json
+import os
 import stat
 import subprocess
 from pathlib import Path
@@ -606,6 +607,43 @@ def test_manual_registration_refreshes_without_rolling_back_on_failure(env, monk
     assert response["ok"]
     assert response["result"]["catalog_status"] == "catalog_failed"
     assert list(registry.read_registry(env).connections) == calls
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory write permission")
+def test_automatic_discovery_failure_names_read_only_engine_home(env, monkeypatch):
+    """Codex app-server exits at startup when CODEX_HOME is read-only (seen when
+    Cortex ran inside a sandbox mounting ~/.codex read-only); the status and
+    Settings row name that fixed cause instead of a bare catalog_failed."""
+    from cortex_runtime.connections import automatic
+    from cortex_runtime.catalog import refresh
+    env["CORTEX_ENGINE_UPDATE"] = "on"
+    installed(env, "codex-acp")
+    home = login(env, "codex-acp").parent
+    monkeypatch.setattr(engine_update, "update_engine", lambda *a, **kw: None)
+    monkeypatch.setattr(refresh, "_resolve_install_for_refresh", lambda record, environ: None)
+    read_only = []
+    def exits(record, workspace, **kw):
+        if read_only:
+            home.chmod(0o500)
+        raise EOFError("app-server exited: private adapter text")
+    monkeypatch.setattr(refresh, "_read_catalog_from_engine", exits)
+    status = registry.config_root(env) / "first-run-codex-acp.json"
+    automatic.run(environ=env)
+    assert json.loads(status.read_text()) == {"phase": "catalog_failed", "reason": "engine_unreachable:EOFError"}
+    read_only.append(True)
+    try:
+        automatic.run(environ=env)
+    finally:
+        home.chmod(0o700)
+    assert json.loads(status.read_text()) == {"phase": "catalog_failed", "reason": "engine_home_read_only"}
+    row = request(env)["result"]["engines"][0]
+    assert row["automatic_setup"] == "catalog_failed"
+    assert row["automatic_setup_reason"] == "engine_home_read_only"
+    assert "private adapter" not in json.dumps(row) + status.read_text()
+    # Only fixed codes are kept; free text never reaches the status file.
+    automatic.record_status("codex-acp", "catalog_failed", env, reason="Error: /home/owner/.codex is read-only")
+    assert json.loads(status.read_text()) == {"phase": "catalog_failed"}
+    assert automatic.read_status_reason("codex-acp", env) is None
 
 
 def test_automatic_models_are_selectable_without_manual_catalog_refresh(env, monkeypatch):
