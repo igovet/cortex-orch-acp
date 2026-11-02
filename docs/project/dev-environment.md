@@ -756,6 +756,20 @@ For example, missing PID metadata returns `binding_refused` plus
 whether a daemon is stopped. A helper import failure before its main handler
 can only establish `helper-output/subprocess_failed`, not its private cause.
 
+`binding` is a live host observation, not an offline store reader: it reads
+the running dev daemon's `~/.paseo-dev/paseo.pid` record, fetches the exact
+agent's current `runtimeInfo` (the only source of its ACP session id) over that
+daemon's loopback WebSocket, and compares the daemon's `serverId` with the PID
+record before and after the storage reads. It also requires a valid,
+distinct `~/.paseo/paseo.pid` record, so the production daemon must be running
+(it is only read, never contacted). A normal `daemon stop` removes
+`~/.paseo-dev/paseo.pid`, so every binding run after the dev daemon stops
+refuses with `endpoint-provenance/metadata_unavailable`. No option recovers a
+binding from a stopped store later: the session id cannot be obtained without the
+host, and reading the Paseo registry or enumerating store tasks instead is a
+substitute reader. Run the binding (and the bound task inspection that uses
+its result) before stopping the dev daemon.
+
 Unknown, malformed, ambiguous, truncated or terminated output supplies no
 child-authored reason; the wrapper may still report its own safe process/output
 observation. Unknown exception codes remain generic. No exception text, paths, stdout/stderr
@@ -780,15 +794,23 @@ For a later explicitly authorized observation (not an offline diagnostic task):
    safe identities only. Do not auto-start it; any startup needs a separate
    bounded setup decision that cannot resume unauthorized paid work.
 3. Once exact owned agent/workspace/project identities are supported by that
-   run, execute the guarded `binding` command above once. Retain its complete
-   receipt and diagnostics; only a valid returned binding permits the bound
-   metadata inspector. Stop on refusal, incomplete evidence or drift. Do not
-   reuse consumed historical target consent or substitute another reader.
+   run and the host reports the agent idle (`wait` returned), execute the
+   guarded `binding` command above once while the dev daemon is still running.
+   Retain its complete receipt and diagnostics; only a valid returned binding
+   permits the bound metadata inspector, which also runs before the stop.
+   Stop on refusal, incomplete evidence or drift. Do not reuse consumed
+   historical target consent or substitute another reader.
+4. Only then stop the dev daemon. A binding first attempted after the stop
+   cannot succeed (see above); record it as unverified rather than retrying.
 
 A later guarded observation requires explicit read authority and a justified
 changed condition, not a retry for reassurance or an alternate SQLite reader:
 - Busy locks or nonempty WAL: let the normal runtime connection lifecycle
   produce a checkpointed snapshot; never force a checkpoint or bypass the lock.
+  Runtime store connections are per operation, and SQLite removes the WAL when
+  the last one closes, so wait for the agent to be idle with the dev daemon
+  still running. Stopping the daemon to obtain a checkpoint also removes the
+  endpoint provenance the binding needs.
 - Unsafe/legacy/unsupported storage: stop and obtain a scoped setup/repair
   decision; the inspector never changes modes, migrates or initializes.
 - Binding mismatch: establish the correct exact owned host/session/task through
