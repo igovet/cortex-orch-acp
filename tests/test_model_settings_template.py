@@ -58,6 +58,15 @@ def test_public_asset_preserves_exact_baseline_tiers_efforts_and_coordinator():
     ]
     # Undo exactly the priority, Terra additions and coordinator sync for preservation.
     baseline = deepcopy(template)
+    baseline.pop("mcp_servers")
+    # Restore the historical inactive OpenCode examples for the preserved digest.
+    baseline["routing"]["models"]["opencode"] = {
+        "auto": ["byteplus-plan/glm-5.3-flash"],
+        "tiers": {"byteplus-plan/glm-5.2": "deep", "byteplus-plan/glm-5.3-flash": ["light", "standard"]},
+        "policy": {"byteplus-plan/glm-5.2": {"preferred_for": []},
+                   "byteplus-plan/glm-5.3-flash": {"preferred_for": [
+                       "implementation_backend", "implementation_frontend", "debugging", "testing",
+                       "investigation", "analysis", "writing"]}}}
     baseline["coordinator"] = {"engine": "codex-acp", "model": "gpt-6.1-sol",
                                "parameters": {"thought_level": "medium"}}
     baseline_routing = baseline["routing"]
@@ -105,8 +114,7 @@ def test_public_asset_preserves_exact_baseline_tiers_efforts_and_coordinator():
             }[model]
             assert auto_route.permitted_efforts(entry(engine, model), tier, policy) == efforts
     assert routing["enabled"]["opencode"] == []
-    assert routing["models"]["opencode"]["auto"] == ["byteplus-plan/glm-5.3-flash"]
-    assert routing["models"]["opencode"]["tiers"]["byteplus-plan/glm-5.2"] == "deep"
+    assert routing["models"]["opencode"] == {"auto": [], "tiers": {}, "policy": {}}
     assert routing["providers"] == ["claude-agent-acp", "codex-acp"]
     assert routing["auto_allow"] == []
     assert routing["deny"] == ["gpt-5.5", "claude-agent-acp/claude-haiku-4-5-20251001", "claude-agent-acp/claude-sonnet-4-6",
@@ -207,6 +215,34 @@ def test_template_rejects_invalid_or_private_data(tmp_path, change):
     path = tmp_path / "template.json"
     path.write_text(json.dumps(data))
     with pytest.raises(ValueError): defaults.load_model_settings_template(path)
+
+
+def test_mcp_examples_are_disabled_valid_and_have_only_placeholder_paths():
+    from cortex_runtime.configuration import mcp_servers
+
+    template = defaults.load_model_settings_template()
+    text = defaults.TEMPLATE_PATH.read_text()
+    assert "/home/" not in text and "/Users/" not in text and "~/" not in text
+    servers = template["mcp_servers"]
+    assert set(servers) == {"codebase-memory-mcp", "playwright", "vivaldi"}
+    assert all(spec["enabled"] is False and spec.get("env", {}) == {} for spec in servers.values())
+    for spec in servers.values():
+        for value in [spec["command"], *spec.get("args", []),
+                      *spec.get("read_paths", []), *spec.get("write_paths", [])]:
+            if value.startswith("/"):
+                assert value.startswith("/path/to/")
+    assert mcp_servers._normalize_entries({"servers": servers}, defaults.TEMPLATE_PATH) == []
+    assert len(mcp_servers._normalize_entries({"servers": {
+        name: dict(spec, enabled=True) for name, spec in servers.items()}}, defaults.TEMPLATE_PATH)) == 3
+
+
+def test_template_rejects_enabled_mcp_examples(tmp_path):
+    template = defaults.load_model_settings_template()
+    template["mcp_servers"]["vivaldi"]["enabled"] = True
+    path = tmp_path / "unsafe.json"
+    path.write_text(json.dumps(template))
+    with pytest.raises(ValueError, match="disabled examples"):
+        defaults.load_model_settings_template(path)
 
 
 def test_template_reads_are_fresh_and_runtime_never_uses_asset(tmp_path, monkeypatch):

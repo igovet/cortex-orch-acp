@@ -1701,9 +1701,14 @@ def _preset_snapshot(env):
     root = registry.config_root(env)
     data = {name: registry.read_owner_file(root / (name + ".json")) for name in ("routing", "defaults")}
     revisions = {name: _revision(body) for name, body in data.items()}
-    return data, dict(surface="default_preset", revision=_revision(_pretty(revisions)),
-                      files={name: dict(revision=revision, status="absent" if data[name] is None else "existing")
-                             for name, revision in revisions.items()})
+    files = {name: dict(revision=revision, status="absent" if data[name] is None else "existing")
+             for name, revision in revisions.items()}
+    # Reset still binds/replaces only routing and defaults. Apply also seeds
+    # absent MCP examples and the named profile; expose those outcomes to Settings.
+    for name, filename in (("mcp_servers", "mcp-servers.json"), ("routing_profiles", "routing-profiles.json")):
+        body = registry.read_owner_file(root / filename)
+        files[name] = dict(revision=_revision(body), status="absent" if body is None else "existing")
+    return data, dict(surface="default_preset", revision=_revision(_pretty(revisions)), files=files)
 
 
 def read_default_preset(*, environ: Mapping[str, str] | None = None) -> dict[str, object]:

@@ -496,7 +496,7 @@ export const engineInstallResult = z.object({
   discovery: connectionsDiscoveryResult,
 });
 
-// The bundled default preset: the user routing.json and defaults.json.
+// Apply seeds four absent files. Reset still replaces only routing/defaults.
 const presetFile = z.object({ revision, status: z.enum(["absent", "existing"]) });
 const presetSeed = z.object({ path: z.string(), status: z.string(), changed: z.boolean(), error: z.string().optional() });
 
@@ -504,10 +504,10 @@ export const defaultPresetResult = z.object({
   surface: z.literal("default_preset"),
   // Binds both files together; a reset must send exactly this.
   revision,
-  files: z.object({ routing: presetFile, defaults: presetFile }),
+  files: z.object({ routing: presetFile, defaults: presetFile, mcp_servers: presetFile.optional(), routing_profiles: presetFile.optional() }),
   changed: z.boolean().optional(),
   // Apply only: one outcome per file (an existing file is never replaced).
-  settings: z.object({ routing: presetSeed.optional(), defaults: presetSeed.optional() }).optional(),
+  settings: z.object({ routing: presetSeed.optional(), defaults: presetSeed.optional(), mcp_servers: presetSeed.optional(), routing_profiles: presetSeed.optional() }).optional(),
   // Reset only: the private copy of each file that existed before.
   backups: z.object({ routing: z.string().optional(), defaults: z.string().optional() }).optional(),
 });
@@ -701,16 +701,15 @@ export const installEngine = defineRpc({
   output: engineInstallOutput,
 });
 
-/** Whether the user routing.json and defaults.json exist, and the combined
- * revision a reset needs. */
+/** Whether preset files exist, and the combined routing/defaults revision a reset needs. */
 export const readDefaultPreset = defineRpc({
   name: "cortex.config.preset.read",
   input: z.strictObject({}),
   output: defaultPresetOutput,
 });
 
-/** Writes the bundled default preset into whichever of the two files is
- * absent; an existing file (even an invalid one) is never replaced. */
+/** Seeds absent routing/defaults/MCP files and, for matching settings, an applied default profile.
+ * An existing file (even an invalid one) is never replaced. */
 export const applyDefaultPreset = defineRpc({
   name: "cortex.config.preset.apply",
   input: z.strictObject({}),

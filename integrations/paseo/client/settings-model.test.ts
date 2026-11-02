@@ -673,6 +673,16 @@ test("default preset: apply only while a file is absent; reset only confirmed an
     "Default preset restored. There were no previous files to back up.");
 });
 
+test("default preset: missing profile or MCP file is visible and can be seeded", () => {
+  const view = preset("existing", "existing");
+  view.files.mcp_servers = { status: "absent", revision: "absent" };
+  view.files.routing_profiles = { status: "absent", revision: "absent" };
+  assert.equal(presetCanApply(view), true);
+  assert.match(presetFilesText(view), /mcp-servers.json: absent.*routing-profiles.json: absent/);
+  assert.match(profileStateText({ ...profileView(), active: "default", state: "in_sync" }),
+    /^Applied:.*profile "default"/);
+});
+
 // --- engines & models -----------------------------------------------------------
 
 test("engines & models: engine switches write <engine>/* and the automatic-routing list, keeping every other rule", () => {

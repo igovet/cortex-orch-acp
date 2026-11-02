@@ -221,8 +221,13 @@ python3 -B scripts/cortex_acp_setup.py install-paseo-plugin
 
 Both commands are idempotent and safe to rerun; neither touches unrelated
 Paseo plugins or configuration. Each seeds the [default preset](docs/configuration.md#default-preset)
-into `routing.json` and `defaults.json` when those files are absent; the Git-hosted
-install does this in its bootstrap step. Every later Cortex agent start repeats the
+into absent `routing.json`, `defaults.json` and `mcp-servers.json` files; the Git-hosted
+install does this in its bootstrap step. A fresh install also creates one profile named
+`default` in `routing-profiles.json`, selected and shown as **Applied** in Cortex Settings.
+The MCP entries (`codebase-memory-mcp`, `playwright`, `vivaldi`) start **disabled**, with
+`/path/to/...` examples instead of personal paths. Install their executables and edit
+those examples before enabling them; Cortex does not download or launch these MCP servers.
+Every later Cortex agent start repeats the
 same absent-only seeding and never overwrites an existing file. After either one, Paseo exposes Cortex as a
 native provider named `cortex` for new chats — no separate generic ACP agent
 registration is needed. See
@@ -238,6 +243,8 @@ its own qualified, pinned adapters in the background through npm into
 engine's native login marker exists, Cortex registers its missing connection
 and immediately loads its model list, without sending a model prompt. Existing
 connections are preserved. Cortex Settings → Connections shows progress and failures.
+Its background checks retain connection rows and unsaved edits; failed checks
+mark the last known status and offer a retry rather than hiding the form.
 
 Log in once outside Cortex with the engine's own command (`codex login` or
 `claude` and `/login`). If automatic setup already finished without a login,
@@ -393,8 +400,9 @@ Provider choices and hard eligibility still apply. Normal-complexity technical
 writers remain light-tier. The 2026-10-27 sync also
 sets the portable coordinator to `claude-agent-acp/opus[1m]` at medium effort.
 Existing owner settings are unchanged; the preset is not live model qualification.
-The **Default preset** card in Settings' User defaults section shows whether `routing.json` and `defaults.json` exist. It
-can apply the preset to a missing file, or reset both files after confirmation; reset
+The **Default preset** card in Settings' User defaults section shows all four preset files. It
+can seed missing files without replacing existing settings or saved profiles, or reset
+only routing/defaults after confirmation; reset
 keeps a private backup of each existing file. See [Default preset](docs/configuration.md#default-preset).
 
 See the [configuration guide](docs/configuration.md) for connections,

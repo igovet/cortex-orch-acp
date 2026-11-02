@@ -46,6 +46,7 @@ function createRuntime() {
   let pending: Array<() => void> = [];
   let current: { path: string; index: number } | null = null;
   let dirty = false;
+  let stateChanges = 0;
   const slot = (): [unknown[], number] => {
     assert.ok(current, "hook called outside a component");
     let values = hooks.get(current.path);
@@ -60,7 +61,7 @@ function createRuntime() {
       if (!(i in values)) values[i] = typeof initial === "function" ? (initial as () => unknown)() : initial;
       return [values[i], (value: unknown) => {
         const next = typeof value === "function" ? (value as (prev: unknown) => unknown)(values[i]) : value;
-        if (!Object.is(next, values[i])) { values[i] = next; dirty = true; }
+        if (!Object.is(next, values[i])) { values[i] = next; dirty = true; stateChanges += 1; }
       }];
     },
     useRef(initial: unknown) {
@@ -88,14 +89,24 @@ function createRuntime() {
   };
 
   let elements: Element[] = [];
+  const hostInstances = new Map<string, object>();
+  const elementInstances = new WeakMap<Element, object>();
+  let renderedHosts = new Set<string>();
   function render(node: unknown, path: string): void {
     if (node === null || node === undefined || typeof node === "boolean" || typeof node === "string" || typeof node === "number") return;
-    if (Array.isArray(node)) { node.forEach((child, index) => render(child, `${path}[${index}]`)); return; }
+    if (Array.isArray(node)) { node.forEach((child, index) => render(child, `${path}[${(child as Element | null)?.key ?? index}]`)); return; }
     const element = node as Element;
     const type = element.type;
     assert.ok(typeof type === "string" || typeof type === "function", `element type at ${path} is ${String(type)}`);
     elements.push(element);
-    if (typeof type === "string") { render(element.props?.children, `${path}/${type}`); return; }
+    if (typeof type === "string") {
+      const hostPath = `${path}/${type}`;
+      renderedHosts.add(hostPath);
+      if (!hostInstances.has(hostPath)) hostInstances.set(hostPath, {});
+      elementInstances.set(element, hostInstances.get(hostPath)!);
+      render(element.props?.children, hostPath);
+      return;
+    }
     const childPath = `${path}/${type.name || "anonymous"}:${element.key ?? ""}`;
     mounted.add(childPath);
     current = { path: childPath, index: 0 };
@@ -109,8 +120,10 @@ function createRuntime() {
     for (let round = 0; round < 40; round += 1) {
       dirty = false;
       elements = [];
+      renderedHosts = new Set();
       mounted.clear();
       render(root(), "root");
+      for (const path of hostInstances.keys()) if (!renderedHosts.has(path)) hostInstances.delete(path);
       for (const [path, values] of hooks) {
         if (mounted.has(path)) continue;
         for (const value of values) {
@@ -131,6 +144,8 @@ function createRuntime() {
     settle,
     async mount(next: () => unknown) { root = next; await settle(); },
     elements: () => elements,
+    identity: (element: Element) => elementInstances.get(element),
+    stateChanges: () => stateChanges,
   };
 }
 
@@ -288,6 +303,8 @@ async function openScreen(data = fixtures()) {
   const onboards: Array<Record<string, unknown>> = [];
   const onboardReplies: unknown[] = [];
   const replies: unknown[] = [];
+  const readReplies: unknown[] = [];
+  const intervals = new Set<() => void>();
   const refreshes: Array<Record<string, unknown>> = [];
   const discovers: Array<Record<string, unknown>> = [];
   const discoverReplies: unknown[] = [];
@@ -333,7 +350,7 @@ async function openScreen(data = fixtures()) {
     },
     "cortex.config.read": async (input) => {
       reads.push(input);
-      return { ok: true, binding, result: structuredClone(data[input.surface as string]) };
+      return readReplies.shift() ?? { ok: true, binding, result: structuredClone(data[input.surface as string]) };
     },
     "cortex.config.update": async (input) => {
       updates.push(input);
@@ -370,7 +387,10 @@ async function openScreen(data = fixtures()) {
     "@getpaseo/plugin/client/react-native": { Icon: "Icon", ScrollView: "ScrollView" },
     zod: await import("zod"),
   };
-  const evaluate = new Function(`return ${await compilePanel()}`)() as (require: (name: string) => unknown) => { SettingsScreen: (props: unknown) => unknown };
+  const evaluate = new Function("setInterval", "clearInterval", `return ${await compilePanel()}`)(
+    (callback: () => void) => { intervals.add(callback); return callback; },
+    (callback: () => void) => { intervals.delete(callback); },
+  ) as (require: (name: string) => unknown) => { SettingsScreen: (props: unknown) => unknown };
   const { SettingsScreen } = evaluate((name) => {
     assert.ok(name in modules, `settings panel required unexpected module ${name}`);
     return modules[name];
@@ -389,12 +409,101 @@ async function openScreen(data = fixtures()) {
   const texts = () => runtime.elements().filter((element) => element.type === "Text").map((element) => textOf(element.props.children));
   const section = async (title: string) => press(`Section: ${title}`);
   return {
-    runtime, data, reads, updates, onboards, onboardReplies, replies, refreshes, find, has, press, type, toggle, texts, section,
+    runtime, data, reads, readReplies, updates, onboards, onboardReplies, replies, refreshes, find, has, press, type, toggle, texts, section,
+    poll: async () => { for (const callback of [...intervals]) callback(); await runtime.settle(); },
     discovers, discoverReplies, installs, installReplies, connects, connectReplies, presetCalls, presetReplies,
   };
 }
 
 // --- tests ------------------------------------------------------------------------
+
+test("connections: passive refresh keeps row identity, drafts and confirmation while updating live status", async () => {
+  const screen = await openScreen();
+  await screen.section("Connections");
+  const label = `Name of ${CONN.codex[0]}`;
+  const identity = screen.runtime.identity(screen.find(label, "TextInput"));
+  await screen.type(label, "Unsaved name");
+  await screen.press("Remove Codex");
+  const changes = screen.runtime.stateChanges();
+  await screen.poll();
+  assert.equal(screen.runtime.stateChanges(), changes, "structurally identical discovery and registry skip state updates");
+
+  let finish!: (value: unknown) => void;
+  screen.readReplies.push(new Promise((resolve) => { finish = resolve; }));
+  await screen.poll();
+  assert.ok(!screen.texts().includes("Loading…"), "background read must not replace the form");
+  assert.equal(screen.runtime.identity(screen.find(label, "TextInput")), identity);
+  finish({ ok: true, binding, result: structuredClone(screen.data.connections) });
+  await screen.runtime.settle();
+  assert.equal(screen.runtime.identity(screen.find(label, "TextInput")), identity);
+  assert.equal(screen.find(label, "TextInput").props.value, "Unsaved name");
+  assert.ok(screen.has("Confirm remove Codex"));
+
+  const connections = screen.data.connections.connections as Array<Record<string, unknown>>;
+  connections[0].state = "needs_login";
+  await screen.poll();
+  assert.equal(screen.runtime.identity(screen.find(label, "TextInput")), identity);
+  assert.equal(screen.find(label, "TextInput").props.value, "Unsaved name");
+  assert.ok(screen.texts().some((text) => text.includes("needs_login")));
+  assert.ok(screen.has("Confirm remove Codex"));
+});
+
+test("connections: failed background reads retain rows, drafts and engine opt-ins with retry", async () => {
+  const data = fixtures();
+  const engines = data.connections_discovery.engines as Array<Record<string, unknown>>;
+  Object.assign(engines[1], { status: "ready_to_connect", version: "0.97.0", native_login_detected: true, qualified: true });
+  const screen = await openScreen(data);
+  await screen.section("Connections");
+  const label = `Name of ${CONN.codex[0]}`;
+  const identity = screen.runtime.identity(screen.find(label, "TextInput"));
+  await screen.type(label, "Draft");
+  await screen.toggle("Connect claude-agent-acp through my own account login", true);
+  screen.readReplies.push({ ok: false, error: { code: "read_failed", message: "offline" } });
+  screen.discoverReplies.push(Promise.reject(new Error("discovery offline")));
+  await screen.poll();
+  assert.equal(screen.runtime.identity(screen.find(label, "TextInput")), identity);
+  assert.equal(screen.find(label, "TextInput").props.value, "Draft");
+  assert.equal((screen.find("Connect claude-agent-acp through my own account login", "Switch").props.value), true);
+  assert.ok(screen.texts().some((text) => text.includes("Showing last known")));
+  await screen.press("Retry connections refresh");
+  await screen.press("Check engines again");
+  assert.equal(screen.runtime.identity(screen.find(label, "TextInput")), identity);
+  assert.ok(!screen.texts().some((text) => text.includes("Showing last known")));
+});
+
+
+test("connections: reordered refreshed data keeps surviving rows in place and new rows appear", async () => {
+  const screen = await openScreen();
+  await screen.section("Connections");
+  const label = `Name of ${CONN.codex[0]}`;
+  const identity = screen.runtime.identity(screen.find(label, "TextInput"));
+  const rows = screen.data.connections.connections as Array<Record<string, unknown>>;
+  rows.unshift({ ...structuredClone(rows[0]), id: CONN.claude[0], name: "Claude", engine: "claude-agent-acp" });
+  await screen.poll();
+  const names = screen.runtime.elements().filter((e) => e.type === "TextInput" && String(e.props.accessibilityLabel).startsWith("Name of "));
+  assert.deepEqual(names.map((e) => e.props.accessibilityLabel), [label, `Name of ${CONN.claude[0]}`]);
+  assert.equal(screen.runtime.identity(screen.find(label, "TextInput")), identity);
+});
+
+test("connections: a late passive response cannot overwrite a completed mutation", async () => {
+  const screen = await openScreen();
+  await screen.section("Connections");
+  const label = `Name of ${CONN.codex[0]}`;
+  let finish!: (value: unknown) => void;
+  const stale = structuredClone(screen.data.connections);
+  screen.readReplies.push(new Promise((resolve) => { finish = resolve; }));
+  await screen.poll();
+  await screen.type(label, "Renamed");
+  const saved = structuredClone(screen.data.connections);
+  (saved.connections as Array<Record<string, unknown>>)[0].name = "Renamed";
+  saved.revision = REV("z");
+  screen.replies.push({ ok: true, binding, result: saved });
+  await screen.press("Rename Codex");
+  finish({ ok: true, binding, result: stale });
+  await screen.runtime.settle();
+  assert.ok(screen.has("Rename Renamed"));
+  assert.ok(!screen.has("Rename Codex"));
+});
 
 test("no section offers a raw JSON entry field, and every control is labelled", async () => {
   const screen = await openScreen();
@@ -1150,6 +1259,33 @@ test("engines & models: a model can be placed in several tiers and back to unpla
   await fresh.press(tier("standard"));
   await fresh.press("Save engine and model switches to the user routing file");
   assert.equal((fresh.updates[0].rules as any).models?.["codex-acp"]?.tiers, undefined, "no tier left: no placement");
+});
+
+test("a fresh default profile is visibly applied and its MCP examples are disabled and toggleable", async () => {
+  const data = fixtures();
+  const view = data.routing_profiles;
+  view.active = "default";
+  view.state = "in_sync";
+  view.modified_sections = [];
+  view.differences = [];
+  view.matches_profile = ["default"];
+  (view.profiles as any[])[0].name = "default";
+  const names = ["codebase-memory-mcp", "playwright", "vivaldi"];
+  data.mcp_servers.servers = names.map((name) => ({
+    name, enabled: false, valid: true, problem: null, redacted: false, unsupported_keys: [],
+    config: { command: "/path/to/server", args: [], env: [], allowed_tools: ["example"] },
+  }));
+  const screen = await openScreen(data);
+  assert.equal(screen.find("Current profile: default", "Pressable").props.accessibilityState.checked, true);
+  assert.ok(screen.texts().includes('Applied: the current settings match profile "default".'));
+  assert.equal(screen.has("Current profile: mix"), false);
+  await screen.section("MCP servers");
+  for (const name of names) {
+    assert.equal(screen.find(name + " enabled", "Switch").props.value, false);
+  }
+  await screen.toggle("vivaldi enabled", true);
+  assert.deepEqual(screen.updates[0], { surface: "mcp_servers", expected_revision: REV("m"),
+    operations: [{ op: "set_enabled", name: "vivaldi", enabled: true }] });
 });
 
 test("profiles show modified sections, confirm revert, and retain revision conflicts", async () => {

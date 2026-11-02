@@ -39,6 +39,8 @@ OpenCode v2 discovery is read-only. Onboarding requires an explicit opt-in and r
 
 The **Engines: download and connect** group under Connections shows installed/login/connection state and automatic setup progress, polling every three seconds while mounted. Plugin or agent startup runs one background pass: download Cortex-owned pinned Codex and Claude adapters, register missing native-account connections when a login marker exists, then observe models immediately without a model prompt. Existing connections are not replaced. Removing a connection atomically records its engine in `connections.json`'s optional `auto_connect_disabled` list, preventing automatic recreation, including a concurrent startup. **Add connection** can restore it explicitly with the opt-in switch, current revision, qualified installed adapter and native login marker. **Download engine** remains a manual retry. These actions accept no key, path, command or version. `opencode` stays manual through **Enable OpenCode v2**; Cortex never downloads or automatically registers it. A login marker is only an existence check, not verified authentication; **Validate** checks connection state and model discovery can still fail. A failed model discovery retains the connection and previous catalogue; use **Refresh model lists** to retry. API-key connections remain setup-command only.
 
+Connections polls retain mounted rows, pending input and removal confirmation; surviving rows keep their order, and new connections are appended. Structurally unchanged reads do not update client state. Failed background reads retain last known connections/engine status with a visible warning and retry controls; they do not clear save conflicts or retry writes. Explicit conflict reload still discards edits.
+
 For API details and current restrictions, see `src/cortex_runtime/configuration/management.py` and `integrations/paseo/shared/config.ts`. Changes are consumed by the next Cortex session; they do not retroactively reconfigure active tasks. Saving settings does not restart active Cortex sessions. Conversely, a plugin code update/reload is not needed for a settings edit, but it restarts the plugin process and can close open provider connections; apply plugin updates between active tasks until recovery has been qualified on the deployed Paseo version.
 
 `HOME`, `XDG_CONFIG_HOME` and `XDG_STATE_HOME` must resolve to absolute paths. The user roots cannot be placed inside a project workspace. Cortex creates managed directories owner-only and validates existing files before trusting them. See `connections.registry.config_root/state_root`, `configuration.store`, `routing.auto_route._routing_path`, `configuration.mcp_servers._global_path`, and `scripts/cortex_acp_setup.py::_write_paseo_launch_config`.
@@ -123,13 +125,15 @@ Accepted adapter versions (`connections.discovery.QUALIFIED_ADAPTER_VERSIONS`): 
 
 ## Default preset
 
-`policy/model-settings-default.json` is the bundled preset. It supplies the starting `routing.json` (engines, enabled models, tiers, per-model policy and quota windows) and `defaults.json` (coordinator default and language). Cortex writes each file only when it is absent:
+`policy/model-settings-default.json` is the bundled preset. It supplies the starting `routing.json` (engines, enabled models, tiers, per-model policy and quota windows), `defaults.json` (coordinator default and language), and `mcp-servers.json` (disabled examples). A fresh install creates exactly one named profile, `default`, in `routing-profiles.json`, with `active: "default"` and an applied snapshot of all four user sections. Settings selects **Current profile: default** and shows **Applied** (`in_sync`). Cortex writes each file only when it is absent:
 
-- `init-storage` seeds both files. `install-paseo-plugin` runs it, and so does the Git-install bootstrap (`bootstrap-paseo-git-install`).
+- `init-storage` seeds the preset files. `install-paseo-plugin` runs it, and so does the Git-install bootstrap (`bootstrap-paseo-git-install`).
 - Every Cortex agent process start repeats the absent-only seeding, so a file that goes missing is restored by the next session. A seeding failure never blocks startup.
 - The **Default preset** card in Settings' User defaults section shows whether each file exists. **Apply default preset** appears only while a file is missing and never replaces one.
 
-An existing file is left unchanged even when it is malformed or from an older schema; Cortex does not repair it. Preset seeding never adds an engine connection.
+An existing file is left unchanged even when it is malformed or from an older schema; Cortex does not repair it, merge MCP entries into it, or rename/overwrite saved profiles. If the profile registry is absent, `default` is captured only when routing, defaults and MCP usage policy still match the bundled preset; customized settings are never relabeled as an applied default. This also lets an interrupted first install finish on retry. Preset seeding never adds an engine connection.
+
+The MCP examples are `codebase-memory-mcp`, `playwright` (Claude workers only), and `vivaldi` (workers). All start with `enabled: false`; the runtime loader excludes them before launch. Settings lists them as disabled, editable and toggleable. Commands, arguments and filesystem grants contain only `/path/to/...` examples; environment maps are empty. Registering these definitions does not install binaries or browser extensions. Install the corresponding tools, replace example paths and review grants before enabling. The named profile captures only MCP usage policy, never commands, arguments or environment values.
 
 **Reset to default preset** in Settings replaces `routing.json` and `defaults.json` together. It requires a confirmation that names the overwrite, and it sends the combined revision of both files, so a file changed elsewhere is refused with a conflict. Before writing, it keeps a private owner-only backup of each existing file, named `<name>.json.cortex-backup-<time_ns>` in the same configuration directory. Reset overwrites all routing rules, the coordinator default, the language and the owner ceiling. Project and `$CORTEX_ROUTING` overrides are not changed. If a write fails, completed replacements are rolled back. A hard process kill between the two replacements can leave the pair mixed; the backups allow manual restoration.
 
@@ -572,15 +576,18 @@ quota-window associations. The portable coordinator is
 `claude-agent-acp/opus[1m]` with `thought_level: medium` (refreshed from the saved
 `default` profile); no mode override is
 added. New `defaults.json` files also set `language: ru`. The install envelope
-remains schema version 1 with optional `language` (`en` or `ru`); coordinator
+remains schema version 1 with optional `language` (`en` or `ru`) and
+`mcp_servers` (disabled installation examples); coordinator
 `mode` is optional, and when present the install template accepts `agent`.
 
 This is portable model/settings installation, not cloning the owner's machine:
-route/connection IDs, account bindings, MCP installation definitions and local
-read/write paths are excluded. The saved unrestricted ceiling needs no override.
+route/connection IDs, account bindings and real local paths are excluded. MCP
+installation definitions use only disabled example paths and empty environment maps. The saved unrestricted ceiling needs no override.
 Existing connection session limits and MCP registrations/policies are not changed;
-no saved `routing-profiles.json` snapshot is created or replaced. A fresh host must
-register its own connections/MCP servers and resolve the exact coordinator against
+existing saved `routing-profiles.json` snapshots are never replaced. Fresh installs
+create the applied `default` profile and disabled example MCP registrations as described
+in [Default preset](#default-preset). A fresh host must configure its own MCP executables
+and native engine accounts and resolve the exact coordinator against
 one observed selectable route. Missing or unsupported model/effort observations
 still fail closed; this snapshot is not live qualification.
 

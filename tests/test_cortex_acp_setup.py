@@ -481,10 +481,14 @@ def test_init_storage_is_idempotent(tmp_path, monkeypatch):
     assert Path(first["state_root"]).is_dir()
     second = setup.init_storage()
     assert first["routing"]["routing"]["status"] == "created"
+    # Every owner file is either left as-is (current) or, for the profile registry,
+    # reported as already present; a second run never writes any of them.
     assert second["routing"] == {
         "routing": {**first["routing"]["routing"], "status": "current", "changed": False},
         "route_policy": first["routing"]["route_policy"],
         "defaults": {**first["routing"]["defaults"], "status": "current", "changed": False},
+        "mcp_servers": {**first["routing"]["mcp_servers"], "status": "current", "changed": False},
+        "routing_profiles": {**first["routing"]["routing_profiles"], "status": "existing", "changed": False},
     }
     assert {**second, "routing": None} == {**first, "routing": None}
 

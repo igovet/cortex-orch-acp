@@ -697,6 +697,44 @@ try {
   rmSync(base, { recursive: true, force: true });
 }
 
+// A pristine install publishes a named applied default, not just routing values.
+{
+  const isolated = mkdtempSync(join(tmpdir(), "cortex-config-default-"));
+  try {
+    process.env.CORTEX_ENGINE_UPDATE = "off";
+    const { configHome } = setupOwner(isolated);
+    process.env.CORTEX_PASEO_SOURCE_ROOT = repoRoot;
+    const ctx = context({});
+    const seeded = await call(applyDefaultPreset, {}, ctx);
+    assert.equal(seeded.ok, true, JSON.stringify(seeded));
+    assert.equal(seeded.result.settings.routing_profiles.status, "created");
+    assert.equal(seeded.result.settings.mcp_servers.path, "~/.config/cortex/mcp-servers.json");
+    assert.equal(seeded.result.files.routing_profiles.status, "existing");
+    const view = await call(readConfig, { surface: "routing_profiles" }, ctx);
+    assert.equal(view.ok, true, JSON.stringify(view));
+    assert.equal(view.result.active, "default");
+    assert.equal(view.result.applied.profile, "default");
+    assert.equal(view.result.state, "in_sync");
+    assert.deepEqual(view.result.profiles.map((p: any) => p.name), ["default"]);
+    const mcp = await call(readConfig, { surface: "mcp_servers" }, ctx);
+    assert.equal(mcp.ok, true, JSON.stringify(mcp));
+    assert.deepEqual(mcp.result.servers.map((s: any) => s.name).sort(), ["codebase-memory-mcp", "playwright", "vivaldi"]);
+    assert.ok(mcp.result.servers.every((s: any) => s.enabled === false && s.valid));
+    const profilePath = join(configHome, "cortex", "routing-profiles.json");
+    const before = readFileSync(profilePath, "utf8");
+    const again = await call(applyDefaultPreset, {}, ctx);
+    assert.equal(again.result.changed, false);
+    assert.equal(readFileSync(profilePath, "utf8"), before);
+    const toggled = await call(updateConfig, { surface: "mcp_servers", expected_revision: mcp.result.revision,
+      operations: [{ op: "set_enabled", name: "vivaldi", enabled: true }] }, ctx);
+    assert.equal(toggled.ok, true, JSON.stringify(toggled));
+    assert.equal(toggled.result.servers.find((s: any) => s.name === "vivaldi").enabled, true);
+  } finally {
+    restoreEnv();
+    rmSync(isolated, { recursive: true, force: true });
+  }
+}
+
 // Owner binding: the launch record's HOME/XDG overrides -- the environment
 // the plugin starts Cortex with -- select the configuration home, not the
 // daemon's own environment.

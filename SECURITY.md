@@ -17,7 +17,11 @@ yields at known usage >=95% when more than 10 points worse than an available
 alternative. Provider choices and hard eligibility remain controlling, and ordinary
 light-tier technical writing is unchanged. This is not live qualification. Existing owner
 settings are never replaced. Account/connection
-identities and machine-specific MCP definitions/paths are not cloned; see
+identities and machine-specific MCP paths/credentials are not cloned. Fresh installs
+register disabled MCP examples with `/path/to/...` placeholders and empty environments,
+not installed executables; the loader excludes disabled entries before launch. A named
+applied `default` profile is created only for matching preset settings in an absent
+profile registry. Existing profiles and MCP registries are never replaced; see
 [the install snapshot boundary](docs/configuration.md#fresh-install-owner-default-snapshot).
 
 Routing effort controls read cached per-model observations only; they do not start engines, grant model access or change authorization. Unknown/conflicting observations are labeled, and unsupported stored values are preserved rather than silently repaired. Runtime dispatch validation remains authoritative. See [settings](docs/configuration.md#manage-settings-in-paseo).
@@ -1296,6 +1300,8 @@ The first-run actions are: connection discovery, which reads installed adapter v
 The plugin RPC handlers rely on Paseo daemon authorization (the installed 0.10.0 implementation requires `daemon.manage` for RPC invocation); the handler itself receives no caller identity for an additional per-call check. Writes use revision preconditions and refuse stale revisions. File and project-configuration writes use the existing lock/SQLite transaction path; lockless external writers may still race the final instant. A timeout does not prove that a write failed; re-read state before retrying.
 
 MCP environment values and credential values/paths are not returned. MCP secret values may be retained with an explicit keep marker without being read back. Treat settings JSON fields as sensitive input: only enter trusted configuration, and never paste secrets into support logs or reports. OpenCode onboarding is explicit opt-in, references the owner's existing login rather than copying it, and does not enable automatic routing. OpenCode models also stay off (routing `enabled`) until the owner switches each one on under Settings > Models; a model left out of `enabled` is refused exactly like a denied one. The Models section's **Refresh model lists** action (`cortex.config.catalog.refresh`, management action `refresh` on `route_catalog`) starts each registered connection's engine for `initialize` and `session/new` only, in a private empty temporary directory rather than the project, never sends a prompt, and only adds a catalog snapshot; a failed refresh keeps the previous snapshot and changes no routing.
+
+Connections background polling is read-only and retains the last successful view on read failure, visibly marked with retry controls. It does not retry writes or clear revision-conflict feedback. A passive read started before a local mutation cannot replace that mutation’s returned view.
 
 See [configuration management](docs/configuration.md#manage-settings-in-paseo) for the supported scope and persistence map.
 

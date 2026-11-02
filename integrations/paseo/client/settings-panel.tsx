@@ -464,7 +464,7 @@ function CeilingSummary({ ceiling, theme }: { ceiling: CeilingView; theme: Theme
 type ReadState<Result> =
   | { status: "loading" }
   | { status: "error"; message: string }
-  | { status: "ready"; result: Result; binding: ConfigBinding };
+  | { status: "ready"; result: Result; binding: ConfigBinding; refreshError?: string };
 
 type SaveError = { message: string; conflict: boolean; fields: FieldErrors };
 
@@ -473,6 +473,8 @@ type SaveError = { message: string; conflict: boolean; fields: FieldErrors };
  * resolves by reloading, never by overwriting. */
 function useConfigSurface<Result>(surface: string, workspaceId: string | null, requireWorkspace: boolean, onWritten?: () => void) {
   const lastSaved = useRef<Result | null>(null);
+  const readEpoch = useRef(0);
+  const refreshPending = useRef(false);
   const read = useRpc(readConfig);
   const write = useRpc(updateConfig);
   const [state, setState] = useState<ReadState<Result>>({ status: "loading" });
@@ -480,6 +482,7 @@ function useConfigSurface<Result>(surface: string, workspaceId: string | null, r
   const [saveError, setSaveError] = useState<SaveError | null>(null);
 
   const reload = useCallback(async () => {
+    ++readEpoch.current;
     setSaveError(null);
     if (requireWorkspace && !workspaceId) {
       setState({ status: "error", message: "Select a project workspace above to read this surface." });
@@ -498,10 +501,38 @@ function useConfigSurface<Result>(surface: string, workspaceId: string | null, r
 
   useEffect(() => { reload(); }, [reload]);
 
+  // Passive refreshes retain the mounted form and any save/conflict feedback.
+  const refresh = useCallback(async (reconcile?: (previous: Result, next: Result) => Result) => {
+    if (refreshPending.current || writePending.current) return;
+    refreshPending.current = true;
+    const epoch = readEpoch.current;
+    try {
+      const out = await read({ surface: surface as never, ...(workspaceId ? { workspaceId } : {}) });
+      if (epoch !== readEpoch.current) return;
+      if (!out.ok) throw new Error(describeConfigError(out.error));
+      setState((current) => {
+        const result = current.status === "ready" && reconcile
+          ? reconcile(current.result, out.result as unknown as Result) : out.result as unknown as Result;
+        const next = { status: "ready" as const, result, binding: out.binding };
+        return sameJson(current, next) ? current : next;
+      });
+    } catch (error) {
+      if (epoch !== readEpoch.current) return;
+      const message = error instanceof Error ? error.message : "Read failed";
+      setState((current) => {
+        const next = current.status === "ready" ? { ...current, refreshError: message } : { status: "error" as const, message };
+        return sameJson(current, next) ? current : next;
+      });
+    } finally {
+      refreshPending.current = false;
+    }
+  }, [read, surface, workspaceId]);
+
   const writePending = useRef(false);
   const save = useCallback(async (input: ConfigUpdateInput, prefixes: readonly string[] = []): Promise<boolean> => {
     if (writePending.current) return false;
     writePending.current = true;
+    ++readEpoch.current;
     setSaving(true);
     setSaveError(null);
     try {
@@ -529,7 +560,7 @@ function useConfigSurface<Result>(surface: string, workspaceId: string | null, r
     setState((current) => current.status === "ready" ? { ...current, result } : current);
   }, []);
 
-  return { state, reload, save, saving, saveError, setSaveError, replace, lastSaved };
+  return { state, reload, refresh, save, saving, saveError, setSaveError, replace, lastSaved };
 }
 
 function SurfaceFrame<Result>({ state, reload, theme, children }: {
@@ -1659,7 +1690,15 @@ function ConnectionCard({ connection, view, busy, save, errors, theme }: {
   const [sessions, setSessions] = useState(String(connection.max_concurrent_sessions));
   const [clientErrors, setClientErrors] = useState<FieldErrors>({});
   const [confirmRemove, setConfirmRemove] = useState(false);
-  useEffect(() => { setName(connection.name); setSessions(String(connection.max_concurrent_sessions)); }, [connection]);
+  const previous = useRef(connection);
+  useEffect(() => {
+    // Status-only polls must not overwrite a draft. Adopt changed persisted
+    // fields only when that field has no local edit.
+    const before = previous.current;
+    setName((value) => value === before.name ? connection.name : value);
+    setSessions((value) => value === String(before.max_concurrent_sessions) ? String(connection.max_concurrent_sessions) : value);
+    previous.current = connection;
+  }, [connection]);
   const allowed = (operation: string) => view.operations.length === 0 || view.operations.includes(operation);
   const shown = mergeErrors(clientErrors, errors);
   const apply = async (built: ReturnType<typeof buildConnectionRename>) => {
@@ -1757,11 +1796,13 @@ type DiscoveryState = { status: "loading" } | { status: "error"; message: string
  * (Cortex's pinned adapter) and Add connection (native account login, with
  * an explicit opt-in). Kept outside the connections read frame so its
  * outcome survives the reload that follows a new connection. */
-function EngineSetup({ revision, onConnected, theme }: { revision: string | null; onConnected: () => Promise<void> | void; theme: Theme }) {
+function EngineSetup({ revision, onConnected, onRefresh, theme }: { revision: string | null; onConnected: () => Promise<void> | void; onRefresh: () => Promise<void>; theme: Theme }) {
   const discover = useRpc(discoverConnections);
   const onboard = useRpc(onboardConnection);
   const install = useRpc(installEngine);
   const [state, setState] = useState<DiscoveryState>({ status: "loading" });
+  const [refreshError, setRefreshError] = useState<string | null>(null);
+  const checking = useRef(false);
   const [optIns, setOptIns] = useState<Record<string, boolean>>({});
   const [busy, setBusy] = useState<{ engine: string; kind: "download" | "connect" } | null>(null);
   const [outcomes, setOutcomes] = useState<Record<string, Outcome>>({});
@@ -1769,21 +1810,32 @@ function EngineSetup({ revision, onConnected, theme }: { revision: string | null
   const seenRevision = useRef<string | null>(null);
 
   const check = useCallback(async () => {
+    if (checking.current) return;
+    checking.current = true;
     try {
       const out = await discover({});
-      setState(out.ok ? { status: "ready", result: out.result } : { status: "error", message: describeConfigError(out.error) });
+      if (!out.ok) throw new Error(describeConfigError(out.error));
+      setRefreshError(null);
+      setState((current) => {
+        const next = { status: "ready" as const, result: out.result };
+        return sameJson(current, next) ? current : next;
+      });
     } catch (error) {
-      setState({ status: "error", message: error instanceof Error ? error.message : "Check failed" });
+      const message = error instanceof Error ? error.message : "Check failed";
+      setRefreshError(message);
+      setState((current) => current.status === "ready" ? current : { status: "error", message });
+    } finally {
+      checking.current = false;
     }
   }, [discover]);
   useEffect(() => { check(); }, [check]);
   // Poll only while mounted; discovery is passive and never starts a download.
   useEffect(() => {
-    const timer = setInterval(() => { if (!pending.current) { void check(); void onConnected(); } }, 3000);
+    const timer = setInterval(() => { if (!pending.current) { void check(); void onRefresh(); } }, 3000);
     // Browser timers are numeric; Node renderers must not be kept alive by polling.
     (timer as unknown as { unref?: () => void }).unref?.();
     return () => clearInterval(timer);
-  }, [check, onConnected]);
+  }, [check, onRefresh]);
   // A connection renamed, removed or added changes the registry: re-check.
   useEffect(() => {
     if (revision === null) return;
@@ -1856,13 +1908,25 @@ function EngineSetup({ revision, onConnected, theme }: { revision: string | null
   return <Group title="Engines: download and connect" theme={theme} hint={HELP.engineSetup}>
     <Button title={state.status === "loading" ? "Checking…" : "Check again"} theme={theme} accessibilityLabel="Check engines again"
       disabled={state.status === "loading" || busy !== null} onPress={check} />
-    {state.status === "error" && <Banner text={`Engine status unavailable: ${state.message}`} theme={theme} tone="danger" />}
+    {refreshError && <Banner text={`Engine status unavailable: ${refreshError}${state.status === "ready" ? " Showing last known status; Check again to retry." : ""}`} theme={theme} tone="danger" />}
     {state.status === "ready" && state.result.engines.map((row) => <EngineSetupRow key={row.engine} row={row} theme={theme}
       busy={busy?.engine === row.engine ? busy.kind : null} locked={busy !== null} outcome={outcomes[row.engine] ?? null}
       optIn={optIns[row.engine] === true} onOptIn={(value) => setOptIns((current) => ({ ...current, [row.engine]: value }))}
       onDownload={() => download(row)} onConnect={() => connect(row)}
       onRecheck={() => { setOutcome(row.engine, null); check(); onConnected(); }} />)}
   </Group>;
+}
+
+/** Keep surviving rows in place even if a refreshed registry has a new order. */
+function reconcileConnections(previous: ConnectionsView, next: ConnectionsView): ConnectionsView {
+  const byId = new Map(next.connections.map((row) => [row.id, row]));
+  const connections = previous.connections.flatMap((row) => {
+    const updated = byId.get(row.id);
+    if (!updated) return [];
+    byId.delete(row.id);
+    return [sameJson(row, updated) ? row : updated];
+  });
+  return { ...next, connections: [...connections, ...byId.values()] };
 }
 
 function ConnectionsSection({ theme, onWritten }: { theme: Theme; onWritten?: () => void }) {
@@ -1876,6 +1940,15 @@ function ConnectionsSection({ theme, onWritten }: { theme: Theme; onWritten?: ()
   const [activeConnection, setActiveConnection] = useState<string | null>(null);
   const [onboarded, setOnboarded] = useState<{ version: string; nextAction: string | null; automaticRouting: string } | null>(null);
   const { state } = surface;
+  const refreshConnections = useCallback(() => surface.refresh(reconcileConnections), [surface.refresh]);
+  const connected = useCallback(async () => { onWritten?.(); await refreshConnections(); }, [onWritten, refreshConnections]);
+  const registryRevision = state.status === "ready" ? state.result.revision : null;
+  const seenRegistryRevision = useRef<string | null>(null);
+  useEffect(() => {
+    if (registryRevision === null) return;
+    if (seenRegistryRevision.current !== null && seenRegistryRevision.current !== registryRevision) onWritten?.();
+    seenRegistryRevision.current = registryRevision;
+  }, [registryRevision, onWritten]);
 
   const runDiscover = async () => {
     setDiscovery({ status: "loading" });
@@ -1919,7 +1992,7 @@ function ConnectionsSection({ theme, onWritten }: { theme: Theme; onWritten?: ()
   return <Card title="Connections" theme={theme}>
     <Hint theme={theme} text={HELP.connections} />
     <EngineSetup theme={theme} revision={state.status === "ready" ? state.result.revision : null}
-      onConnected={async () => { onWritten?.(); await surface.reload(); }} />
+      onConnected={connected} onRefresh={refreshConnections} />
     <SurfaceFrame state={state} reload={surface.reload} theme={theme}>
       {(result) => <View style={{ gap: 10 }}>
         {result.connections.length === 0 && <Text style={{ color: theme.colors.foregroundMuted, fontSize: 12 }}>No connections registered.</Text>}
@@ -1957,6 +2030,10 @@ function ConnectionsSection({ theme, onWritten }: { theme: Theme; onWritten?: ()
         </Group>
       </View>}
     </SurfaceFrame>
+    {state.status === "ready" && state.refreshError && <View style={{ gap: 6 }}>
+      <Banner text={`Connections refresh failed: ${state.refreshError}. Showing last known connections.`} theme={theme} tone="danger" />
+      <Button title="Retry connections refresh" onPress={refreshConnections} theme={theme} />
+    </View>}
   </Card>;
 }
 
@@ -2029,7 +2106,7 @@ function DefaultPresetCard({ theme, onChanged }: { theme: Theme; onChanged: () =
       <ReadOnlyRow label="User files" value={presetFilesText(state.result)} theme={theme} />
       {presetCanApply(state.result)
         ? <Button title={busy ? "Applying…" : "Apply default preset"} theme={theme} disabled={busy || confirming} onPress={() => run("apply")} />
-        : <Hint theme={theme} text="Both files exist, so Apply has nothing to write; it never replaces a file." />}
+        : <Hint theme={theme} text="All preset files exist, so Apply has nothing to write; it never replaces a file." />}
       {(state.result.files.routing.status === "existing" || state.result.files.defaults.status === "existing") && (confirming
         ? <View style={{ gap: 6 }}>
           <Banner theme={theme} tone="warning" text={"Reset replaces your whole user routing.json and defaults.json — every routing rule, the coordinator default, the "

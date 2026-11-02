@@ -1452,7 +1452,7 @@ export function buildEngineInstall(engine: string): Built<EngineInstallInput> {
 
 /** Apply writes only absent files, so it is offered only while one is absent. */
 export function presetCanApply(view: DefaultPresetView): boolean {
-  return view.files.routing.status === "absent" || view.files.defaults.status === "absent";
+  return Object.values(view.files).some((file) => file?.status === "absent");
 }
 
 /** A reset is sent only after the owner confirmed it, bound to the combined
@@ -1462,12 +1462,13 @@ export function buildPresetReset(view: DefaultPresetView, confirmed: boolean): B
   return { ok: true, value: { expected_revision: view.revision, confirm: true } };
 }
 
-const PRESET_FILE_NAMES = { routing: "routing.json", defaults: "defaults.json" } as const;
+const PRESET_FILE_NAMES = { routing: "routing.json", defaults: "defaults.json", mcp_servers: "mcp-servers.json", routing_profiles: "routing-profiles.json" } as const;
 
-/** Which of the two files exist, in words. */
+/** Which preset files exist, in words. */
 export function presetFilesText(view: DefaultPresetView): string {
   return (Object.keys(PRESET_FILE_NAMES) as Array<keyof typeof PRESET_FILE_NAMES>)
-    .map((name) => `${PRESET_FILE_NAMES[name]}: ${view.files[name].status === "absent" ? "absent" : "present"}`).join(" · ");
+    .filter((name) => view.files[name] !== undefined)
+    .map((name) => `${PRESET_FILE_NAMES[name]}: ${view.files[name]?.status === "absent" ? "absent" : "present"}`).join(" · ");
 }
 
 /** What an apply or reset did, from its own response. */
@@ -1538,7 +1539,7 @@ export function profileStateText(view: Pick<ProfilesView, "active" | "state" | "
     case "none":
       return "No profile is active. Every setting applies directly to its file; capture it with \"Save as new profile\".";
     case "in_sync":
-      return view.active ? `Saved: the current settings match profile "${view.active}".` : "Saved.";
+      return view.active ? `Applied: the current settings match profile "${view.active}".` : "Saved.";
     case "modified": {
       const keys = new Map<ProfileSection, string[]>();
       for (const difference of view.differences) {

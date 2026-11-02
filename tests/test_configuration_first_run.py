@@ -65,6 +65,9 @@ def test_startup_seeds_once_and_never_changes_existing_bytes(env, monkeypatch):
     monkeypatch.setattr(discovery, "discover_all", lambda: {})
     monkeypatch.setattr(engine_update, "start_background_update", lambda: None)
     cortex_acp._ensure_first_run_configuration()
+    from cortex_runtime.configuration import routing_profiles
+    profile = routing_profiles.read_profiles(environ=env)
+    assert profile["active"] == "default" and profile["state"] == "in_sync"
     root = registry.config_root(env)
     before = {name: (root / name).read_bytes() for name in ("routing.json", "defaults.json")}
     assert json.loads(before["routing.json"]) == defaults.default_routing()
@@ -74,6 +77,86 @@ def test_startup_seeds_once_and_never_changes_existing_bytes(env, monkeypatch):
     before["routing.json"] = b"{owner-invalid"
     cortex_acp._ensure_first_run_configuration()
     assert {name: (root / name).read_bytes() for name in before} == before
+
+
+def test_fresh_seed_installs_one_applied_profile_and_disabled_toggleable_mcp(env, tmp_path):
+    from cortex_runtime.configuration import mcp_servers, routing_profiles
+
+    result = defaults.apply(env)
+    assert all(result[key]["changed"] for key in ("routing", "defaults", "mcp_servers", "routing_profiles"))
+    view = routing_profiles.read_profiles(environ=env)
+    assert view["active"] == view["applied"]["profile"] == "default"
+    assert view["state"] == "in_sync" and view["matches_profile"] == ["default"]
+    assert [p["name"] for p in view["profiles"]] == ["default"]
+    assert view["profiles"][0]["sections"] == list(routing_profiles.PROFILE_SECTIONS)
+    assert not registry.registry_path(env).exists()  # no copied account identifiers
+    root = registry.config_root(env)
+    for name in ("routing.json", "defaults.json", "mcp-servers.json", "routing-profiles.json"):
+        assert stat.S_IMODE((root / name).stat().st_mode) == 0o600
+    assert mcp_servers.load_mcp_servers(str(tmp_path), environ=env) == []
+    servers = m.read_mcp_servers(environ=env)
+    assert {s["name"] for s in servers["servers"]} == {"codebase-memory-mcp", "playwright", "vivaldi"}
+    assert all(s["enabled"] is False and s["valid"] for s in servers["servers"])
+    before = {p.name: p.read_bytes() for p in root.glob("*.json")}
+    assert not any(item["changed"] for item in defaults.apply(env).values())
+    assert before == {p.name: p.read_bytes() for p in root.glob("*.json")}
+    toggled = m.update_mcp_servers(servers["revision"], [
+        {"op": "set_enabled", "name": "vivaldi", "enabled": True}], environ=env)
+    assert next(s for s in toggled["servers"] if s["name"] == "vivaldi")["enabled"] is True
+    assert routing_profiles.read_profiles(environ=env)["state"] == "modified"
+
+
+@pytest.mark.parametrize("filename", ["routing.json", "defaults.json", "mcp-servers.json", "routing-profiles.json"])
+def test_seeding_preserves_existing_owner_files_even_invalid(env, filename):
+    root = registry.config_root(env)
+    registry.ensure_private_dir(root, root=root, environ=env)
+    path = root / filename
+    path.write_bytes(b"{owner-invalid")
+    path.chmod(0o600)
+    defaults.apply(env)
+    assert path.read_bytes() == b"{owner-invalid"
+    if filename != "routing-profiles.json":
+        assert not (root / "routing-profiles.json").exists()
+
+
+def test_absent_profile_is_not_created_over_custom_working_settings(env):
+    from cortex_runtime.configuration import routing_profiles
+
+    defaults.apply(env)
+    root = registry.config_root(env)
+    # Simulate an older installation without profiles and with owner changes.
+    (root / "routing-profiles.json").unlink()
+    (root / "defaults.json").write_text('{"defaults":{"language":"en"}}')
+    before = (root / "defaults.json").read_bytes()
+    assert defaults.apply(env)["routing_profiles"]["status"] == "custom_settings"
+    assert (root / "defaults.json").read_bytes() == before
+    assert routing_profiles.read_profiles(environ=env)["active"] is None
+
+
+def test_partial_first_run_can_finish_without_replacing_backing_files(env):
+    defaults.apply(env)
+    root = registry.config_root(env)
+    before = {p.name: p.read_bytes() for p in root.glob("*.json") if p.name != "routing-profiles.json"}
+    (root / "routing-profiles.json").unlink()
+    assert defaults.apply(env)["routing_profiles"]["changed"]
+    assert before == {p.name: p.read_bytes() for p in root.glob("*.json") if p.name != "routing-profiles.json"}
+
+
+def test_profile_publication_failure_preserves_per_file_outcomes_and_retries(env, monkeypatch):
+    create = defaults._create_private
+    def fail_profile(path, body):
+        if path.name == "routing-profiles.json":
+            raise OSError("simulated full disk")
+        return create(path, body)
+    monkeypatch.setattr(defaults, "_create_private", fail_profile)
+    result = defaults.apply(env)
+    assert all(result[key]["changed"] for key in ("routing", "defaults", "mcp_servers"))
+    assert result["routing_profiles"]["status"] == "invalid"
+    assert not result["routing_profiles"]["changed"]
+    monkeypatch.setattr(defaults, "_create_private", create)
+    retried = defaults.apply(env)
+    assert retried["routing_profiles"]["changed"]
+    assert all(not retried[key]["changed"] for key in ("routing", "defaults", "mcp_servers"))
 
 
 def test_seeding_failure_cannot_block_startup_or_other_helpers(env, monkeypatch):
@@ -198,7 +281,7 @@ def test_preset_apply_is_absent_only_and_reset_backs_up_both_files(env):
     old = {n: (root / (n + ".json")).read_bytes() for n in original}
     applied = request(env, surface="default_preset", action="apply_default_preset")["result"]
     assert all(not v["changed"] and v["status"] not in ("current", "created")
-               for v in applied["settings"].values())
+               for n, v in applied["settings"].items() if n in ("routing", "defaults"))
     assert {n: (root / (n + ".json")).read_bytes() for n in original} == old
     reset = request(env, surface="default_preset", action="reset_default_preset",
                     expected_revision=applied["revision"], confirm=True)

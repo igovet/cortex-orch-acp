@@ -100,8 +100,12 @@ python3 -B scripts/cortex_acp_setup.py install-paseo-plugin
   symlink-refusing — the same primitives
   `cortex_runtime.connections.registry` already uses). It never touches
   any project's own `.cortex` store.
-- **Default preset seeding.** `init-storage` also creates a missing `routing.json` and
-  `defaults.json` from the bundled preset (see [Default preset](../configuration.md#default-preset)).
+- **Default preset seeding.** `init-storage` creates absent `routing.json`,
+  `defaults.json` and `mcp-servers.json` files, plus one applied `default` profile in
+  an absent `routing-profiles.json` when the working settings match the preset. MCP
+  entries are disabled examples (`codebase-memory-mcp`, `playwright`, `vivaldi`),
+  not downloaded or launched executables. All paths are `/path/to/...` placeholders.
+  See [Default preset](../configuration.md#default-preset).
   An existing file is never replaced. Every Cortex agent start repeats this absent-only seeding.
 - **`add-connection`** registers (or reuses) one connection through the
   existing `connections.onboarding` API. An API-key secret is always read

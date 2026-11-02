@@ -268,7 +268,11 @@ files, with journaled recovery. States are `none`, `in_sync`, `modified`,
 `interrupted` and `unavailable`; modified activation requires an explicit
 discard choice or saving first. Format-1 routing-only profiles migrate on
 first mutation with a private verified backup and remain partial until saved
-as a full snapshot.
+as a full snapshot. First-run seeding creates one applied `default` profile only
+when the profiles file is absent and working routing/defaults/MCP policy matches
+the bundled preset. Its MCP definitions start disabled and use example paths;
+existing settings and saved profiles are never replaced or renamed. See
+[Default preset](../../configuration.md#default-preset).
 
 The runtime routing loader still uses first-existing-file precedence:
 project, `$CORTEX_ROUTING`, then user. Thus project/environment routing
