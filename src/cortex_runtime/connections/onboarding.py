@@ -315,8 +315,9 @@ def create_referenced_connection(
     launch_command: tuple[str, ...],
     reuse: bool = True,
     expected_revision: str | None = None,
+    automatic: bool = False,
     environ: dict[str, str] | None = None,
-) -> ConnectionRecord:
+) -> ConnectionRecord | None:
     """Register a connection that *references* the client's own native
     credential directory (D-T035-02) instead of owning a Cortex-managed copy.
 
@@ -335,6 +336,15 @@ def create_referenced_connection(
     fingerprint = trust.fingerprint(engine, provider, None, launch_command)
     now = _now_iso()
     with registry.transaction(environ) as state:
+        if automatic:
+            # Check opt-out and existing engines under the same lock as creation.
+            if engine in state.auto_connect_disabled:
+                return None
+            if any(record.engine == engine for record in state.connections.values()):
+                return None
+            marker = registry.client_native_dir(engine, environ) / _NATIVE_LOGIN_MARKER[engine]
+            if not marker.is_file():
+                return None
         if expected_revision is not None:
             data = registry.read_owner_file(registry.registry_path(environ))
             current = "absent" if data is None else "sha256:" + hashlib.sha256(data).hexdigest()
@@ -513,6 +523,8 @@ def remove(connection_id: str, *, environ: dict[str, str] | None = None) -> None
         if record is None:
             raise _authorization_error("connection_unavailable", "Unknown connection id.")
         state.override_history.pop(connection_id, None)
+        # Removal is an owner opt-out, committed atomically with the deletion.
+        state.auto_connect_disabled.add(record.engine)
         if isinstance(record.credential_ref, SecretFile) and registry.credential_ref_matches_canonical(record, environ):
             path = registry.secret_path(record.id, environ)
             try:
@@ -552,11 +564,9 @@ def sync_discovered_connections(discovered: dict, *, environ: dict[str, str] | N
     created via :func:`create_referenced_connection`. Idempotent and safe
     to call on every startup.
 
-    # ponytail: the read-then-create check below is not atomic across the
-    # two registry transactions (a concurrent second startup could still
-    # both pass the "no existing connection" check); create_referenced_connection's
-    # own reuse=True keeps that race harmless as long as both calls agree on
-    # provider/launch_command (true for two runs of the same install).
+    Automatic creation also requires a native login marker. The existing-engine
+    and owner-removal opt-out checks are repeated inside the creation transaction,
+    so concurrent startup/removal cannot recreate an owner-removed connection.
     """
     if not discovered:
         return []
@@ -576,11 +586,13 @@ def sync_discovered_connections(discovered: dict, *, environ: dict[str, str] | N
                 provider=provider,
                 launch_command=tuple(info.launch_command),
                 reuse=True,
+                automatic=True,
                 environ=environ,
             )
         except PortableError:
             continue
-        created.append(record)
+        if record is not None:
+            created.append(record)
     return created
 
 

@@ -138,6 +138,50 @@ def test_transient_store_error_is_not_read_as_channel_revocation(tmp_path):
 
 
 @pytest.mark.requires_bwrap
+def test_an_engine_installed_under_var_tmp_launches_in_the_jail(tmp_path, tree):
+    """The jail binds a private /var/tmp. Cortex's own engines live there
+    when XDG_DATA_HOME is under /var/tmp; the hidden install made every
+    jailed Codex launch fail its initialize while catalog refreshes, which
+    run unjailed, still worked (live, 2026-11-02). The verified install and
+    its node binary are sealed into the jail, read-only."""
+    import hashlib
+    import json
+    import tempfile
+    from cortex_runtime.engine.claude_install import ClaudeAcpInstall
+
+    environ = isolated_environ(tmp_path)
+    base = Path(tempfile.mkdtemp(prefix='cortex-test-var-tmp-engine-', dir='/var/tmp')).resolve()
+    try:
+        package = base / 'engines' / 'claude-agent-acp' / '0.97.0' / 'node_modules' / '@agentclientprotocol' / 'claude-agent-acp'
+        (package / 'dist').mkdir(parents=True)
+        entry = package / 'dist' / 'index.js'
+        entry.write_text('adapter-visible\n')
+        manifest = package / 'package.json'
+        manifest.write_text(json.dumps({'version': '0.97.0', 'bin': {'claude-agent-acp': 'dist/index.js'}}))
+        node = base / 'bin' / 'node'
+        node.parent.mkdir()
+        node.write_text('#!/bin/sh\ncat "$1"\necho x >> "$1" 2>/dev/null || echo sealed\nexec cat\n')
+        node.chmod(0o755)
+        install = ClaudeAcpInstall(
+            node_binary=str(node), adapter_entry=str(entry), package_json=str(manifest), package_version='0.97.0',
+            package_json_sha256=hashlib.sha256(manifest.read_bytes()).hexdigest(),
+            adapter_entry_sha256=hashlib.sha256(entry.read_bytes()).hexdigest(),
+        )
+        record = make_connection_record(new_connection_id(), (str(node), str(entry)),
+                                        engine='claude-agent-acp', environ=environ)
+        process = EngineProcess(record, str(tree), environ=environ, install=install, jail={'scopes': []})
+        try:
+            lines = [process.process.stdout.readline(), process.process.stdout.readline()]
+        finally:
+            process.release(grace=2.0)
+        stderr = (process.logs.directory / 'stderr.log').read_text()
+        assert lines == [b'adapter-visible\n', b'sealed\n'], stderr
+        assert entry.read_text() == 'adapter-visible\n'
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
+
+
+@pytest.mark.requires_bwrap
 def test_a_linked_engine_state_dir_and_config_still_run_locked_down(tmp_path, tree):
     """A dotfile manager links ~/.claude and its settings elsewhere; that
     refused every engine. It must run, with the config still read-only."""

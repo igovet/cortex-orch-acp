@@ -15,10 +15,12 @@ import {
 } from "./shared/config.js";
 import {
   applyDefaultPresetHandler, discoverConnectionsHandler, discoverOpenCodeHandler, installEngineHandler, onboardConnectionHandler, onboardOpenCodeHandler,
-  readConfigHandler, readDefaultPresetHandler, refreshModelCatalogHandler, resetDefaultPresetHandler, updateConfigHandler,
+  readConfigHandler, readDefaultPresetHandler, refreshModelCatalogHandler, resetDefaultPresetHandler, startAutomaticSetup, updateConfigHandler,
 } from "./server/config.js";
 
 export default function contribute(server: PluginServerContext) {
+  // Do not wait for npm/network before registering the provider or Settings.
+  void startAutomaticSetup().catch(() => {});
   server.registerProvider(createCortexProvider());
   server.handle(readWorkerHistory, instrumentHandler(readWorkerHistory.name, getWorkerHistory));
   server.handle(readPipeline, instrumentHandler(readPipeline.name, getPipeline));

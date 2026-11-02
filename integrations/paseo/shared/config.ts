@@ -363,6 +363,7 @@ export const connectionsResult = z.object({
   operations: z.array(z.string()),
   max_concurrent_sessions_limit: z.number(),
   connection: connection.optional(),
+  catalog_status: z.enum(["ready", "catalog_failed"]).optional(),
   opencode: z.object({
     version: z.string(),
     next_action: z.string().nullable(),
@@ -482,6 +483,8 @@ export const connectionsDiscoveryResult = z.object({
     already_connected: z.string().nullable(),
     qualified: z.boolean(),
     install_supported: z.boolean(),
+    automatic_setup: z.string().nullable().optional(),
+    auto_connect_disabled: z.boolean().optional(),
   })),
 });
 

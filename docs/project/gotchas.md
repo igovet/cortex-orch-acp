@@ -740,6 +740,17 @@ the agent showed only `engine_launch`. Read the engine's own `stderr.log`
 before blaming an engine version, and start daemons with `outside_command`. See
 [the dev Paseo environment](dev-environment.md).
 
+An engine root under `/var/tmp` is invisible to a jail unless its install is
+sealed in. A disposable qualification set `XDG_DATA_HOME` under `/var/tmp`, so
+Settings downloaded codex-acp there. Catalog refreshes, which run unjailed,
+listed models; every jailed task launch then failed: the Cortex Codex launcher
+could not run the bundled binary (exit 65), codex-acp answered `initialize` with
+error 1001, and the chat showed five `EngineProtocolError` retries with an empty
+`stderr.log` (2026-11-02). `engine.process._jail_launch_inputs` now mounts the
+verified install read-only into the jail. Prompt-free discriminator: ACP
+`initialize` alone, under a private `/var/tmp`, with and without the install
+directory bound.
+
 
 ## Paid desktop rerun runtime findings (2026-10-07)
 

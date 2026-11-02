@@ -1,8 +1,13 @@
 """Keep Cortex's own engine installs current (see ``discovery.owned_root``).
 
-Runs in the background at startup: asks npm for each engine's latest
-version and, iff it is newer than the newest owned install, installs it
-beside the current one (``<root>/<engine>/<version>``). Exact qualified SDK
+Runs in the background at startup: installs each engine's manifest pin
+(``pinned-dependencies.json`` ``pinned_package_version``, the current
+qualified adapter) iff it is not installed yet, beside the current one
+(``<root>/<engine>/<version>``). The Settings "Download engine" action
+(:func:`install_pinned_engine`) installs exactly the same version, so a
+first run never depends on which path ran first. npm's latest release is
+never downloaded: an unqualified adapter cannot launch anyway, and once a
+Cortex release qualifies one, its pin moves. Exact qualified SDK
 refreshes use ``<version>+sdk.<sdk-version>`` without replacing a running install. A new version is
 used from the next session on, never swapped under a running one; one
 previous version is kept to fall back to. No network, no npm, a failed
@@ -21,7 +26,6 @@ import threading
 
 from cortex_runtime.connections import discovery
 
-_TIMEOUT_VIEW = 20
 _TIMEOUT_INSTALL = 600
 _KEEP = 2  # the current version and one to fall back to
 # 0.87.0 pins SDK 0.3.287 upstream, which predates Haiku 5.5. This exact
@@ -47,9 +51,13 @@ def _run(args: list[str], timeout: int, environ: dict[str, str] | None) -> str:
                           stdin=subprocess.DEVNULL, check=True).stdout
 
 
-def _install_engine(engine: str, *, version: str | None = None, timeout: int = _TIMEOUT_INSTALL,
+def _install_engine(engine: str, *, version: str, background: bool, timeout: int = _TIMEOUT_INSTALL,
                     environ: dict[str, str] | None = None) -> str | None:
-    """Stage and publish an owned adapter, using the same checks for both callers."""
+    """Stage and publish one exact owned adapter, using the same checks for both callers.
+
+    An existing install is a no-op: the explicit action reports its version,
+    the background update reports nothing new.
+    """
     package = discovery._PACKAGE_NAME[engine]
     npm = _npm(environ)
     node = discovery._node_binary(environ)
@@ -64,18 +72,16 @@ def _install_engine(engine: str, *, version: str | None = None, timeout: int = _
             return None  # another Cortex process is already updating
         for stale in root.glob(".tmp-*"):
             shutil.rmtree(stale, ignore_errors=True)
-        latest = version or json.loads(_run([npm, "view", package, "version", "--json"], _TIMEOUT_VIEW, environ))
-        if not isinstance(latest, str) or not discovery.version_key(latest):
+        if not isinstance(version, str) or not discovery.version_key(version):
             return None
-        sdk_version = _CLAUDE_SDK_OVERRIDES.get(latest) if engine == "claude-agent-acp" else None
-        install_name = f"{latest}+sdk.{sdk_version}" if sdk_version else latest
-        installed = sorted((p.name for p in discovery._subdirs(root)), key=discovery.version_key)
-        if version is not None and (root / install_name).exists():
+        sdk_version = _CLAUDE_SDK_OVERRIDES.get(version) if engine == "claude-agent-acp" else None
+        install_name = f"{version}+sdk.{sdk_version}" if sdk_version else version
+        if (root / install_name).exists():
+            if background:
+                return None
             found = discovery._discover_in([root / install_name], engine, package,
                                            node, environ)
             return version if found is not None and found.version == version else None
-        if version is None and installed and discovery.version_key(install_name) <= discovery.version_key(installed[-1]):
-            return None
         staging = root / f".tmp-{install_name}"
         if sdk_version:
             staging.mkdir()
@@ -83,13 +89,12 @@ def _install_engine(engine: str, *, version: str | None = None, timeout: int = _
                 "private": True, "overrides": {_CLAUDE_SDK_PACKAGE: sdk_version},
             }), encoding="utf-8")
         _run([npm, "install", "--prefix", str(staging), "--no-audit", "--no-fund", "--omit=dev",
-              "--no-save", f"{package}@{latest}"], timeout, environ)
+              "--no-save", f"{package}@{version}"], timeout, environ)
         declared = discovery._declared_bin(staging / "node_modules" / package / "package.json")
-        if declared is None or declared[0] != latest:
+        if declared is None or declared[0] != version:
             shutil.rmtree(staging, ignore_errors=True)
             return None
-        if version is not None and discovery._discover_in(
-                [staging], engine, package, node, environ) is None:
+        if discovery._discover_in([staging], engine, package, node, environ) is None:
             shutil.rmtree(staging, ignore_errors=True)
             return None
         if sdk_version:
@@ -113,23 +118,16 @@ def _install_engine(engine: str, *, version: str | None = None, timeout: int = _
             if old.name in keep or discovery.is_pinned(engine, old.name):
                 continue
             shutil.rmtree(old, ignore_errors=True)
-        if version is None and discovery.is_qualified(engine, latest):
+        if background and discovery.is_qualified(engine, version):
             from ..configuration.management import follow_approved_adapters
 
             follow_approved_adapters(environ=environ)
-        return latest
+        return version
 
 
-def update_engine(engine: str, *, environ: dict[str, str] | None = None) -> str | None:
-    """Install the latest adapter/qualified dependency build; return the adapter version."""
-    return _install_engine(engine, environ=environ)
+def pinned_version(engine: str) -> str:
+    """The manifest pin both installers use: the current qualified adapter.
 
-
-def install_pinned_engine(engine: str, *, environ: dict[str, str] | None = None) -> str | None:
-    """Explicit, bounded install of the manifest pin, never an engine from PATH.
-
-    Reuses background-update staging/version/SDK checks, without changing existing
-    connections. Launch-time install integrity and instruction checks still apply.
     OpenCode has no Cortex-owned pinned installer and is deliberately unsupported.
     """
     from ..packaging.pinned import load_manifest
@@ -139,7 +137,21 @@ def install_pinned_engine(engine: str, *, environ: dict[str, str] | None = None)
     version = load_manifest().get("engines", {}).get(engine, {}).get("pinned_package_version")
     if not isinstance(version, str) or not discovery.version_key(version) or not discovery.is_qualified(engine, version):
         raise ValueError("The manifest does not name a qualified engine pin.")
-    return _install_engine(engine, version=version, timeout=60, environ=environ)
+    return version
+
+
+def update_engine(engine: str, *, environ: dict[str, str] | None = None) -> str | None:
+    """Background: install the manifest pin iff absent; return the newly installed version."""
+    return _install_engine(engine, version=pinned_version(engine), background=True, environ=environ)
+
+
+def install_pinned_engine(engine: str, *, environ: dict[str, str] | None = None) -> str | None:
+    """Explicit, bounded install of the manifest pin, never an engine from PATH.
+
+    Reuses background-update staging/version/SDK checks, without changing existing
+    connections. Launch-time install integrity and instruction checks still apply.
+    """
+    return _install_engine(engine, version=pinned_version(engine), background=False, timeout=60, environ=environ)
 
 
 def update_all(*, environ: dict[str, str] | None = None) -> dict[str, str]:
@@ -165,7 +177,9 @@ def start_background_update(*, environ: dict[str, str] | None = None) -> threadi
     env = os.environ if environ is None else environ
     if env.get(UPDATE_SWITCH, "").strip().lower() in {"off", "0", "false", "no"}:
         return None
-    thread = threading.Thread(target=update_all, kwargs={"environ": environ},
+    from .automatic import run
+
+    thread = threading.Thread(target=run, kwargs={"environ": environ},
                               name="cortex-engine-update", daemon=True)
     thread.start()
     return thread

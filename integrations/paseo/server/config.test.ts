@@ -78,7 +78,7 @@ function context(directories: Record<string, string>, options: { throwOnRef?: bo
   };
 }
 
-const ENV_KEYS = ["HOME", "XDG_CONFIG_HOME", "XDG_STATE_HOME", "CORTEX_PASEO_SOURCE_ROOT", "CORTEX_ACP_COMMAND", "CORTEX_ROUTING", "CORTEX_PASEO_SHIM"];
+const ENV_KEYS = ["HOME", "XDG_CONFIG_HOME", "XDG_STATE_HOME", "CORTEX_PASEO_SOURCE_ROOT", "CORTEX_ACP_COMMAND", "CORTEX_ROUTING", "CORTEX_PASEO_SHIM", "CORTEX_ENGINE_UPDATE"];
 const saved = new Map(ENV_KEYS.map((key) => [key, process.env[key]] as const));
 function restoreEnv(): void {
   for (const [key, value] of saved) {
@@ -118,6 +118,8 @@ function setupOwner(base: string): { home: string; configHome: string } {
 
 const base = mkdtempSync(join(tmpdir(), "cortex-config-rpc-"));
 try {
+  // Registration tests inspect pristine storage and never fetch engines.
+  process.env.CORTEX_ENGINE_UPDATE = "off";
   const { configHome } = setupOwner(base);
   process.env.CORTEX_PASEO_SOURCE_ROOT = repoRoot;
   const project = privateDir(join(base, "project"));

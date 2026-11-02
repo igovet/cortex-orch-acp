@@ -11,7 +11,7 @@ import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { homedir } from "node:os";
-import { runAcpProvider } from "@getpaseo/plugin/server/acp";
+import { runAcpProvider, type AcpTransformer } from "@getpaseo/plugin/server/acp";
 import type {
   ProviderEvent,
   ProviderRegistration,
@@ -922,8 +922,75 @@ export function withAccessModeVisuals<T extends { modes: ReadonlyArray<{ id: str
   };
 }
 
+/** Cortex's config ids for the model and its effort (acp/config_options.py). */
+const MODEL_CONFIG_ID = "model";
+const THOUGHT_LEVEL_CONFIG_ID = "thought_level";
+
+/** Each model's efforts, shared by the catalog and every chat's sessions;
+ * refreshed with each catalog, read once when nothing has loaded it yet. */
+export function modelEffortsCache(command: readonly string[]) {
+  let cached: Promise<Record<string, string[]>> | null = null;
+  const refresh = () => {
+    const loading = modelEfforts(command);
+    cached = loading;
+    loading.catch(() => { if (cached === loading) cached = null; });
+    return loading;
+  };
+  return { refresh, get: () => cached ?? refresh() };
+}
+
+/** The Cortex transformer around the stock ACP bridge. */
+export function cortexTransformer(
+  command: readonly string[], fence: WorkerCardFence,
+  efforts: ReturnType<typeof modelEffortsCache> = modelEffortsCache(command),
+): AcpTransformer {
+  return {
+    async discover(catalog) {
+      try {
+        return withAccessModeVisuals(withModelEfforts(catalog, await efforts.refresh()));
+      } catch {
+        // Cortex unavailable: the bridge's own catalog, only the mode visuals added
+        return withAccessModeVisuals(catalog);
+      }
+    },
+    // Paseo's composer keeps its thinking choice across model switches and
+    // sends it with the next model. A model without efforts (Haiku) has no
+    // thought_level option, and the bridge then refuses to create the chat;
+    // an effort the model does not offer is refused by Cortex. Either way the
+    // stale choice is dropped and the model keeps the effort Cortex selects
+    // for it; an effort the model offers is applied as before.
+    async configure(change, context) {
+      if (change.target !== "thinking") return "pass";
+      const values = await context.config.read();
+      if (!(THOUGHT_LEVEL_CONFIG_ID in values)) return "handled";
+      const model = values[MODEL_CONFIG_ID];
+      if (change.value === null || typeof model !== "string") return "pass";
+      let offered: string[] | undefined;
+      try {
+        offered = (await efforts.get())[model];
+      } catch {
+        return "pass";
+      }
+      return offered !== undefined && !offered.includes(change.value) ? "handled" : "pass";
+    },
+    toolCall(received) {
+      // A worker card keeps the status Cortex sent, never the bridge's
+      // own turn-end settlement merged into a later update.
+      const snapshot = nativeEditSnapshot(fence.toolCall(received));
+      if (snapshot.status !== "failed" || snapshot.output !== null) {
+        return snapshot;
+      }
+      return {
+        ...snapshot,
+        output: `Tool call failed: ${snapshot.title}`,
+      };
+    },
+  };
+}
+
 export function createCortexProvider(): ProviderRegistration {
   const command = cortexCommand();
+  const efforts = modelEffortsCache(command);
   const makeBase = (replay: ReplayController, fence: WorkerCardFence) => runAcpProvider({
     // Register the native provider under `cortex` for new chats. The setup
     // command removes only the exact owned generic registration; old generic
@@ -946,28 +1013,7 @@ export function createCortexProvider(): ProviderRegistration {
     // item, while ACP permits rawOutput to be omitted. Preserve the observed
     // failure status and title when an agent supplies no output; do not claim
     // an underlying cause that the ACP event did not report.
-    transformers: [{
-      async discover(catalog) {
-        try {
-          return withAccessModeVisuals(withModelEfforts(catalog, await modelEfforts(command)));
-        } catch {
-          // Cortex unavailable: the bridge's own catalog, only the mode visuals added
-          return withAccessModeVisuals(catalog);
-        }
-      },
-      toolCall(received) {
-        // A worker card keeps the status Cortex sent, never the bridge's
-        // own turn-end settlement merged into a later update.
-        const snapshot = nativeEditSnapshot(fence.toolCall(received));
-        if (snapshot.status !== "failed" || snapshot.output !== null) {
-          return snapshot;
-        }
-        return {
-          ...snapshot,
-          output: `Tool call failed: ${snapshot.title}`,
-        };
-      },
-    }],
+    transformers: [cortexTransformer(command, fence, efforts)],
   });
 
   const base = makeBase(new ReplayController(command), new WorkerCardFence());

@@ -859,6 +859,33 @@ os.execv(BINARY, [BINARY, *BASE, *overrides, "app-server"])
     return str(wrapper)
 
 
+def _jail_launch_inputs(verified_install, *extra) -> list[str]:
+    """The host files a jailed engine launches from, to be sealed into its jail.
+
+    The jail binds a private ``/var/tmp`` (``orchestration.sandbox``), so an
+    install below it -- ``XDG_DATA_HOME`` under ``/var/tmp`` puts Cortex's own
+    engines there -- was invisible inside: the Codex wrapper could not run its
+    bundled binary, codex-acp answered ``initialize`` with an error, and every
+    task launch failed while the unjailed catalog refresh still worked. Each
+    input is mounted read-only over itself, wherever it lives. Only the
+    adapter's own ``node_modules`` tree is sealed as a directory; any other
+    layout seals just the package directory.
+    """
+    package_dir = Path(verified_install.package_json).parent
+    modules = package_dir.parents[1]
+    tree = modules if modules.name == "node_modules" else package_dir
+    candidates = [verified_install.node_binary, tree,
+                  getattr(verified_install, "bundled_codex_binary", None), *extra]
+    inputs = []
+    for candidate in candidates:
+        if not candidate:
+            continue
+        real = _resolved(Path(candidate))
+        if real is not None and real.exists() and str(real) not in inputs:
+            inputs.append(str(real))
+    return inputs
+
+
 def _validation_error(code, remediation, *, field=None):
     return PortableError(
         category=PortableErrorCategory.VALIDATION, code=code, remediation=remediation,
@@ -984,6 +1011,7 @@ class EngineProcess:
             )
         pinned_engine_vars = None
         adapter_entry_override = None
+        jail_inputs: list[str] = []
         if install is not None:
             install_module = _INSTALL_MODULE_BY_ENGINE.get(record.engine)
             if install_module is None:
@@ -1031,6 +1059,11 @@ class EngineProcess:
                     ),
                     "NO_BROWSER": "1",
                 }
+            if jail is not None and record.engine in ("codex-acp", "claude-agent-acp"):
+                private = ()
+                if adapter_entry_override is not None:
+                    private = (Path(adapter_entry_override).parents[1], pinned_engine_vars["CODEX_PATH"])
+                jail_inputs = _jail_launch_inputs(verified_install, *private)
 
         base_env = dict(os.environ if environ is None else environ)
         # Pass this connection's own resolution ``environ`` through
@@ -1091,7 +1124,7 @@ class EngineProcess:
                 from ..connections.environment import engine_state_dir
                 state = engine_state_dir(record.engine, process_env)
                 isolation = {}
-                sealed = []
+                sealed = list(jail_inputs)
                 if opencode:
                     from .opencode_adapter_acp import USER_CONFIG_RELATIVE
 

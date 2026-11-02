@@ -102,7 +102,8 @@ def test_startup_follows_existing_connections(monkeypatch):
     monkeypatch.setattr(management, "follow_approved_adapters", lambda: calls.append("follow"))
     monkeypatch.setattr(engine_update, "start_background_update", lambda: calls.append("update"))
     cortex_acp._ensure_first_run_configuration()
-    assert calls == ["discover", "follow", "update"]
+    # Discovery/download/model observation run together off the startup path.
+    assert calls == ["follow", "update"]
 
 
 def test_opt_out(tmp_path):
@@ -193,6 +194,9 @@ def test_update_installs_then_selects_only_approved(tmp_path, monkeypatch, lates
         return ""
 
     monkeypatch.setattr(engine_update, "_run", npm)
-    assert engine_update.update_engine(record.engine, environ=env) == latest
+    # The shared installer always requests the qualified manifest pin; a
+    # mismatched npm result is rejected, never published or selected.
+    result = engine_update.update_engine(record.engine, environ=env)
+    assert result == (latest if changed else None)
     actual = registry.read_registry(env).connections[record.id]
     assert (actual.launch_command != record.launch_command) is changed

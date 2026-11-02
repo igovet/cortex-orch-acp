@@ -613,6 +613,16 @@ test("engine status text names the next step for every discovery status", () => 
   assert.equal(engineStatusText(engineRow({ status: "future_state" })), "Status: future_state.");
 });
 
+test("automatic progress and owner removal have actionable status", () => {
+  for (const phase of ["downloading", "connecting", "refreshing_models"]) {
+    assert.match(engineStatusText(engineRow({ automatic_setup: phase })), /Automatically/);
+  }
+  assert.match(engineStatusText(engineRow({ automatic_setup: "catalog_failed" })), /Refresh model lists/);
+  assert.match(engineStatusText(engineRow({ automatic_setup: "interrupted" })), /interrupted/);
+  assert.match(engineStatusText(engineRow({ auto_connect_disabled: true, status: "ready_to_connect",
+    native_login_detected: true, qualified: true })), /removed it.*Add connection/);
+});
+
 test("Add connection is offered only for a qualified, logged-in, unconnected engine; Download only for a missing or unqualified pinned adapter", () => {
   assert.equal(engineCanConnect(engineRow({ status: "ready_to_connect", qualified: true })), true);
   assert.equal(engineCanConnect(engineRow({ status: "ready_to_connect", qualified: false })), false);

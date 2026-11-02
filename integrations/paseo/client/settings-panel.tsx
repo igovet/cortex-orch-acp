@@ -1769,7 +1769,6 @@ function EngineSetup({ revision, onConnected, theme }: { revision: string | null
   const seenRevision = useRef<string | null>(null);
 
   const check = useCallback(async () => {
-    setState({ status: "loading" });
     try {
       const out = await discover({});
       setState(out.ok ? { status: "ready", result: out.result } : { status: "error", message: describeConfigError(out.error) });
@@ -1778,6 +1777,13 @@ function EngineSetup({ revision, onConnected, theme }: { revision: string | null
     }
   }, [discover]);
   useEffect(() => { check(); }, [check]);
+  // Poll only while mounted; discovery is passive and never starts a download.
+  useEffect(() => {
+    const timer = setInterval(() => { if (!pending.current) { void check(); void onConnected(); } }, 3000);
+    // Browser timers are numeric; Node renderers must not be kept alive by polling.
+    (timer as unknown as { unref?: () => void }).unref?.();
+    return () => clearInterval(timer);
+  }, [check, onConnected]);
   // A connection renamed, removed or added changes the registry: re-check.
   useEffect(() => {
     if (revision === null) return;
@@ -1830,7 +1836,7 @@ function EngineSetup({ revision, onConnected, theme }: { revision: string | null
         const connection = out.result.connection;
         setOutcome(row.engine, { tone: "success", text: out.result.changed === false
           ? `${row.engine} was already connected${connection ? ` (${connection.id})` : ""}; nothing changed.`
-          : `Connected ${row.engine}${connection ? ` as ${connection.name} (${connection.id})` : ""}. Use Validate on it to check the login.` });
+          : `Connected ${row.engine}${connection ? ` as ${connection.name} (${connection.id})` : ""}. ${out.result.catalog_status === "catalog_failed" ? "Model discovery failed; use Refresh model lists to retry." : "Model list refreshed."}` });
         await check();
         await onConnected();
       } else {

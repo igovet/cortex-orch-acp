@@ -1567,8 +1567,11 @@ def onboard_opencode(expected_revision, *, explicit_opt_in, binary: str | None =
         launch_command=opencode_install.launch_command_for(install), reuse=True, environ=env,
     )
     record = onboarding.validate(record.id, environ=env)
+    from ..connections.automatic import refresh_connection
+
+    catalog_status = refresh_connection(record, environ=env)
     return dict(
-        read_connections(env), changed=True, connection=_connection_view(record),
+        read_connections(env), changed=True, connection=_connection_view(record), catalog_status=catalog_status,
         opencode=dict(version=install.version, next_action=_OPENCODE_NEXT_ACTION.get(record.state.value),
                       automatic_routing="excluded_until_routing_opts_in"),
     )
@@ -1602,10 +1605,11 @@ def discover_connections(*, environ: Mapping[str, str] | None = None) -> dict[st
     OpenCode's version probe uses disposable sandbox files, not owner config.
     A login marker is not proof of a working account or available models.
     """
-    from ..connections import discovery
+    from ..connections import automatic, discovery
 
     env = _env(environ)
     view = read_connections(env)
+    state = registry.inspect_registry(env)
     engines = []
     for engine in SUPPORTED_ENGINES:
         found = _discover_connection_engine(engine, env)
@@ -1616,7 +1620,9 @@ def discover_connections(*, environ: Mapping[str, str] | None = None) -> dict[st
         engines.append(dict(engine=engine, status=status, version=found.version if found else None,
                             native_login_detected=login, already_connected=connected,
                             qualified=bool(found and discovery.is_qualified(engine, found.version)),
-                            install_supported=engine in discovery.SUPPORTED_ENGINES))
+                            install_supported=engine in discovery.SUPPORTED_ENGINES,
+                            automatic_setup=automatic.read_status(engine, env),
+                            auto_connect_disabled=engine in state.auto_connect_disabled))
     return dict(surface="connections", revision=view["revision"], engines=engines)
 
 
@@ -1658,7 +1664,11 @@ def onboard_connection(engine, expected_revision, *, explicit_opt_in,
     record = onboarding.create_referenced_connection(
         name=engine, engine=engine, provider=onboarding._DISCOVERY_PROVIDER[engine],
         launch_command=tuple(found.launch_command), reuse=True, expected_revision=expected, environ=env)
-    return dict(read_connections(env), changed=True, connection=_connection_view(record))
+    from ..connections.automatic import refresh_connection
+
+    catalog_status = refresh_connection(record, environ=env)
+    return dict(read_connections(env), changed=True, connection=_connection_view(record),
+                catalog_status=catalog_status)
 
 
 def install_engine(engine, *, environ: Mapping[str, str] | None = None) -> dict[str, object]:
@@ -1681,6 +1691,9 @@ def install_engine(engine, *, environ: Mapping[str, str] | None = None) -> dict[
     if version is None:
         raise _error("engine_install_failed", "Pinned installation is unavailable, busy or failed verification.",
                      field="engine")
+    from ..connections.automatic import record_status
+
+    record_status(engine, "downloaded", env)
     return dict(engine=engine, version=version, status="installed", discovery=discover_connections(environ=env))
 
 

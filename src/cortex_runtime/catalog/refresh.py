@@ -27,9 +27,9 @@ opens (``delegation.live_adapters.EngineSessionManagerAdapter.open``), and
 that already captures the real, just-observed ``configOptions`` into a
 fresh catalog snapshot on every such open (see
 ``EngineSessionManagerAdapter._capture_catalog_observation``) -- for free,
-with no second engine process. This module is not wired to run
-automatically anywhere; it exists only as the explicit, on-demand
-:func:`perform_refresh` entry point (``scripts/cortex_acp_setup.py``'s
+with no second engine process. First-run background setup and Settings
+registration now call :func:`perform_refresh` immediately for a new connection.
+It also remains the explicit, on-demand entry point (``scripts/cortex_acp_setup.py``'s
 ``refresh-catalog`` step) for a connection that has no catalog yet, or
 whose catalog a caller wants refreshed without waiting for/running a real
 task. (An earlier revision of this module also carried an

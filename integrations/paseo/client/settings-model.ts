@@ -1382,6 +1382,19 @@ export const ENGINE_LOGIN_HINTS: Readonly<Record<string, string>> = {
 /** One line saying where an engine stands and what the owner does next. */
 export function engineStatusText(row: EngineDiscoveryView): string {
   const version = row.version ? ` ${row.version}` : "";
+  const progress: Record<string, string> = {
+    downloading: "Automatically downloading Cortex's pinned adapter…",
+    connecting: "Automatically connecting the detected native account…",
+    refreshing_models: "Automatically loading model lists (no model prompt)…",
+    download_failed: "Automatic download failed. Check npm/network and use Download engine to retry.",
+    setup_failed: "Automatic setup failed. Check again or use the manual actions.",
+    interrupted: "Automatic setup was interrupted; it will retry at the next start. Manual actions remain available.",
+    catalog_failed: "Connected, but automatic model discovery failed. Use Refresh model lists to retry.",
+  };
+  if (row.auto_connect_disabled && row.status !== "connected") {
+    return `Automatic connection is off because you removed it. ${row.native_login_detected && row.qualified ? "Use Add connection to restore it explicitly." : "Download the engine and log in to restore it manually."}`;
+  }
+  if (row.automatic_setup && progress[row.automatic_setup]) return progress[row.automatic_setup];
   switch (row.status) {
     case "connected":
       return `Connected (${row.already_connected ?? "registered"}). Use Validate on its connection to check the login.`;

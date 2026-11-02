@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -7,6 +7,9 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import test from "node:test";
 import { build } from "esbuild";
 import { loadServerModuleForTest } from "./test-bundle.ts";
+
+// Activation tests must never download engines or use native accounts.
+process.env.CORTEX_ENGINE_UPDATE = "off";
 
 const pluginRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const repoRoot = resolve(pluginRoot, "../..");
@@ -109,6 +112,38 @@ test("each Paseo profile launches only its own launch record", async () => {
     for (const [key, value] of saved) {
       if (value === undefined) delete process.env[key];
       else process.env[key] = value;
+    }
+    rmSync(isolated, { recursive: true, force: true });
+  }
+});
+
+test("automatic setup uses the configured owner runtime", async () => {
+  const isolated = mkdtempSync(join(tmpdir(), "cortex-auto-start-"));
+  const saved = new Map(LAUNCH_ENV.map((key) => [key, process.env[key]] as const));
+  try {
+    const src = join(isolated, "src");
+    mkdirSync(join(src, "cortex_runtime", "configuration"), { recursive: true });
+    mkdirSync(join(src, "cortex_runtime", "connections"), { recursive: true });
+    writeFileSync(join(src, "cortex_acp.py"), "# fake entry");
+    const shimDir = join(isolated, "integrations", "paseo", "server");
+    mkdirSync(shimDir, { recursive: true });
+    writeFileSync(join(shimDir, "acp-load-shim.mjs"), "// fake shim");
+    writeFileSync(join(src, "cortex_runtime", "configuration", "management.py"), "# supported API");
+    writeFileSync(join(src, "cortex_runtime", "connections", "automatic.py"), [
+      "import os, pathlib",
+      "def run():",
+      "    pathlib.Path(os.environ['HOME'], 'automatic-ran').touch()",
+    ].join("\n"));
+    process.env.HOME = isolated;
+    process.env.XDG_CONFIG_HOME = join(isolated, "config");
+    process.env.CORTEX_PASEO_SOURCE_ROOT = isolated;
+    delete process.env.CORTEX_ACP_COMMAND;
+    const config = await loadServerModuleForTest<typeof import("./config.ts")>(join(pluginRoot, "server", "config.ts"));
+    await config.startAutomaticSetup();
+    assert.equal(existsSync(join(isolated, "automatic-ran")), true);
+  } finally {
+    for (const [key, value] of saved) {
+      if (value === undefined) delete process.env[key]; else process.env[key] = value;
     }
     rmSync(isolated, { recursive: true, force: true });
   }

@@ -229,17 +229,21 @@ for the full Git-hosted install and update reference.
 
 ### 2. Connect an engine
 
-**From Paseo Settings (native account, `codex-acp` and `claude-agent-acp`).** Open
-Cortex Settings and use *Engines: download and connect* under Connections:
+**Automatic native-account setup (`codex-acp` and `claude-agent-acp`).** On
+plugin or agent startup, Cortex seeds missing default-preset files and downloads
+its own qualified, pinned adapters in the background through npm into
+`$XDG_DATA_HOME/cortex/engines`, or `~/.local/share/cortex/engines`. When an
+engine's native login marker exists, Cortex registers its missing connection
+and immediately loads its model list, without sending a model prompt. Existing
+connections are preserved. Cortex Settings → Connections shows progress and failures.
 
-1. *Download engine* installs Cortex's own pinned adapter with npm (up to about a
-   minute) into `$XDG_DATA_HOME/cortex/engines`, or `~/.local/share/cortex/engines`.
-   Nothing else is downloaded.
-2. Log in once with the engine's own command, outside Cortex (for example
-   `claude /login`).
-3. Switch on *Connect <engine> through my own account login*, then press
-   *Add connection*. Cortex registers a native-account connection that references your
-   existing login directory. It copies no credential.
+Log in once outside Cortex with the engine's own command (`codex login` or
+`claude` and `/login`). If automatic setup already finished without a login,
+restart the plugin/agent or use *Add connection* with its opt-in switch. Removing
+a connection disables automatic registration for that engine; only an explicit
+*Add connection* restores it. *Download engine* remains a manual retry (up to a
+minute). `CORTEX_ENGINE_UPDATE=off` skips the automatic setup pass. No credential
+is copied, and OpenCode remains manual.
 
 Settings checks only that the engine's login marker file exists, not that the login
 works, so press *Validate* on the new connection. Settings never asks for an API key.

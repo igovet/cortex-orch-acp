@@ -183,6 +183,8 @@ def test_startup_discovery_sync_is_idempotent_and_never_mutates_existing(tmp_pat
     _write_package(entry, "@agentclientprotocol/codex-acp")
     found = discovery.discover_all(registry_root=registry_root, node_binary="/usr/bin/node", environ={"HOME": str(home)})
 
+    (home / ".codex").mkdir(mode=0o700)
+    (home / ".codex" / "auth.json").touch()
     created = onboarding.sync_discovered_connections(found)
     assert len(created) == 1
     first_id = created[0].id
@@ -343,6 +345,8 @@ def test_discovery_alone_never_repoints_existing_connections(tmp_path, monkeypat
     entry.mkdir()
     _write_package(entry, "@agentclientprotocol/codex-acp")
     found = discovery.discover_all(registry_root=registry_root, node_binary="/usr/bin/node", environ={"HOME": str(home)})
+    (home / ".codex").mkdir(mode=0o700)
+    (home / ".codex" / "auth.json").touch()
     created = onboarding.sync_discovered_connections(found)
     assert len(created) == 1
     connection_id = created[0].id

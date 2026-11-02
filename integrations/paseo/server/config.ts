@@ -87,6 +87,21 @@ const REFRESH_TIMEOUT_MS = 60000;
 const INSTALL_TIMEOUT_MS = 90000;
 const MAX_OUTPUT_BYTES = 8 * 1024 * 1024;
 
+/** Called once by plugin activation, not by Settings reads. Fire-and-forget:
+ * the owned Python worker holds a cross-process lock and reports safe progress. */
+export async function startAutomaticSetup(): Promise<void> {
+  const runtime = configRuntime();
+  if (isFailure(runtime)) return;
+  const script = [
+    "import sys", "sys.path.insert(0, sys.argv[1])",
+    "from cortex_runtime.connections.automatic import run", "run()",
+  ].join("\n");
+  await runProcess(runtime.interpreter, ["-B", "-c", script, runtime.srcDir], {
+    timeoutMs: 30 * 60 * 1000, maxBuffer: MAX_OUTPUT_BYTES,
+    env: runtime.env, cwd: "/",
+  });
+}
+
 const BOOT = [
   "import sys",
   "sys.path.insert(0, sys.argv[1])",
@@ -635,7 +650,7 @@ export const onboardConnectionHandler = guarded(async (input: ConnectionOnboardI
     const outcome = await callApi(runtime, {
       action: "onboard_connection", surface: "connections", engine: input.engine,
       expected_revision: input.expected_revision, explicit_opt_in: input.explicit_opt_in === true,
-    }, WRITE_TIMEOUT_MS);
+    }, REFRESH_TIMEOUT_MS);
     if (isFailure(outcome)) return refused(bound, outcome.failure);
     if (!outcome.ok) return refused(bound, convertError(outcome.error, scope));
     const typed = typedSurface("connections", outcome.result, scope);
@@ -696,7 +711,7 @@ export const onboardOpenCodeHandler = guarded(async (
     const outcome = await callApi(runtime, {
       action: "onboard_opencode", surface: "connections", expected_revision: input.expected_revision,
       explicit_opt_in: input.explicit_opt_in === true, ...(input.name === undefined ? {} : { name: input.name }),
-    }, WRITE_TIMEOUT_MS);
+    }, REFRESH_TIMEOUT_MS);
     if (isFailure(outcome)) return refused(bound, outcome.failure);
     if (!outcome.ok) return refused(bound, convertError(outcome.error, scope));
     const typed = typedSurface("connections", outcome.result, scope);

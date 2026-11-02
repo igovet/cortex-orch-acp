@@ -356,7 +356,7 @@ def test_installer_does_not_use_client_adapter_or_publish_wrong_version(env, mon
 def test_installer_never_confuses_a_broken_pin_with_another_qualified_install(env, monkeypatch):
     pinned = installed(env, "codex-acp")
     (pinned / "index.js").unlink()
-    installed(env, "codex-acp", "2.3.0")
+    installed(env, "codex-acp", "2.1.1")
     monkeypatch.setattr(engine_update, "_npm", lambda environ: "/fake/npm")
     def unexpected(*args, **kwargs):
         pytest.fail("A broken existing owned pin must fail closed, not run npm or substitute.")
@@ -369,3 +369,181 @@ def test_main_dispatches_new_management_actions(env):
     output = io.StringIO()
     assert m.main(io.StringIO('{"surface":"connections","action":"discover_connections"}'), output) == 0
     assert len(json.loads(output.getvalue())["result"]["engines"]) == 3
+
+
+@pytest.mark.parametrize("engine", discovery.SUPPORTED_ENGINES)
+def test_automatic_install_connect_refresh_in_one_pass(env, monkeypatch, engine):
+    from cortex_runtime.connections import automatic
+    from cortex_runtime.catalog import refresh
+    from types import SimpleNamespace
+
+    env["CORTEX_ENGINE_UPDATE"] = "on"
+    marker = login(env, engine)
+    calls = []
+    def install(which, **kw):
+        installed(env, which)
+        calls.append(("install", which))
+    def observe(record, workspace, **kw):
+        assert record.id in registry.read_registry(env).connections
+        assert record.auth_mode.value == "native_account"
+        assert kw["timeout"] == 20 and Path(workspace).is_dir()
+        calls.append(("models", record.engine))
+        return SimpleNamespace(success=True)
+    real_read = Path.read_bytes
+    def read(path):
+        assert path != marker, "automatic setup must never read a credential"
+        return real_read(path)
+    monkeypatch.setattr(Path, "read_bytes", read)
+    monkeypatch.setattr(engine_update, "update_engine", install)
+    monkeypatch.setattr(refresh, "perform_refresh", observe)
+    automatic.run(environ=env)
+    records = registry.read_registry(env).connections
+    assert [r.engine for r in records.values()] == [engine]
+    assert calls.index(("install", engine)) < calls.index(("models", engine))
+    assert automatic.read_status(engine, env) == "ready"
+    other = next(e for e in discovery.SUPPORTED_ENGINES if e != engine)
+    assert automatic.read_status(other, env) == "login_required"
+
+
+def test_automatic_respects_removal_and_explicit_restore(env, monkeypatch):
+    from cortex_runtime.connections import automatic
+    env["CORTEX_ENGINE_UPDATE"] = "on"
+    for engine in discovery.SUPPORTED_ENGINES:
+        installed(env, engine)
+        login(env, engine)
+    monkeypatch.setattr(engine_update, "update_engine", lambda *a, **kw: None)
+    monkeypatch.setattr(automatic, "refresh_connection", lambda *a, **kw: "ready")
+    automatic.run(environ=env)
+    before = registry.read_registry(env)
+    assert len(before.connections) == 2
+    record = next(r for r in before.connections.values() if r.engine == "codex-acp")
+    onboarding.remove(record.id, environ=env)
+    automatic.run(environ=env)
+    state = registry.read_registry(env)
+    assert len(state.connections) == 1
+    assert state.auto_connect_disabled == {"codex-acp"}
+    assert automatic.read_status("codex-acp", env) == "opted_out"
+    row = request(env)["result"]["engines"][0]
+    assert row["auto_connect_disabled"] and row["status"] == "ready_to_connect"
+    result = request(env, action="onboard_connection", engine="codex-acp",
+                     expected_revision=request(env)["result"]["revision"], explicit_opt_in=True)
+    assert result["ok"] and result["result"]["catalog_status"] == "ready"
+    assert len(registry.read_registry(env).connections) == 2
+    # The owner-removal opt-out survives manual restoration and later startup.
+    assert "codex-acp" in registry.read_registry(env).auto_connect_disabled
+
+
+def test_automatic_serializes_concurrent_startups_and_never_rewrites_existing(env, monkeypatch):
+    import threading
+    from cortex_runtime.connections import automatic
+    env["CORTEX_ENGINE_UPDATE"] = "on"
+    installed(env, "codex-acp")
+    login(env, "codex-acp")
+    entered, release = threading.Event(), threading.Event()
+    calls = []
+    def update(engine, **kw):
+        calls.append(engine)
+        if engine == "codex-acp":
+            entered.set()
+            assert release.wait(5)
+    monkeypatch.setattr(engine_update, "update_engine", update)
+    monkeypatch.setattr(automatic, "refresh_connection", lambda *a, **kw: "ready")
+    worker = threading.Thread(target=automatic.run, kwargs={"environ": env})
+    worker.start()
+    try:
+        assert entered.wait(5)
+        assert automatic.read_status("codex-acp", env) == "downloading"
+        automatic.run(environ=env)
+        assert calls == ["codex-acp"]
+    finally:
+        release.set()
+        worker.join(5)
+    assert not worker.is_alive()
+    before = registry.registry_path(env).read_bytes()
+    automatic.run(environ=env)
+    assert registry.registry_path(env).read_bytes() == before
+
+
+def test_automatic_existing_copy_works_offline_and_catalog_failure_is_visible(env, monkeypatch):
+    from cortex_runtime.connections import automatic
+    env["CORTEX_ENGINE_UPDATE"] = "on"
+    installed(env, "codex-acp")
+    login(env, "codex-acp")
+    def offline(*a, **kw):
+        raise OSError("private registry error must not be exposed")
+    monkeypatch.setattr(engine_update, "update_engine", offline)
+    monkeypatch.setattr(automatic, "refresh_connection", lambda *a, **kw: "catalog_failed")
+    automatic.run(environ=env)
+    assert len(registry.read_registry(env).connections) == 1
+    rows = request(env)["result"]["engines"]
+    assert rows[0]["automatic_setup"] == "catalog_failed"
+    assert rows[1]["automatic_setup"] == "download_failed"
+    assert "private registry" not in json.dumps(rows)
+
+
+def test_automatic_off_is_non_mutating_and_stale_progress_is_interrupted(env, tmp_path):
+    from cortex_runtime.connections import automatic
+    before = tree(tmp_path)
+    automatic.run(environ=env)
+    assert tree(tmp_path) == before
+    automatic._status("codex-acp", "downloading", env)
+    assert automatic.read_status("codex-acp", env) == "interrupted"
+
+
+def test_removal_racing_automatic_creation_stays_removed(env):
+    found = discovery.EngineDiscovery(engine="codex-acp", version="2.3.0",
+                                     launch_command=("/usr/bin/node", "/fake/index.js"),
+                                     native_credential_dir=str(registry.client_native_dir("codex-acp", env)))
+    login(env, "codex-acp")
+    record = onboarding.create_referenced_connection(name="owner", engine="codex-acp", provider="openai",
+                                                    launch_command=found.launch_command, environ=env)
+    onboarding.remove(record.id, environ=env)
+    assert onboarding.sync_discovered_connections({"codex-acp": found}, environ=env) == []
+    assert not registry.read_registry(env).connections
+
+
+@pytest.mark.parametrize("disabled", ["codex-acp", ["unknown"], ["codex-acp", "codex-acp"], [1]])
+def test_registry_rejects_malformed_automatic_opt_out(disabled):
+    with pytest.raises(PortableError):
+        registry._parse_registry_bytes(json.dumps({"schema_version": 1, "auto_connect_disabled": disabled}).encode())
+
+
+def test_manual_registration_refreshes_without_rolling_back_on_failure(env, monkeypatch):
+    from cortex_runtime.connections import automatic
+    from cortex_runtime.catalog import refresh
+    installed(env, "codex-acp")
+    login(env, "codex-acp")
+    calls = []
+    def broken(record, workspace, **kw):
+        calls.append(record.id)
+        raise RuntimeError("not returned to Settings")
+    monkeypatch.setattr(refresh, "perform_refresh", broken)
+    response = request(env, action="onboard_connection", engine="codex-acp",
+                       expected_revision="absent", explicit_opt_in=True)
+    assert response["ok"]
+    assert response["result"]["catalog_status"] == "catalog_failed"
+    assert list(registry.read_registry(env).connections) == calls
+
+
+def test_automatic_models_are_selectable_without_manual_catalog_refresh(env, monkeypatch):
+    from cortex_runtime.connections import automatic
+    from cortex_runtime.catalog import refresh, store as catalog_store
+    from cortex_runtime.acp import config_options
+
+    env["CORTEX_ENGINE_UPDATE"] = "on"
+    installed(env, "codex-acp")
+    login(env, "codex-acp")
+    monkeypatch.setattr(engine_update, "update_engine", lambda *a, **kw: None)
+    options = json.loads((Path(__file__).parent / "fixtures/catalog/codex_acp_config_options.json").read_text())["configOptions"]
+    # Replace only engine transport; keep the real catalog builder, persistence,
+    # discovery provenance and ACP selector boundary.
+    monkeypatch.setattr(refresh, "_read_catalog_from_engine", lambda *a, **kw: options)
+    monkeypatch.setattr(refresh, "_codex_effort_ceiling", lambda *a, **kw: None)
+    automatic.run(environ=env)
+    record = next(iter(registry.read_registry(env).connections.values()))
+    snapshot = catalog_store.latest_connection_snapshot(record.id, env)
+    assert snapshot is not None
+    assert {e.route.model for e in snapshot.entries} == {"model-a", "model-b"}
+    assert automatic.read_status("codex-acp", env) == "ready"
+    selectable = config_options.selectable_entries_from_snapshots({record.id: record}, environ=env)
+    assert {e.route.model for e in selectable} == {"model-a", "model-b"}
