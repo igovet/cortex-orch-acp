@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.0.6 (unreleased)
+
+Paseo 0.15.0 is qualified for the CLI runtime and protocol behavior exercised by the owner-requested paid `cli` checks, through the isolated dev Paseo daemon and disposable projects only, on `codex-acp/gpt-6-luna:high`. A lifecycle run with mandatory independent review and verification passed; a model remark on a Git-initialized fixture passed with the unchanged-project review waiver; and a user question whose answer resumed the run passed. A first model-remark run used a non-Git fixture that did not satisfy the review-or-waiver baseline; that failure is retained in the dev environment guide and is not attributed to Paseo 0.15.0. This release changes no runtime behavior and records the CLI qualification and the package version bump. It does not establish rendered desktop/GUI behavior, release readiness or qualification of other Paseo versions.
+
 ## 1.0.5 (unreleased)
 
 A worker that published its report but ended its turn without `result_submit` is now shut down and released. Before this, the runtime recorded that report as the worker's result under the assignment key instead of the attempt id. The finished-worker shutdown then tried to stop an engine under the assignment key, matched nothing and never retried, so the worker's engine stayed live. Every later close-out stopped with `workers_still_live_or_unknown`. A live Codex worker held a finished task this way for about three and a half hours. The shutdown now resolves that key to the provisioned attempt; a key with no attempt is not stopped. That stop question now names each worker still live or unconfirmed by node id, role, engine and observed state, in English and Russian. This does not establish live qualification.

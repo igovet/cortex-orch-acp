@@ -36,7 +36,7 @@ regression passes do not clear a nonzero audit, and `devDependencies` is not
 a security boundary. See the [dependency disposition](docs/project/paseo-dependency-audit.md)
 for exact paths, artifact-test limits and the next upstream-fix decision.
 
-## Current ACP boundary (1.0.5)
+## Current ACP boundary (1.0.6)
 
 Paseo Routing model choices exclude models disabled in the file being edited.
 Stored pins and policy references remain intact and carry an inactive warning;
