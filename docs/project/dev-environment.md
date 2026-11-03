@@ -38,6 +38,37 @@ exercise paid engine turns or rendered client behavior.
 
 ## Installed Paseo version boundary
 
+> On 2026-11-03, a read-only `/opt/Paseo/resources/bin/paseo --version`
+> check reported installed Paseo **0.15.0**. Through the guarded wrapper,
+> `run`, `send`, `permit`, `wait` and `inspect` help each exited 0 and retained
+> the options recorded for 0.12.0 below; `send` also advertises `--behavior`,
+> and `permit allow` supports `--input <json>`. Installed-bundle inspection
+> confirmed home/endpoint selection and separate Electron-profile support;
+> the live daemon used only `~/.paseo-dev` at `127.0.0.1:16767`, with the
+> explicit absolute checkout plugin path and new disposable projects.
+> The owner-requested paid `cli` checks used only `codex-acp/gpt-6-luna:high`
+> on package `1.0.5+sha256.a581c7f4838cd49d`. Lifecycle with mandatory review
+> and verification **passed**; question/answer resume with mandatory review
+> **passed**. The model-remark scenario **failed** its bound outcome assertion:
+> its read-only, non-Git fixture emitted `REVIEW_NOT_REQUIRED` with a null
+> Git head, which does not satisfy `review_or_valid_waiver`. Worker routing
+> remained on the requested model, but completion alone is not a pass. This
+> establishes a qualification-evidence failure, not its introduction by Paseo
+> 0.15.0; that failed run remains a failure. A separate corrected-fixture rerun
+> used a fresh disposable Git repository with an initial commit and the same
+> package and route. The read-only model-remark scenario **passed** its bound
+> outcome assertion: the worker's native route remained unchanged, and the
+> runtime's unchanged-project review waiver matched the observed baseline's
+> non-null Git head and revision digest; verification passed. No reviewer ran
+> in this unchanged-project case. Together with the two earlier passing
+> scenarios, the resulting overall verdict is **QUALIFIED** for these CLI
+> runtime/protocol scenarios on Paseo 0.15.0 and the package above, not release
+> readiness or a new Cortex package. The dev daemon was stopped after each case;
+> routing/defaults were restored byte for byte, and the original dev plugin
+> configuration was restored after each final stop, including the rerun.
+> Desktop/GUI was not run (only `cli` was requested). This observation does not
+> requalify older Paseo versions, including 0.14.0, 0.12.0, 0.11.x, 0.10.x or 0.9.x.
+
 > On 2026-10-23, a read-only `/opt/Paseo/resources/bin/paseo --version`
 > check reported installed Paseo **0.12.0**. Through the guarded wrapper,
 > `run --help`, `send --help`, `permit --help`, `wait --help` and

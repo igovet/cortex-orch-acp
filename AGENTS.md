@@ -86,7 +86,7 @@ After behavior changes update README.md, SECURITY.md and affected documentation;
 check links and commands against source. Keep secrets, private reports and raw
 host logs out of repository documents and diagnostics. Report unrun checks.
 
-For this release use semantic version 1.0.5. After any package payload
+For this release use semantic version 1.0.6. After any package payload
 edit, regenerate its complete content hash with
 `python3 -B scripts/cortex_package.py stamp` before release-sensitive checks.
 Run package, profile-generation and test checks sequentially in the same
@@ -155,6 +155,7 @@ installed Paseo 0.11.2; CLI/isolation observations recorded for 0.10.x and 0.9.x
 historical and do not qualify 0.11.2.
 A read-only `--version` check on 2026-10-16 reported installed Paseo 0.11.4, and its guarded CLI help matched the `run`, `send`, `wait` and `inspect` options recorded in the dated note of docs/project/dev-environment.md. This does not requalify 0.11.2 or the historical 0.10.x and 0.9.x observations.
 A read-only `--version` check on 2026-10-23 reported installed Paseo 0.12.0, and the guarded wrapper's `run`, `send`, `permit`, `wait` and `inspect` help each exited 0 with the options recorded in the dated note of docs/project/dev-environment.md. An owner-requested paid `cli` qualification that day, through the isolated `~/.paseo-dev` daemon and a disposable project, passed the lifecycle/review/verification, model-remark consent and question/answer resume scenarios. This qualifies CLI runtime/protocol behavior on 0.12.0 only: rendered desktop/GUI behavior was not run, and it does not requalify the 0.11.x, 0.10.x or 0.9.x observations.
+A read-only `--version` check on 2026-11-03 reported installed Paseo 0.15.0, and the guarded wrapper's `run`, `send`, `permit`, `wait` and `inspect` help each exited 0 with the options recorded in the dated note of docs/project/dev-environment.md (`send` also advertises `--behavior`, and `permit allow` supports `--input`). An owner-requested paid `cli` qualification that day, through the isolated `~/.paseo-dev` daemon and disposable projects, passed the lifecycle/review/verification, model-remark consent (on a Git-initialized fixture; an earlier non-Git fixture failure is recorded in the dated note) and question/answer resume scenarios. This qualifies CLI runtime/protocol behavior on 0.15.0 only: rendered desktop/GUI behavior was not run, and it does not requalify the 0.12.0, 0.11.x, 0.10.x or 0.9.x observations.
 Recheck the installed CLI/bridge and guarded wrapper before live use. Invoke python3 -B scripts/cortex_paseo_dev.py --
 ...; it defaults to ~/.paseo-dev, rejects ~/.paseo, and blocks command-level endpoint
 overrides. If the installed build cannot be shown to isolate every required state and
