@@ -15,6 +15,7 @@
     "test:worker-card": "node --experimental-strip-types client/worker-card-model.test.ts && node --experimental-strip-types client/worker-card-pulse.test.ts && node --experimental-strip-types client/card-a11y.test.ts && node --experimental-strip-types server/provider-worker-card.test.ts && node --experimental-strip-types server/worker-card-order.test.ts",
     "test:terminal-status": "node --experimental-strip-types client/worker-terminal-status.test.ts",
     "test:replay": "node --experimental-strip-types server/replay.test.ts",
+    "test:thinking": "node --experimental-strip-types server/provider-efforts.test.ts && node --experimental-strip-types server/provider-thinking.test.ts",
     "test:coalesce": "node --experimental-strip-types client/coalesce.test.ts",
     "test:worker-result-batch": "node --experimental-strip-types client/worker-result-batch.test.ts",
     "test:rpc-subscribe": "node --experimental-strip-types client/rpc-subscribe.test.ts",

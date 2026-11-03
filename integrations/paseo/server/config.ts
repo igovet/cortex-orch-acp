@@ -6,6 +6,9 @@ import {
   CONFIG_API_VERSION,
   REDACTED,
   allSurfacesResult,
+  connectionsDiscoveryResult,
+  defaultPresetResult,
+  engineInstallResult,
   openCodeDiscoveryResult,
   readSurfaceResults,
   type ConfigBinding,
@@ -20,6 +23,13 @@ import {
   type CatalogRefreshOutput,
   type OpenCodeDiscoverOutput,
   type OpenCodeOnboardOutput,
+  type ConnectionOnboardInput,
+  type ConnectionOnboardOutput,
+  type ConnectionsDiscoverOutput,
+  type DefaultPresetOutput,
+  type EngineInstallInput,
+  type EngineInstallOutput,
+  type PresetResetInput,
 } from "../shared/config.js";
 import { cortexLaunchTarget } from "./provider.js";
 import { runProcess } from "./python-runner.js";
@@ -71,7 +81,26 @@ const READ_TIMEOUT_MS = 15000;
 const WRITE_TIMEOUT_MS = 25000;
 // Every connection's engine is started in parallel, each bounded at 20 s.
 const REFRESH_TIMEOUT_MS = 60000;
+// The API bounds one pinned npm install at 60 s; this leaves room for Python
+// start-up and the discovery that follows. The host may stop waiting for the
+// answer earlier: the download still finishes, and the client re-checks.
+const INSTALL_TIMEOUT_MS = 90000;
 const MAX_OUTPUT_BYTES = 8 * 1024 * 1024;
+
+/** Called once by plugin activation, not by Settings reads. Fire-and-forget:
+ * the owned Python worker holds a cross-process lock and reports safe progress. */
+export async function startAutomaticSetup(): Promise<void> {
+  const runtime = configRuntime();
+  if (isFailure(runtime)) return;
+  const script = [
+    "import sys", "sys.path.insert(0, sys.argv[1])",
+    "from cortex_runtime.connections.automatic import run", "run()",
+  ].join("\n");
+  await runProcess(runtime.interpreter, ["-B", "-c", script, runtime.srcDir], {
+    timeoutMs: 30 * 60 * 1000, maxBuffer: MAX_OUTPUT_BYTES,
+    env: runtime.env, cwd: "/",
+  });
+}
 
 const BOOT = [
   "import sys",
@@ -294,6 +323,26 @@ export function sanitizeSurface(surface: ConfigReadSurface, raw: unknown, scope:
   if (surface === "connections") {
     if (Array.isArray(result.connections)) result.connections = result.connections.map((item) => sanitizeConnection(item, scope));
     if (result.connection !== undefined) result.connection = sanitizeConnection(result.connection, scope);
+  }
+  return result;
+}
+
+/** A default-preset result: per-file paths and backup locations in display
+ * form, seed diagnostics scrubbed. */
+export function sanitizePreset(raw: unknown, scope: Scope): Record<string, unknown> {
+  const result = { ...record(raw) };
+  if (result.settings !== undefined) {
+    result.settings = Object.fromEntries(Object.entries(record(result.settings)).map(([name, item]) => {
+      const seed = { ...record(item) };
+      displayField(seed, "path", scope);
+      if (typeof seed.error === "string") seed.error = scrubText(seed.error, scope);
+      return [name, seed];
+    }));
+  }
+  if (result.backups !== undefined) {
+    result.backups = Object.fromEntries(Object.entries(record(result.backups))
+      .filter((entry): entry is [string, string] => typeof entry[1] === "string")
+      .map(([name, path]) => [name, displayPath(path, scope)]));
   }
   return result;
 }
@@ -578,6 +627,80 @@ export const refreshModelCatalogHandler = guarded(async (
   });
 }, internalError);
 
+const unexpected = (what: string) => failure("invalid_response", `The Cortex configuration API returned an unexpected ${what} result.`).failure;
+
+export const discoverConnectionsHandler = guarded(async (_input: Record<string, never>, context: PluginHandlerContext): Promise<ConnectionsDiscoverOutput> => {
+  const prepared = await prepare(undefined, context);
+  if ("refusal" in prepared) return refused(prepared.bound, prepared.refusal);
+  const { runtime, scope, bound } = prepared;
+  // OpenCode's version probe runs in a disposable sandbox; nothing is written.
+  const outcome = await callApi(runtime, { action: "discover_connections", surface: "connections" }, WRITE_TIMEOUT_MS);
+  if (isFailure(outcome)) return refused(bound, outcome.failure);
+  if (!outcome.ok) return refused(bound, convertError(outcome.error, scope));
+  const parsed = connectionsDiscoveryResult.safeParse(outcome.result);
+  return parsed.success ? { ok: true, binding: bound, result: parsed.data } : refused(bound, unexpected("discovery"));
+}, internalError);
+
+export const onboardConnectionHandler = guarded(async (input: ConnectionOnboardInput, context: PluginHandlerContext): Promise<ConnectionOnboardOutput> => {
+  const prepared = await prepare(undefined, context);
+  if ("refusal" in prepared) return refused(prepared.bound, prepared.refusal);
+  const { runtime, scope, bound } = prepared;
+  return serializeWrite(async () => {
+    // Exactly the three fields the API accepts: no key, path or command.
+    const outcome = await callApi(runtime, {
+      action: "onboard_connection", surface: "connections", engine: input.engine,
+      expected_revision: input.expected_revision, explicit_opt_in: input.explicit_opt_in === true,
+    }, REFRESH_TIMEOUT_MS);
+    if (isFailure(outcome)) return refused(bound, outcome.failure);
+    if (!outcome.ok) return refused(bound, convertError(outcome.error, scope));
+    const typed = typedSurface("connections", outcome.result, scope);
+    return isFailure(typed) ? refused(bound, typed.failure) : { ok: true, binding: bound, result: typed.result as never };
+  });
+}, internalError);
+
+/** Not serialized with the configuration writes: a download changes no
+ * owner file, and the API refuses a second concurrent one itself. */
+export const installEngineHandler = guarded(async (input: EngineInstallInput, context: PluginHandlerContext): Promise<EngineInstallOutput> => {
+  const prepared = await prepare(undefined, context);
+  if ("refusal" in prepared) return refused(prepared.bound, prepared.refusal);
+  const { runtime, scope, bound } = prepared;
+  const outcome = await callApi(runtime, { action: "install_engine", surface: "connections", engine: input.engine }, INSTALL_TIMEOUT_MS);
+  if (isFailure(outcome)) return refused(bound, outcome.failure);
+  if (!outcome.ok) return refused(bound, convertError(outcome.error, scope));
+  const parsed = engineInstallResult.safeParse(outcome.result);
+  return parsed.success ? { ok: true, binding: bound, result: parsed.data } : refused(bound, unexpected("download"));
+}, internalError);
+
+async function presetCall(request: Record<string, unknown>, context: PluginHandlerContext, write: boolean): Promise<DefaultPresetOutput> {
+  const prepared = await prepare(undefined, context);
+  if ("refusal" in prepared) return refused(prepared.bound, prepared.refusal);
+  const { runtime, scope, bound } = prepared;
+  const run = async (): Promise<DefaultPresetOutput> => {
+    const outcome = await callApi(runtime, { surface: "default_preset", ...request }, write ? WRITE_TIMEOUT_MS : READ_TIMEOUT_MS);
+    if (isFailure(outcome)) return refused(bound, outcome.failure);
+    if (!outcome.ok) return refused(bound, convertError(outcome.error, scope));
+    const parsed = defaultPresetResult.safeParse(sanitizePreset(outcome.result, scope));
+    return parsed.success ? { ok: true, binding: bound, result: parsed.data } : refused(bound, unexpected("default preset"));
+  };
+  return write ? serializeWrite(run) : run();
+}
+
+export const readDefaultPresetHandler = guarded(
+  async (_input: Record<string, never>, context: PluginHandlerContext): Promise<DefaultPresetOutput> => presetCall({ action: "read" }, context, false),
+  internalError,
+);
+
+export const applyDefaultPresetHandler = guarded(
+  async (_input: Record<string, never>, context: PluginHandlerContext): Promise<DefaultPresetOutput> => presetCall({ action: "apply_default_preset" }, context, true),
+  internalError,
+);
+
+export const resetDefaultPresetHandler = guarded(
+  async (input: PresetResetInput, context: PluginHandlerContext): Promise<DefaultPresetOutput> => presetCall(
+    { action: "reset_default_preset", expected_revision: input.expected_revision, confirm: input.confirm === true }, context, true),
+  internalError,
+);
+
 export const onboardOpenCodeHandler = guarded(async (
   input: { expected_revision: string; explicit_opt_in: true; name?: string }, context: PluginHandlerContext,
 ): Promise<OpenCodeOnboardOutput> => {
@@ -588,7 +711,7 @@ export const onboardOpenCodeHandler = guarded(async (
     const outcome = await callApi(runtime, {
       action: "onboard_opencode", surface: "connections", expected_revision: input.expected_revision,
       explicit_opt_in: input.explicit_opt_in === true, ...(input.name === undefined ? {} : { name: input.name }),
-    }, WRITE_TIMEOUT_MS);
+    }, REFRESH_TIMEOUT_MS);
     if (isFailure(outcome)) return refused(bound, outcome.failure);
     if (!outcome.ok) return refused(bound, convertError(outcome.error, scope));
     const typed = typedSurface("connections", outcome.result, scope);

@@ -9,10 +9,18 @@ import { readWorkerResults } from "./shared/worker-results.js";
 import { instrumentHandler } from "./server/invoke-diagnostics.js";
 import { readRunningCommands, requestCommandStop } from "./shared/command-stop.js";
 import { getRunningCommands, stopCommandHandler } from "./server/command-stop.js";
-import { discoverOpenCode, onboardOpenCode, readConfig, refreshModelCatalog, updateConfig } from "./shared/config.js";
-import { discoverOpenCodeHandler, onboardOpenCodeHandler, readConfigHandler, refreshModelCatalogHandler, updateConfigHandler } from "./server/config.js";
+import {
+  applyDefaultPreset, discoverConnections, discoverOpenCode, installEngine, onboardConnection, onboardOpenCode, readConfig, readDefaultPreset,
+  refreshModelCatalog, resetDefaultPreset, updateConfig,
+} from "./shared/config.js";
+import {
+  applyDefaultPresetHandler, discoverConnectionsHandler, discoverOpenCodeHandler, installEngineHandler, onboardConnectionHandler, onboardOpenCodeHandler,
+  readConfigHandler, readDefaultPresetHandler, refreshModelCatalogHandler, resetDefaultPresetHandler, startAutomaticSetup, updateConfigHandler,
+} from "./server/config.js";
 
 export default function contribute(server: PluginServerContext) {
+  // Do not wait for npm/network before registering the provider or Settings.
+  void startAutomaticSetup().catch(() => {});
   server.registerProvider(createCortexProvider());
   server.handle(readWorkerHistory, instrumentHandler(readWorkerHistory.name, getWorkerHistory));
   server.handle(readPipeline, instrumentHandler(readPipeline.name, getPipeline));
@@ -27,5 +35,13 @@ export default function contribute(server: PluginServerContext) {
   server.handle(discoverOpenCode, instrumentHandler(discoverOpenCode.name, discoverOpenCodeHandler));
   server.handle(onboardOpenCode, instrumentHandler(onboardOpenCode.name, onboardOpenCodeHandler));
   server.handle(refreshModelCatalog, instrumentHandler(refreshModelCatalog.name, refreshModelCatalogHandler));
+  // First-run setup: engine status, pinned adapter download, native-account
+  // connection (explicit opt-in only) and the bundled default preset.
+  server.handle(discoverConnections, instrumentHandler(discoverConnections.name, discoverConnectionsHandler));
+  server.handle(onboardConnection, instrumentHandler(onboardConnection.name, onboardConnectionHandler));
+  server.handle(installEngine, instrumentHandler(installEngine.name, installEngineHandler));
+  server.handle(readDefaultPreset, instrumentHandler(readDefaultPreset.name, readDefaultPresetHandler));
+  server.handle(applyDefaultPreset, instrumentHandler(applyDefaultPreset.name, applyDefaultPresetHandler));
+  server.handle(resetDefaultPreset, instrumentHandler(resetDefaultPreset.name, resetDefaultPresetHandler));
   return () => {};
 }

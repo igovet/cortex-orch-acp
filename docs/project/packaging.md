@@ -20,8 +20,9 @@ python3 -B /absolute/path/to/src/cortex_acp.py
 
 `cortex_runtime` (everything under `src/cortex_runtime/`)
 is standard-library only — nothing to `pip install` for the agent itself.
-`cortex_acp.py` never spawns a plugin host, never downloads or upgrades
-anything at launch, and writes only JSON-RPC lines to stdout (every log
+`cortex_acp.py` never spawns a plugin host and writes only JSON-RPC lines
+to stdout. Startup schedules the owned pinned-adapter download and native-account
+setup in a background thread, never on the protocol path (every log
 goes to stderr) — see `tests/test_acp_entrypoint_packaging.py` and
 `tests/test_acp_stdout_purity.py`.
 
@@ -51,12 +52,13 @@ serialization format does not.
   (`cortex_runtime.portable.version.CONTRACT_VERSION`);
 - the vendored ACP schema fixture's pinned sha256
   (`tests/fixtures/acp/schema-1.4.0.json`);
-- each supported engine adapter's pinned compatibility basis (codex-acp
-  2.0.1 with Codex CLI 0.159.1; Claude's instruction-channel basis remains
-  0.78.0 while the installed current adapter is 0.84.0 — see
+- each supported engine adapter's pinned version, the current qualified
+  adapter (codex-acp 2.3.0, whose `@openai/codex` dependency is `^0.164.0`;
+  claude-agent-acp 0.97.0). Settings' **Download engine** and the background
+  updater (`connections.engine_update`) both install exactly this pin; see
   [codex-acp-adapter.md](../features/codex-engine/index.md) and
   [claude-agent-acp-adapter.md](../features/claude-engine/index.md) for the
-  verified-digest install-record mechanism those pinned versions rely on).
+  verified-digest install-record mechanism and the other qualified versions.
 
 `cortex_runtime.packaging.pinned.verify_all()`/`verify_launch_critical()`
 re-check every one of those *fresh* on every call and report a
@@ -98,6 +100,13 @@ python3 -B scripts/cortex_acp_setup.py install-paseo-plugin
   symlink-refusing — the same primitives
   `cortex_runtime.connections.registry` already uses). It never touches
   any project's own `.cortex` store.
+- **Default preset seeding.** `init-storage` creates absent `routing.json`,
+  `defaults.json` and `mcp-servers.json` files, plus one applied `default` profile in
+  an absent `routing-profiles.json` when the working settings match the preset. MCP
+  entries are disabled examples (`codebase-memory-mcp`, `playwright`, `vivaldi`),
+  not downloaded or launched executables. All paths are `/path/to/...` placeholders.
+  See [Default preset](../configuration.md#default-preset).
+  An existing file is never replaced. Every Cortex agent start repeats this absent-only seeding.
 - **`add-connection`** registers (or reuses) one connection through the
   existing `connections.onboarding` API. An API-key secret is always read
   from a file path or stdin — never a plain CLI argument — and is written
@@ -305,7 +314,7 @@ Run one explicit setup command:
 python3 -B scripts/cortex_acp_setup.py install-paseo-plugin
 ```
 
-The plugin registers a Cortex Settings screen for supported owner/project configuration. Its values are stored by the Cortex runtime (JSON files or the existing project SQLite configuration row), not in Paseo's settings document. A live Paseo 0.10.0 check did not find the screen in the rendered Settings navigation or command palette, so do not assume it is reachable in that host version. See [configuration management](../configuration.md#manage-settings-in-paseo) for scope, revision conflicts, redaction and the OpenCode opt-in.
+The plugin registers a Cortex Settings screen for supported owner/project configuration. Its values are stored by the Cortex runtime (JSON files or the existing project SQLite configuration row), not in Paseo's settings document. A live Paseo 0.10.0 check did not find the screen in the rendered Settings navigation or command palette, so do not assume it is reachable in that host version. See [configuration management](../configuration.md#manage-settings-in-paseo) for scope, revision conflicts, redaction and the OpenCode opt-in. Its Connections section can also download Cortex's pinned `codex-acp` or `claude-agent-acp` adapter and add a native-account connection after an explicit opt-in; see [Engine install records](../configuration.md#engine-install-records).
 
 #### Install from GitHub
 
@@ -313,7 +322,8 @@ The plugin lives below the repository root, so include the Paseo subdirectory
 suffix. Paseo stages the full Git checkout and runs the manifest's supported
 `build` command before activation. The manifest calls
 `scripts/cortex_acp_setup.py bootstrap-paseo-git-install`, which prepares the
-private runtime and launch record. No separate `init-storage` or
+private runtime and launch record. It runs `init-storage` itself, so the default preset
+files are seeded when absent. No separate `init-storage` or
 `configure-paseo-plugin-launch` command is needed for this Git install; the
 hook does not log in to an engine or copy credentials.
 
@@ -333,7 +343,12 @@ Paseo stages the complete repository, including `src/cortex_acp.py`; the
 `:integrations/paseo` suffix selects the plugin entry directory. The build
 step retains the launch-critical runtime under
 `$XDG_STATE_HOME/cortex/paseo-runtime/` and writes a `0600` launch record at
-`~/.config/cortex/paseo-plugin-launch.json`.
+`$XDG_CONFIG_HOME/cortex/paseo-plugin-launch.json`, or
+`~/.config/cortex/paseo-plugin-launch.json` when `XDG_CONFIG_HOME` is unset.
+The build step runs in the Paseo daemon's environment, so a second Paseo
+instance with its own `XDG_CONFIG_HOME` writes and reads its own record and
+never replaces the record of the conventional installation. An existing record
+that Cortex did not write is still refused, never overwritten.
 
 Update the installed Git plugin, checking first if desired:
 
@@ -376,11 +391,18 @@ generated SHA-256 integrity record, enables the Paseo daemon plugin switch
 only for this explicit setup action, installs or reloads the `cortex-acp`
 provider, and verifies that the daemon reports it as `running`. It is
 idempotent and preserves unrelated Paseo plugins and configuration keys.
-Setup also writes the owner-private `HOME/.config/cortex/paseo-plugin-launch.json`
-record with the absolute Cortex entrypoint and the non-secret `HOME`,
-`XDG_CONFIG_HOME`, and `XDG_STATE_HOME` roots used by setup. The HOME-based
-locator remains stable when a daemon restarts with a different XDG
-environment. The provider applies those roots when it starts Cortex after a Paseo daemon restart, so the same connection
+Setup also writes the owner-private `paseo-plugin-launch.json` record with the
+absolute Cortex entrypoint and the non-secret `HOME`, `XDG_CONFIG_HOME`, and
+`XDG_STATE_HOME` roots used by setup. The record lives in the Cortex config
+root of that environment: `$XDG_CONFIG_HOME/cortex/` when `XDG_CONFIG_HOME` is
+set to a directory other than `~/.config`, otherwise `~/.config/cortex/`. The
+provider looks first in its own `XDG_CONFIG_HOME` and then in `~/.config`; a
+daemon with its own `XDG_CONFIG_HOME` uses the `~/.config` record only if that
+record names the same `XDG_CONFIG_HOME` (a record written by an older setup),
+so it never launches another installation's runtime and storage. Run setup in
+the same XDG environment as the daemon: a daemon started without
+`XDG_CONFIG_HOME` does not see a record written under a custom one. The
+provider applies the recorded roots when it starts Cortex after a Paseo daemon restart, so the same connection
 registry, catalog, and native-account state remain visible even when Paseo
 was launched from a desktop environment with a different shell environment.
 The record also names the repository-owned Paseo 0.8 `session/load` stdio
@@ -393,7 +415,22 @@ directories; setup refuses symlinked ancestors and uses exclusive private
 temporary files for replacement. Setup also verifies that the daemon config is
 current-user-owned and repairs group/world-readable mode bits before reading
 it, without printing unrelated config keys.
-The command never runs implicitly during an ACP session. After installation,
+The plugin installation command never runs implicitly during an ACP session. Agent starts
+separately seed missing default-preset files and follow approved adapters. Plugin activation
+and agent startup also start one non-blocking background pass: install each qualified
+manifest pin, register a missing native-account connection only when its login marker
+exists, then load its models without a prompt. Owner-removed engines stay opted out
+of automatic registration. Settings polls progress and keeps manual download/connect
+and model-refresh actions available. Concurrent startup passes share an owner-private
+lock; npm installs are bounded to 600 seconds each (manual download: 60 seconds),
+model-discovery RPCs to 20 seconds each. A model-discovery failure keeps the
+connection; its per-engine status (`first-run-<engine>.json` in the Cortex config
+root) and Settings name a fixed failure code such as `engine_home_read_only`
+(the engine's account directory, for example `~/.codex`, is read-only for the
+Cortex process; Codex cannot start then) or `engine_unreachable:<error type>`,
+never adapter output. A stopped pass retries at the next start;
+`CORTEX_ENGINE_UPDATE=off` disables the automatic pass. See
+[configuration](../configuration.md#approved-adapter-following-and-rollback). After installation,
 Paseo exposes the native Cortex provider; no separate generic ACP provider
 registration is required for Paseo. The source hash is regenerated by
 `python3 -B scripts/cortex_package.py stamp` and checked by package

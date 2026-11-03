@@ -245,12 +245,12 @@ def test_codex_usage_is_read_from_its_newest_rollout(tmp_path):
 
 
 def test_the_reset_is_the_most_used_windows_own(tmp_path):
-    """An exhausted 5-hour window resets long before the weekly one; the
-    route comes back when the window that ran out resets."""
+    """An exhausted scoped weekly window can reset before the shared one;
+    the route comes back when the window that ran out resets."""
     environ = {"HOME": str(tmp_path), "XDG_STATE_HOME": str(tmp_path / "state")}
     connection_id = "cn_" + "c" * 12
     now = time.time()
-    quota.observe(connection_id, {"status": "rejected", "rateLimitType": "five_hour", "resetsAt": now + 3600}, environ)
+    quota.observe(connection_id, {"status": "rejected", "rateLimitType": "seven_day_sonnet", "resetsAt": now + 3600}, environ)
     quota.observe(connection_id, {"status": "allowed", "rateLimitType": "seven_day", "utilization": 0.4,
                                   "resetsAt": now + 5 * 86400}, environ)
     record = SimpleNamespace(engine="claude-agent-acp", id=connection_id, credential_ref=None)
@@ -264,7 +264,7 @@ def test_claude_usage_keeps_the_latest_window_per_kind_and_scopes_model_windows(
     environ = {"HOME": str(tmp_path), "XDG_STATE_HOME": str(tmp_path / "state")}
     connection_id = "cn_" + "b" * 12
     future = time.time() + 3600
-    quota.observe(connection_id, {"status": "allowed", "rateLimitType": "five_hour", "utilization": 0.3, "resetsAt": future}, environ)
+    quota.observe(connection_id, {"status": "allowed", "rateLimitType": "seven_day_sonnet", "utilization": 0.3, "resetsAt": future}, environ)
     quota.observe(connection_id, {"status": "allowed_warning", "rateLimitType": "seven_day_opus", "utilization": 0.9, "resetsAt": future}, environ)
     quota.observe(connection_id, {"status": "allowed", "rateLimitType": "overage", "utilization": 1.0}, environ)
     record = SimpleNamespace(engine="claude-agent-acp", id=connection_id, credential_ref=None)
@@ -273,8 +273,42 @@ def test_claude_usage_keeps_the_latest_window_per_kind_and_scopes_model_windows(
         {"window": "seven_day_opus", "models": ["opus[1m]"]}]}}
     assert quota.used_percent(record, "opus[1m]", environ, routing=routing) == pytest.approx(90.0)
     assert quota.used_percent(record, "sonnet", environ, routing=routing) == pytest.approx(30.0)
-    quota.observe(connection_id, {"status": "rejected", "rateLimitType": "five_hour", "resetsAt": future}, environ)
+    quota.observe(connection_id, {"status": "rejected", "rateLimitType": "seven_day_sonnet", "resetsAt": future}, environ)
     assert quota.used_percent(record, "sonnet", environ, routing=routing) == 100.0
+
+
+@pytest.mark.parametrize("weekly", [None, 40.0, 95.0, 100.0])
+def test_legacy_claude_session_window_never_drives_route_ranking(tmp_path, weekly):
+    environ = {"HOME": str(tmp_path), "XDG_STATE_HOME": str(tmp_path / "state")}
+    connection_id = "cn_" + "e" * 12
+    now = time.time()
+    future = now + 86400
+    record = SimpleNamespace(engine="claude-agent-acp", id=connection_id, credential_ref=None)
+    # Old installations may already have persisted a rejected session window.
+    quota._write_windows(connection_id, environ, {
+        "five_hour": {"used": 100.0, "resets_at": now + 3600, "source": "event"},
+    })
+    quota.observe(connection_id, {"status": "rejected", "rateLimitType": "five_hour",
+                                  "resetsAt": now + 7200}, environ)
+    if weekly is not None:
+        quota.observe(connection_id, {"rateLimitType": "seven_day", "utilization": weekly / 100,
+                                      "resetsAt": future}, environ)
+    # Even an explicit owner association cannot re-enable the retired window.
+    routing = {"quota_windows": {"claude-agent-acp": [{"window": "five_hour", "models": None}]}}
+    used = quota.used_percent(record, "sonnet", environ, now=now, routing=routing)
+    assert used == weekly
+    assert quota.resets_at(record, "sonnet", environ, now=now, routing=routing) == (
+        future if weekly is not None else None)
+    assert [w["name"] for w in quota.visible_windows(record, environ, now=now)] == (
+        ["seven_day"] if weekly is not None else [])
+    picked, decision = auto_route.rank("standard", [CLAUDE[1]], lambda _: used, models=MODELS)
+    if weekly == 100.0:
+        assert picked is None
+    else:
+        assert picked is CLAUDE[1]
+        assert decision["candidates"][0]["hot"] is (weekly == 95.0)
+        if weekly is None:
+            assert decision["usage"]["status"] == "unavailable"
 
 
 def test_explicit_escalation_is_the_only_automatic_flagship_path():

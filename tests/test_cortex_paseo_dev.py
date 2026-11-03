@@ -526,6 +526,82 @@ def test_gui_uses_private_cortex_xdg_paths_and_current_source_root(tmp_path):
     assert f"XDG_STATE_HOME={dev_home}/cortex-xdg/state" in result.stdout
 
 
+def _env_printer(tmp_path, name="paseo"):
+    fake_paseo = tmp_path / name
+    fake_paseo.write_text(
+        "#!/bin/sh\n"
+        'echo "CORTEX_PASEO_SOURCE_ROOT=${CORTEX_PASEO_SOURCE_ROOT-unset}"\n'
+        'echo "XDG_CONFIG_HOME=$XDG_CONFIG_HOME"\n'
+        'echo "ARGS=$*"\n'
+    )
+    fake_paseo.chmod(0o755)
+    dev_home = tmp_path / "dev-home"
+    dev_home.mkdir(exist_ok=True)
+    return fake_paseo, dev_home
+
+
+@pytest.mark.parametrize("mode", ["cli", "gui"])
+def test_installed_runtime_drops_checkout_source_root_even_when_inherited(tmp_path, mode):
+    fake_paseo, dev_home = _env_printer(tmp_path, "Paseo")
+    env = dict(os.environ, CORTEX_PASEO_SOURCE_ROOT=str(ROOT))
+    if mode == "gui":
+        argv = ["gui", "--installed-runtime", "--user-data-dir", str(tmp_path / "electron-profile")]
+        tail = []
+    else:
+        argv = ["--installed-runtime"]
+        tail = ["--", "status", "--json"]
+    result = subprocess.run(
+        [sys.executable, str(SCRIPT), *argv, "--paseo", str(fake_paseo), "--home", str(dev_home), *tail],
+        capture_output=True, text=True, cwd=str(ROOT), env=env,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "CORTEX_PASEO_SOURCE_ROOT=unset" in result.stdout
+    assert f"XDG_CONFIG_HOME={dev_home}/cortex-xdg/config" in result.stdout
+
+
+@pytest.mark.parametrize("command", [
+    ["plugin", "install", "github:igovet/cortex-orch-acp:integrations/paseo", "--ref", "dev", "--json"],
+    ["plugin", "update", "cortex-acp", "--ref", "dev", "--yes"],
+])
+def test_git_plugin_install_requires_installed_runtime(tmp_path, command):
+    fake_paseo, dev_home = _env_printer(tmp_path)
+    base = [sys.executable, str(SCRIPT), "--paseo", str(fake_paseo), "--home", str(dev_home)]
+
+    refused = subprocess.run([*base, "--", *command], capture_output=True, text=True, cwd=str(ROOT))
+    assert refused.returncode == 2
+    assert "needs --installed-runtime" in refused.stderr
+    assert refused.stdout == ""
+
+    allowed = subprocess.run([*base[:2], "--installed-runtime", *base[2:], "--", *command],
+                             capture_output=True, text=True, cwd=str(ROOT))
+    assert allowed.returncode == 0, allowed.stderr
+    assert "CORTEX_PASEO_SOURCE_ROOT=unset" in allowed.stdout
+    assert f"ARGS=--home {dev_home} {' '.join(command)}" in allowed.stdout
+
+
+def test_local_directory_plugin_install_keeps_checkout_source_root(tmp_path):
+    fake_paseo, dev_home = _env_printer(tmp_path)
+    result = subprocess.run(
+        [sys.executable, str(SCRIPT), "--paseo", str(fake_paseo), "--home", str(dev_home),
+         "--", "plugin", "install", str(ROOT / "integrations" / "paseo"), "--json"],
+        capture_output=True, text=True, cwd=str(ROOT),
+    )
+    assert result.returncode == 0, result.stderr
+    assert f"CORTEX_PASEO_SOURCE_ROOT={ROOT}" in result.stdout
+
+
+def test_wire_trace_refuses_installed_runtime(tmp_path):
+    fake_paseo, dev_home = _env_printer(tmp_path)
+    result = subprocess.run(
+        [sys.executable, str(SCRIPT), "--wire-trace", "--installed-runtime", "--paseo", str(fake_paseo),
+         "--home", str(dev_home), "--", "start"],
+        capture_output=True, text=True, cwd=str(ROOT),
+    )
+    assert result.returncode == 2
+    assert "cannot use --installed-runtime" in result.stderr
+    assert result.stdout == ""
+
+
 # /proc/self/mountinfo as seen inside a Cortex command sandbox: /var/tmp is
 # the command's own scratch subdirectory (orchestration.sandbox).
 SANDBOX_MOUNTINFO = (
@@ -609,6 +685,39 @@ def test_gui_refuses_launch_inside_cortex_sandbox(tmp_path, monkeypatch):
     assert not marker.exists()
 
 
+@pytest.mark.parametrize("account", [".codex", ".claude"])
+def test_cli_refuses_daemon_launch_with_read_only_engine_account(tmp_path, monkeypatch, account):
+    """A command sandbox that keeps the host /var/tmp but mounts ~/.codex
+    read-only made Codex app-server exit at startup, so the daemon's first-run
+    model discovery recorded catalog_failed (live, 2026-11-02)."""
+    home = tmp_path / "owner"
+    monkeypatch.setenv("HOME", str(home))
+    mountinfo = tmp_path / "mountinfo"
+    mountinfo.write_text(
+        "36 25 259:2 / / rw,relatime - ext4 /dev/nvme0n1p2 rw\n"
+        "52 36 259:2 /var/tmp /var/tmp rw,relatime - ext4 /dev/nvme0n1p2 rw\n"
+        f"53 36 259:2 {home}/{account} {home}/{account} rw,relatime - ext4 /dev/nvme0n1p2 rw\n"
+        f"60 36 259:2 {home}/{account} {home}/{account} ro,nosuid,nodev,relatime - ext4 /dev/nvme0n1p2 rw\n")
+    monkeypatch.setenv("CORTEX_PASEO_DEV_MOUNTINFO", str(mountinfo))
+    fake, marker = _launch_recorder(tmp_path)
+    result = subprocess.run(
+        [sys.executable, str(SCRIPT), "--paseo", str(fake), "--home", str(tmp_path / "dev-home"), "--", "start"],
+        capture_output=True, text=True, cwd=str(ROOT),
+    )
+    assert result.returncode == 2
+    assert f"{home}/{account} is mounted read-only" in result.stderr
+    assert not marker.exists()
+    # A writable effective mount of the same directory is not refused.
+    mountinfo.write_text(f"60 36 259:2 {home}/{account} {home}/{account} ro - ext4 /dev/nvme0n1p2 rw\n"
+                         f"61 36 259:2 {home}/{account} {home}/{account} rw - ext4 /dev/nvme0n1p2 rw\n")
+    result = subprocess.run(
+        [sys.executable, str(SCRIPT), "--paseo", str(fake), "--home", str(tmp_path / "dev-home"), "--", "start"],
+        capture_output=True, text=True, cwd=str(ROOT),
+    )
+    assert result.returncode == 0
+    assert marker.read_text().split() == ["--home", str(tmp_path / "dev-home"), "start"]
+
+
 def _mountinfo_root(path: Path) -> str:
     """``path`` as mountinfo reports a bind of it: relative to its own
     filesystem, e.g. without the ``/tmp`` prefix when /tmp is a tmpfs."""
@@ -626,6 +735,8 @@ def test_cli_reads_the_real_sandbox_var_tmp_mount(tmp_path, monkeypatch):
     """The real /proc/self/mountinfo of a bwrap namespace laid out like a Cortex
     command sandbox is refused; the same command with a plain /var/tmp runs."""
     monkeypatch.delenv("CORTEX_PASEO_DEV_MOUNTINFO")
+    # Isolate from read-only native account mounts of a surrounding sandbox.
+    monkeypatch.setenv("HOME", str(tmp_path / "owner"))
     scratch = tmp_path / "cortex-command-real1234" / "var-tmp"
     scratch.mkdir(parents=True)
     fake, marker = _launch_recorder(tmp_path)

@@ -40,7 +40,7 @@ Surfaces (:data:`SURFACES`):
   ``mcp_servers._normalize_entries``.
 - ``connections`` -- ``connections.json`` metadata (never credential values
   or credential paths): rename, session limit, validate, remove, and the
-  explicit opt-in onboarding of the optional OpenCode v2 engine. OpenCode is
+  explicit native-account onboarding of supported engines. OpenCode is
   never onboarded, and never let into automatic routing, as a side effect.
 - ``route_catalog`` (read-only) -- every supported engine and every catalog
   route Cortex knows of, with its effective state under the effective
@@ -57,6 +57,12 @@ Surfaces (:data:`SURFACES`):
   catalog snapshot. Each route reports ``enabled`` (routing ``enabled`` or
   its built-in default: OpenCode models stay off until listed). Enabling or
   disabling an engine or model is a ``routing`` update.
+
+The additional ``default_preset`` surface supports ``read``,
+``apply_default_preset`` (absent-only), and confirmed ``reset_default_preset``
+(combined byte revision of routing/defaults; private backups). Connections add
+``discover_connections``, ``onboard_connection`` and ``install_engine`` actions.
+These paths never accept credential values, commands, binary paths or versions.
 
 Versioning: every read returns a ``revision`` -- ``"absent"`` or
 ``"sha256:<hex>"`` of the authoritative bytes (for the project row, of its
@@ -1561,11 +1567,215 @@ def onboard_opencode(expected_revision, *, explicit_opt_in, binary: str | None =
         launch_command=opencode_install.launch_command_for(install), reuse=True, environ=env,
     )
     record = onboarding.validate(record.id, environ=env)
+    from ..connections.automatic import refresh_connection
+
+    catalog_status = refresh_connection(record, environ=env)
     return dict(
-        read_connections(env), changed=True, connection=_connection_view(record),
+        read_connections(env), changed=True, connection=_connection_view(record), catalog_status=catalog_status,
         opencode=dict(version=install.version, next_action=_OPENCODE_NEXT_ACTION.get(record.state.value),
                       automatic_routing="excluded_until_routing_opts_in"),
     )
+
+
+# --- First-run configuration ---------------------------------------------------
+
+def _connection_engine(engine):
+    if not isinstance(engine, str) or engine not in SUPPORTED_ENGINES:
+        raise _error("unsupported_engine", "Choose codex-acp, claude-agent-acp or opencode.", field="engine")
+    return engine
+
+
+def _native_login_detected(engine, env):
+    """Presence only: never open, parse or return a native credential."""
+    from ..connections import onboarding
+
+    return (registry.client_native_dir(engine, env) / onboarding._NATIVE_LOGIN_MARKER[engine]).is_file()
+
+
+def _discover_connection_engine(engine, env):
+    from ..connections import discovery
+
+    return (discovery.discover_opencode(environ=env) if engine == OPENCODE
+            else discovery.discover_engine(engine, environ=env))
+
+
+def discover_connections(*, environ: Mapping[str, str] | None = None) -> dict[str, object]:
+    """Read installed adapters and native login markers, never create connections.
+
+    OpenCode's version probe uses disposable sandbox files, not owner config.
+    A login marker is not proof of a working account or available models.
+    """
+    from ..connections import automatic, discovery
+
+    env = _env(environ)
+    view = read_connections(env)
+    state = registry.inspect_registry(env)
+    engines = []
+    for engine in SUPPORTED_ENGINES:
+        found = _discover_connection_engine(engine, env)
+        login = _native_login_detected(engine, env)
+        connected = next((item["id"] for item in view["connections"] if item["engine"] == engine), None)
+        status = ("connected" if connected else "not_downloaded" if found is None
+                  else "ready_to_connect" if login else "downloaded_no_login")
+        engines.append(dict(engine=engine, status=status, version=found.version if found else None,
+                            native_login_detected=login, already_connected=connected,
+                            qualified=bool(found and discovery.is_qualified(engine, found.version)),
+                            install_supported=engine in discovery.SUPPORTED_ENGINES,
+                            automatic_setup=automatic.read_status(engine, env),
+                            automatic_setup_reason=automatic.read_status_reason(engine, env),
+                            auto_connect_disabled=engine in state.auto_connect_disabled))
+    return dict(surface="connections", revision=view["revision"], engines=engines)
+
+
+def onboard_connection(engine, expected_revision, *, explicit_opt_in,
+                       environ: Mapping[str, str] | None = None) -> dict[str, object]:
+    """Explicit native-account onboarding; no keys, paths or commands are accepted.
+
+    Existing connections for the engine are left byte-identical, as in startup
+    sync. Creation rechecks the revision inside its registry transaction.
+    """
+    from ..connections import discovery, onboarding
+
+    engine = _connection_engine(engine)
+    if explicit_opt_in is not True:
+        raise _error("explicit_opt_in_required", "Send explicit_opt_in: true to connect a native account.",
+                     field="explicit_opt_in")
+    expected = _expected(expected_revision)
+    env = _env(environ)
+    with _owner_config_lock(env):
+        data = _registry_bytes(env)
+        _check("connections", expected, _revision(data))
+        state = registry._parse_registry_bytes(data or b"")
+        existing = next((record for record in state.connections.values() if record.engine == engine), None)
+        if existing is not None:
+            return dict(_connections_view(data), changed=False, connection=_connection_view(existing))
+    found = _discover_connection_engine(engine, env)
+    if found is None:
+        raise _error("engine_not_downloaded", "Install the supported engine before connecting it.", field="engine")
+    if not discovery.is_qualified(engine, found.version):
+        raise _error("engine_version_unqualified", "Install a source-qualified adapter version.", field="engine")
+    if not _native_login_detected(engine, env):
+        raise _error("native_login_required", "Log in with the engine's native account command first.",
+                     field="engine")
+    if engine == OPENCODE:
+        from ..engine import opencode_install
+
+        opencode_install.verify_install(opencode_install.OpenCodeInstall(
+            binary=found.launch_command[0], version=found.version), env)
+    record = onboarding.create_referenced_connection(
+        name=engine, engine=engine, provider=onboarding._DISCOVERY_PROVIDER[engine],
+        launch_command=tuple(found.launch_command), reuse=True, expected_revision=expected, environ=env)
+    from ..connections.automatic import refresh_connection
+
+    catalog_status = refresh_connection(record, environ=env)
+    return dict(read_connections(env), changed=True, connection=_connection_view(record),
+                catalog_status=catalog_status)
+
+
+def install_engine(engine, *, environ: Mapping[str, str] | None = None) -> dict[str, object]:
+    """Install only Cortex's owned manifest pin; no arbitrary binary or version input."""
+    import subprocess
+    from ..connections import discovery, engine_update
+    from ..packaging.pinned import PinnedManifestError
+
+    engine = _connection_engine(engine)
+    if engine not in discovery.SUPPORTED_ENGINES:
+        raise _error("engine_install_unsupported", "OpenCode must be installed using its native installer.",
+                     field="engine")
+    env = _env(environ)
+    try:
+        version = engine_update.install_pinned_engine(engine, environ=env)
+    except (OSError, ValueError, subprocess.SubprocessError, PinnedManifestError):
+        # Do not echo npm output: it may include private registry configuration.
+        raise _error("engine_install_failed", "Pinned engine installation failed; retry after checking npm/network.",
+                     field="engine") from None
+    if version is None:
+        raise _error("engine_install_failed", "Pinned installation is unavailable, busy or failed verification.",
+                     field="engine")
+    from ..connections.automatic import record_status
+
+    record_status(engine, "downloaded", env)
+    return dict(engine=engine, version=version, status="installed", discovery=discover_connections(environ=env))
+
+
+def _preset_snapshot(env):
+    root = registry.config_root(env)
+    data = {name: registry.read_owner_file(root / (name + ".json")) for name in ("routing", "defaults")}
+    revisions = {name: _revision(body) for name, body in data.items()}
+    files = {name: dict(revision=revision, status="absent" if data[name] is None else "existing")
+             for name, revision in revisions.items()}
+    # Reset still binds/replaces only routing and defaults. Apply also seeds
+    # absent MCP examples and the named profile; expose those outcomes to Settings.
+    for name, filename in (("mcp_servers", "mcp-servers.json"), ("routing_profiles", "routing-profiles.json")):
+        body = registry.read_owner_file(root / filename)
+        files[name] = dict(revision=_revision(body), status="absent" if body is None else "existing")
+    return data, dict(surface="default_preset", revision=_revision(_pretty(revisions)), files=files)
+
+
+def read_default_preset(*, environ: Mapping[str, str] | None = None) -> dict[str, object]:
+    """Read the combined revision of both user files without creating either."""
+    return _preset_snapshot(_env(environ))[1]
+
+
+def apply_default_preset(*, environ: Mapping[str, str] | None = None) -> dict[str, object]:
+    """Seed only absent user files; even malformed existing files stay unchanged."""
+    from ..routing import defaults
+
+    env = _env(environ)
+    settings = defaults.ensure_model_settings(env)
+    return dict(read_default_preset(environ=env), settings=settings,
+                changed=any(item["changed"] for item in settings.values()))
+
+
+def reset_default_preset(expected_revision, *, confirm=False,
+                         environ: Mapping[str, str] | None = None) -> dict[str, object]:
+    """Explicitly replace both user files from the validated public asset.
+
+    The revision binds both files, not project/environment overrides. Back up
+    every existing file privately before any replacement; roll back on errors.
+    """
+    import time
+    from ..routing import defaults
+
+    if confirm is not True:
+        raise _error("confirmation_required", "Send confirm: true to replace both user preset files.", field="confirm")
+    expected = _expected(expected_revision)
+    try:
+        template = defaults.load_model_settings_template()
+    except (OSError, ValueError):
+        raise _error("invalid_default_preset", "The bundled preset failed validation; nothing was replaced.") from None
+    payloads = dict(routing=_pretty(template["routing"]),
+                    defaults=_pretty(dict(defaults=dict(coordinator=template["coordinator"],
+                         **({"language": template["language"]} if "language" in template else {})))))
+    env = _env(environ)
+    root = registry.config_root(env)
+    with _owner_config_lock(env):
+        before, snapshot = _preset_snapshot(env)
+        _check("default_preset", expected, snapshot["revision"])
+        backups = {}
+        stamp = time.time_ns()
+        for name, body in before.items():
+            if body is not None:
+                backup = root / f"{name}.json.cortex-backup-{stamp}"
+                registry.atomic_write_private(backup, body, directory=root)
+                backups[name] = str(backup)
+        written = []
+        try:
+            for name, body in payloads.items():
+                _replace_file(root / (name + ".json"), body)
+                written.append(name)
+        except (OSError, PortableError):
+            try:
+                for name in reversed(written):
+                    path = root / (name + ".json")
+                    if before[name] is None:
+                        path.unlink()
+                    else:
+                        _replace_file(path, before[name])
+            except (OSError, PortableError):
+                raise _error("preset_rollback_failed", "Preset reset and rollback failed; restore the private backups.") from None
+            raise
+        return dict(_preset_snapshot(env)[1], changed=before != payloads, backups=backups)
 
 
 # --- JSON request/response ------------------------------------------------------
@@ -1643,6 +1853,17 @@ def _dispatch(request, environ) -> dict[str, object]:
         if action == "refresh":
             return refresh_route_catalog(request.get("project"), environ)
         return read_route_catalog(request.get("project"), environ)
+    if surface == "default_preset":
+        if action == "read":
+            _fields(request, ())
+            return read_default_preset(environ=environ)
+        if action == "apply_default_preset":
+            _fields(request, ())
+            return apply_default_preset(environ=environ)
+        if action == "reset_default_preset":
+            _fields(request, ("expected_revision", "confirm"))
+            return reset_default_preset(request.get("expected_revision"), confirm=request.get("confirm"),
+                                        environ=environ)
     if surface not in SURFACES:
         raise _error("unknown_surface", f"surface must be one of {', '.join(SURFACES)} (or 'all' or "
                                         f"'{ROUTE_CATALOG}' for read).", field="surface")
@@ -1695,6 +1916,16 @@ def _dispatch(request, environ) -> dict[str, object]:
         return update_connection(request.get("expected_revision"), request.get("connection_id"),
                                  request.get("operation"), name=request.get("name"),
                                  max_concurrent_sessions=request.get("max_concurrent_sessions"), environ=environ)
+    if surface == "connections" and action == "discover_connections":
+        _fields(request, ())
+        return discover_connections(environ=environ)
+    if surface == "connections" and action == "onboard_connection":
+        _fields(request, ("engine", "expected_revision", "explicit_opt_in"))
+        return onboard_connection(request.get("engine"), request.get("expected_revision"),
+                                  explicit_opt_in=request.get("explicit_opt_in"), environ=environ)
+    if surface == "connections" and action == "install_engine":
+        _fields(request, ("engine",))
+        return install_engine(request.get("engine"), environ=environ)
     if surface == "connections" and action == "discover_opencode":
         _fields(request, ("binary",))
         return discover_opencode(binary=request.get("binary"), environ=environ)

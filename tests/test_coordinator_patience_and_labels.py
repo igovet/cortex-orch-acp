@@ -127,6 +127,58 @@ def test_direct_dialogue_without_cortex_tool_remains_visible(tmp_path):
     assert "structured_proposal_missing" in updates[-1]
 
 
+def test_text_only_turn_is_reprompted_with_an_explicit_submission_repair(tmp_path):
+    """Live Codex coordinator (gpt-6-luna, low) answered "6" in plain text
+    three times to "Answer only the number. Do not use tools...": the runtime
+    resent the identical prompt and never said the text was not recorded, nor
+    that the user's tool restriction does not cover answer_submit."""
+    store, task_id = _task(tmp_path)
+    messages: list[str] = []
+
+    def coordinator(store, channel, session_ref, message, call_index):
+        messages.append(message)
+        return PromptOutcome(StopReason.END_TURN, "6")
+
+    runtime = OrchestratingRuntime(
+        store, FakeSessionRuntime(store, lambda s, c, sr, l, i: coordinator),
+        FakeWorkspace(), FakeConfigSnapshotSource(),
+        wait_timeout_seconds=0.02, max_no_progress_continuations=2,
+    )
+    runtime.start_prompt(task_id, "s1", "What is 3 + 3? Answer only the number. Do not use tools.",
+                         lambda _: True, threading.Event())
+    repair = "Your previous turn ended without an accepted structured submission"
+    assert len(messages) == 3
+    assert repair not in messages[0]
+    assert all(repair in m for m in messages[1:])
+    for message in messages:
+        assert "reaches the user only through answer_submit" in message
+        assert "never forbids the answer_submit call" in message
+
+
+def test_text_only_turn_followed_by_answer_submit_completes(tmp_path):
+    from cortex_runtime.orchestration.state import TaskMachine
+
+    store, task_id = _task(tmp_path)
+    messages: list[str] = []
+
+    def coordinator(store, channel, session_ref, message, call_index):
+        messages.append(message)
+        if "Your previous turn ended without an accepted structured submission" in message:
+            mcp_tools.dispatch(store, channel, "answer_submit", dict(text="6", request_key="repair-answer"))
+        return PromptOutcome(StopReason.END_TURN, "6")
+
+    runtime = OrchestratingRuntime(
+        store, FakeSessionRuntime(store, lambda s, c, sr, l, i: coordinator),
+        FakeWorkspace(), FakeConfigSnapshotSource(),
+        wait_timeout_seconds=0.02, max_no_progress_continuations=2,
+    )
+    assert runtime.start_prompt(task_id, "s1", "What is 3 + 3?", lambda _: True,
+                                threading.Event()) == StopReason.END_TURN
+    context = TaskMachine(store).context(task_id)
+    assert len(messages) == 2
+    assert (context["state"], context["blocker"], context["synthesis"]) == ("COMPLETED", None, "6")
+
+
 def test_anti_narration_rule_is_delivered_at_coordinator_open(tmp_path):
     store, task_id = _task(tmp_path)
     delivered: list[str] = []

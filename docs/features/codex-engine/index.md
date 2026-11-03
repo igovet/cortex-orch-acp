@@ -183,7 +183,7 @@ MCP call and rejection of a forced native patch. It uses a local fake provider,
 so it does not qualify a real paid model or client UI. See
 [containment](../permissions-and-containment/index.md).
 
-An operator who has already installed codex-acp by some other means (for
+Settings > Connections > Download engine installs the manifest-pinned codex-acp into Cortex's owned engine root and needs no install record (see [engine install records](../../configuration.md#engine-install-records)). An operator who has already installed codex-acp by some other means (for
 example following Zed's own npx-based Custom Agent registration, or a manual
 `npm install @agentclientprotocol/codex-acp`) records the resulting install as a
 `engine.codex_install.CodexAcpInstall`:

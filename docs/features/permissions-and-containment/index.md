@@ -38,7 +38,12 @@ directory. `TMPDIR`/`TMP`/`TEMP` use private per-process scratch;
 Cortex keeps that scratch and its other temporary files under the host's
 `/var/tmp` (`cortex_runtime.tempdirs`), not in a RAM-backed `/tmp`. The private
 `/var/tmp` is mounted before the scratch, so the scratch stays visible inside the
-sandbox while the other Cortex scratch directories there stay hidden;
+sandbox while the other Cortex scratch directories there stay hidden.
+The verified engine install the process launches from (Node binary, the
+adapter's `node_modules` tree, Codex's bundled binary and Cortex's private Codex
+adapter and launcher, `engine.process._jail_launch_inputs`) is mounted read-only
+over itself, so an owned engine root under `/var/tmp` (an `XDG_DATA_HOME` there)
+stays launchable instead of failing ACP `initialize`;
 HOME is the owner's real read-only home with selected writable caches. See
 [SECURITY.md](../../../SECURITY.md#tool-access-and-containment). The project is
 read-only for the coordinator, reviewers and read-only roles. Writing workers
@@ -82,8 +87,8 @@ engine environment and each `command_run` also receive the display session and
 ssh prompts then appear on the owner's desktop and the answers bypass the model.
 See [SECURITY.md](../../../SECURITY.md#optional-ssh-password-dialog).
 
-The current supported Codex CLI is 0.159.1 with codex-acp 2.0.1;
-codex-acp 1.12.0 and 1.13.0 remain supported. A verified private
+The pinned Codex adapter is codex-acp 2.3.0 (`@openai/codex` `^0.164.0`);
+codex-acp 1.12.0, 1.13.0, 2.0.1 and 2.1.1 remain qualified. A verified private
 adapter and per-process launcher disable native agents, multi-agent, plugin,
 hook and app features and each inherited MCP server; only session-specific
 brokered servers are re-enabled. The same two layers also force Codex's own

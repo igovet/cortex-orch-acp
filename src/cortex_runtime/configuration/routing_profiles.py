@@ -458,6 +458,36 @@ def read_profiles(project_root=None, environ=None):
     return _view(doc, path, data, migrated_from, _snapshot(env), project_root, env)
 
 
+def _seed_default_profile(template, environ):
+    """Called under the owner lock by the installer, never by a read.
+
+    Publish only an absent profile registry whose working files still match
+    the bundled preset. Existing/custom registries and settings stay untouched.
+    """
+    from ..routing.defaults import _create_private
+
+    path, _ = _paths(environ)
+    result = dict(path=str(path), status="existing", changed=False)
+    if registry.read_owner_file(path) is not None:
+        return result
+    snapshot = _snapshot(environ)
+    settings = _capture_all(snapshot)
+    expected_defaults = dict(defaults=dict(coordinator=template["coordinator"],
+                             **({"language": template["language"]} if "language" in template else {})))
+    expected = dict(routing=template["routing"],
+                    user_defaults=_capture("user_defaults", m._pretty(expected_defaults)),
+                    mcp_servers=_capture("mcp_servers", m._pretty(dict(servers=template.get("mcp_servers", {})))))
+    if any(settings[section] != value for section, value in expected.items()):
+        return dict(result, status="custom_settings")
+    now = m._now_iso()
+    doc = dict(format=FORMAT, active="default", pending=None,
+               applied=_applied("default", now, {s: snapshot[s]["revision"] for s in PROFILE_SECTIONS}),
+               profiles={"default": dict(description="Bundled default settings", created_at=now, updated_at=now,
+                                         sections=list(PROFILE_SECTIONS), settings=settings)})
+    created = _create_private(path, m._pretty(_document_v2(doc)).decode("utf-8"))
+    return dict(result, status="created" if created else "existing", changed=created)
+
+
 # --- mutations ---------------------------------------------------------------------
 
 def _name(name, field="name"):

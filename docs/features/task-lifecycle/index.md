@@ -82,6 +82,16 @@ Liveness and cancellation are checked again after composition and integrity
 checks; a now-live or unknown worker keeps coordinator reconciliation. An engine
 without this transaction-safe liveness gate also retains the coordinator path.
 
+A worker that publishes a report but ends its turn without `result_submit` gets
+a runtime-recorded result for that report, keyed by the assignment rather than
+the attempt. The finished-worker shutdown resolves that key to the attempt the
+assignment provisioned and stops and releases its engine as for a submitted
+result; a key with no provisioned attempt is never stopped under the key itself.
+When completion after coordinator synthesis still finds a worker that is not
+confirmed absent, the task stops with `workers_still_live_or_unknown`, and the
+stop question names each such worker by node id, role, engine and observed
+liveness (at most five, then a count). It never includes message or report content.
+
 An interrupted pre-commit attempt rolls back. On the next runtime start, a task
 left in RECONCILING after VERIFICATION_PASSED retries these same gates: eligible
 work completes through runtime synthesis, otherwise it is handed to the

@@ -93,13 +93,99 @@ def test_bootstrap_paseo_git_install_stages_and_repairs_complete_payload(tmp_pat
     assert probe.returncode == 0, probe.stderr
 
 
+def _paseo_profile(root):
+    """HOME plus Cortex-only XDG roots, as the guarded dev wrapper sets them."""
+    config_home, state_home = root / "cortex-xdg" / "config", root / "cortex-xdg" / "state"
+    for path in (config_home, state_home):
+        path.mkdir(parents=True)
+    return config_home, state_home
+
+
+def test_git_bootstrap_in_isolated_profile_keeps_owner_launch_record(tmp_path):
+    """A second Paseo profile (dev daemon, second install) with its own XDG
+    roots installs from Git next to the owner's conventional record: each
+    profile owns its own launch record and the owner's bytes never change."""
+    home = tmp_path / "home"
+    home.mkdir()
+    owner_env = {"HOME": str(home)}
+    owner = setup.bootstrap_paseo_git_install(owner_env)
+    owner_record = home / ".config" / "cortex" / "paseo-plugin-launch.json"
+    assert owner["launch_config"]["path"] == str(owner_record)
+    owner_bytes = owner_record.read_bytes()
+
+    config_home, state_home = _paseo_profile(home / ".paseo-dev")
+    dev_env = {"HOME": str(home), "XDG_CONFIG_HOME": str(config_home), "XDG_STATE_HOME": str(state_home)}
+    dev = setup.bootstrap_paseo_git_install(dev_env)
+
+    dev_record = config_home / "cortex" / "paseo-plugin-launch.json"
+    assert dev["launch_config"] == {**dev["launch_config"], "path": str(dev_record), "created": True}
+    persisted = json.loads(dev_record.read_text(encoding="utf-8"))
+    assert persisted["env"] == {"HOME": str(home), "XDG_CONFIG_HOME": str(config_home), "XDG_STATE_HOME": str(state_home)}
+    assert Path(persisted["argv"][2]).is_relative_to(state_home / "cortex" / "paseo-runtime")
+    assert dev_record.stat().st_mode & 0o777 == 0o600
+    assert owner_record.read_bytes() == owner_bytes
+
+    # Rerunning either profile's bootstrap updates only its own record.
+    assert setup.bootstrap_paseo_git_install(owner_env)["launch_config"]["created"] is False
+    assert setup.bootstrap_paseo_git_install(dev_env)["launch_config"]["created"] is False
+    assert owner_record.read_bytes() == owner_bytes
+
+
+def test_launch_record_without_xdg_config_home_uses_home_config(tmp_path):
+    home = tmp_path / "home"
+    home.mkdir()
+
+    result = setup._write_paseo_launch_config({"HOME": str(home)})
+
+    assert result["path"] == str(home / ".config" / "cortex" / "paseo-plugin-launch.json")
+    assert result["env"]["XDG_CONFIG_HOME"] == str((home / ".config").resolve())
+
+
+def test_launch_record_for_xdg_equal_to_home_config_stays_conventional(tmp_path):
+    home = tmp_path / "home"
+    (home / ".config").mkdir(parents=True)
+
+    result = setup._write_paseo_launch_config({"HOME": str(home), "XDG_CONFIG_HOME": str(home / ".config")})
+
+    assert result["path"] == str(home / ".config" / "cortex" / "paseo-plugin-launch.json")
+
+
+def test_isolated_launch_record_still_refuses_unrelated_file(tmp_path):
+    home = tmp_path / "home"
+    home.mkdir()
+    config_home, state_home = _paseo_profile(tmp_path / "profile")
+    record_dir = config_home / "cortex"
+    record_dir.mkdir(mode=0o700)
+    record = record_dir / "paseo-plugin-launch.json"
+    record.write_text(json.dumps({"argv": ["/usr/bin/other-agent"]}), encoding="utf-8")
+    record.chmod(0o600)
+    before = record.read_bytes()
+    env = {"HOME": str(home), "XDG_CONFIG_HOME": str(config_home), "XDG_STATE_HOME": str(state_home)}
+
+    with pytest.raises(SystemExit, match="refusing to overwrite unrelated launch configuration"):
+        setup._write_paseo_launch_config(env)
+
+    assert record.read_bytes() == before
+    assert not (home / ".config").exists()
+
+
+def test_launch_record_refuses_relative_xdg_config_home(tmp_path):
+    home = tmp_path / "home"
+    home.mkdir()
+
+    with pytest.raises(SystemExit, match="XDG_CONFIG_HOME must be an absolute path"):
+        setup._write_paseo_launch_config({"HOME": str(home), "XDG_CONFIG_HOME": "relative/config"})
+
+    assert list(home.iterdir()) == []
+
+
 def test_configure_paseo_plugin_launch_supports_git_installed_provider(tmp_path, monkeypatch, capsys):
-    _config_home, _state_home, home = _isolate(tmp_path, monkeypatch)
+    config_home, _state_home, _home = _isolate(tmp_path, monkeypatch)
 
     assert setup.main(["configure-paseo-plugin-launch"]) == 0
 
     result = json.loads(capsys.readouterr().out)
-    launch = home / ".config" / "cortex" / "paseo-plugin-launch.json"
+    launch = config_home / "cortex" / "paseo-plugin-launch.json"
     assert result["path"] == str(launch)
     assert result["argv"] == ["python3", "-B", str((setup._ROOT / "src" / "cortex_acp.py").resolve())]
     persisted = json.loads(launch.read_text(encoding="utf-8"))
@@ -126,7 +212,7 @@ def test_paseo_integrity_ignores_dependency_and_generated_churn_but_covers_sourc
 
 
 def test_install_paseo_plugin_is_idempotent_and_preserves_config(tmp_path, monkeypatch):
-    _config_home, _state_home, home = _isolate(tmp_path, monkeypatch)
+    config_home, _state_home, _home = _isolate(tmp_path, monkeypatch)
     plugin = tmp_path / "paseo"
     plugin.mkdir()
     (plugin / "paseo-plugin.json").write_text(
@@ -166,7 +252,7 @@ def test_install_paseo_plugin_is_idempotent_and_preserves_config(tmp_path, monke
             # Paseo loads the provider during install.  The durable launch
             # record must already exist so the compiled provider does not
             # evaluate its import.meta.url fallback on first load.
-            launch = home / ".config" / "cortex" / "paseo-plugin-launch.json"
+            launch = config_home / "cortex" / "paseo-plugin-launch.json"
             assert launch.is_file()
             assert json.loads(launch.read_text(encoding="utf-8"))["argv"]
             installed["value"] = True
@@ -193,7 +279,7 @@ def test_install_paseo_plugin_is_idempotent_and_preserves_config(tmp_path, monke
         **second, "launch_config": {k: v for k, v in second["launch_config"].items() if k != "created"},
         "legacy_provider_migration": None, "routing": None,
     }
-    launch = Path(home / ".config" / "cortex" / "paseo-plugin-launch.json")
+    launch = config_home / "cortex" / "paseo-plugin-launch.json"
     assert json.loads(launch.read_text(encoding="utf-8"))["argv"] == [
         "python3", "-B", str((setup._ROOT / "src" / "cortex_acp.py").resolve())
     ]
@@ -256,7 +342,7 @@ def test_legacy_generic_provider_migration_refuses_unrelated_launcher(tmp_path):
 
 
 def test_install_paseo_plugin_removes_new_launch_record_when_install_fails(tmp_path, monkeypatch):
-    _config_home, _state_home, home = _isolate(tmp_path, monkeypatch)
+    config_home, _state_home, _home = _isolate(tmp_path, monkeypatch)
     plugin = tmp_path / "paseo"
     plugin.mkdir()
     (plugin / "paseo-plugin.json").write_text(
@@ -283,7 +369,7 @@ def test_install_paseo_plugin_removes_new_launch_record_when_install_fails(tmp_p
 
     with pytest.raises(SystemExit, match="Paseo command failed"):
         setup.install_paseo_plugin(paseo_cli="paseo", runner=run)
-    launch_path = home / ".config" / "cortex" / "paseo-plugin-launch.json"
+    launch_path = config_home / "cortex" / "paseo-plugin-launch.json"
     assert not launch_path.exists()
 
     existing_launch = setup._write_paseo_launch_config()
@@ -295,7 +381,7 @@ def test_install_paseo_plugin_removes_new_launch_record_when_install_fails(tmp_p
 
 def test_paseo_launch_config_upgrades_argv_only_record_for_daemon_restart(tmp_path, monkeypatch):
     config_home, state_home, home = _isolate(tmp_path, monkeypatch)
-    launch_dir = home / ".config" / "cortex"
+    launch_dir = config_home / "cortex"
     launch_dir.mkdir(parents=True)
     launch = launch_dir / "paseo-plugin-launch.json"
     launch.write_text(json.dumps({
@@ -319,7 +405,7 @@ def test_paseo_launch_config_upgrades_argv_only_record_for_daemon_restart(tmp_pa
 
 def test_paseo_launch_config_upgrades_prior_managed_git_runtime(tmp_path, monkeypatch):
     config_home, state_home, home = _isolate(tmp_path, monkeypatch)
-    launch_dir = home / ".config" / "cortex"
+    launch_dir = config_home / "cortex"
     launch_dir.mkdir(parents=True)
     launch = launch_dir / "paseo-plugin-launch.json"
     old_runtime = tmp_path / "state" / "cortex" / "paseo-runtime" / "0.9.0"
@@ -345,6 +431,7 @@ def test_paseo_launch_config_upgrades_prior_managed_git_runtime(tmp_path, monkey
 
 def test_paseo_launch_config_rejects_symlinked_private_ancestor(tmp_path, monkeypatch):
     _config_home, _state_home, home = _isolate(tmp_path, monkeypatch)
+    monkeypatch.delenv("XDG_CONFIG_HOME")
     real_config = tmp_path / "real-config"
     real_config.mkdir()
     (home / ".config").symlink_to(real_config, target_is_directory=True)
@@ -354,7 +441,7 @@ def test_paseo_launch_config_rejects_symlinked_private_ancestor(tmp_path, monkey
 
 
 def test_install_paseo_plugin_repairs_overly_readable_daemon_config(tmp_path, monkeypatch):
-    _config_home, _state_home, home = _isolate(tmp_path, monkeypatch)
+    config_home, _state_home, _home = _isolate(tmp_path, monkeypatch)
     plugin = tmp_path / "paseo"
     plugin.mkdir()
     (plugin / "paseo-plugin.json").write_text(
@@ -384,7 +471,7 @@ def test_install_paseo_plugin_repairs_overly_readable_daemon_config(tmp_path, mo
     setup.install_paseo_plugin(paseo_cli="paseo", runner=run)
     assert config_path.stat().st_mode & 0o777 == 0o600
     assert json.loads(config_path.read_text(encoding="utf-8")) == {"pluginsEnabled": True}
-    assert (home / ".config" / "cortex" / "paseo-plugin-launch.json").stat().st_mode & 0o777 == 0o600
+    assert (config_home / "cortex" / "paseo-plugin-launch.json").stat().st_mode & 0o777 == 0o600
 
 
 def test_init_storage_is_idempotent(tmp_path, monkeypatch):
@@ -394,10 +481,14 @@ def test_init_storage_is_idempotent(tmp_path, monkeypatch):
     assert Path(first["state_root"]).is_dir()
     second = setup.init_storage()
     assert first["routing"]["routing"]["status"] == "created"
+    # Every owner file is either left as-is (current) or, for the profile registry,
+    # reported as already present; a second run never writes any of them.
     assert second["routing"] == {
         "routing": {**first["routing"]["routing"], "status": "current", "changed": False},
         "route_policy": first["routing"]["route_policy"],
         "defaults": {**first["routing"]["defaults"], "status": "current", "changed": False},
+        "mcp_servers": {**first["routing"]["mcp_servers"], "status": "current", "changed": False},
+        "routing_profiles": {**first["routing"]["routing_profiles"], "status": "existing", "changed": False},
     }
     assert {**second, "routing": None} == {**first, "routing": None}
 
@@ -743,4 +834,5 @@ def test_paseo_update_rejects_old_mcp_grants_before_mutating_daemon(tmp_path, mo
     assert 'codebase-memory-mcp.allowed_tools' in str(caught.value)
     assert 'never-print-this' not in str(caught.value)
     assert path.read_bytes()==original
+    assert not (config/'cortex/paseo-plugin-launch.json').exists()
     assert not (home/'.config/cortex/paseo-plugin-launch.json').exists()

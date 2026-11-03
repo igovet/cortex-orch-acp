@@ -3,10 +3,16 @@ import { Icon, ScrollView } from "@getpaseo/plugin/client/react-native";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Pressable, Switch, Text, TextInput, View } from "react-native";
 import {
+  applyDefaultPreset,
+  discoverConnections,
   discoverOpenCode,
+  installEngine,
+  onboardConnection,
   onboardOpenCode,
   readConfig,
+  readDefaultPreset,
   refreshModelCatalog,
+  resetDefaultPreset,
   updateConfig,
   type ConfigBinding,
   type ConfigError,
@@ -22,7 +28,16 @@ import {
   PERMISSION_LEVELS,
   SETTINGS_SECTIONS,
   buildConnectionMaxSessions,
+  buildConnectionOnboard,
   buildConnectionRename,
+  buildEngineInstall,
+  buildPresetReset,
+  engineCanConnect,
+  engineCanDownload,
+  engineStatusText,
+  presetCanApply,
+  presetFilesText,
+  presetOutcomeText,
   buildMcpUpsert,
   buildOnboard,
   buildProjectCeilingUpdate,
@@ -99,7 +114,10 @@ import {
   LEGACY_WORK_KINDS,
   storedWorkKindLabel,
   type ConnectionView,
+  type ConnectionsDiscoveryView,
   type ConnectionsView,
+  type DefaultPresetView,
+  type EngineDiscoveryView,
   type EnvRow,
   type FieldErrors,
   type KeyValueRow,
@@ -446,7 +464,7 @@ function CeilingSummary({ ceiling, theme }: { ceiling: CeilingView; theme: Theme
 type ReadState<Result> =
   | { status: "loading" }
   | { status: "error"; message: string }
-  | { status: "ready"; result: Result; binding: ConfigBinding };
+  | { status: "ready"; result: Result; binding: ConfigBinding; refreshError?: string };
 
 type SaveError = { message: string; conflict: boolean; fields: FieldErrors };
 
@@ -455,6 +473,8 @@ type SaveError = { message: string; conflict: boolean; fields: FieldErrors };
  * resolves by reloading, never by overwriting. */
 function useConfigSurface<Result>(surface: string, workspaceId: string | null, requireWorkspace: boolean, onWritten?: () => void) {
   const lastSaved = useRef<Result | null>(null);
+  const readEpoch = useRef(0);
+  const refreshPending = useRef(false);
   const read = useRpc(readConfig);
   const write = useRpc(updateConfig);
   const [state, setState] = useState<ReadState<Result>>({ status: "loading" });
@@ -462,6 +482,7 @@ function useConfigSurface<Result>(surface: string, workspaceId: string | null, r
   const [saveError, setSaveError] = useState<SaveError | null>(null);
 
   const reload = useCallback(async () => {
+    ++readEpoch.current;
     setSaveError(null);
     if (requireWorkspace && !workspaceId) {
       setState({ status: "error", message: "Select a project workspace above to read this surface." });
@@ -480,10 +501,38 @@ function useConfigSurface<Result>(surface: string, workspaceId: string | null, r
 
   useEffect(() => { reload(); }, [reload]);
 
+  // Passive refreshes retain the mounted form and any save/conflict feedback.
+  const refresh = useCallback(async (reconcile?: (previous: Result, next: Result) => Result) => {
+    if (refreshPending.current || writePending.current) return;
+    refreshPending.current = true;
+    const epoch = readEpoch.current;
+    try {
+      const out = await read({ surface: surface as never, ...(workspaceId ? { workspaceId } : {}) });
+      if (epoch !== readEpoch.current) return;
+      if (!out.ok) throw new Error(describeConfigError(out.error));
+      setState((current) => {
+        const result = current.status === "ready" && reconcile
+          ? reconcile(current.result, out.result as unknown as Result) : out.result as unknown as Result;
+        const next = { status: "ready" as const, result, binding: out.binding };
+        return sameJson(current, next) ? current : next;
+      });
+    } catch (error) {
+      if (epoch !== readEpoch.current) return;
+      const message = error instanceof Error ? error.message : "Read failed";
+      setState((current) => {
+        const next = current.status === "ready" ? { ...current, refreshError: message } : { status: "error" as const, message };
+        return sameJson(current, next) ? current : next;
+      });
+    } finally {
+      refreshPending.current = false;
+    }
+  }, [read, surface, workspaceId]);
+
   const writePending = useRef(false);
   const save = useCallback(async (input: ConfigUpdateInput, prefixes: readonly string[] = []): Promise<boolean> => {
     if (writePending.current) return false;
     writePending.current = true;
+    ++readEpoch.current;
     setSaving(true);
     setSaveError(null);
     try {
@@ -511,7 +560,7 @@ function useConfigSurface<Result>(surface: string, workspaceId: string | null, r
     setState((current) => current.status === "ready" ? { ...current, result } : current);
   }, []);
 
-  return { state, reload, save, saving, saveError, setSaveError, replace, lastSaved };
+  return { state, reload, refresh, save, saving, saveError, setSaveError, replace, lastSaved };
 }
 
 function SurfaceFrame<Result>({ state, reload, theme, children }: {
@@ -1641,7 +1690,15 @@ function ConnectionCard({ connection, view, busy, save, errors, theme }: {
   const [sessions, setSessions] = useState(String(connection.max_concurrent_sessions));
   const [clientErrors, setClientErrors] = useState<FieldErrors>({});
   const [confirmRemove, setConfirmRemove] = useState(false);
-  useEffect(() => { setName(connection.name); setSessions(String(connection.max_concurrent_sessions)); }, [connection]);
+  const previous = useRef(connection);
+  useEffect(() => {
+    // Status-only polls must not overwrite a draft. Adopt changed persisted
+    // fields only when that field has no local edit.
+    const before = previous.current;
+    setName((value) => value === before.name ? connection.name : value);
+    setSessions((value) => value === String(before.max_concurrent_sessions) ? String(connection.max_concurrent_sessions) : value);
+    previous.current = connection;
+  }, [connection]);
   const allowed = (operation: string) => view.operations.length === 0 || view.operations.includes(operation);
   const shown = mergeErrors(clientErrors, errors);
   const apply = async (built: ReturnType<typeof buildConnectionRename>) => {
@@ -1707,6 +1764,171 @@ function opencodeOnboardedText(onboarded: { version: string; nextAction: string 
   return `Onboarded OpenCode ${onboarded.version} — ${next} Automatic routing: ${onboarded.automaticRouting}.`;
 }
 
+type Outcome = { tone: "success" | "danger"; text: string; conflict?: boolean };
+
+/** One engine's first-run state and the actions that move it on. */
+function EngineSetupRow({ row, busy, locked, outcome, optIn, onOptIn, onDownload, onConnect, onRecheck, theme }: {
+  row: EngineDiscoveryView; busy: "download" | "connect" | null; locked: boolean; outcome: Outcome | null; optIn: boolean; onOptIn: (value: boolean) => void;
+  onDownload: () => void; onConnect: () => void; onRecheck: () => void; theme: Theme;
+}) {
+  // One download or connection at a time across every engine.
+  const anyBusy = locked;
+  return <View style={{ borderWidth: 1, borderColor: theme.colors.border, borderRadius: 6, padding: 8, gap: 6 }}>
+    <Text accessibilityRole="header" style={{ color: theme.colors.foreground, fontSize: 13, fontWeight: "600" }}>{engineLabel(row.engine)}</Text>
+    <Text style={{ color: theme.colors.foregroundMuted, fontSize: 12 }}>{engineStatusText(row)}</Text>
+    {engineCanDownload(row) && <Button title={busy === "download" ? "Downloading…" : "Download engine"} theme={theme}
+      accessibilityLabel={`Download engine ${row.engine}`} disabled={anyBusy} onPress={onDownload} />}
+    {engineCanConnect(row) && <>
+      <ToggleField label={`Connect ${row.engine} through my own account login`} value={optIn} onValueChange={onOptIn} theme={theme} disabled={anyBusy} />
+      <Button title={busy === "connect" ? "Connecting…" : "Add connection"} icon="Plus" theme={theme} accessibilityLabel={`Add connection for ${row.engine}`}
+        disabled={!optIn || anyBusy} onPress={onConnect} />
+    </>}
+    {outcome && <View style={{ gap: 6 }}>
+      <Banner text={outcome.text} theme={theme} tone={outcome.tone} />
+      {outcome.conflict && <Button title="Check again" theme={theme} accessibilityLabel={`Check ${row.engine} again`} onPress={onRecheck} />}
+    </View>}
+  </View>;
+}
+
+type DiscoveryState = { status: "loading" } | { status: "error"; message: string } | { status: "ready"; result: ConnectionsDiscoveryView };
+
+/** First-run setup for every supported engine: its status, Download engine
+ * (Cortex's pinned adapter) and Add connection (native account login, with
+ * an explicit opt-in). Kept outside the connections read frame so its
+ * outcome survives the reload that follows a new connection. */
+function EngineSetup({ revision, onConnected, onRefresh, theme }: { revision: string | null; onConnected: () => Promise<void> | void; onRefresh: () => Promise<void>; theme: Theme }) {
+  const discover = useRpc(discoverConnections);
+  const onboard = useRpc(onboardConnection);
+  const install = useRpc(installEngine);
+  const [state, setState] = useState<DiscoveryState>({ status: "loading" });
+  const [refreshError, setRefreshError] = useState<string | null>(null);
+  const checking = useRef(false);
+  const [optIns, setOptIns] = useState<Record<string, boolean>>({});
+  const [busy, setBusy] = useState<{ engine: string; kind: "download" | "connect" } | null>(null);
+  const [outcomes, setOutcomes] = useState<Record<string, Outcome>>({});
+  const pending = useRef(false);
+  const seenRevision = useRef<string | null>(null);
+
+  const check = useCallback(async () => {
+    if (checking.current) return;
+    checking.current = true;
+    try {
+      const out = await discover({});
+      if (!out.ok) throw new Error(describeConfigError(out.error));
+      setRefreshError(null);
+      setState((current) => {
+        const next = { status: "ready" as const, result: out.result };
+        return sameJson(current, next) ? current : next;
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Check failed";
+      setRefreshError(message);
+      setState((current) => current.status === "ready" ? current : { status: "error", message });
+    } finally {
+      checking.current = false;
+    }
+  }, [discover]);
+  useEffect(() => { check(); }, [check]);
+  // Poll only while mounted; discovery is passive and never starts a download.
+  useEffect(() => {
+    const timer = setInterval(() => { if (!pending.current) { void check(); void onRefresh(); } }, 3000);
+    // Browser timers are numeric; Node renderers must not be kept alive by polling.
+    (timer as unknown as { unref?: () => void }).unref?.();
+    return () => clearInterval(timer);
+  }, [check, onRefresh]);
+  // A connection renamed, removed or added changes the registry: re-check.
+  useEffect(() => {
+    if (revision === null) return;
+    if (seenRevision.current !== null && seenRevision.current !== revision) check();
+    seenRevision.current = revision;
+  }, [revision, check]);
+
+  const setOutcome = (engine: string, outcome: Outcome | null) => setOutcomes((current) => {
+    const next = { ...current };
+    if (outcome) next[engine] = outcome; else delete next[engine];
+    return next;
+  });
+
+  const download = async (row: EngineDiscoveryView) => {
+    const built = buildEngineInstall(row.engine);
+    if (!built.ok) { setOutcome(row.engine, { tone: "danger", text: Object.values(built.errors).join(" ") }); return; }
+    if (pending.current) return;
+    pending.current = true;
+    setBusy({ engine: row.engine, kind: "download" });
+    setOutcome(row.engine, null);
+    try {
+      const out = await install(built.value);
+      if (out.ok) {
+        setState({ status: "ready", result: out.result.discovery });
+        setOutcome(row.engine, { tone: "success", text: `Downloaded ${row.engine} ${out.result.version}.` });
+      } else {
+        setOutcome(row.engine, { tone: "danger", text: `Not downloaded: ${describeConfigError(out.error)}` });
+      }
+    } catch (error) {
+      // The host stopped waiting; the download itself may still complete.
+      setOutcome(row.engine, { tone: "danger", text: `No answer from the download (${error instanceof Error ? error.message : "request failed"}). It may still finish; press Check again in a minute.` });
+    } finally {
+      pending.current = false;
+      setBusy(null);
+    }
+  };
+
+  const connect = async (row: EngineDiscoveryView) => {
+    if (state.status !== "ready") return;
+    const built = buildConnectionOnboard(state.result.revision, row.engine, optIns[row.engine] === true);
+    if (!built.ok) { setOutcome(row.engine, { tone: "danger", text: Object.values(built.errors).join(" ") }); return; }
+    if (pending.current) return;
+    pending.current = true;
+    setBusy({ engine: row.engine, kind: "connect" });
+    setOutcome(row.engine, null);
+    try {
+      const out = await onboard(built.value);
+      if (out.ok) {
+        setOptIns((current) => ({ ...current, [row.engine]: false }));
+        const connection = out.result.connection;
+        setOutcome(row.engine, { tone: "success", text: out.result.changed === false
+          ? `${row.engine} was already connected${connection ? ` (${connection.id})` : ""}; nothing changed.`
+          : `Connected ${row.engine}${connection ? ` as ${connection.name} (${connection.id})` : ""}. ${out.result.catalog_status === "catalog_failed" ? "Model discovery failed; use Refresh model lists to retry." : "Model list refreshed."}` });
+        await check();
+        await onConnected();
+      } else {
+        const conflict = isRevisionConflict(out.error);
+        setOutcome(row.engine, { tone: "danger", conflict, text: conflict
+          ? `Connections changed elsewhere; nothing was registered. ${describeConfigError(out.error)}`
+          : `Not connected: ${describeConfigError(out.error)}` });
+      }
+    } catch (error) {
+      setOutcome(row.engine, { tone: "danger", text: `Not connected: ${error instanceof Error ? error.message : "request failed"}. Press Check again before retrying.` });
+    } finally {
+      pending.current = false;
+      setBusy(null);
+    }
+  };
+
+  return <Group title="Engines: download and connect" theme={theme} hint={HELP.engineSetup}>
+    <Button title={state.status === "loading" ? "Checking…" : "Check again"} theme={theme} accessibilityLabel="Check engines again"
+      disabled={state.status === "loading" || busy !== null} onPress={check} />
+    {refreshError && <Banner text={`Engine status unavailable: ${refreshError}${state.status === "ready" ? " Showing last known status; Check again to retry." : ""}`} theme={theme} tone="danger" />}
+    {state.status === "ready" && state.result.engines.map((row) => <EngineSetupRow key={row.engine} row={row} theme={theme}
+      busy={busy?.engine === row.engine ? busy.kind : null} locked={busy !== null} outcome={outcomes[row.engine] ?? null}
+      optIn={optIns[row.engine] === true} onOptIn={(value) => setOptIns((current) => ({ ...current, [row.engine]: value }))}
+      onDownload={() => download(row)} onConnect={() => connect(row)}
+      onRecheck={() => { setOutcome(row.engine, null); check(); onConnected(); }} />)}
+  </Group>;
+}
+
+/** Keep surviving rows in place even if a refreshed registry has a new order. */
+function reconcileConnections(previous: ConnectionsView, next: ConnectionsView): ConnectionsView {
+  const byId = new Map(next.connections.map((row) => [row.id, row]));
+  const connections = previous.connections.flatMap((row) => {
+    const updated = byId.get(row.id);
+    if (!updated) return [];
+    byId.delete(row.id);
+    return [sameJson(row, updated) ? row : updated];
+  });
+  return { ...next, connections: [...connections, ...byId.values()] };
+}
+
 function ConnectionsSection({ theme, onWritten }: { theme: Theme; onWritten?: () => void }) {
   const surface = useConfigSurface<ConnectionsView>("connections", null, false, onWritten);
   const discover = useRpc(discoverOpenCode);
@@ -1718,6 +1940,15 @@ function ConnectionsSection({ theme, onWritten }: { theme: Theme; onWritten?: ()
   const [activeConnection, setActiveConnection] = useState<string | null>(null);
   const [onboarded, setOnboarded] = useState<{ version: string; nextAction: string | null; automaticRouting: string } | null>(null);
   const { state } = surface;
+  const refreshConnections = useCallback(() => surface.refresh(reconcileConnections), [surface.refresh]);
+  const connected = useCallback(async () => { onWritten?.(); await refreshConnections(); }, [onWritten, refreshConnections]);
+  const registryRevision = state.status === "ready" ? state.result.revision : null;
+  const seenRegistryRevision = useRef<string | null>(null);
+  useEffect(() => {
+    if (registryRevision === null) return;
+    if (seenRegistryRevision.current !== null && seenRegistryRevision.current !== registryRevision) onWritten?.();
+    seenRegistryRevision.current = registryRevision;
+  }, [registryRevision, onWritten]);
 
   const runDiscover = async () => {
     setDiscovery({ status: "loading" });
@@ -1760,6 +1991,8 @@ function ConnectionsSection({ theme, onWritten }: { theme: Theme; onWritten?: ()
 
   return <Card title="Connections" theme={theme}>
     <Hint theme={theme} text={HELP.connections} />
+    <EngineSetup theme={theme} revision={state.status === "ready" ? state.result.revision : null}
+      onConnected={connected} onRefresh={refreshConnections} />
     <SurfaceFrame state={state} reload={surface.reload} theme={theme}>
       {(result) => <View style={{ gap: 10 }}>
         {result.connections.length === 0 && <Text style={{ color: theme.colors.foregroundMuted, fontSize: 12 }}>No connections registered.</Text>}
@@ -1797,6 +2030,101 @@ function ConnectionsSection({ theme, onWritten }: { theme: Theme; onWritten?: ()
         </Group>
       </View>}
     </SurfaceFrame>
+    {state.status === "ready" && state.refreshError && <View style={{ gap: 6 }}>
+      <Banner text={`Connections refresh failed: ${state.refreshError}. Showing last known connections.`} theme={theme} tone="danger" />
+      <Button title="Retry connections refresh" onPress={refreshConnections} theme={theme} />
+    </View>}
+  </Card>;
+}
+
+// --- Default preset ----------------------------------------------------------------
+
+type PresetState = { status: "loading" } | { status: "error"; message: string } | { status: "ready"; result: DefaultPresetView };
+
+/** Apply (absent files only) or reset (both files, after a confirmation
+ * step and a private backup) the bundled default preset. */
+function DefaultPresetCard({ theme, onChanged }: { theme: Theme; onChanged: () => void }) {
+  const read = useRpc(readDefaultPreset);
+  const apply = useRpc(applyDefaultPreset);
+  const reset = useRpc(resetDefaultPreset);
+  const [state, setState] = useState<PresetState>({ status: "loading" });
+  const [confirming, setConfirming] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [outcome, setOutcome] = useState<Outcome | null>(null);
+
+  const load = useCallback(async () => {
+    setState({ status: "loading" });
+    try {
+      const out = await read({});
+      setState(out.ok ? { status: "ready", result: out.result } : { status: "error", message: describeConfigError(out.error) });
+    } catch (error) {
+      setState({ status: "error", message: error instanceof Error ? error.message : "Read failed" });
+    }
+  }, [read]);
+  useEffect(() => { load(); }, [load]);
+
+  const run = async (operation: "apply" | "reset") => {
+    if (state.status !== "ready" || busy) return;
+    let request: Promise<Awaited<ReturnType<typeof apply>>>;
+    if (operation === "reset") {
+      const built = buildPresetReset(state.result, confirming);
+      if (!built.ok) { setOutcome({ tone: "danger", text: Object.values(built.errors).join(" ") }); return; }
+      request = reset(built.value);
+    } else {
+      request = apply({});
+    }
+    setBusy(true);
+    setOutcome(null);
+    try {
+      const out = await request;
+      setConfirming(false);
+      if (out.ok) {
+        setState({ status: "ready", result: out.result });
+        setOutcome({ tone: "success", text: presetOutcomeText(out.result, operation) });
+        if (out.result.changed !== false) onChanged();
+        return;
+      }
+      const conflict = isRevisionConflict(out.error);
+      setOutcome({ tone: "danger", conflict, text: conflict
+        ? `The preset files changed since they were read; nothing was replaced. ${describeConfigError(out.error)}`
+        : `Not ${operation === "reset" ? "reset" : "applied"}: ${describeConfigError(out.error)}` });
+    } catch (error) {
+      setOutcome({ tone: "danger", text: `No answer (${error instanceof Error ? error.message : "request failed"}); reload before retrying.` });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return <Card title="Default preset" theme={theme}>
+    <Hint theme={theme} text={HELP.defaultPreset} />
+    {state.status === "loading" && <Text style={{ color: theme.colors.foregroundMuted, fontSize: 13 }}>Loading…</Text>}
+    {state.status === "error" && <View style={{ gap: 8 }}>
+      <Banner text={state.message} theme={theme} tone="danger" />
+      <Button title="Retry" accessibilityLabel="Retry reading the default preset" onPress={load} theme={theme} />
+    </View>}
+    {state.status === "ready" && <View style={{ gap: 8 }}>
+      <ReadOnlyRow label="User files" value={presetFilesText(state.result)} theme={theme} />
+      {presetCanApply(state.result)
+        ? <Button title={busy ? "Applying…" : "Apply default preset"} theme={theme} disabled={busy || confirming} onPress={() => run("apply")} />
+        : <Hint theme={theme} text="All preset files exist, so Apply has nothing to write; it never replaces a file." />}
+      {(state.result.files.routing.status === "existing" || state.result.files.defaults.status === "existing") && (confirming
+        ? <View style={{ gap: 6 }}>
+          <Banner theme={theme} tone="warning" text={"Reset replaces your whole user routing.json and defaults.json — every routing rule, the coordinator default, the "
+            + "language and the owner ceiling — with the default preset. Each existing file is first copied to a private backup next to it "
+            + "(<name>.json.cortex-backup-<time>). Project and environment routing files are not changed."} />
+          <View style={{ flexDirection: "row", gap: 8, flexWrap: "wrap" }}>
+            <Button title={busy ? "Resetting…" : "Confirm reset to default preset"} tone="danger" theme={theme} disabled={busy} onPress={() => run("reset")} />
+            <Button title="Cancel" tone="muted" accessibilityLabel="Cancel reset to default preset" theme={theme} disabled={busy} onPress={() => setConfirming(false)} />
+          </View>
+        </View>
+        : <Button title="Reset to default preset…" tone="danger" accessibilityLabel="Reset to default preset" theme={theme} disabled={busy}
+          onPress={() => { setOutcome(null); setConfirming(true); }} />)}
+    </View>}
+    {outcome && <View style={{ gap: 6 }}>
+      <Banner text={outcome.text} theme={theme} tone={outcome.tone} />
+      {outcome.conflict && <Button title="Reload latest" accessibilityLabel="Reload the default preset files" theme={theme}
+        onPress={() => { setOutcome(null); load(); }} />}
+    </View>}
   </Card>;
 }
 
@@ -1839,6 +2167,9 @@ export function SettingsScreen({ theme }: PluginSurfaceProps) {
   const [settingsEpoch, setSettingsEpoch] = useState(0);
   const onWritten = useCallback(() => setProfileTick((tick) => tick + 1), []);
   const onActivated = useCallback(() => setSettingsEpoch((epoch) => epoch + 1), []);
+  // The preset rewrote routing.json/defaults.json: every section re-reads,
+  // and the profile bar re-checks whether the active profile still matches.
+  const onPresetChanged = useCallback(() => { setSettingsEpoch((epoch) => epoch + 1); setProfileTick((tick) => tick + 1); }, []);
 
   return <ScrollView style={{ flex: 1, backgroundColor: theme.colors.surface0 }} contentContainerStyle={{ padding: 14, gap: 14 }}>
     <Text accessibilityRole="header" style={{ color: theme.colors.foreground, fontSize: 18, fontWeight: "700" }}>Cortex settings</Text>
@@ -1852,6 +2183,7 @@ export function SettingsScreen({ theme }: PluginSurfaceProps) {
     <ProfileBar theme={theme} workspaceId={workspaceId} tick={profileTick} onActivated={onActivated} manage={section === "routing_profiles"} />
     <ChoiceField label="Section" value={section} theme={theme} help={HELP.section} onChange={setSection}
       options={SETTINGS_SECTIONS.map((entry) => ({ value: entry.id, label: entry.title }))} />
+    {section === "user_defaults" && <DefaultPresetCard theme={theme} onChanged={onPresetChanged} />}
     {section === "user_defaults" && <UserDefaultsSection key={settingsEpoch} onWritten={onWritten} theme={theme} />}
     {section === "models" && <ModelsSection key={settingsEpoch} onWritten={onWritten} theme={theme} workspaceId={workspaceId} />}
     {section === "engines_models" && <EnginesModelsSection key={settingsEpoch} onWritten={onWritten} theme={theme} workspaceId={workspaceId} />}

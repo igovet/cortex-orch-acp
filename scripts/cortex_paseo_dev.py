@@ -31,8 +31,14 @@ def cortex_xdg_paths(home: Path) -> tuple[Path, Path]:
     return root / "config", root / "state"
 
 
-def isolated_environment(home: Path) -> dict[str, str]:
-    """Keep a dev Paseo process out of the user's normal Cortex XDG state."""
+def isolated_environment(home: Path, *, checkout_runtime: bool = True) -> dict[str, str]:
+    """Keep a dev Paseo process out of the user's normal Cortex XDG state.
+
+    ``checkout_runtime`` passes this checkout as ``CORTEX_PASEO_SOURCE_ROOT``,
+    which the provider prefers over any launch record: right for a local
+    directory plugin, wrong for a Git-installed one, whose staged runtime it
+    would silently replace. ``--installed-runtime`` turns it off.
+    """
     config_home, state_home = cortex_xdg_paths(home)
     env = os.environ.copy()
     # Inherited opt-in must not activate tracing for an ordinary invocation.
@@ -46,8 +52,29 @@ def isolated_environment(home: Path) -> dict[str, str]:
         del env[key]
     env["XDG_CONFIG_HOME"] = str(config_home)
     env["XDG_STATE_HOME"] = str(state_home)
-    env["CORTEX_PASEO_SOURCE_ROOT"] = str(Path(__file__).resolve().parent.parent)
+    # Paseo bundles server plugins as CJS and does not expose their source
+    # path, so a directory plugin learns this worktree root only from here.
+    env.pop("CORTEX_PASEO_SOURCE_ROOT", None)
+    if checkout_runtime:
+        env["CORTEX_PASEO_SOURCE_ROOT"] = str(Path(__file__).resolve().parent.parent)
     return env
+
+
+_INSTALLED_RUNTIME_HELP = (
+    "do not pass this checkout as CORTEX_PASEO_SOURCE_ROOT, so a Git-installed plugin "
+    "launches the runtime its own install staged; required for Git plugin install/update "
+    "and for the daemon start that serves them"
+)
+
+
+def _installs_git_plugin(words: list[str]) -> bool:
+    """Whether a Paseo command installs or updates a non-directory plugin."""
+    if words[:2] == ["plugin", "update"]:
+        return True
+    if words[:2] != ["plugin", "install"]:
+        return False
+    source = next((item for item in words[2:] if not item.startswith("-")), None)
+    return source is not None and not Path(source).expanduser().is_dir()
 
 
 def _stop_xvfb(process: subprocess.Popen[str]) -> None:
@@ -145,33 +172,61 @@ def _live_singleton_owner(user_data_dir: Path) -> int | None:
 # before the engine starts (live, 2026-10-06).
 _SANDBOX_VAR_TMP = re.compile(r"/cortex-(?:command|engine)-[^/]+/(?:tmp/)?var-tmp(?://deleted)?$")
 _DAEMON_LAUNCHES = (["start"], ["onboard"], ["daemon", "start"], ["daemon", "run"])
+# A command sandbox may instead keep the host /var/tmp and mount the native
+# engine account directories read-only. Codex app-server then exits at startup
+# ("Error: Read-only file system (os error 30)"), so first-run model discovery
+# and every Codex session fail (live, 2026-11-02).
+_ENGINE_ACCOUNT_DIRS = (".codex", ".claude")
 # Tests only: an alternate mountinfo file to inspect.
 MOUNTINFO_OVERRIDE = "CORTEX_PASEO_DEV_MOUNTINFO"
+
+
+def _mountinfo() -> list[list[str]]:
+    path = os.environ.get(MOUNTINFO_OVERRIDE) or "/proc/self/mountinfo"
+    try:
+        lines = Path(path).read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return []
+    return [fields for line in lines if len(fields := line.split(" ")) > 5]
 
 
 def _cortex_sandbox_var_tmp() -> str | None:
     """The Cortex sandbox scratch directory mounted over /var/tmp, or ``None``
     when this process does not run inside a Cortex sandbox."""
-    path = os.environ.get(MOUNTINFO_OVERRIDE) or "/proc/self/mountinfo"
-    try:
-        lines = Path(path).read_text(encoding="utf-8", errors="replace").splitlines()
-    except OSError:
-        return None
     # The last mount on /var/tmp is the one in effect.
-    roots = [fields[3].replace("\\040", " ") for line in lines
-             if len(fields := line.split(" ")) > 4 and fields[4] == "/var/tmp"]
+    roots = [fields[3].replace("\\040", " ") for fields in _mountinfo() if fields[4] == "/var/tmp"]
     return roots[-1] if roots and _SANDBOX_VAR_TMP.search(roots[-1]) else None
+
+
+def _read_only_engine_account() -> str | None:
+    """A native engine account directory whose effective mount is read-only."""
+    home = os.path.expanduser("~")
+    targets = [os.path.join(home, name) for name in _ENGINE_ACCOUNT_DIRS]
+    effective = {}
+    # The last mount on a path is the one in effect.
+    for fields in _mountinfo():
+        point = fields[4].replace("\\040", " ")
+        if point in targets:
+            effective[point] = "ro" in fields[5].split(",")
+    return next((point for point in targets if effective.get(point)), None)
 
 
 def _refused_inside_cortex_sandbox(label: str) -> bool:
     scratch = _cortex_sandbox_var_tmp()
-    if scratch is None:
-        return False
-    print(f"{label}: refusing to start a long-lived Paseo process inside a Cortex sandbox "
-          f"(/var/tmp is its scratch {scratch}, deleted when the command ends, after which every "
-          "engine jail the daemon launches fails in bwrap); run it through outside_command "
-          "or a normal terminal", file=sys.stderr)
-    return True
+    if scratch is not None:
+        print(f"{label}: refusing to start a long-lived Paseo process inside a Cortex sandbox "
+              f"(/var/tmp is its scratch {scratch}, deleted when the command ends, after which every "
+              "engine jail the daemon launches fails in bwrap); run it through outside_command "
+              "or a normal terminal", file=sys.stderr)
+        return True
+    account = _read_only_engine_account()
+    if account is not None:
+        print(f"{label}: refusing to start a long-lived Paseo process inside a Cortex sandbox "
+              f"({account} is mounted read-only, but the daemon's engines use the native accounts "
+              "there; Codex cannot start with a read-only ~/.codex, so its model discovery fails); "
+              "run it through outside_command or a normal terminal", file=sys.stderr)
+        return True
+    return False
 
 
 def _run_route_preflight(args) -> int:
@@ -219,6 +274,7 @@ def main(argv: list[str]) -> int:
         )
         parser.add_argument("--port", type=int, help="Chrome DevTools Protocol port (default: choose a free port)")
         parser.add_argument("--xvfb", action="store_true", help="launch a private Xvfb display for this GUI invocation")
+        parser.add_argument("--installed-runtime", action="store_true", help=_INSTALLED_RUNTIME_HELP)
 
         args = parser.parse_args(argv[1:])
         return _run_gui(args)
@@ -234,6 +290,7 @@ def main(argv: list[str]) -> int:
         parser.add_argument("--wire-trace", action="store_true",
                             help="opt in to private wire tracing on dev daemon start only")
         parser.add_argument("--check", action="store_true", help="validate only")
+        parser.add_argument("--installed-runtime", action="store_true", help=_INSTALLED_RUNTIME_HELP)
         parser.add_argument("command", nargs=argparse.REMAINDER, help="Paseo command after --")
 
         args = parser.parse_args(argv)
@@ -296,7 +353,7 @@ def _run_gui(args) -> int:
     if _refused_inside_cortex_sandbox("cortex_paseo_dev gui"):
         return 2
 
-    env = isolated_environment(home)
+    env = isolated_environment(home, checkout_runtime=not getattr(args, "installed_runtime", False))
     env["PASEO_HOME"] = str(home)
     env["PASEO_ELECTRON_USER_DATA_DIR"] = str(user_data_dir)
     env["PASEO_ELECTRON_FLAGS"] = " ".join(flags)
@@ -372,6 +429,11 @@ def _run_cli(args) -> int:
         print("cortex_paseo_dev: command may not override --home or select --host", file=sys.stderr)
         return 2
 
+    installed_runtime = getattr(args, "installed_runtime", False)
+    if args.wire_trace and installed_runtime:
+        print("cortex_paseo_dev: --wire-trace traces this checkout and cannot use --installed-runtime", file=sys.stderr)
+        return 2
+
     if args.wire_trace:
         if (home != Path.home() / ".paseo-dev" or home.resolve() != home
                 or not (command[:1] == ["start"] or command[:2] == ["daemon", "start"])
@@ -391,11 +453,16 @@ def _run_cli(args) -> int:
         return 2
 
     words = command[next((i for i, item in enumerate(command) if not item.startswith("-")), len(command)):]
+    if _installs_git_plugin(words) and not installed_runtime:
+        print("cortex_paseo_dev: a Git-sourced plugin install or update needs --installed-runtime, "
+              "and the dev daemon must be started with --installed-runtime too; otherwise the "
+              "daemon launches this checkout instead of the installed runtime", file=sys.stderr)
+        return 2
     if (any(words[:len(launch)] == launch for launch in _DAEMON_LAUNCHES)
             and _refused_inside_cortex_sandbox("cortex_paseo_dev")):
         return 2
 
-    env = isolated_environment(home)
+    env = isolated_environment(home, checkout_runtime=not installed_runtime)
     if args.wire_trace:
         env["CORTEX_DEV_WIRE_TRACE"] = "1"
         env["CORTEX_DEV_TRACE_HOME"] = str(home)
@@ -414,9 +481,6 @@ def _run_cli(args) -> int:
     # (isolated_environment already dropped PASEO_AGENT_ID/PASEO_AGENT_CWD);
     # the isolated home is explicit in both --home and the environment.
     env["PASEO_HOME"] = str(home)
-    # Paseo bundles server plugins as CJS and does not expose their source path.
-    # Pass this worktree root explicitly to the isolated daemon for directory plugins.
-    env["CORTEX_PASEO_SOURCE_ROOT"] = str(Path(__file__).resolve().parent.parent)
     return subprocess.run([str(paseo), "--home", str(home), *command], env=env, check=False).returncode
 
 

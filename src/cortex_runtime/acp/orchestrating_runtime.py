@@ -5253,7 +5253,25 @@ class OrchestratingRuntime:
                 "SELECT DISTINCT assignment_ref FROM task_events WHERE task_id=? AND event_type='assignment_failed'",
                 (task_id,),
             ).fetchall()
-        result_attempts = {row["assignment_ref"] for row in results if row["assignment_ref"]}
+        # A worker's own result_submit names its attempt id; the runtime's
+        # silent-result fallback names the assignment's idempotency key.
+        # Stop the engine under the attempt that key provisioned: under the
+        # key itself nothing matches, and the real engine was never stopped
+        # or released (live, 2026-11-02). A key with no attempt is skipped.
+        result_attempts: set[str] = set()
+        with self._store.connection() as db:
+            for row in results:
+                ref = row["assignment_ref"]
+                if not ref:
+                    continue
+                prov = db.execute(
+                    "SELECT attempt_id FROM delegation_provisioning WHERE task_id=? AND idempotency_key=?",
+                    (task_id, ref),
+                ).fetchone()
+                if prov is None:
+                    result_attempts.add(ref)
+                elif prov["attempt_id"]:
+                    result_attempts.add(prov["attempt_id"])
         attempt_ids: set[str] = set(result_attempts)
         for row in failures:
             hash_ref = row["assignment_ref"]

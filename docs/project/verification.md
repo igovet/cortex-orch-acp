@@ -434,6 +434,7 @@ npm --prefix integrations/paseo run test:terminal-status # authoritative termina
 npm --prefix integrations/paseo run test:command-stop # command list/stop RPC and client model
 npm --prefix integrations/paseo run test:worker-card # card model, card contrast/Space activation, and one stable worker-card identity across turns/replay (cancel vs. real failure)
 npm --prefix integrations/paseo run test:replay    # server/replay.test.ts
+npm --prefix integrations/paseo run test:thinking  # per-model efforts; a stale thinking choice the model lacks is dropped through the real ACP bridge
 npm --prefix integrations/paseo run test:coalesce  # client/coalesce.test.ts
 npm --prefix integrations/paseo run test:worker-result-batch # client/worker-result-batch.test.ts
 npm --prefix integrations/paseo run test:rpc-subscribe # client/rpc-subscribe.test.ts

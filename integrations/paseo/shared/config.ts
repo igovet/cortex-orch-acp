@@ -363,6 +363,7 @@ export const connectionsResult = z.object({
   operations: z.array(z.string()),
   max_concurrent_sessions_limit: z.number(),
   connection: connection.optional(),
+  catalog_status: z.enum(["ready", "catalog_failed"]).optional(),
   opencode: z.object({
     version: z.string(),
     next_action: z.string().nullable(),
@@ -458,6 +459,61 @@ export const openCodeDiscoveryResult = z.object({
   onboarded_connection_ids: z.array(z.string()),
 });
 
+/** The engines Settings reports on and can connect through a native account
+ * login. No request for them ever carries a key, a credential path, a binary
+ * or a launch command: the API finds the installed adapter itself. */
+export const connectionEngines = ["codex-acp", "claude-agent-acp", "opencode"] as const;
+export type ConnectionEngine = typeof connectionEngines[number];
+/** Engines with a Cortex-owned pinned adapter download; OpenCode is
+ * installed with its own installer. */
+export const installableEngines = ["codex-acp", "claude-agent-acp"] as const;
+export type InstallableEngine = typeof installableEngines[number];
+
+// One row per engine. status: not_downloaded | downloaded_no_login |
+// ready_to_connect | connected (registered, not proof the login works).
+// native_login_detected is a marker file's presence, never its content.
+export const connectionsDiscoveryResult = z.object({
+  surface: z.literal("connections"),
+  revision,
+  engines: z.array(z.object({
+    engine: z.string(),
+    status: z.string(),
+    version: z.string().nullable(),
+    native_login_detected: z.boolean(),
+    already_connected: z.string().nullable(),
+    qualified: z.boolean(),
+    install_supported: z.boolean(),
+    automatic_setup: z.string().nullable().optional(),
+    // Fixed failure code of a catalog_failed discovery, never adapter text.
+    automatic_setup_reason: z.string().nullable().optional(),
+    auto_connect_disabled: z.boolean().optional(),
+  })),
+});
+
+export const engineInstallResult = z.object({
+  engine: z.string(),
+  version: z.string(),
+  status: z.literal("installed"),
+  // Discovery as it stands after the download.
+  discovery: connectionsDiscoveryResult,
+});
+
+// Apply seeds four absent files. Reset still replaces only routing/defaults.
+const presetFile = z.object({ revision, status: z.enum(["absent", "existing"]) });
+const presetSeed = z.object({ path: z.string(), status: z.string(), changed: z.boolean(), error: z.string().optional() });
+
+export const defaultPresetResult = z.object({
+  surface: z.literal("default_preset"),
+  // Binds both files together; a reset must send exactly this.
+  revision,
+  files: z.object({ routing: presetFile, defaults: presetFile, mcp_servers: presetFile.optional(), routing_profiles: presetFile.optional() }),
+  changed: z.boolean().optional(),
+  // Apply only: one outcome per file (an existing file is never replaced).
+  settings: z.object({ routing: presetSeed.optional(), defaults: presetSeed.optional(), mcp_servers: presetSeed.optional(), routing_profiles: presetSeed.optional() }).optional(),
+  // Reset only: the private copy of each file that existed before.
+  backups: z.object({ routing: z.string().optional(), defaults: z.string().optional() }).optional(),
+});
+
 const surfaceOutcome = <Result extends z.ZodType>(result: Result) => z.union([
   z.object({ ok: z.literal(true), result }),
   z.object({ ok: z.literal(false), error: configError }),
@@ -519,6 +575,10 @@ export const configUpdateOutput = envelope(z.union([
 export const openCodeDiscoverOutput = envelope(openCodeDiscoveryResult);
 export const catalogRefreshOutput = envelope(routeCatalogResult);
 export const openCodeOnboardOutput = envelope(connectionsResult);
+export const connectionsDiscoverOutput = envelope(connectionsDiscoveryResult);
+export const connectionOnboardOutput = envelope(connectionsResult);
+export const engineInstallOutput = envelope(engineInstallResult);
+export const defaultPresetOutput = envelope(defaultPresetResult);
 
 // --- contracts --------------------------------------------------------------
 
@@ -613,6 +673,60 @@ export const onboardOpenCode = defineRpc({
   output: openCodeOnboardOutput,
 });
 
+/** Every supported engine's state: downloaded or not, native login marker
+ * present or not, already connected or not. Reads only; writes nothing. */
+export const discoverConnections = defineRpc({
+  name: "cortex.config.connections.discover",
+  input: z.strictObject({}),
+  output: connectionsDiscoverOutput,
+});
+
+/** Registers one engine through the owner's own native account login (the
+ * engine's login command, run outside Cortex). Only an explicit opt-in with
+ * the connections revision is accepted; an existing connection for the
+ * engine is returned unchanged. There is no key or credential field. */
+export const onboardConnection = defineRpc({
+  name: "cortex.config.connections.onboard",
+  input: z.strictObject({
+    engine: z.enum(connectionEngines),
+    expected_revision: revision,
+    explicit_opt_in: z.literal(true),
+  }),
+  output: connectionOnboardOutput,
+});
+
+/** Downloads Cortex's own pinned adapter for one engine. Nothing is
+ * connected by it; the version is the pinned one, never client-chosen. */
+export const installEngine = defineRpc({
+  name: "cortex.config.connections.install",
+  input: z.strictObject({ engine: z.enum(installableEngines) }),
+  output: engineInstallOutput,
+});
+
+/** Whether preset files exist, and the combined routing/defaults revision a reset needs. */
+export const readDefaultPreset = defineRpc({
+  name: "cortex.config.preset.read",
+  input: z.strictObject({}),
+  output: defaultPresetOutput,
+});
+
+/** Seeds absent routing/defaults/MCP files and, for matching settings, an applied default profile.
+ * An existing file (even an invalid one) is never replaced. */
+export const applyDefaultPreset = defineRpc({
+  name: "cortex.config.preset.apply",
+  input: z.strictObject({}),
+  output: defaultPresetOutput,
+});
+
+/** Replaces both files with the bundled default preset, after a private
+ * backup of each existing one. Needs the combined revision and a literal
+ * confirmation. */
+export const resetDefaultPreset = defineRpc({
+  name: "cortex.config.preset.reset",
+  input: z.strictObject({ expected_revision: revision, confirm: z.literal(true) }),
+  output: defaultPresetOutput,
+});
+
 /** Re-reads every connection's model list from its engine (initialize and
  * session/new only: no prompt, no model call) and returns the fresh route
  * catalog. Nothing in routing changes. */
@@ -631,3 +745,10 @@ export type ConfigUpdateOutput = z.infer<typeof configUpdateOutput>;
 export type OpenCodeDiscoverOutput = z.infer<typeof openCodeDiscoverOutput>;
 export type OpenCodeOnboardOutput = z.infer<typeof openCodeOnboardOutput>;
 export type CatalogRefreshOutput = z.infer<typeof catalogRefreshOutput>;
+export type ConnectionsDiscoverOutput = z.infer<typeof connectionsDiscoverOutput>;
+export type ConnectionOnboardOutput = z.infer<typeof connectionOnboardOutput>;
+export type EngineInstallOutput = z.infer<typeof engineInstallOutput>;
+export type DefaultPresetOutput = z.infer<typeof defaultPresetOutput>;
+export type ConnectionOnboardInput = z.infer<typeof onboardConnection["input"]>;
+export type EngineInstallInput = z.infer<typeof installEngine["input"]>;
+export type PresetResetInput = z.infer<typeof resetDefaultPreset["input"]>;

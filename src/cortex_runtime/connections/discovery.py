@@ -1,12 +1,12 @@
 """Engine discovery: find Cortex's own engine installs (kept current by
 ``connections.engine_update``); a client's (e.g. Zed's) copy is never used.
 
-D-T035-02: an engine is no longer something Cortex installs, copies, or
-pins for itself -- it is whatever the user already configured in their
-editor. This module only ever *reads* the client's own installed npm
-package for the two engines this project implements adapters for
-(``codex-acp``, ``claude-agent-acp``); it never downloads, writes, or
-modifies anything. A launch command is only ever built from a package's
+This module reads Cortex-owned npm installs for ``codex-acp`` and
+``claude-agent-acp``; engine_update downloads them separately, either in the
+background or on explicit request. Discovery never downloads or changes
+owner configuration. Optional OpenCode discovery probes a trusted binary
+in a disposable, network-less sandbox and requires explicit onboarding.
+A launch command is only ever built from a package's
 own declared ``package.json`` ``"bin"`` entry -- never a guessed filename
 -- and an engine whose package/bin/node binary cannot actually be found on
 disk is reported as absent, never as a guess.
@@ -98,7 +98,7 @@ def is_pinned(engine: str, version: str) -> bool:
 
 @dataclass(frozen=True)
 class EngineDiscovery:
-    """One engine actually found installed for the client, ready to launch."""
+    """One installed adapter; qualification and native login are separate checks."""
 
     engine: str
     version: str
@@ -184,8 +184,9 @@ def discover_engine(
     node_binary: str | None = None,
     environ: dict[str, str] | None = None,
 ) -> EngineDiscovery | None:
-    """Report ``engine`` iff its package is actually installed under the
-    client's registry root, with a real, existing, declared ``bin`` entry
+    """Report ``engine`` iff its package is installed under Cortex's owned
+    root (or the explicitly supplied inspection root), with a real, existing,
+    declared ``bin`` entry
     point and a usable ``node`` binary. ``None`` otherwise -- never raises.
     """
     package_name = _PACKAGE_NAME.get(engine)
@@ -315,7 +316,7 @@ def discover_all(
     node_binary: str | None = None,
     environ: dict[str, str] | None = None,
 ) -> dict[str, EngineDiscovery]:
-    """Discover every supported engine the client has installed.
+    """Discover Cortex-owned npm engines; optional OpenCode is not included.
 
     Never raises: a broken/unreadable registry tree, a missing package, or
     a missing ``node`` binary simply yields fewer (or zero) entries.

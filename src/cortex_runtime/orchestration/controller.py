@@ -588,6 +588,34 @@ def _synthesis_workers_absent(runtime, task_id, cancel_event, db):
         return all(lookup(row['attempt_id'], db) == 'absent' for row in workers)
 
 
+def _live_or_unknown_workers(runtime, task_id):
+    """Each worker attempt of the task not observed absent, named for the stop
+    question: node id, role, engine and observed state -- identifiers only,
+    never a message or report body. Unknown liveness counts as blocking."""
+    with runtime._store.connection() as db:
+        rows = db.execute(
+            "SELECT p.attempt_id, p.role_id, "
+            "(SELECT n.node_id FROM runtime_nodes n WHERE n.task_id=p.task_id "
+            " AND n.assignment_ref=p.idempotency_key ORDER BY n.revision DESC LIMIT 1) AS node_id, "
+            "(SELECT a.engine FROM attempt_route_audit a WHERE a.task_id=p.task_id "
+            " AND a.attempt_id=p.attempt_id ORDER BY a.recorded_at DESC, a.id DESC LIMIT 1) AS engine "
+            "FROM delegation_provisioning p WHERE p.task_id=? AND p.role_id!='orchestrator' "
+            "ORDER BY p.created_at, p.idempotency_key", (task_id,)).fetchall()
+    blocking = []
+    for row in rows:
+        state = runtime._engine.lookup_owned(row['attempt_id'])
+        if state != 'absent':
+            blocking.append(f"{row['node_id'] or row['attempt_id'] or 'unprovisioned'} "
+                            f"({row['role_id']}, {row['engine'] or 'engine unknown'}): {str(state)[:32]}")
+    return blocking
+
+
+def _live_workers_blocker(blocking, shown=5):
+    """The close-out blocker naming the workers that hold it (bounded)."""
+    detail = '; '.join(blocking[:shown]) + (f'; +{len(blocking) - shown} more' if len(blocking) > shown else '')
+    return 'workers_still_live_or_unknown:' + detail
+
+
 def _await_synthesis_settlement(runtime, task_id, cancel_event):
     """Await owned post-result cleanup without holding a SQLite transaction.
 
@@ -778,7 +806,8 @@ def _run(runtime, task_id, session_id, channel, session_ref, content, emit_updat
             if prompted.get(key,0)>=3:
                 machine.move(task_id, 'BLOCKED', blocker='structured_proposal_missing')
                 continue
-            prompted[key]=prompted.get(key,0)+1
+            retried = prompted.get(key,0)
+            prompted[key]=retried+1
             request = (_direct_answer_request(runtime, task_id) +
                        'Explaining how to run tests does not require executing them. '
                        'The coordinator can inspect files but cannot execute commands. Do not expand a description into a defect audit. '
@@ -801,6 +830,8 @@ def _run(runtime, task_id, session_id, channel, session_ref, content, emit_updat
                        'If the user must still decide something (approve a proposed plan, choose between fixes, confirm manual steps), '
                        'do not submit synthesis: write the full details once as message text before the call, then ask with '
                        'user_question_request and end the turn without writing anything after it. ')
+            if retried:
+                request = _missing_submission_request() + request
             delivery_marker=f'runtime-coordinator:{time.monotonic_ns()}'
             pending_events=events.claim_unconsumed(runtime._store,task_id,delivery_marker)
             from ..acp import messages as localized_messages
@@ -1035,10 +1066,9 @@ def _run(runtime, task_id, session_id, channel, session_ref, content, emit_updat
                     machine.move(task_id, 'BLOCKED', blocker='workers_still_running')
                 else:
                     try:
-                        with runtime._store.connection() as db:
-                            workers = db.execute("SELECT attempt_id FROM delegation_provisioning WHERE task_id=? AND role_id!='orchestrator'", (task_id,)).fetchall()
-                        if any(runtime._engine.lookup_owned(row['attempt_id']) != 'absent' for row in workers):
-                            raise StoreError('workers_still_live_or_unknown')
+                        blocking = _live_or_unknown_workers(runtime, task_id)
+                        if blocking:
+                            raise StoreError(_live_workers_blocker(blocking))
                         machine.move(task_id, 'COMPLETED')
                     except StoreError as error:
                         if _storage_contention(error):
@@ -1452,7 +1482,21 @@ def _direct_answer_request(runtime, task_id):
     return (('This task was completed and the user\'s new message reopened it. ' if reopened else '') +
             'First determine whether the user wants information or changes. For a simple question or project overview, '
             'read only the relevant files yourself and submit a concise direct answer with answer_submit; do not create '
-            'workers, reports, code review or verification jobs for an explanation. ')
+            'workers, reports, code review or verification jobs for an explanation. '
+            'Message text alone never completes the task: even a one-word answer reaches the user only through '
+            'answer_submit. A user request not to use tools, delegate or create files limits project work; it never '
+            'forbids the answer_submit call that delivers the answer. ')
+
+
+def _missing_submission_request():
+    """Repair note for a planning/reconciling turn that ended without an
+    accepted structured submission: the runtime re-prompts, and the engine
+    must learn that its text-only reply was not recorded."""
+    return ('Your previous turn ended without an accepted structured submission, so the runtime recorded nothing '
+            'from it: message text alone never reaches the user as a final answer and never completes or advances '
+            'the task. In this turn, call the structured cortex tool the instructions below name; do not reply with '
+            'text only. A user request not to use tools, delegate or create files never forbids these cortex '
+            'submission tools. ')
 
 
 def _review_without_findings_request(runtime, task_id):

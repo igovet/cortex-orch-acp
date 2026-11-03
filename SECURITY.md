@@ -17,7 +17,11 @@ yields at known usage >=95% when more than 10 points worse than an available
 alternative. Provider choices and hard eligibility remain controlling, and ordinary
 light-tier technical writing is unchanged. This is not live qualification. Existing owner
 settings are never replaced. Account/connection
-identities and machine-specific MCP definitions/paths are not cloned; see
+identities and machine-specific MCP paths/credentials are not cloned. Fresh installs
+register disabled MCP examples with `/path/to/...` placeholders and empty environments,
+not installed executables; the loader excludes disabled entries before launch. A named
+applied `default` profile is created only for matching preset settings in an absent
+profile registry. Existing profiles and MCP registries are never replaced; see
 [the install snapshot boundary](docs/configuration.md#fresh-install-owner-default-snapshot).
 
 Routing effort controls read cached per-model observations only; they do not start engines, grant model access or change authorization. Unknown/conflicting observations are labeled, and unsupported stored values are preserved rather than silently repaired. Runtime dispatch validation remains authoritative. See [settings](docs/configuration.md#manage-settings-in-paseo).
@@ -32,7 +36,7 @@ regression passes do not clear a nonzero audit, and `devDependencies` is not
 a security boundary. See the [dependency disposition](docs/project/paseo-dependency-audit.md)
 for exact paths, artifact-test limits and the next upstream-fix decision.
 
-## Current ACP boundary (1.0.4)
+## Current ACP boundary (1.0.5)
 
 Paseo Routing model choices exclude models disabled in the file being edited.
 Stored pins and policy references remain intact and carry an inactive warning;
@@ -46,7 +50,7 @@ endpoints, providers, routes and model settings remain intact. Selection remains
 subject to launch-time integrity/private-adapter checks, never accepts an
 unregistered release and never downgrades automatically. Registry writes are
 locked, revision-checked and atomic with a private 0600 previous-config backup.
-There is no per-connection pin field; `CORTEX_ENGINE_FOLLOW=off` opts out for
+Each agent start also creates a missing `routing.json` or `defaults.json` from the bundled preset and never replaces an existing file; it registers a connection only for an engine that has none. There is no per-connection pin field; `CORTEX_ENGINE_FOLLOW=off` opts out for
 rollback, separately from disabling downloads. See
 [configuration and rollback](docs/configuration.md#approved-adapter-following-and-rollback).
 
@@ -789,7 +793,10 @@ and its other temporary files under the host's `/var/tmp`
 (`cortex_runtime.tempdirs`) rather than a RAM-backed `/tmp`. The private
 `/var/tmp` is mounted before the scratch, so a sandbox sees its own scratch but
 not the other Cortex scratch directories there, which previously sat in the
-shared `/tmp`. The project mount follows
+shared `/tmp`. The verified install an engine launches from (its Node binary,
+the adapter's `node_modules` tree, Codex's bundled binary and Cortex's private
+Codex adapter and launcher) is mounted read-only over itself, so an owned
+engine root under `/var/tmp` stays launchable; this adds no write access. The project mount follows
 the engine's existing launch-time jail grant: writing workers can have the
 whole project writable even when their runtime-declared assignment work area is
 narrower. That declared area coordinates parallel writers; it is not a gateway
@@ -929,7 +936,11 @@ examined. No paid or live OpenCode run has been made.
 Outside the jail, entirely unjailed, `connections.quota` lazily runs the
 installed Claude Code CLI's own local `/usage` command (`claude -p /usage
 --output-format json --restricted --strict-mcp-config`) to learn a
-claude-agent-acp connection's plan-usage percentage. The subprocess
+claude-agent-acp connection's plan-usage percentage. Legacy Claude `five_hour`
+events, cached windows and CLI session lines do not contribute to quota decisions
+or current window display; remaining reported windows still apply, and missing usage
+stays unavailable rather than inferred hot. Codex windows and actual engine-refusal
+handling are unchanged. The subprocess
 environment comes from `connections.environment.build_process_env`, which
 re-verifies the connection against the on-disk registry before trusting its
 `credential_ref` and sets `CLAUDE_CONFIG_DIR` to that connection's own
@@ -1280,11 +1291,17 @@ account's session tokens) that should stay owner-only.
 
 ## Configuration management UI and RPC boundary
 
-The Paseo plugin's Cortex Settings screen edits only the closed surfaces exposed by the Cortex management API: user defaults, project policy ceiling, routing, MCP servers, and connection metadata. It does not edit Paseo's own plugin settings document or expose arbitrary paths, commands, or executable selection. Project scope is resolved from Paseo's workspace; the owner configuration root comes from the Cortex launch environment.
+The Paseo plugin's Cortex Settings screen edits only the closed surfaces exposed by the Cortex management API: user defaults, project policy ceiling, routing, MCP servers, connection metadata and the first-run actions described below. It does not edit Paseo's own plugin settings document or expose arbitrary paths, commands, or executable selection. Project scope is resolved from Paseo's workspace; the owner configuration root comes from the Cortex launch environment.
+
+That launch environment comes from the owner-private `paseo-plugin-launch.json` record that setup writes in the Cortex config root of its own environment (`$XDG_CONFIG_HOME/cortex/`, or `~/.config/cortex/`). A Paseo daemon with its own `XDG_CONFIG_HOME` reads its own record. It uses the `~/.config` record only if that record names the same `XDG_CONFIG_HOME`, so one Paseo instance never starts another instance's runtime against that instance's configuration and state. Setup replaces only a record it recognizes as Cortex's own: an older record for the same entrypoint, or a record with the complete Cortex-owned shape and the same storage roots. Any other existing file is refused, never overwritten or deleted. This separates records by environment. It is not an operating-system isolation boundary: every instance runs as the same user.
+
+The first-run actions are: connection discovery, which reads installed adapter versions and checks whether an engine's native login marker file exists, without creating anything; native-account onboarding of `codex-acp`, `claude-agent-acp` or `opencode`, which needs an explicit opt-in, the current connections revision, a qualified installed adapter and the login marker, and then references the owner's existing native directory without copying it; Download engine, which runs npm to install only the manifest-pinned `codex-acp` or `claude-agent-acp` package into Cortex's owned engine root (`$XDG_DATA_HOME/cortex/engines`), bounded to 60 seconds, with no caller-supplied package, version, path or binary and no npm output returned; and default-preset read, apply (missing files only) and reset (confirmed, revision-checked, with private backups first). The manual Download engine action starts network access on an explicit press. Separately, plugin activation or agent startup automatically downloads these same qualified manifest pins in a non-blocking background pass (600-second npm bound per engine), registers a missing native-account connection only when its native login marker exists, and observes models immediately through prompt-free discovery. `CORTEX_ENGINE_UPDATE=off` disables this automatic pass. Native markers are checked for existence only, never opened or copied. Removal atomically persists an engine opt-out in the registry, preventing automatic recreation even during concurrent startup; explicit Add connection remains available. Existing connection records are not overwritten by registration. Model-discovery failure does not roll back a valid connection or replace a prior catalogue. Progress files contain only allowlisted phase names, not npm output, credentials or raw engine errors. No request field carries an API key, credential, path, binary, command or package version, and API-key connections remain setup-command only. Responses carry no credential value; preset results show configuration paths in display form only.
 
 The plugin RPC handlers rely on Paseo daemon authorization (the installed 0.10.0 implementation requires `daemon.manage` for RPC invocation); the handler itself receives no caller identity for an additional per-call check. Writes use revision preconditions and refuse stale revisions. File and project-configuration writes use the existing lock/SQLite transaction path; lockless external writers may still race the final instant. A timeout does not prove that a write failed; re-read state before retrying.
 
 MCP environment values and credential values/paths are not returned. MCP secret values may be retained with an explicit keep marker without being read back. Treat settings JSON fields as sensitive input: only enter trusted configuration, and never paste secrets into support logs or reports. OpenCode onboarding is explicit opt-in, references the owner's existing login rather than copying it, and does not enable automatic routing. OpenCode models also stay off (routing `enabled`) until the owner switches each one on under Settings > Models; a model left out of `enabled` is refused exactly like a denied one. The Models section's **Refresh model lists** action (`cortex.config.catalog.refresh`, management action `refresh` on `route_catalog`) starts each registered connection's engine for `initialize` and `session/new` only, in a private empty temporary directory rather than the project, never sends a prompt, and only adds a catalog snapshot; a failed refresh keeps the previous snapshot and changes no routing.
+
+Connections background polling is read-only and retains the last successful view on read failure, visibly marked with retry controls. It does not retry writes or clear revision-conflict feedback. A passive read started before a local mutation cannot replace that mutation’s returned view.
 
 See [configuration management](docs/configuration.md#manage-settings-in-paseo) for the supported scope and persistence map.
 

@@ -1,7 +1,7 @@
-"""Explicit install-only public model defaults and separate legacy cleanup.
+"""Absent-only public model defaults for setup/startup and separate legacy cleanup.
 
 Existing owner files are never patched, merged or replaced by installation.
-Runtime routing does not import or read the installation asset.
+Startup may seed absent files; routing resolution never overlays the asset.
 """
 from __future__ import annotations
 
@@ -27,7 +27,7 @@ def load_model_settings_template(path: Path | None = None) -> dict:
 
     document = json.loads((TEMPLATE_PATH if path is None else path).read_text(encoding="utf-8"))
     if (not isinstance(document, dict) or (not {"schema_version", "routing", "coordinator"} <= set(document)
-                                         or set(document) - {"schema_version", "routing", "coordinator", "language"})
+                                         or set(document) - {"schema_version", "routing", "coordinator", "language", "mcp_servers"})
             or type(document["schema_version"]) is not int or document["schema_version"] != 1):
         raise ValueError("invalid model-settings template envelope")
     if "language" in document and (not isinstance(document["language"], str)
@@ -50,6 +50,15 @@ def load_model_settings_template(path: Path | None = None) -> dict:
             or coordinator["parameters"].get("thought_level") not in auto_route.model_policy.POLICY_EFFORTS
             or coordinator["parameters"].get("mode") not in {None, "agent"}):
         raise ValueError("invalid portable coordinator preference")
+    from ..configuration import mcp_servers
+
+    servers = document.get("mcp_servers", {})
+    if not isinstance(servers, dict) or any(not isinstance(spec, dict) or spec.get("enabled") is not False
+                                            for spec in servers.values()):
+        raise ValueError("template MCP servers must be disabled examples")
+    # Validate the definitions too, even though the runtime skips disabled entries.
+    mcp_servers._normalize_entries({"servers": {name: dict(spec, enabled=True)
+                                               for name, spec in servers.items()}}, TEMPLATE_PATH)
     return document
 
 
@@ -134,13 +143,14 @@ def ensure_model_settings(environ=None, *, routing_only=False):
         registry.ensure_private_dir(root, root=root, environ=environ)
         with m._owner_config_lock(environ):
             result = {}
-            names = ("routing",) if routing_only else ("routing", "defaults")
+            names = ("routing",) if routing_only else ("routing", "defaults", "mcp_servers")
             for name in names:
-                path = root / (name + ".json")
+                path = root / ("mcp-servers.json" if name == "mcp_servers" else name + ".json")
                 try:
                     data = registry.read_owner_file(path)
                     if data is None:
-                        payload = (template["routing"] if name == "routing" else
+                        payload = (dict(version=1, servers=template.get("mcp_servers", {})) if name == "mcp_servers" else
+                                   template["routing"] if name == "routing" else
                                    {"defaults": dict(coordinator=template["coordinator"],
                                                      **({"language": template["language"]} if "language" in template else {}))})
                         created = _create_private(path, json.dumps(payload, indent=2, ensure_ascii=False) + "\n")
@@ -148,6 +158,9 @@ def ensure_model_settings(environ=None, *, routing_only=False):
                         continue
                     if name == "routing":
                         auto_route.validate_routing(json.loads(data))
+                    elif name == "mcp_servers":
+                        from ..configuration import mcp_servers
+                        mcp_servers._normalize_entries(json.loads(data), path)
                     else:
                         values, _, _ = m._parse_user_defaults(data)
                         errors = m._Errors()
@@ -163,13 +176,25 @@ def ensure_model_settings(environ=None, *, routing_only=False):
                     result[name] = dict(path=str(path), status=error.code, changed=False)
                 except (OSError, ValueError) as error:
                     result[name] = dict(path=str(path), status="invalid", changed=False, error=str(error))
+            if not routing_only:
+                from ..configuration import routing_profiles
+                try:
+                    result["routing_profiles"] = routing_profiles._seed_default_profile(template, environ)
+                except PortableError as error:
+                    result["routing_profiles"] = dict(path=str(root / "routing-profiles.json"),
+                                                      status=error.code, changed=False)
+                except (OSError, ValueError):
+                    result["routing_profiles"] = dict(path=str(root / "routing-profiles.json"),
+                                                      status="invalid", changed=False)
             return result
     except PortableError as error:
         status = error.code
     except (OSError, ValueError):
         status = "invalid"
-    return {name: dict(path=str(root / (name + ".json")), status=status, changed=False)
-            for name in (("routing",) if routing_only else ("routing", "defaults"))}
+    return {name: dict(path=str(root / filename), status=status, changed=False)
+            for name, filename in ({"routing": "routing.json"} if routing_only else
+                                   {"routing": "routing.json", "defaults": "defaults.json",
+                                    "mcp_servers": "mcp-servers.json", "routing_profiles": "routing-profiles.json"}).items()}
 
 
 def ensure_default_routing(environ: Mapping[str, str] | None = None) -> dict:
@@ -245,5 +270,5 @@ def clean_route_policy(environ: Mapping[str, str] | None = None) -> dict:
 
 
 def apply(environ: Mapping[str, str] | None = None) -> dict:
-    """Install only; destructive legacy cleanup requires a separate explicit call."""
+    """Seed absent settings; destructive legacy cleanup is always separate."""
     return dict(ensure_model_settings(environ), route_policy=dict(status="not_requested", changed=False))

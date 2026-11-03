@@ -254,8 +254,8 @@ export const HELP = {
   ),
   quotaWindows: helpBlock(
     h(
-      "Ties the plan usage windows an engine reports (5-hour, weekly…) to exact models, so an exhausted window blocks only the models it covers. Without it every window counts for every model of that engine (safe but may block too much).",
-      "Связывает окна лимитов тарифа, которые сообщает движок (5 часов, неделя…), с точными моделями, чтобы исчерпанное окно блокировало только свои модели. Без этого каждое окно считается общим для всех моделей движка (безопасно, но может блокировать лишнее).",
+      "Ties the plan usage windows an engine reports (weekly, per-model weekly…) to exact models, so an exhausted window blocks only the models it covers. Without it every applicable window counts for every model of that engine (safe but may block too much). Claude's legacy session / 5-hour window is ignored; Codex keeps its own windows.",
+      "Связывает окна лимитов тарифа, которые сообщает движок (неделя, неделя для отдельной модели…), с точными моделями, чтобы исчерпанное окно блокировало только свои модели. Без этого каждое учитываемое окно считается общим для всех моделей движка (безопасно, но может блокировать лишнее). Устаревшее сессионное / 5-часовое окно Claude игнорируется; окна Codex сохраняются.",
     ),
     [
       ["<engine> quota windows", h("Turns on explicit rules for that engine.", "Включает явные правила для движка.")],
@@ -423,6 +423,14 @@ export const HELP = {
       ["Validate", h("Checks the account and login without calling a model.", "Проверяет аккаунт и логин без вызова модели.")],
       ["Remove", h("Unregisters the connection; its models disappear from Cortex.", "Удаляет подключение; его модели пропадают из Cortex.")],
     ],
+  ),
+  engineSetup: h(
+    "At plugin or agent startup, Cortex downloads its pinned Codex and Claude adapters in the background, connects an existing native account login and loads model lists without a model prompt. Settings shows progress. No login marker means you must log in with the engine's own command first. Removing a connection disables automatic registration for that engine; Add connection restores it explicitly. Download engine and Add connection remain manual fallbacks. API keys stay command-line only. OpenCode is never downloaded or connected automatically.",
+    "При запуске плагина или агента Cortex в фоне скачивает закреплённые адаптеры Codex и Claude, подключает уже выполненный вход в аккаунт и загружает модели без запроса к модели. Settings показывает ход настройки. Если маркера входа нет, войдите командой самого движка. Удаление подключения отключает автоматическую регистрацию этого движка; «Add connection» восстанавливает его явно. «Download engine» и «Add connection» остаются ручными способами настройки. API-ключи — только через командную строку. OpenCode автоматически не скачивается и не подключается.",
+  ),
+  defaultPreset: h(
+    "The bundled default preset supplies routing.json, defaults.json and disabled MCP examples in mcp-servers.json. A fresh install selects one applied profile named default. Apply creates only absent files, including routing-profiles.json when working settings match the preset; it never replaces existing settings or profiles. Install MCP tools and replace /path/to/... examples before enabling them. Reset replaces only routing.json and defaults.json after private backups.",
+    "Встроенный пресет задаёт routing.json, defaults.json и выключенные примеры MCP в mcp-servers.json. Чистая установка выбирает один применённый профиль default. «Apply» создаёт только отсутствующие файлы, включая routing-profiles.json, если рабочие настройки совпадают с пресетом; существующие настройки и профили не заменяются. Установите инструменты MCP и замените примеры /path/to/... перед включением. «Reset» заменяет только routing.json и defaults.json с личными резервными копиями.",
   ),
   openCode: h(
     "Optional engine, opt-in only. Registering never changes routing: OpenCode routes stay out of automatic routing until you switch models on under Models and add them to automatic routing. Recommended: enable only if you need models available only through OpenCode.",

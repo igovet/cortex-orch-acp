@@ -72,7 +72,9 @@ def test_install_absent_portable_defaults_no_binding_or_discovery(env, monkeypat
         "coordinator": {"engine": "claude-agent-acp", "model": "opus[1m]",
                         "parameters": {"thought_level": "medium"}}, "language": "ru"}}
     assert json.loads((root / "routing.json").read_text()) == defaults.default_routing()
-    assert not (root / "routing-profiles.json").exists()
+    view = routing_profiles.read_profiles(environ=env)
+    assert view["active"] == "default" and view["state"] == "in_sync"
+    assert [p["name"] for p in view["profiles"]] == ["default"]
     assert (root / "defaults.json").stat().st_mode & 0o777 == 0o600
     assert defaults.apply(env)["defaults"]["changed"] is False
     assert not (root / "connections.json").exists()

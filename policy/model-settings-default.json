@@ -236,32 +236,9 @@
         }
       },
       "opencode": {
-        "auto": [
-          "byteplus-plan/glm-5.3-flash"
-        ],
-        "tiers": {
-          "byteplus-plan/glm-5.2": "deep",
-          "byteplus-plan/glm-5.3-flash": [
-            "light",
-            "standard"
-          ]
-        },
-        "policy": {
-          "byteplus-plan/glm-5.2": {
-            "preferred_for": []
-          },
-          "byteplus-plan/glm-5.3-flash": {
-            "preferred_for": [
-              "implementation_backend",
-              "implementation_frontend",
-              "debugging",
-              "testing",
-              "investigation",
-              "analysis",
-              "writing"
-            ]
-          }
-        }
+        "auto": [],
+        "tiers": {},
+        "policy": {}
       }
     },
     "quota_windows": {
@@ -300,5 +277,75 @@
       "thought_level": "medium"
     }
   },
-  "language": "ru"
+  "language": "ru",
+  "mcp_servers": {
+    "codebase-memory-mcp": {
+      "command": "/path/to/codebase-memory-mcp",
+      "args": [],
+      "env": {},
+      "enabled": false,
+      "allowed_tools": [
+        "index_repository", "search_graph", "query_graph", "trace_path",
+        "get_code_snippet", "get_graph_schema", "get_architecture", "search_code",
+        "list_projects", "delete_project", "index_status", "check_index_coverage",
+        "detect_changes", "manage_adr", "ingest_traces"
+      ],
+      "read_only_tools": [
+        "search_graph", "query_graph", "trace_path", "get_code_snippet",
+        "get_graph_schema", "get_architecture", "search_code", "list_projects",
+        "index_status", "check_index_coverage", "detect_changes"
+      ],
+      "read_paths": ["/path/to/codebase-memory-mcp"],
+      "write_paths": ["/path/to/codebase-memory-mcp"],
+      "network": false,
+      "coordinator_tools": [
+        "search_graph", "search_code", "get_architecture", "list_projects",
+        "index_status", "check_index_coverage", "trace_path", "get_code_snippet"
+      ],
+      "runtime_dir_env": ["CBM_RUNTIME_DIR"],
+      "always_load_tools": [
+        "search_graph", "query_graph", "trace_path", "get_code_snippet",
+        "get_graph_schema", "get_architecture", "search_code", "list_projects",
+        "index_status", "check_index_coverage", "detect_changes"
+      ]
+    },
+    "playwright": {
+      "command": "/path/to/node",
+      "args": [
+        "/path/to/playwright/cli.js", "--headless", "--isolated",
+        "--browser", "chromium", "--executable-path", "/path/to/chrome"
+      ],
+      "roles": ["worker"],
+      "engines": ["claude-agent-acp"],
+      "enabled": false,
+      "allowed_tools": [
+        "browser_close", "browser_resize", "browser_console_messages",
+        "browser_handle_dialog", "browser_evaluate", "browser_file_upload",
+        "browser_drop", "browser_find", "browser_fill_form", "browser_press_key",
+        "browser_type", "browser_navigate", "browser_navigate_back",
+        "browser_network_requests", "browser_network_request", "browser_take_screenshot",
+        "browser_snapshot", "browser_click", "browser_drag", "browser_hover",
+        "browser_select_option", "browser_tabs", "browser_wait_for",
+        "browser_webmcp_list", "browser_webmcp_call"
+      ],
+      "read_paths": ["/path/to/node", "/path/to/playwright", "/path/to/fonts", "/path/to/chrome"],
+      "network": true,
+      "runtime_dir_env": ["PLAYWRIGHT_MCP_OUTPUT_DIR"]
+    },
+    "vivaldi": {
+      "command": "/path/to/node",
+      "args": ["/path/to/vivaldi/mcp-server-stdio.js"],
+      "roles": ["worker"],
+      "enabled": false,
+      "allowed_tools": [
+        "get_windows_and_tabs", "chrome_navigate", "chrome_screenshot",
+        "chrome_close_tabs", "chrome_switch_tab", "chrome_get_web_content",
+        "chrome_javascript", "chrome_click_element", "chrome_fill_or_select",
+        "chrome_keyboard", "chrome_handle_dialog"
+      ],
+      "read_only_tools": ["get_windows_and_tabs", "chrome_get_web_content"],
+      "read_paths": ["/path/to/vivaldi", "/path/to/node"],
+      "network": true
+    }
+  }
 }

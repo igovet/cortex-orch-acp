@@ -11,7 +11,8 @@ engine itself reports it -- never estimated from Cortex's own token counts.
 
   1. The adapter forwards the SDK's ``rate_limit_event`` as
      ``usage_update._meta["_claude/rateLimit"]`` (one window per event:
-     ``five_hour``, ``seven_day``, or a provider-reported scoped label).
+     ``seven_day`` or a provider-reported scoped label). Legacy
+     ``five_hour`` events and cached windows are ignored.
      Nothing on disk
      holds it, so ``engine.session_manager`` hands each one to
      :func:`observe`. This rarely carries ``utilization``, so on its own it
@@ -82,9 +83,6 @@ _REJECTED_WINDOW_DEFAULT_TTL_SECONDS = 14 * 86400.0
 _CLAUDE_USAGE_CLI_TTL_SECONDS = 300.0
 _CLAUDE_USAGE_CLI_TIMEOUT_SECONDS = 20.0
 
-_SESSION_LINE = re.compile(
-    r"^Current session:\s*(?P<used>\d+(?:\.\d+)?)%\s*used\s*[·-]\s*resets\s+(?P<date>.+?)\s*\((?P<tz>[^)]*)\)\s*$"
-)
 _WEEK_LINE = re.compile(
     r"^Current week \((?P<scope>[^)]+)\):\s*(?P<used>\d+(?:\.\d+)?)%\s*used\s*[·-]\s*resets\s+(?P<date>.+?)\s*\((?P<tz>[^)]*)\)\s*$"
 )
@@ -157,6 +155,8 @@ def observe(connection_id: str, info: object, environ: Mapping[str, str] | None 
         if not isinstance(info, Mapping):
             return
         name = info.get("rateLimitType") or "unscoped"
+        if name == "five_hour":
+            return
         utilization = info.get("utilization")
         reset_at = info.get("resetsAt")
         if isinstance(reset_at, bool) or not isinstance(reset_at, (int, float)):
@@ -186,6 +186,10 @@ def _windows_for(record, environ: Mapping[str, str] | None, now: float) -> dict:
         return _codex_windows(record)
     if record.engine == "claude-agent-acp":
         _maybe_refresh_claude_usage(record, environ, now)
+        # Filter old caches as well as new observations, before any consumer
+        # computes headroom, reset times, route eligibility or display values.
+        return {name: window for name, window in _load(record.id, environ).items()
+                if name != "five_hour"}
     return _load(getattr(record, "id", None) or "", environ)
 
 
@@ -459,12 +463,6 @@ def _parse_usage_text(text: str, now: float) -> dict:
     windows: dict = {}
     for raw_line in text.splitlines():
         line = raw_line.strip()
-        match = _SESSION_LINE.match(line)
-        if match:
-            window = _build_window(match.group("used"), match.group("date"), now)
-            if window is not None:
-                windows["five_hour"] = window
-            continue
         match = _WEEK_LINE.match(line)
         if match:
             scope = match.group("scope").strip().casefold()

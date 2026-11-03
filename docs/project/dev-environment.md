@@ -232,7 +232,7 @@ The plugin connector answers the bridge's `session/close` locally, so Cortex nev
 
 Until plugin-reload recovery is qualified for the deployed version, apply plugin updates between active tasks. Recovery uses persisted Cortex state and does not automatically repeat actions with an unknown outcome. A host SIGKILL without SIGTERM leaves no disconnect record (a later reader identifies the interrupted worker from its provably gone owning process), and native engine actions have no retained command receipt.
 
-Historical 0.9.2 observation only: a plugin reload with an active worker closed the provider connection, the shim forwarded SIGTERM, Cortex recorded `host_disconnected` with `trigger: sigterm`, and Paseo did not reload the session until the next prompt. This recovery behavior has not been requalified for 0.10.0; do not reproduce it against active work without a separately authorized, isolated check. Start the daemon and the `gui` helper outside the Cortex command sandbox (a Cortex worker uses `outside_command`). A daemon started through `command_run` keeps that command's mount namespace and `TMPDIR`; Cortex deletes the command's scratch, including the directory mounted over `/var/tmp`, when the command ends, so every engine jail the daemon later launches fails in bubblewrap (`Can't bind mount ... on /newroot/var/tmp: ... No such file or directory` in the engine's `stderr.log`) and each agent reports `engine_launch` (live, 2026-10-06). The guarded wrapper therefore refuses `start`, `onboard`, `daemon start`, `daemon run` and `gui` when `/var/tmp` is a Cortex sandbox scratch mount; stop such a daemon and start it again from `outside_command`. The `gui` helper blocks until Electron exits, so run it detached; SIGTERM to the helper stops its Electron and Xvfb.
+Historical 0.9.2 observation only: a plugin reload with an active worker closed the provider connection, the shim forwarded SIGTERM, Cortex recorded `host_disconnected` with `trigger: sigterm`, and Paseo did not reload the session until the next prompt. This recovery behavior has not been requalified for 0.10.0; do not reproduce it against active work without a separately authorized, isolated check. Start the daemon and the `gui` helper outside the Cortex command sandbox (a Cortex worker uses `outside_command`). A daemon started through `command_run` keeps that command's mount namespace and `TMPDIR`; Cortex deletes the command's scratch, including the directory mounted over `/var/tmp`, when the command ends, so every engine jail the daemon later launches fails in bubblewrap (`Can't bind mount ... on /newroot/var/tmp: ... No such file or directory` in the engine's `stderr.log`) and each agent reports `engine_launch` (live, 2026-10-06). A command sandbox can instead keep the host `/var/tmp` and mount `~/.codex` and `~/.claude` read-only; a daemon started there connects both engines, but Codex app-server exits at startup (`Error: Read-only file system (os error 30)` in the engine's `stderr.log`), so first-run model discovery records `catalog_failed` with reason `engine_home_read_only` and Codex sessions fail (live, 2026-11-02). The guarded wrapper therefore refuses `start`, `onboard`, `daemon start`, `daemon run` and `gui` when `/var/tmp` is a Cortex sandbox scratch mount or when the effective mount of `~/.codex` or `~/.claude` is read-only; stop such a daemon and start it again from `outside_command`. The `gui` helper blocks until Electron exits, so run it detached; SIGTERM to the helper stops its Electron and Xvfb.
 
 Development command mounts use the real host `/var/tmp`, unlike restricted
 commands and engine jails, which retain their per-run scratch view. Do not infer
@@ -418,6 +418,24 @@ daemon for local directory-plugin loading. It also sets `XDG_CONFIG_HOME` and
 `~/.paseo-dev/cortex-xdg/state` (or equivalent paths below an explicit dev home).
 This prevents a user-level Cortex launch record from selecting a packaged runtime;
 the explicit source root takes precedence for this dev-only path.
+
+A Git-installed plugin must run the runtime its own build step staged, not this
+checkout. Pass `--installed-runtime` both to the daemon start that serves it and to
+the install or update command; the wrapper then drops `CORTEX_PASEO_SOURCE_ROOT`,
+including an inherited value. Without the flag, the wrapper refuses `plugin install`
+from a source that is not a local directory and `plugin update`, because the daemon
+would otherwise launch this checkout. The flag cannot be combined with
+`--wire-trace`, which traces this checkout only. The build step writes its launch
+record to `~/.paseo-dev/cortex-xdg/config/cortex/paseo-plugin-launch.json` and
+leaves the owner's `~/.config/cortex/paseo-plugin-launch.json` unchanged:
+
+~~~bash
+python3 -B scripts/cortex_paseo_dev.py --installed-runtime -- start --timeout 60 --json
+python3 -B scripts/cortex_paseo_dev.py --installed-runtime -- plugin install github:igovet/cortex-orch-acp:integrations/paseo --ref dev --json
+python3 -B scripts/cortex_paseo_dev.py gui --installed-runtime
+~~~
+
+Restart the daemon without the flag before going back to a local directory plugin.
 
 Start the isolated daemon, install or inspect the explicitly addressed local plugin,
 then launch Electron Desktop:
@@ -738,6 +756,20 @@ For example, missing PID metadata returns `binding_refused` plus
 whether a daemon is stopped. A helper import failure before its main handler
 can only establish `helper-output/subprocess_failed`, not its private cause.
 
+`binding` is a live host observation, not an offline store reader: it reads
+the running dev daemon's `~/.paseo-dev/paseo.pid` record, fetches the exact
+agent's current `runtimeInfo` (the only source of its ACP session id) over that
+daemon's loopback WebSocket, and compares the daemon's `serverId` with the PID
+record before and after the storage reads. It also requires a valid,
+distinct `~/.paseo/paseo.pid` record, so the production daemon must be running
+(it is only read, never contacted). A normal `daemon stop` removes
+`~/.paseo-dev/paseo.pid`, so every binding run after the dev daemon stops
+refuses with `endpoint-provenance/metadata_unavailable`. No option recovers a
+binding from a stopped store later: the session id cannot be obtained without the
+host, and reading the Paseo registry or enumerating store tasks instead is a
+substitute reader. Run the binding (and the bound task inspection that uses
+its result) before stopping the dev daemon.
+
 Unknown, malformed, ambiguous, truncated or terminated output supplies no
 child-authored reason; the wrapper may still report its own safe process/output
 observation. Unknown exception codes remain generic. No exception text, paths, stdout/stderr
@@ -762,15 +794,23 @@ For a later explicitly authorized observation (not an offline diagnostic task):
    safe identities only. Do not auto-start it; any startup needs a separate
    bounded setup decision that cannot resume unauthorized paid work.
 3. Once exact owned agent/workspace/project identities are supported by that
-   run, execute the guarded `binding` command above once. Retain its complete
-   receipt and diagnostics; only a valid returned binding permits the bound
-   metadata inspector. Stop on refusal, incomplete evidence or drift. Do not
-   reuse consumed historical target consent or substitute another reader.
+   run and the host reports the agent idle (`wait` returned), execute the
+   guarded `binding` command above once while the dev daemon is still running.
+   Retain its complete receipt and diagnostics; only a valid returned binding
+   permits the bound metadata inspector, which also runs before the stop.
+   Stop on refusal, incomplete evidence or drift. Do not reuse consumed
+   historical target consent or substitute another reader.
+4. Only then stop the dev daemon. A binding first attempted after the stop
+   cannot succeed (see above); record it as unverified rather than retrying.
 
 A later guarded observation requires explicit read authority and a justified
 changed condition, not a retry for reassurance or an alternate SQLite reader:
 - Busy locks or nonempty WAL: let the normal runtime connection lifecycle
   produce a checkpointed snapshot; never force a checkpoint or bypass the lock.
+  Runtime store connections are per operation, and SQLite removes the WAL when
+  the last one closes, so wait for the agent to be idle with the dev daemon
+  still running. Stopping the daemon to obtain a checkpoint also removes the
+  endpoint provenance the binding needs.
 - Unsafe/legacy/unsupported storage: stop and obtain a scoped setup/repair
   decision; the inspector never changes modes, migrates or initializes.
 - Binding mismatch: establish the correct exact owned host/session/task through

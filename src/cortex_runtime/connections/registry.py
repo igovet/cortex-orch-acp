@@ -39,7 +39,7 @@ from .model import (
 )
 
 SCHEMA_VERSION = 1
-_ROOT_KEYS = {"schema_version", "connections", "override_history"}
+_ROOT_KEYS = {"schema_version", "connections", "override_history", "auto_connect_disabled"}
 _RECORD_KEYS = {
     "id",
     "name",
@@ -594,11 +594,13 @@ def _validate_history_entry(entry: object) -> dict[str, object]:
 class RegistryState:
     """In-memory registry contents: connections plus override history."""
 
-    __slots__ = ("connections", "override_history")
+    __slots__ = ("connections", "override_history", "auto_connect_disabled")
 
-    def __init__(self, connections: dict[str, ConnectionRecord], override_history: dict[str, list[dict[str, object]]]) -> None:
+    def __init__(self, connections: dict[str, ConnectionRecord], override_history: dict[str, list[dict[str, object]]],
+                 auto_connect_disabled: set[str] | None = None) -> None:
         self.connections = connections
         self.override_history = override_history
+        self.auto_connect_disabled = set(auto_connect_disabled or ())
 
     def to_json_bytes(self) -> bytes:
         payload = {
@@ -606,6 +608,8 @@ class RegistryState:
             "connections": {cid: _record_to_dict(record) for cid, record in sorted(self.connections.items())},
             "override_history": {cid: entries for cid, entries in sorted(self.override_history.items())},
         }
+        if self.auto_connect_disabled:
+            payload["auto_connect_disabled"] = sorted(self.auto_connect_disabled)
         return json.dumps(payload, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
 
 
@@ -639,7 +643,11 @@ def _parse_registry_bytes(data: bytes) -> RegistryState:
         if not isinstance(entries, list):
             raise _fail_closed("invalid_registry", "override_history entries must be a list.")
         override_history[cid] = [_validate_history_entry(entry) for entry in entries]
-    return RegistryState(connections=connections, override_history=override_history)
+    disabled = raw.get("auto_connect_disabled", [])
+    if (not isinstance(disabled, list) or any(not isinstance(engine, str) or engine not in
+            {"codex-acp", "claude-agent-acp", "opencode"} for engine in disabled) or len(disabled) != len(set(disabled))):
+        raise _fail_closed("invalid_registry", "auto_connect_disabled must list distinct supported engines.")
+    return RegistryState(connections=connections, override_history=override_history, auto_connect_disabled=set(disabled))
 
 
 def read_registry(environ: dict[str, str] | None = None) -> RegistryState:

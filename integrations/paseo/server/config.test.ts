@@ -15,7 +15,10 @@ const pluginRoot = resolve(".");
 const repoRoot = resolve(pluginRoot, "../..");
 const shared = await loadServerModuleForTest<typeof import("../shared/config.ts")>(resolve("shared/config.ts"));
 const server = await loadServerModuleForTest<typeof import("./config.ts")>(resolve("server/config.ts"));
-const { readConfig, updateConfig, discoverOpenCode, onboardOpenCode } = shared;
+const {
+  readConfig, updateConfig, discoverOpenCode, onboardOpenCode,
+  discoverConnections, onboardConnection, installEngine, readDefaultPreset, applyDefaultPreset, resetDefaultPreset,
+} = shared;
 
 const WORKSPACE = "workspace-config-1";
 const MISSING_STORE_WORKSPACE = "workspace-no-store";
@@ -27,9 +30,16 @@ const handlers: Record<string, (input: any, context: any) => Promise<unknown>> =
   [updateConfig.name]: server.updateConfigHandler,
   [discoverOpenCode.name]: server.discoverOpenCodeHandler,
   [onboardOpenCode.name]: server.onboardOpenCodeHandler,
+  [discoverConnections.name]: server.discoverConnectionsHandler,
+  [onboardConnection.name]: server.onboardConnectionHandler,
+  [installEngine.name]: server.installEngineHandler,
+  [readDefaultPreset.name]: server.readDefaultPresetHandler,
+  [applyDefaultPreset.name]: server.applyDefaultPresetHandler,
+  [resetDefaultPreset.name]: server.resetDefaultPresetHandler,
 };
 const contracts: Record<string, AnyContract> = Object.fromEntries(
-  [readConfig, updateConfig, discoverOpenCode, onboardOpenCode].map((contract) => [contract.name, contract]),
+  [readConfig, updateConfig, discoverOpenCode, onboardOpenCode, discoverConnections, onboardConnection, installEngine, readDefaultPreset,
+    applyDefaultPreset, resetDefaultPreset].map((contract) => [contract.name, contract]),
 );
 
 /** The SDK's client step (`callPluginRpc` in @getpaseo/plugin dist/rpc.js,
@@ -68,7 +78,7 @@ function context(directories: Record<string, string>, options: { throwOnRef?: bo
   };
 }
 
-const ENV_KEYS = ["HOME", "XDG_CONFIG_HOME", "XDG_STATE_HOME", "CORTEX_PASEO_SOURCE_ROOT", "CORTEX_ACP_COMMAND", "CORTEX_ROUTING", "CORTEX_PASEO_SHIM"];
+const ENV_KEYS = ["HOME", "XDG_CONFIG_HOME", "XDG_STATE_HOME", "CORTEX_PASEO_SOURCE_ROOT", "CORTEX_ACP_COMMAND", "CORTEX_ROUTING", "CORTEX_PASEO_SHIM", "CORTEX_ENGINE_UPDATE"];
 const saved = new Map(ENV_KEYS.map((key) => [key, process.env[key]] as const));
 function restoreEnv(): void {
   for (const [key, value] of saved) {
@@ -108,6 +118,8 @@ function setupOwner(base: string): { home: string; configHome: string } {
 
 const base = mkdtempSync(join(tmpdir(), "cortex-config-rpc-"));
 try {
+  // Registration tests inspect pristine storage and never fetch engines.
+  process.env.CORTEX_ENGINE_UPDATE = "off";
   const { configHome } = setupOwner(base);
   process.env.CORTEX_PASEO_SOURCE_ROOT = repoRoot;
   const project = privateDir(join(base, "project"));
@@ -140,6 +152,8 @@ try {
       "cortex.commands.running", "cortex.commands.stop",
       "cortex.config.read", "cortex.config.update", "cortex.config.opencode.discover", "cortex.config.opencode.onboard",
       "cortex.config.catalog.refresh",
+      "cortex.config.connections.discover", "cortex.config.connections.onboard", "cortex.config.connections.install",
+      "cortex.config.preset.read", "cortex.config.preset.apply", "cortex.config.preset.reset",
     ]);
     assert.equal(settings, 0);
   }
@@ -157,6 +171,29 @@ try {
     await rejects(discoverOpenCode, { binary: "/bin/sh" });
     await rejects(onboardOpenCode, { expected_revision: "absent", explicit_opt_in: false });
     await rejects(onboardOpenCode, { expected_revision: "absent", explicit_opt_in: true, binary: "/bin/sh" });
+    // Native-account onboarding: an explicit opt-in, a known engine, and no
+    // key, credential path, binary or command field of any kind.
+    await rejects(discoverConnections, { binary: "/bin/sh" });
+    await rejects(onboardConnection, { engine: "codex-acp", expected_revision: "absent" });
+    await rejects(onboardConnection, { engine: "codex-acp", expected_revision: "absent", explicit_opt_in: false });
+    await rejects(onboardConnection, { engine: "other", expected_revision: "absent", explicit_opt_in: true });
+    await rejects(onboardConnection, { engine: "codex-acp", expected_revision: "latest", explicit_opt_in: true });
+    for (const field of ["api_key", "key", "auth_mode", "credential", "credential_path", "binary", "launch_command", "name"]) {
+      await rejects(onboardConnection, { engine: "codex-acp", expected_revision: "absent", explicit_opt_in: true, [field]: "x" });
+    }
+    const onboardKeys = Object.keys(onboardConnection.input.shape).sort();
+    assert.deepEqual(onboardKeys, ["engine", "expected_revision", "explicit_opt_in"]);
+    // Downloads: Cortex's pinned adapters only, never a client-chosen version.
+    await rejects(installEngine, { engine: "opencode" });
+    await rejects(installEngine, { engine: "codex-acp", version: "9.9.9" });
+    await rejects(installEngine, { engine: "codex-acp", package: "evil" });
+    // Preset: reset needs a literal confirmation and a revision; apply takes nothing.
+    await rejects(resetDefaultPreset, { expected_revision: ZERO_REVISION });
+    await rejects(resetDefaultPreset, { expected_revision: ZERO_REVISION, confirm: false });
+    await rejects(resetDefaultPreset, { confirm: true });
+    await rejects(resetDefaultPreset, { expected_revision: ZERO_REVISION, confirm: true, path: "/tmp/x.json" });
+    await rejects(applyDefaultPreset, { force: true });
+    await rejects(readDefaultPreset, { path: "/tmp" });
   }
 
   // Owner-only read: every owner surface with its revision and effective
@@ -586,9 +623,116 @@ try {
     assert.equal(refused.ok, false);
     assert.equal(refused.error.code, "unknown_connection");
   }
+
+  // First-run engines: discovery reports one row per engine and writes
+  // nothing; onboarding checks the revision first, then refuses an engine
+  // that is not downloaded. A login marker's presence is reported, never
+  // its content. (No download runs here: that would reach the network.)
+  {
+    const before = await call(readConfig, { surface: "connections" }, ctx);
+    const home = process.env.HOME!;
+    privateDir(join(home, ".codex"));
+    writeFileSync(join(home, ".codex", "auth.json"), "{\"token\": \"MARKERSECRET4242\"}", { mode: 0o600 });
+    const discovered = await call(discoverConnections, {}, ctx);
+    assert.equal(discovered.ok, true, JSON.stringify(discovered));
+    assert.equal(discovered.result.revision, before.result.revision);
+    assert.deepEqual(discovered.result.engines.map((row: any) => row.engine).sort(), ["claude-agent-acp", "codex-acp", "opencode"]);
+    const codex = discovered.result.engines.find((row: any) => row.engine === "codex-acp");
+    assert.equal(codex.status, "not_downloaded");
+    assert.equal(codex.native_login_detected, true);
+    assert.equal(codex.install_supported, true);
+    assert.equal(discovered.result.engines.find((row: any) => row.engine === "opencode").install_supported, false);
+    assert.ok(!JSON.stringify(discovered).includes("MARKERSECRET4242"));
+    noLeak(discovered);
+
+    const stale = await call(onboardConnection, { engine: "codex-acp", expected_revision: ZERO_REVISION, explicit_opt_in: true }, ctx);
+    assert.equal(stale.ok, false);
+    assert.equal(stale.error.code, "revision_conflict");
+    const missing = await call(onboardConnection, { engine: "codex-acp", expected_revision: before.result.revision, explicit_opt_in: true }, ctx);
+    assert.equal(missing.ok, false);
+    assert.equal(missing.error.code, "engine_not_downloaded");
+    noLeak(missing);
+    const after = await call(readConfig, { surface: "connections" }, ctx);
+    assert.equal(after.result.revision, before.result.revision, "a refused onboarding writes nothing");
+  }
+
+  // Default preset: apply never replaces an existing file; reset is refused
+  // on a stale combined revision and otherwise replaces both files after a
+  // private backup, shown only in display form.
+  {
+    const routingPath = join(configHome, "cortex", "routing.json");
+    const defaultsPath = join(configHome, "cortex", "defaults.json");
+    const read = await call(readDefaultPreset, {}, ctx);
+    assert.equal(read.ok, true, JSON.stringify(read));
+    const applied = await call(applyDefaultPreset, {}, ctx);
+    assert.equal(applied.ok, true, JSON.stringify(applied));
+    assert.equal(applied.result.files.routing.status, "existing");
+    assert.equal(applied.result.files.defaults.status, "existing");
+    assert.equal(applied.result.settings.routing.path, "~/.config/cortex/routing.json");
+    assert.equal(applied.result.settings.defaults.path, "~/.config/cortex/defaults.json");
+    noLeak(applied);
+    const routingBefore = readFileSync(routingPath, "utf8");
+    const defaultsBefore = readFileSync(defaultsPath, "utf8");
+    const reapplied = await call(applyDefaultPreset, {}, ctx);
+    assert.equal(reapplied.result.changed, false);
+    assert.equal(readFileSync(routingPath, "utf8"), routingBefore, "apply never replaces an existing file");
+
+    const stale = await call(resetDefaultPreset, { expected_revision: ZERO_REVISION, confirm: true }, ctx);
+    assert.equal(stale.ok, false);
+    assert.equal(stale.error.code, "revision_conflict");
+    assert.equal(readFileSync(routingPath, "utf8"), routingBefore);
+    assert.equal(readFileSync(defaultsPath, "utf8"), defaultsBefore);
+
+    const current = await call(readDefaultPreset, {}, ctx);
+    const reset = await call(resetDefaultPreset, { expected_revision: current.result.revision, confirm: true }, ctx);
+    assert.equal(reset.ok, true, JSON.stringify(reset));
+    assert.match(reset.result.backups.routing, /^~\/\.config\/cortex\/routing\.json\.cortex-backup-\d+$/);
+    assert.match(reset.result.backups.defaults, /^~\/\.config\/cortex\/defaults\.json\.cortex-backup-\d+$/);
+    assert.equal(readFileSync(join(configHome, "cortex", reset.result.backups.routing.slice("~/.config/cortex/".length)), "utf8"), routingBefore);
+    assert.notEqual(reset.result.revision, current.result.revision);
+    noLeak(reset);
+  }
 } finally {
   restoreEnv();
   rmSync(base, { recursive: true, force: true });
+}
+
+// A pristine install publishes a named applied default, not just routing values.
+{
+  const isolated = mkdtempSync(join(tmpdir(), "cortex-config-default-"));
+  try {
+    process.env.CORTEX_ENGINE_UPDATE = "off";
+    const { configHome } = setupOwner(isolated);
+    process.env.CORTEX_PASEO_SOURCE_ROOT = repoRoot;
+    const ctx = context({});
+    const seeded = await call(applyDefaultPreset, {}, ctx);
+    assert.equal(seeded.ok, true, JSON.stringify(seeded));
+    assert.equal(seeded.result.settings.routing_profiles.status, "created");
+    assert.equal(seeded.result.settings.mcp_servers.path, "~/.config/cortex/mcp-servers.json");
+    assert.equal(seeded.result.files.routing_profiles.status, "existing");
+    const view = await call(readConfig, { surface: "routing_profiles" }, ctx);
+    assert.equal(view.ok, true, JSON.stringify(view));
+    assert.equal(view.result.active, "default");
+    assert.equal(view.result.applied.profile, "default");
+    assert.equal(view.result.state, "in_sync");
+    assert.deepEqual(view.result.profiles.map((p: any) => p.name), ["default"]);
+    const mcp = await call(readConfig, { surface: "mcp_servers" }, ctx);
+    assert.equal(mcp.ok, true, JSON.stringify(mcp));
+    assert.deepEqual(mcp.result.servers.map((s: any) => s.name).sort(), ["codebase-memory-mcp", "playwright", "vivaldi"]);
+    assert.ok(mcp.result.servers.every((s: any) => s.enabled === false && s.valid));
+    const profilePath = join(configHome, "cortex", "routing-profiles.json");
+    const before = readFileSync(profilePath, "utf8");
+    const again = await call(applyDefaultPreset, {}, ctx);
+    assert.equal(again.result.changed, false);
+    assert.equal(readFileSync(profilePath, "utf8"), before);
+    const toggled = await call(updateConfig, { surface: "mcp_servers", expected_revision: mcp.result.revision,
+      operations: [{ op: "set_enabled", name: "vivaldi", enabled: true }] }, ctx);
+    assert.equal(toggled.ok, true, JSON.stringify(toggled));
+    assert.equal(toggled.result.servers.find((s: any) => s.name === "vivaldi").enabled, true);
+  } finally {
+    restoreEnv();
+    rmSync(isolated, { recursive: true, force: true });
+  }
 }
 
 // Owner binding: the launch record's HOME/XDG overrides -- the environment

@@ -257,6 +257,9 @@ def _write_paseo_launch_config(environ=None, *, runtime_root=None):
     home = Path(env.get("HOME") or str(Path.home())).expanduser()
     if not home.is_absolute() or home.is_symlink() or not home.is_dir():
         raise SystemExit(f"error: HOME must be an existing, non-symlink directory: {home}")
+    raw_config_home = env.get("XDG_CONFIG_HOME")
+    if raw_config_home and not Path(raw_config_home).expanduser().is_absolute():
+        raise SystemExit(f"error: XDG_CONFIG_HOME must be an absolute path: {raw_config_home}")
     config_base = Path(env.get("XDG_CONFIG_HOME") or str(home / ".config")).expanduser().resolve()
     state_base = Path(env.get("XDG_STATE_HOME") or str(home / ".local" / "state")).expanduser().resolve()
     runtime = Path(runtime_root or _ROOT).resolve()
@@ -265,11 +268,18 @@ def _write_paseo_launch_config(environ=None, *, runtime_root=None):
         "env": {"HOME": str(home), "XDG_CONFIG_HOME": str(config_base), "XDG_STATE_HOME": str(state_base)},
         "shim": str((runtime / "integrations" / "paseo" / "server" / "acp-load-shim.mjs").resolve()),
     }
-    # The locator must not depend on XDG_CONFIG_HOME: a GUI daemon restart can
-    # start with a different XDG environment. Keep the record under the
-    # user's conventional HOME/.config path and persist custom XDG roots in
-    # its payload.
-    config_parent = _ensure_private_directory(home / ".config", create=True)
+    # The record lives in the Cortex config root of the environment it
+    # describes, the same root the provider reads first in that environment
+    # (integrations/paseo/server/provider.ts). A Paseo instance with its own
+    # XDG_CONFIG_HOME (the isolated dev daemon, a second installation) owns
+    # its own record and never collides with the conventional
+    # HOME/.config/cortex record; without XDG_CONFIG_HOME, or when it names
+    # HOME/.config, the record stays at the conventional path.
+    conventional = home / ".config"
+    if raw_config_home and config_base != conventional.resolve():
+        config_parent = _ensure_private_directory(config_base, create=True)
+    else:
+        config_parent = _ensure_private_directory(conventional, create=True)
     config_root = _ensure_private_directory(config_parent / "cortex", create=True)
     path = config_root / "paseo-plugin-launch.json"
     if path.is_symlink():

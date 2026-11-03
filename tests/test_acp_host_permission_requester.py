@@ -79,12 +79,16 @@ def test_outside_consent_requests_host_only_in_guarded_over_real_acp_connection(
         if call_index >= 1:
             return PromptOutcome(StopReason.END_TURN, "Done.")
         access_mode.switch(store, channel.task_id, mode, origin="acp_set_mode")
+        # Record the request already claimed ('asked'), as _claim_pending
+        # leaves it. A 'pending' row races the controller's own relay, which
+        # polls pending requests while the coordinator waits and may claim
+        # and ask it first, leaving this worker nothing to claim.
         with store.connection() as db:
             consent._ensure(db)
             db.execute("INSERT INTO consent_requests VALUES(?,?,?,?,?,?,?,NULL)",
-                       ("cr_wire", channel.task_id, channel.attempt_id, kind, "/outside/target", "pending", "now"))
+                       ("cr_wire", channel.task_id, channel.attempt_id, kind, "/outside/target", "asked", "now"))
             db.commit()
-        row, = consent._claim_pending(store, channel.task_id)
+            row = dict(db.execute("SELECT * FROM consent_requests WHERE id='cr_wire'").fetchone())
         consent._ask(harness.runtime, channel.task_id, row, "en")
         with store.connection() as db:
             observed["status"] = db.execute("SELECT status FROM consent_requests WHERE id='cr_wire'").fetchone()[0]

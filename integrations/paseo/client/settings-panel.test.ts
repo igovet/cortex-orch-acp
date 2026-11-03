@@ -46,6 +46,7 @@ function createRuntime() {
   let pending: Array<() => void> = [];
   let current: { path: string; index: number } | null = null;
   let dirty = false;
+  let stateChanges = 0;
   const slot = (): [unknown[], number] => {
     assert.ok(current, "hook called outside a component");
     let values = hooks.get(current.path);
@@ -60,7 +61,7 @@ function createRuntime() {
       if (!(i in values)) values[i] = typeof initial === "function" ? (initial as () => unknown)() : initial;
       return [values[i], (value: unknown) => {
         const next = typeof value === "function" ? (value as (prev: unknown) => unknown)(values[i]) : value;
-        if (!Object.is(next, values[i])) { values[i] = next; dirty = true; }
+        if (!Object.is(next, values[i])) { values[i] = next; dirty = true; stateChanges += 1; }
       }];
     },
     useRef(initial: unknown) {
@@ -88,14 +89,24 @@ function createRuntime() {
   };
 
   let elements: Element[] = [];
+  const hostInstances = new Map<string, object>();
+  const elementInstances = new WeakMap<Element, object>();
+  let renderedHosts = new Set<string>();
   function render(node: unknown, path: string): void {
     if (node === null || node === undefined || typeof node === "boolean" || typeof node === "string" || typeof node === "number") return;
-    if (Array.isArray(node)) { node.forEach((child, index) => render(child, `${path}[${index}]`)); return; }
+    if (Array.isArray(node)) { node.forEach((child, index) => render(child, `${path}[${(child as Element | null)?.key ?? index}]`)); return; }
     const element = node as Element;
     const type = element.type;
     assert.ok(typeof type === "string" || typeof type === "function", `element type at ${path} is ${String(type)}`);
     elements.push(element);
-    if (typeof type === "string") { render(element.props?.children, `${path}/${type}`); return; }
+    if (typeof type === "string") {
+      const hostPath = `${path}/${type}`;
+      renderedHosts.add(hostPath);
+      if (!hostInstances.has(hostPath)) hostInstances.set(hostPath, {});
+      elementInstances.set(element, hostInstances.get(hostPath)!);
+      render(element.props?.children, hostPath);
+      return;
+    }
     const childPath = `${path}/${type.name || "anonymous"}:${element.key ?? ""}`;
     mounted.add(childPath);
     current = { path: childPath, index: 0 };
@@ -109,8 +120,10 @@ function createRuntime() {
     for (let round = 0; round < 40; round += 1) {
       dirty = false;
       elements = [];
+      renderedHosts = new Set();
       mounted.clear();
       render(root(), "root");
+      for (const path of hostInstances.keys()) if (!renderedHosts.has(path)) hostInstances.delete(path);
       for (const [path, values] of hooks) {
         if (mounted.has(path)) continue;
         for (const value of values) {
@@ -131,6 +144,8 @@ function createRuntime() {
     settle,
     async mount(next: () => unknown) { root = next; await settle(); },
     elements: () => elements,
+    identity: (element: Element) => elementInstances.get(element),
+    stateChanges: () => stateChanges,
   };
 }
 
@@ -262,6 +277,18 @@ function fixtures() {
       ],
       operations: ["rename", "set_max_concurrent_sessions", "validate", "remove"], max_concurrent_sessions_limit: 8,
     },
+    // Not read surfaces: the first-run RPCs' own results.
+    connections_discovery: {
+      surface: "connections", revision: REV("c"), engines: [
+        { engine: "codex-acp", status: "connected", version: "2.0.1", native_login_detected: true, already_connected: "cn_0123456789ab", qualified: true, install_supported: true },
+        { engine: "claude-agent-acp", status: "not_downloaded", version: null, native_login_detected: false, already_connected: null, qualified: false, install_supported: true },
+        { engine: "opencode", status: "downloaded_no_login", version: "2.0.20", native_login_detected: false, already_connected: null, qualified: true, install_supported: false },
+      ],
+    },
+    default_preset: {
+      surface: "default_preset", revision: REV("d"),
+      files: { routing: { revision: "absent", status: "absent" }, defaults: { revision: REV("a"), status: "existing" } },
+    },
   } as Record<string, Record<string, unknown>>;
 }
 
@@ -276,11 +303,54 @@ async function openScreen(data = fixtures()) {
   const onboards: Array<Record<string, unknown>> = [];
   const onboardReplies: unknown[] = [];
   const replies: unknown[] = [];
+  const readReplies: unknown[] = [];
+  const intervals = new Set<() => void>();
   const refreshes: Array<Record<string, unknown>> = [];
+  const discovers: Array<Record<string, unknown>> = [];
+  const discoverReplies: unknown[] = [];
+  const installs: Array<Record<string, unknown>> = [];
+  const installReplies: unknown[] = [];
+  const connects: Array<Record<string, unknown>> = [];
+  const connectReplies: unknown[] = [];
+  const presetCalls: Array<{ method: string; input: Record<string, unknown> }> = [];
+  const presetReplies: unknown[] = [];
   const rpcs: Record<string, (input: Record<string, unknown>) => Promise<unknown>> = {
+    "cortex.config.connections.discover": async (input) => {
+      discovers.push(input);
+      return discoverReplies.shift() ?? { ok: true, binding, result: structuredClone(data.connections_discovery) };
+    },
+    "cortex.config.connections.install": async (input) => {
+      installs.push(input);
+      return installReplies.shift() ?? { ok: true, binding, result: { engine: input.engine, version: "0.78.0", status: "installed", discovery: structuredClone(data.connections_discovery) } };
+    },
+    "cortex.config.connections.onboard": async (input) => {
+      connects.push(input);
+      const connections = structuredClone(data.connections) as { connections: unknown[] };
+      return connectReplies.shift() ?? { ok: true, binding, result: { ...connections, changed: true, connection: connections.connections[0] } };
+    },
+    "cortex.config.preset.read": async (input) => {
+      presetCalls.push({ method: "read", input });
+      return { ok: true, binding, result: structuredClone(data.default_preset) };
+    },
+    "cortex.config.preset.apply": async (input) => {
+      presetCalls.push({ method: "apply", input });
+      return presetReplies.shift() ?? { ok: true, binding, result: {
+        surface: "default_preset", revision: REV("e"),
+        files: { routing: { revision: REV("r"), status: "existing" }, defaults: { revision: REV("a"), status: "existing" } }, changed: true,
+        settings: { routing: { path: "~/.config/cortex/routing.json", status: "created", changed: true }, defaults: { path: "~/.config/cortex/defaults.json", status: "current", changed: false } },
+      } };
+    },
+    "cortex.config.preset.reset": async (input) => {
+      presetCalls.push({ method: "reset", input });
+      return presetReplies.shift() ?? { ok: true, binding, result: {
+        surface: "default_preset", revision: REV("f"),
+        files: { routing: { revision: REV("s"), status: "existing" }, defaults: { revision: REV("t"), status: "existing" } }, changed: true,
+        backups: { defaults: "~/.config/cortex/defaults.json.cortex-backup-1" },
+      } };
+    },
     "cortex.config.read": async (input) => {
       reads.push(input);
-      return { ok: true, binding, result: structuredClone(data[input.surface as string]) };
+      return readReplies.shift() ?? { ok: true, binding, result: structuredClone(data[input.surface as string]) };
     },
     "cortex.config.update": async (input) => {
       updates.push(input);
@@ -317,7 +387,10 @@ async function openScreen(data = fixtures()) {
     "@getpaseo/plugin/client/react-native": { Icon: "Icon", ScrollView: "ScrollView" },
     zod: await import("zod"),
   };
-  const evaluate = new Function(`return ${await compilePanel()}`)() as (require: (name: string) => unknown) => { SettingsScreen: (props: unknown) => unknown };
+  const evaluate = new Function("setInterval", "clearInterval", `return ${await compilePanel()}`)(
+    (callback: () => void) => { intervals.add(callback); return callback; },
+    (callback: () => void) => { intervals.delete(callback); },
+  ) as (require: (name: string) => unknown) => { SettingsScreen: (props: unknown) => unknown };
   const { SettingsScreen } = evaluate((name) => {
     assert.ok(name in modules, `settings panel required unexpected module ${name}`);
     return modules[name];
@@ -335,10 +408,102 @@ async function openScreen(data = fixtures()) {
   const toggle = async (label: string, value: boolean) => { (find(label, "Switch").props.onValueChange as (v: boolean) => void)(value); await runtime.settle(); };
   const texts = () => runtime.elements().filter((element) => element.type === "Text").map((element) => textOf(element.props.children));
   const section = async (title: string) => press(`Section: ${title}`);
-  return { runtime, data, reads, updates, onboards, onboardReplies, replies, refreshes, find, has, press, type, toggle, texts, section };
+  return {
+    runtime, data, reads, readReplies, updates, onboards, onboardReplies, replies, refreshes, find, has, press, type, toggle, texts, section,
+    poll: async () => { for (const callback of [...intervals]) callback(); await runtime.settle(); },
+    discovers, discoverReplies, installs, installReplies, connects, connectReplies, presetCalls, presetReplies,
+  };
 }
 
 // --- tests ------------------------------------------------------------------------
+
+test("connections: passive refresh keeps row identity, drafts and confirmation while updating live status", async () => {
+  const screen = await openScreen();
+  await screen.section("Connections");
+  const label = `Name of ${CONN.codex[0]}`;
+  const identity = screen.runtime.identity(screen.find(label, "TextInput"));
+  await screen.type(label, "Unsaved name");
+  await screen.press("Remove Codex");
+  const changes = screen.runtime.stateChanges();
+  await screen.poll();
+  assert.equal(screen.runtime.stateChanges(), changes, "structurally identical discovery and registry skip state updates");
+
+  let finish!: (value: unknown) => void;
+  screen.readReplies.push(new Promise((resolve) => { finish = resolve; }));
+  await screen.poll();
+  assert.ok(!screen.texts().includes("Loading…"), "background read must not replace the form");
+  assert.equal(screen.runtime.identity(screen.find(label, "TextInput")), identity);
+  finish({ ok: true, binding, result: structuredClone(screen.data.connections) });
+  await screen.runtime.settle();
+  assert.equal(screen.runtime.identity(screen.find(label, "TextInput")), identity);
+  assert.equal(screen.find(label, "TextInput").props.value, "Unsaved name");
+  assert.ok(screen.has("Confirm remove Codex"));
+
+  const connections = screen.data.connections.connections as Array<Record<string, unknown>>;
+  connections[0].state = "needs_login";
+  await screen.poll();
+  assert.equal(screen.runtime.identity(screen.find(label, "TextInput")), identity);
+  assert.equal(screen.find(label, "TextInput").props.value, "Unsaved name");
+  assert.ok(screen.texts().some((text) => text.includes("needs_login")));
+  assert.ok(screen.has("Confirm remove Codex"));
+});
+
+test("connections: failed background reads retain rows, drafts and engine opt-ins with retry", async () => {
+  const data = fixtures();
+  const engines = data.connections_discovery.engines as Array<Record<string, unknown>>;
+  Object.assign(engines[1], { status: "ready_to_connect", version: "0.97.0", native_login_detected: true, qualified: true });
+  const screen = await openScreen(data);
+  await screen.section("Connections");
+  const label = `Name of ${CONN.codex[0]}`;
+  const identity = screen.runtime.identity(screen.find(label, "TextInput"));
+  await screen.type(label, "Draft");
+  await screen.toggle("Connect claude-agent-acp through my own account login", true);
+  screen.readReplies.push({ ok: false, error: { code: "read_failed", message: "offline" } });
+  screen.discoverReplies.push(Promise.reject(new Error("discovery offline")));
+  await screen.poll();
+  assert.equal(screen.runtime.identity(screen.find(label, "TextInput")), identity);
+  assert.equal(screen.find(label, "TextInput").props.value, "Draft");
+  assert.equal((screen.find("Connect claude-agent-acp through my own account login", "Switch").props.value), true);
+  assert.ok(screen.texts().some((text) => text.includes("Showing last known")));
+  await screen.press("Retry connections refresh");
+  await screen.press("Check engines again");
+  assert.equal(screen.runtime.identity(screen.find(label, "TextInput")), identity);
+  assert.ok(!screen.texts().some((text) => text.includes("Showing last known")));
+});
+
+
+test("connections: reordered refreshed data keeps surviving rows in place and new rows appear", async () => {
+  const screen = await openScreen();
+  await screen.section("Connections");
+  const label = `Name of ${CONN.codex[0]}`;
+  const identity = screen.runtime.identity(screen.find(label, "TextInput"));
+  const rows = screen.data.connections.connections as Array<Record<string, unknown>>;
+  rows.unshift({ ...structuredClone(rows[0]), id: CONN.claude[0], name: "Claude", engine: "claude-agent-acp" });
+  await screen.poll();
+  const names = screen.runtime.elements().filter((e) => e.type === "TextInput" && String(e.props.accessibilityLabel).startsWith("Name of "));
+  assert.deepEqual(names.map((e) => e.props.accessibilityLabel), [label, `Name of ${CONN.claude[0]}`]);
+  assert.equal(screen.runtime.identity(screen.find(label, "TextInput")), identity);
+});
+
+test("connections: a late passive response cannot overwrite a completed mutation", async () => {
+  const screen = await openScreen();
+  await screen.section("Connections");
+  const label = `Name of ${CONN.codex[0]}`;
+  let finish!: (value: unknown) => void;
+  const stale = structuredClone(screen.data.connections);
+  screen.readReplies.push(new Promise((resolve) => { finish = resolve; }));
+  await screen.poll();
+  await screen.type(label, "Renamed");
+  const saved = structuredClone(screen.data.connections);
+  (saved.connections as Array<Record<string, unknown>>)[0].name = "Renamed";
+  saved.revision = REV("z");
+  screen.replies.push({ ok: true, binding, result: saved });
+  await screen.press("Rename Codex");
+  finish({ ok: true, binding, result: stale });
+  await screen.runtime.settle();
+  assert.ok(screen.has("Rename Renamed"));
+  assert.ok(!screen.has("Rename Codex"));
+});
 
 test("no section offers a raw JSON entry field, and every control is labelled", async () => {
   const screen = await openScreen();
@@ -795,6 +960,99 @@ test("connections: a successful OpenCode onboard shows its own next-step guidanc
     "expected the banner to show the onboard responses own next_action, not the reloaded connections view");
 });
 
+test("connections: every engine shows its first-run status; Download engine fetches only a pinned Cortex adapter", async () => {
+  const screen = await openScreen();
+  assert.equal(screen.discovers.length, 0, "nothing is checked before the Connections section opens");
+  await screen.section("Connections");
+  assert.equal(screen.discovers.length, 1);
+  const texts = screen.texts();
+  assert.ok(texts.some((text) => text.startsWith("Connected (cn_0123456789ab).")));
+  assert.ok(texts.some((text) => text.startsWith("Not downloaded. Download engine fetches Cortex's own pinned adapter.")));
+  assert.ok(texts.some((text) => text === "Downloaded 2.0.20, not logged in: run `opencode auth login` in a terminal, then press Check again."));
+  assert.ok(!screen.has("Download engine codex-acp"), "a connected engine offers no download");
+  assert.ok(!screen.has("Download engine opencode"), "OpenCode is installed with its own installer");
+  assert.ok(!screen.has("Add connection for claude-agent-acp"), "nothing to connect before the download and login");
+  assert.ok(!screen.has("Add connection for opencode"), "nothing to connect before the login");
+  await screen.press("Download engine claude-agent-acp");
+  assert.deepEqual(screen.installs, [{ engine: "claude-agent-acp" }]);
+  assert.ok(screen.texts().includes("Downloaded claude-agent-acp 0.78.0."));
+
+  screen.installReplies.push({ ok: false, binding, error: { code: "engine_install_failed", message: "Pinned engine installation failed; retry after checking npm/network.", field: "engine" } });
+  await screen.press("Download engine claude-agent-acp");
+  assert.ok(screen.texts().some((text) => text.startsWith("Not downloaded: Pinned engine installation failed")));
+  await screen.press("Check engines again");
+  assert.equal(screen.discovers.length, 2);
+});
+
+const READY_CLAUDE = { engine: "claude-agent-acp", status: "ready_to_connect", version: "0.78.0", native_login_detected: true, already_connected: null, qualified: true, install_supported: true };
+
+test("connections: Add connection sends only the engine, the revision and an explicit opt-in, then re-reads", async () => {
+  const screen = await openScreen();
+  screen.discoverReplies.push({ ok: true, binding, result: { ...screen.data.connections_discovery, engines: [READY_CLAUDE] } });
+  await screen.section("Connections");
+  assert.ok(screen.texts().includes("Downloaded 0.78.0 and logged in: ready to connect."));
+  const add = "Add connection for claude-agent-acp";
+  assert.equal((screen.find(add, "Pressable").props.accessibilityState as { disabled: boolean }).disabled, true);
+  await screen.press(add);
+  assert.deepEqual(screen.connects, [], "no connection without the opt-in");
+  await screen.toggle("Connect claude-agent-acp through my own account login", true);
+  const readsBefore = screen.reads.length;
+  screen.discoverReplies.push({ ok: true, binding, result: { ...screen.data.connections_discovery, engines: [
+    { ...READY_CLAUDE, status: "connected", already_connected: "cn_1123456789ab" },
+  ] } });
+  await screen.press(add);
+  assert.deepEqual(screen.connects, [{ engine: "claude-agent-acp", expected_revision: REV("c"), explicit_opt_in: true }]);
+  assert.ok(screen.texts().some((text) => text.startsWith("Connected claude-agent-acp as Codex (cn_0123456789ab).")));
+  assert.equal(screen.discovers.length, 2, "engine status is re-checked");
+  assert.ok(screen.reads.slice(readsBefore).some((read) => read.surface === "connections"), "the connections list is re-read");
+  assert.ok(screen.texts().some((text) => text.startsWith("Connected (cn_1123456789ab).")), "the re-check shows the new connection");
+  assert.ok(!screen.has(add), "a connected engine offers no second connection");
+});
+
+test("connections: a stale revision registers nothing and offers a re-check", async () => {
+  const screen = await openScreen();
+  screen.discoverReplies.push({ ok: true, binding, result: { ...screen.data.connections_discovery, engines: [READY_CLAUDE] } });
+  screen.connectReplies.push({ ok: false, binding, error: { code: "revision_conflict", message: "The connections configuration changed.", field: "expected_revision", currentRevision: REV("x") } });
+  await screen.section("Connections");
+  await screen.toggle("Connect claude-agent-acp through my own account login", true);
+  await screen.press("Add connection for claude-agent-acp");
+  assert.ok(screen.texts().some((text) => text.startsWith("Connections changed elsewhere; nothing was registered.")));
+  const checks = screen.discovers.length;
+  await screen.press("Check claude-agent-acp again");
+  assert.equal(screen.discovers.length, checks + 1);
+});
+
+test("default preset: Apply writes only absent files; Reset needs a confirmation step and the read revision", async () => {
+  const screen = await openScreen();
+  assert.ok(screen.texts().includes("routing.json: absent · defaults.json: present"));
+  await screen.press("Apply default preset");
+  assert.deepEqual(screen.presetCalls.filter((call) => call.method === "apply"), [{ method: "apply", input: {} }]);
+  assert.ok(screen.texts().includes("Default preset applied: routing.json created, defaults.json left unchanged (current)."));
+  assert.ok(!screen.has("Apply default preset"), "Apply is not offered once both files exist");
+
+  const resets = () => screen.presetCalls.filter((call) => call.method === "reset");
+  await screen.press("Reset to default preset");
+  assert.equal(resets().length, 0, "the first press only asks for confirmation");
+  assert.ok(screen.texts().some((text) => text.startsWith("Reset replaces your whole user routing.json and defaults.json") && text.includes("private backup")));
+  await screen.press("Cancel reset to default preset");
+  assert.ok(!screen.has("Confirm reset to default preset"));
+  assert.equal(resets().length, 0);
+
+  screen.presetReplies.push({ ok: false, binding, error: { code: "revision_conflict", message: "The default_preset files changed.", field: "expected_revision" } });
+  await screen.press("Reset to default preset");
+  await screen.press("Confirm reset to default preset");
+  assert.deepEqual(resets().map((call) => call.input), [{ expected_revision: REV("e"), confirm: true }]);
+  assert.ok(screen.texts().some((text) => text.startsWith("The preset files changed since they were read; nothing was replaced.")));
+  await screen.press("Reload the default preset files");
+  assert.ok(screen.texts().includes("routing.json: absent · defaults.json: present"));
+
+  await screen.press("Reset to default preset");
+  await screen.press("Confirm reset to default preset");
+  assert.deepEqual(resets()[1].input, { expected_revision: REV("d"), confirm: true });
+  assert.ok(screen.texts().includes("Default preset restored. Previous files were backed up to ~/.config/cortex/defaults.json.cortex-backup-1."));
+  assert.ok(!screen.has("Confirm reset to default preset"));
+});
+
 test("project ceiling: typed ceiling fields save with the workspace and revision", async () => {
   const screen = await openScreen();
   await screen.press("Project (for project ceiling and project routing): demo — /p/demo");
@@ -1001,6 +1259,33 @@ test("engines & models: a model can be placed in several tiers and back to unpla
   await fresh.press(tier("standard"));
   await fresh.press("Save engine and model switches to the user routing file");
   assert.equal((fresh.updates[0].rules as any).models?.["codex-acp"]?.tiers, undefined, "no tier left: no placement");
+});
+
+test("a fresh default profile is visibly applied and its MCP examples are disabled and toggleable", async () => {
+  const data = fixtures();
+  const view = data.routing_profiles;
+  view.active = "default";
+  view.state = "in_sync";
+  view.modified_sections = [];
+  view.differences = [];
+  view.matches_profile = ["default"];
+  (view.profiles as any[])[0].name = "default";
+  const names = ["codebase-memory-mcp", "playwright", "vivaldi"];
+  data.mcp_servers.servers = names.map((name) => ({
+    name, enabled: false, valid: true, problem: null, redacted: false, unsupported_keys: [],
+    config: { command: "/path/to/server", args: [], env: [], allowed_tools: ["example"] },
+  }));
+  const screen = await openScreen(data);
+  assert.equal(screen.find("Current profile: default", "Pressable").props.accessibilityState.checked, true);
+  assert.ok(screen.texts().includes('Applied: the current settings match profile "default".'));
+  assert.equal(screen.has("Current profile: mix"), false);
+  await screen.section("MCP servers");
+  for (const name of names) {
+    assert.equal(screen.find(name + " enabled", "Switch").props.value, false);
+  }
+  await screen.toggle("vivaldi enabled", true);
+  assert.deepEqual(screen.updates[0], { surface: "mcp_servers", expected_revision: REV("m"),
+    operations: [{ op: "set_enabled", name: "vivaldi", enabled: true }] });
 });
 
 test("profiles show modified sections, confirm revert, and retain revision conflicts", async () => {
@@ -1308,7 +1593,8 @@ test("quota typed controls edit exact labels and scopes and retain unrelated dat
   const saved = screen.updates[0].rules as any;
   assert.deepEqual(saved.quota_windows, { "codex-acp": [{ window: "Renamed / Label@8", models: null }] });
   assert.deepEqual(saved.models, rules.models);
-  assert.ok(screen.texts().some((text) => text.includes("Without it every window counts for every model of that engine")));
+  assert.ok(screen.texts().some((text) => text.includes("Without it every applicable window counts for every model of that engine")));
+  assert.ok(screen.texts().some((text) => text.includes("Claude\'s legacy session / 5-hour window is ignored; Codex keeps its own windows.")));
 });
 
 test("unknown quota rule shape remains read-only with no destructive save", async () => {
