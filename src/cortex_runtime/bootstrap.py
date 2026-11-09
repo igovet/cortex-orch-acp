@@ -57,7 +57,7 @@ def _bounded_text(value, field_name):
     return value
 
 
-def bootstrap_task(store, source_event, user_input, owner_ref, *, blocks=None, meta=None, workspace_root=None):
+def bootstrap_task(store, source_event, user_input, owner_ref, *, blocks=None, meta=None, workspace_root=None, capture_tx=None):
     """Create (or recover) exactly one task for ``source_event``.
 
     ``store`` must already be constructed against the target project root.
@@ -109,6 +109,18 @@ def bootstrap_task(store, source_event, user_input, owner_ref, *, blocks=None, m
                 db.commit()
                 if blocks: replay_store.cleanup_staged(blocks)
                 return BootstrapResult(task_id=existing["task_id"], channel_id=None, secret=None, replayed=True, owner_epoch=owner_epoch)
+            # A pending Workspace dispatch reserves this checkout, including
+            # against ordinary ACP first prompts racing its capture.
+            if capture_tx is None and db.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='workspace_starts'").fetchone():
+                busy = db.execute(
+                    "SELECT 1 FROM workspace_starts s JOIN workspace_projects p USING(project_id) "
+                    "LEFT JOIN workspace_executions e USING(execution_id) "
+                    "LEFT JOIN runtime_tasks r ON r.task_id=e.runtime_task_id "
+                    "WHERE p.project_root=? AND (s.state='unknown' OR r.state IS NULL "
+                    "OR r.state NOT IN ('COMPLETED','FAILED','CANCELLED')) LIMIT 1", (project,)).fetchone()
+                if busy:
+                    raise StoreError("workspace_checkout_busy")
             project_draft_directory(project, "report")
             project_draft_directory(project, "pipeline")
             task = unique_identifier(db, "t_")
@@ -130,6 +142,14 @@ def bootstrap_task(store, source_event, user_input, owner_ref, *, blocks=None, m
             epoch = acquire_task_owner_tx(db, task, owner_ref, None)
             channel_id, secret = issue_channel_tx(
                 db, task, "coordinator", epoch.epoch, principal_thread_id=principal)
+            if capture_tx is not None:
+                try:
+                    capture_tx(db, task, epoch)
+                except BaseException:
+                    store._rollback_files(rollbacks)
+                    for path in staged:
+                        path.unlink(missing_ok=True)
+                    raise
             db.commit()
         except BaseException:
             db.rollback(); raise

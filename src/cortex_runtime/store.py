@@ -232,7 +232,8 @@ def project_draft_directory(project_root,kind="report"):
     current=project
     leaf={"report":"draft-reports","pipeline":"pipeline-drafts"}.get(kind)
     if leaf is None: raise StoreError("invalid_draft_path","kind",kind,"report or pipeline")
-    for part in (".cortex",leaf):
+    from .project_storage import project_store_name
+    for part in (project_store_name(),leaf):
         current/=part
         try: current.mkdir(mode=0o700)
         except FileExistsError: pass
@@ -249,7 +250,8 @@ def project_task_directory(project_root):
     if not project.is_absolute() or not project.is_dir() or str(project.resolve())!=str(project):
         raise StoreError("invalid_project","project_root",str(project_root),"absolute existing canonical directory")
     current=project
-    for part in (".cortex",):
+    from .project_storage import project_store_name
+    for part in (project_store_name(),):
         current/=part
         try: current.mkdir(mode=0o700)
         except FileExistsError: pass
@@ -348,6 +350,7 @@ class Store:
         from .delegation.integration import INTEGRATION_SCHEMA
         from .routing.store import ROUTING_SCHEMA
         from .observability.store import OBSERVABILITY_SCHEMA
+        from .workspace_api.storage import WORKSPACE_API_SCHEMA, WORKSPACE_OUTBOX_SCHEMA, OUTBOX_LEGACY_CLEANUP_SCHEMA
         from .project_storage import canonical_project, project_store_directory
         self.project_root=canonical_project(project_root) if project_root is not None else None
         if self.project_root is not None and Path(directory)!=project_store_directory(self.project_root):
@@ -380,7 +383,9 @@ class Store:
             db.commit()
             if initialize:
                 db.execute("PRAGMA journal_mode=WAL")
-                db.executescript("BEGIN IMMEDIATE;\n"+SCHEMA+IDENTITY_SCHEMA+CATALOG_SCHEMA+CONFIGURATION_SCHEMA+ACP_SESSION_SCHEMA+DELEGATION_SCHEMA+WORK_GRAPH_SCHEMA+TASK_EVENTS_SCHEMA+RUNTIME_SCHEMA+CAPACITY_SCHEMA+EVIDENCE_SCHEMA+REPLAY_SCHEMA+PENDING_QUESTIONS_SCHEMA+TASK_LANGUAGE_SCHEMA+TASK_STOPPED_SCHEMA+CONTEXT_GENERATIONS_SCHEMA+LARGE_OUTPUT_SCHEMA+PROCESS_REGISTRY_SCHEMA+WORKSPACE_SCHEMA+INTEGRATION_SCHEMA+ROUTING_SCHEMA+OBSERVABILITY_SCHEMA+f"PRAGMA application_id={APPLICATION_ID};\nCOMMIT;")
+                db.executescript("BEGIN IMMEDIATE;\n"+OUTBOX_LEGACY_CLEANUP_SCHEMA+SCHEMA+IDENTITY_SCHEMA+CATALOG_SCHEMA+CONFIGURATION_SCHEMA+ACP_SESSION_SCHEMA+DELEGATION_SCHEMA+WORK_GRAPH_SCHEMA+TASK_EVENTS_SCHEMA+RUNTIME_SCHEMA+CAPACITY_SCHEMA+EVIDENCE_SCHEMA+REPLAY_SCHEMA+PENDING_QUESTIONS_SCHEMA+TASK_LANGUAGE_SCHEMA+TASK_STOPPED_SCHEMA+CONTEXT_GENERATIONS_SCHEMA+LARGE_OUTPUT_SCHEMA+PROCESS_REGISTRY_SCHEMA+WORKSPACE_SCHEMA+INTEGRATION_SCHEMA+ROUTING_SCHEMA+OBSERVABILITY_SCHEMA+WORKSPACE_API_SCHEMA+WORKSPACE_OUTBOX_SCHEMA+f"PRAGMA application_id={APPLICATION_ID};\nCOMMIT;")
+                from .workspace_api.storage import install_outbox_hooks
+                install_outbox_hooks(db)
             if initialize and app==APPLICATION_ID:
                 # T036: add the model-selected requirement type and the
                 # fail-closed legacy assignment state to pre-existing graph
@@ -640,6 +645,9 @@ class Store:
             db=sqlite3.connect(self.path.as_uri()+"?mode=ro&immutable=1" if read_only else self.path,
                                uri=read_only,timeout=15,isolation_level=None)
             db.row_factory=sqlite3.Row
+            from .workspace_api.storage import register_outbox_function, install_outbox_hooks
+            register_outbox_function(db)
+            install_outbox_hooks(db)
             db.execute("PRAGMA foreign_keys=ON"); db.execute("PRAGMA synchronous=FULL")
             yield db
         finally:

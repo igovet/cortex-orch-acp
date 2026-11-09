@@ -76,7 +76,7 @@ def project_git_evidence(store, task_id, owner_scope, root, kind):
             '-c', 'core.hooksPath=/dev/null', '-c', 'core.pager=cat']
     argv += (['status', '--porcelain=v1', '--untracked-files=all'] if kind == 'status'
              else ['diff', '--no-ext-diff', '--no-textconv', 'HEAD'])
-    argv += ['--', '.', ':(exclude).cortex', ':(exclude)**/.cortex/**']
+    argv += ['--', '.', ':(exclude).cortex', ':(exclude)**/.cortex/**', ':(exclude).cortex-dev', ':(exclude)**/.cortex-dev/**', ':(exclude).cortex-dev-owner.json', ':(exclude).cortex-workspace-dev.json']
     with tempfile.TemporaryDirectory(prefix='cortex-git-read-') as scratch:
         command = _project_git_command(root, scratch, argv, metadata)
         with tempfile.TemporaryFile() as output:

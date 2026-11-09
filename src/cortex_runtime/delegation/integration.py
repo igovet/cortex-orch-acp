@@ -106,7 +106,7 @@ CREATE TABLE IF NOT EXISTS workspace_integration_journal (
 );
 '''
 
-_EXCLUDED_TOP_LEVEL = {".git", ".cortex"}
+_EXCLUDED_TOP_LEVEL = {".git", ".cortex", ".cortex-dev", ".cortex-dev-owner.json", ".cortex-workspace-dev.json"}
 _MAX_MERGE_FILE_BYTES = 64 * 1024 * 1024
 
 

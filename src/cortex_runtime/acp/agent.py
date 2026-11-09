@@ -70,6 +70,7 @@ from .. import task_workspace
 
 PLUGIN = Path(__file__).resolve().parents[3]
 _PROMPT_JOIN_TIMEOUT = 5.0
+_WORKSPACE_PROMPT = object()  # Internal dispatch has no generic ACP request/reply.
 # Paseo discovers the provider catalog from the synchronous ``session/new``
 # response and does not consume a later config_option_update while building
 # its model picker.  Give a fresh, seed-only catalog a short opportunity to
@@ -557,6 +558,9 @@ class Agent:
         self.version = _agent_version()
         self.stores = {}
         self.sessions = {}
+        # Only an explicit trusted host activation installs a Workspace binding.
+        # Prompt metadata and client-supplied actor/project claims cannot do so.
+        self._workspace_apis = {}
         self.transport = None
         self.host_requester = None
         self.initialized = False
@@ -617,7 +621,11 @@ class Agent:
             waiter = session.get("question_waiter")
             if session["active"] is not None:
                 if recorded:
-                    return  # the durable status wakes the existing waiter/runner
+                    # The runner may already have read its final wait snapshot.
+                    # Recheck at its locked release boundary rather than losing
+                    # an answer between that read and session["active"] = None.
+                    session.setdefault("pending_recorded_answers", {})[question.id] = (question, choice)
+                    return
                 # A turn is running: hand it the answer if it waits on this
                 # very question's card, else record it durably (a no-op for
                 # a question already answered) for that turn to pick up.
@@ -653,6 +661,8 @@ class Agent:
             message_id = f"assistant:late-answer:{question.id}"
 
             def emit_update(chunk_text):
+                from ..workspace_api.control import observe_owner
+                observe_owner(self, session_id, session)
                 if cancel_event.is_set() or self.transport is None:
                     return False
                 with self._history_lock(session_id):
@@ -701,6 +711,112 @@ class Agent:
             store = Store(directory, initialize=True, project_root=project)
             self.stores[project] = store
         return store
+
+    def activate_workspace(self, session_id, *, project_id, actor_id, request_id, expected_version="0"):
+        """Trusted host API for the separate, recorded project activation.
+
+        The local service must authenticate its peer before calling this hook.
+        It is not an ACP operation, model tool, prompt _meta flag or inferred
+        consequence of session/new. The extension remains unadvertised.
+        """
+        from ..workspace_api import WorkspaceAPI, WorkspaceError
+        session = self.sessions.get(session_id)
+        if session is None:
+            raise WorkspaceError("session_not_found")
+        api = WorkspaceAPI(self._store_for(session["project"]), project_id=project_id,
+                           actor_id=actor_id, build_identity=self.version)
+        previous = self._workspace_apis.get(project_id)
+        if previous is not None and (previous.store.project_root != api.store.project_root
+                                     or previous.actor_id != actor_id):
+            raise WorkspaceError("unauthorized")
+        if previous is not None:
+            api = previous
+        result = api.activate(request_id=request_id, expected_version=expected_version)
+        if result["outcome"] in ("recorded", "stale_version"):
+            api.dispatch_start = lambda start: self._dispatch_workspace_start(session_id, start)
+            api.dispatch_answer = self._dispatch_workspace_answer
+            self._workspace_apis[project_id] = api
+        return result
+
+    def _dispatch_workspace_answer(self, answer):
+        """Winning identified answer uses the existing idle/active runner handoff."""
+        from ..workspace_api import WorkspaceError
+        session_id = answer["session_id"]
+        session = self.sessions.get(session_id)
+        if session is None or session.get("task_id") != answer["task_id"]:
+            raise WorkspaceError("answer_session_unavailable")
+        store = self._store_for(session["project"])
+        question = acp_questions_store.get(store, answer["question_ids"][0])
+        if question is None or question.status != "answered":
+            raise WorkspaceError("answer_not_recorded")
+        self._record_card_answer_history(store, session_id, answer["answers"])
+        threading.Thread(target=self._run_late_answer, name="acp-workspace-answer",
+                         args=(session_id, session, question, question.answer_text, True), daemon=True).start()
+
+    def _dispatch_workspace_start(self, template_session_id, start):
+        """Trusted path only; neither prompt _meta nor client JSON supplies identity."""
+        template = self.sessions[template_session_id]
+        # Each execution gets a fresh durable ACP session, not another turn on
+        # a prior runtime task. Preserve the owner's advertised selections.
+        from ..workspace_api import task_options
+        store = self._store_for(template["project"])
+        cwd = task_options.prepare(store, start["task_id"], self.environ)
+        with store.connection() as db:
+            options = task_options.read(db, start["task_id"])
+        session_id = self._session_new(dict(cwd=cwd,
+                                            mcpServers=template.get("mcp_servers") or []))["sessionId"]
+        session = self.sessions[session_id]
+        for field in ("pending_selection", "default_selection", "pending_language"):
+            session[field] = copy.deepcopy(template.get(field))
+        chosen = options.get("settings")
+        if chosen:
+            self._workspace_select(session, chosen)
+        selected_access = chosen["mode"] if chosen else template.get("pending_access_mode")
+        if selected_access is not None:
+            self._apply_access_mode_selection(self._store_for(session["project"]), session, session_id,
+                                              selected_access, origin="acp_pre_task_selection")
+        cancel_event = threading.Event()
+        with session["lock"]:
+            session["active"] = cancel_event
+        # This is the existing prompt pipeline, with commands deliberately not
+        # recognized in a description. Start is not arbitrary slash dispatch.
+        from ..workspace_api.attachments import content
+        blocks = [dict(type="text", text=start["description"])] + content(options.get("attachments", []))
+        self._launch_prompt((_WORKSPACE_PROMPT, session_id, session, start["description"], cancel_event,
+                             None, blocks, None, start))
+
+    def _workspace_select(self, session, chosen):
+        """Apply an app task choice without writing the owner's machine defaults."""
+        from ..workspace_api.storage import WorkspaceError
+        entries, _ = self._selectable_entries_and_connections(session["project"])
+        matches = [e for e in entries if e.route.id == chosen["model"]]
+        if not matches:
+            matches = [e for e in entries if e.route.model == chosen["model"]]
+        if len(matches) != 1:
+            raise WorkspaceError("task_route_unavailable")
+        entry = matches[0]
+        parameters = {}
+        if chosen["effort"]:
+            parameters["thought_level"] = chosen["effort"]
+        session["workspace_explicit_selection"] = True
+        session["pending_selection"] = dict(route_id=entry.route.id, connection_id=entry.connection_id,
+                                            model=entry.route.model, parameters=parameters, workspace_task=True)
+        session["default_selection"] = None
+        session["pending_language"] = None if chosen["language"] == "auto" else chosen["language"]
+
+    def _workspace_request(self, params):
+        from ..workspace_api import WorkspaceError
+        from ..workspace_contract import ContractError, validate
+        try:
+            validate("Command" if isinstance(params, dict) and "payload" in params else "Query", params)
+            api = self._workspace_apis.get(params["projectId"])
+            if api is None:
+                raise WorkspaceError("workspace_not_activated")
+            return api.handle(params)
+        except ContractError:
+            raise RpcError(-32602, "invalid_workspace_request") from None
+        except WorkspaceError as error:
+            raise RpcError(-32000, str(error)) from None
 
     # -- inbound dispatch (called synchronously on the transport reader
     #    thread; only session/prompt hands work off to a worker thread so
@@ -771,6 +887,30 @@ class Agent:
             self.transport.send_response(protocol.result_response(request_id, result))
             self._post_session_new_notifications(result["sessionId"])
             observe(self.environ, method, "success")
+        elif method == "_cortex/workspace_control":
+            from ..workspace_api.control import handle
+            from ..workspace_api import WorkspaceError
+            try:
+                result = handle(self, params)
+            except WorkspaceError as error:
+                raise RpcError(-32602, str(error)) from None
+            settle = result.pop("_settle", None)
+            if settle is None:
+                self.transport.send_response(protocol.result_response(request_id, result))
+            else:
+                # Stop answers after its interrupted turn has settled. The wait runs off this
+                # reader: that turn may still need a reply that only this reader can read.
+                def answer():
+                    settle()
+                    self.transport.send_response(protocol.result_response(request_id, result))
+                worker = threading.Thread(target=answer, name="acp-workspace-pause", daemon=True)
+                with self._workers_lock:
+                    self._workers.append(worker)
+                worker.start()
+        elif method == "_cortex/workspace":
+            if has_id:
+                result = self._workspace_request(params)
+                self.transport.send_response(protocol.result_response(request_id, result))
         elif method == "session/prompt":
             self._session_prompt(request_id, params)
         elif method == "session/cancel":
@@ -797,7 +937,7 @@ class Agent:
             observe(self.environ, method, "unknown")
 
     def _reply_error(self, request_id, code, message, data=None):
-        if self.transport is None:
+        if self.transport is None or request_id is _WORKSPACE_PROMPT:
             return
         self.transport.send_response(protocol.error_response(request_id, RpcError(code, message, data)))
 
@@ -1354,6 +1494,8 @@ class Agent:
         task_id = session["task_id"]
         if task_id is not None:
             return acp_steering.get_language_override(store, task_id)
+        if session.get("workspace_explicit_selection"):
+            return session.get("pending_language")
         pending = session.get("pending_language")
         if pending is not None:
             return pending
@@ -1542,6 +1684,34 @@ class Agent:
             self._workers.append(worker)
         worker.start()
 
+    def _continue_recorded_answers(self, session_id, session):
+        from ..orchestration import worker_waits, question_batches
+        with session["lock"]:
+            pending = session.pop("pending_recorded_answers", {})
+        if not pending:
+            return
+        store = self._store_for(session["project"])
+        with store.connection() as db:
+            task = db.execute("SELECT state FROM runtime_tasks WHERE task_id=?", (session["task_id"],)).fetchone()
+            if not task or task[0] in {"PAUSED", "COMPLETED", "FAILED", "CANCELLED"}:
+                return
+            waits = worker_waits.projection(db, session["task_id"])
+            eligible = []
+            for question, choice in pending.values():
+                batch = question_batches.find_tx(db, question.task_id, question_id=question.id)
+                wait = next((w for w in waits if w.get("question_id") == (batch["question_id"] if batch else question.id)), None)
+                if ((wait and wait["status"] == "ready" and worker_waits.valid(db, wait))
+                        or (not wait and task[0] == "WAITING_USER")):
+                    eligible.append((question, choice))
+        # One continuation loop observes all ready waits, not one loop per answer.
+        if eligible:
+            question, choice = eligible[0]
+            worker = threading.Thread(target=self._run_late_answer,
+                args=(session_id, session, question, choice, True), name="acp-recorded-answer-handoff", daemon=True)
+            with self._workers_lock:
+                self._workers.append(worker)
+            worker.start()
+
     def _finish_prompt(self, session_id, session, cancel_event):
         next_prompt = None
         cancelled = []
@@ -1565,13 +1735,16 @@ class Agent:
         if next_prompt is not None:
             self._launch_prompt(next_prompt)
         elif not cancel_event.is_set():
+            self._continue_recorded_answers(session_id, session)
             self._start_queued_message_continuation(session_id, session)
 
-    def _run_prompt(self, request_id, session_id, session, text, cancel_event, recognized=None, raw_blocks=None, meta=None):
+    def _run_prompt(self, request_id, session_id, session, text, cancel_event, recognized=None, raw_blocks=None, meta=None, workspace_start=None):
+        outcome = None
         try:
             if cancel_event.is_set():
-                self.transport.send_response(protocol.result_response(
-                    request_id, protocol.prompt_result("cancelled")))
+                if request_id is not _WORKSPACE_PROMPT:
+                    self.transport.send_response(protocol.result_response(
+                        request_id, protocol.prompt_result("cancelled")))
                 return
             if recognized is not None:
                 try:
@@ -1584,7 +1757,7 @@ class Agent:
                     return
                 self._run_command_body(request_id, session_id, session, recognized, cancel_event)
                 return
-            self._run_prompt_body(request_id, session_id, session, text, cancel_event, raw_blocks, meta)
+            outcome = self._run_prompt_body(request_id, session_id, session, text, cancel_event, raw_blocks, meta, workspace_start)
         except Exception:
             # Anything unexpected here -- including a failure in
             # _store_for/SimpleNamespace construction *before* the durable-
@@ -1595,15 +1768,30 @@ class Agent:
             self._reply_error(request_id, -32603, "Internal error while processing this prompt.")
             observe(self.environ, "session/prompt", "internal_error")
         finally:
-            self._finish_prompt(session_id, session, cancel_event)
+            try:
+                if workspace_start is not None and outcome is None:
+                    from ..workspace_api.storage import start_state_tx
+                    self._store_for(session["project"]).immediate_write(
+                        lambda db: start_state_tx(db, workspace_start["execution_id"], "unknown"))
+            finally:
+                self._finish_prompt(session_id, session, cancel_event)
 
-    def _run_prompt_body(self, request_id, session_id, session, text, cancel_event, raw_blocks=None, meta=None):
+    def _run_prompt_body(self, request_id, session_id, session, text, cancel_event, raw_blocks=None, meta=None, workspace_start=None):
         """The actual prompt turn; wrapped by ``_run_prompt`` for the
         catch-all -32603 safety net and the ``session["active"]`` cleanup.
         """
         store = self._store_for(session["project"])
         origin = f"acp:{session_id}"
         event_id = str(uuid.uuid4())
+        capture_tx = None
+        if workspace_start is not None:
+            from ..workspace_api.storage import bind_execution_tx
+            origin, event_id = workspace_start["source_origin"], workspace_start["source_event_id"]
+            def capture_tx(db, task_id, epoch):
+                db.execute("UPDATE acp_host_sessions SET task_id=? WHERE session_id=? AND task_id IS NULL",
+                           (task_id, session_id))
+                acp_sessions._initialize_task_access(db, session_id, task_id)
+                bind_execution_tx(db, workspace_start["task_id"], task_id, session_id, start=workspace_start)
         source_event = SimpleNamespace(origin=origin, event_id=event_id)
         is_first_prompt = session["task_id"] is None
         # T018: resolve every non-text content block (EmbeddedResource
@@ -1667,7 +1855,7 @@ class Agent:
                 # choice the session is carrying.
                 session_language = self._current_language_for_session(store, session)
                 result = bootstrap_task(store, source_event, text, owner_ref=origin, blocks=staged_blocks, meta=meta,
-                                        workspace_root=session.get("workspace"))
+                                        workspace_root=session.get("workspace"), capture_tx=capture_tx)
                 session["task_id"] = result.task_id
                 session["owner_epoch"] = result.owner_epoch
                 if result.channel_id is not None:
@@ -1721,6 +1909,8 @@ class Agent:
                 # documented -32001 orchestration_unavailable.
                 applied_selection = False
                 observe(self.environ, "session/prompt", f"pending_selection_refused:{error.code}")
+            if workspace_start is not None and not applied_selection and session.get("workspace_explicit_selection"):
+                raise StoreError("workspace_task_selection_refused")
             if applied_selection and self.transport is not None and not cancel_event.is_set():
                 self.transport.send_notification(
                     protocol.config_option_update(session_id, self._config_options_for_session(session, store))
@@ -1813,8 +2003,9 @@ class Agent:
             if remediation:
                 # What to change, not only what went wrong.
                 data["remediation"] = remediation
-            self.transport.send_response(protocol.error_response(
-                request_id, RpcError(-32001, "orchestration_unavailable", data=data)))
+            if request_id is not _WORKSPACE_PROMPT:
+                self.transport.send_response(protocol.error_response(
+                    request_id, RpcError(-32001, "orchestration_unavailable", data=data)))
             observe(self.environ, "session/prompt", reason_code)
             return
         except Exception as exc:
@@ -1864,8 +2055,10 @@ class Agent:
             # session/cancel MUST be reflected even if the runtime
             # otherwise reports a different outcome.
             reason = StopReason.CANCELLED
-        self.transport.send_response(protocol.result_response(request_id, protocol.prompt_result(reason.value)))
+        if request_id is not _WORKSPACE_PROMPT:
+            self.transport.send_response(protocol.result_response(request_id, protocol.prompt_result(reason.value)))
         observe(self.environ, "session/prompt", reason.value)
+        return reason
 
     def _propose_pending_selection_for_new_task(self, store, session, task_id):
         """Apply this session's pre-task selection to the just-bootstrapped
@@ -1936,7 +2129,7 @@ class Agent:
             else:
                 observe(self.environ, "session/prompt", "pending_selection_route_unavailable")
             return False
-        if not pending.get("coordinator") and catalog_entry.route.id != pending.get("route_id"):
+        if not pending.get("workspace_task") and not pending.get("coordinator") and catalog_entry.route.id != pending.get("route_id"):
             self._persist_migrated_default(catalog_entry, parameters)
             observe(self.environ, "session/prompt", "pending_selection_route_migrated")
         service = ConfigurationService(store)
@@ -2750,12 +2943,14 @@ class Agent:
         worker.start()
 
     def _run_queued_message_continuation(
-        self, session_id, session, origin, event_id, text, cancel_event,
+        self, session_id, session, origin, event_id, text, cancel_event, *, resume_recorded=False,
     ):
         store = self._store_for(session["project"])
         message_id = f"assistant:queued-message:{event_id}"
 
         def emit_update(chunk_text):
+            from ..workspace_api.control import observe_owner
+            observe_owner(self, session_id, session)
             if cancel_event.is_set() or self.transport is None:
                 return False
             with self._history_lock(session_id):
@@ -2771,7 +2966,7 @@ class Agent:
 
         try:
             method, kwargs = self._runtime_call_kwargs(
-                "start_prompt", project_root=session["project"],
+                "start_prompt", project_root=session["project"], resume_recorded=resume_recorded,
                 source_origin=origin, source_event_id=event_id,
                 emit_tool_call=self._make_emit_tool_call(session_id, cancel_event),
                 emit_display_update=self._make_emit_display_update(session_id, cancel_event),
@@ -2787,7 +2982,7 @@ class Agent:
         finally:
             self._finish_prompt(session_id, session, cancel_event)
 
-    def _queue_paseo_message(self, request_id, session_id, session, value):
+    def _queue_paseo_message(self, request_id, session_id, session, value, *, respond=True):
         """Capture a Paseo message (text, and any image/uploaded-file
         attachments) while the existing ACP turn remains in flight.
 
@@ -2839,7 +3034,7 @@ class Agent:
         )
         image_failures = [
             capture for capture in resolved_blocks
-            if capture.kind == "image" and capture.availability != "stored"
+            if (capture.kind == "image" or payload.get("workspaceAttachments") is True) and capture.availability != "stored"
         ]
         if image_failures:
             reason = image_failures[0].reason or "capture_unavailable"
@@ -2850,7 +3045,7 @@ class Agent:
         )
         staged_image_failures = [
             item.capture for item in staged_blocks
-            if item.capture.kind == "image" and item.capture.availability != "stored"
+            if (item.capture.kind == "image" or payload.get("workspaceAttachments") is True) and item.capture.availability != "stored"
         ]
         if staged_image_failures:
             reason = staged_image_failures[0].reason or "capture_unavailable"
@@ -2898,9 +3093,10 @@ class Agent:
                        source_event_id=message_id)
             except Exception:
                 raise RpcError(-32603, "Failed to close the task after durable capture.") from None
-            self.transport.send_response(protocol.result_response(
-                request_id, protocol.set_config_option_response(options),
-            ))
+            if respond:
+                self.transport.send_response(protocol.result_response(
+                    request_id, protocol.set_config_option_response(options),
+                ))
             return
         # Capture and steering commit separately. A retry may be the first
         # call to record steering, so recover descriptors from durable capture,
@@ -2939,9 +3135,10 @@ class Agent:
             if not result.replayed and not any(item[1] == message_id for item in queued):
                 queued.append((origin, message_id, text))
             options = self._config_options_for_session(session, store)
-        self.transport.send_response(
-            protocol.result_response(request_id, protocol.set_config_option_response(options))
-        )
+        if respond:
+            self.transport.send_response(
+                protocol.result_response(request_id, protocol.set_config_option_response(options))
+            )
         self._start_queued_message_continuation(session_id, session)
 
     def _answer_question_card(self, request_id, session_id, session, value):

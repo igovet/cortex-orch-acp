@@ -128,6 +128,11 @@ def retry_lost(runtime,task_id,node):
         release_observed(runtime,task_id,provision['attempt_id'])
     with store.connection() as db:
         db.execute('BEGIN IMMEDIATE')
+        from . import worker_waits
+        wait = worker_waits.current(db, task_id, assignment)
+        continuing = bool(wait and worker_waits.preserved_tx(db, wait))
+        if continuing and (wait['status'] != 'ready' or not worker_waits.valid(db, wait)):
+            raise StoreError('worker_wait_not_ready')
         failure=db.execute("SELECT payload_json FROM task_events WHERE task_id=? AND assignment_ref=? AND event_type='assignment_failed' AND superseded=0 ORDER BY id DESC LIMIT 1",(task_id,assignment)).fetchone()
         payload=json.loads(failure[0]) if failure else {}
         reason=payload.get('error','')
@@ -174,11 +179,14 @@ def retry_lost(runtime,task_id,node):
             # about the work.
             failure_class=WORKER_LOST_FAILURE_CLASS
         infrastructure=unavailable is None and failure_class in _INFRASTRUCTURE_RETRY_CLASSES
-        count=sum(not p.get('route_failure') and not p.get('failed_at') and not p.get('auth_retry') for p in retried)
+        count=sum(not p.get('route_failure') and not p.get('failed_at') and not p.get('auth_retry')
+                  and not p.get('owner_wait_continuation') for p in retried)
         backoff=None
         if unavailable is not None:
             if sum(bool(p.get('route_failure')) for p in retried)>=MAX_ROUTE_RETRIES:
                 raise StoreError('worker_retry_limit'+(':'+reason if reason else ''))
+        elif continuing:
+            pass  # Explicit owner Resume is not an engine failure/retry budget.
         elif infrastructure:
             from ..engine import retry_policy
             failed_at=time.time()
@@ -202,14 +210,26 @@ def retry_lost(runtime,task_id,node):
                 raise StoreError('lost_worker_action_outcome_unknown')
             db.execute('UPDATE trusted_channels SET revoked_at=? WHERE task_id=? AND attempt_id=? AND revoked_at IS NULL',
                         (now(),task_id,provision['attempt_id']))
-        from .worker_waits import cancel_tx
-        cancel_tx(db, task_id, 'recovered_replacement', assignment_ref=assignment, status='orphaned')
+        if continuing:
+            from ..recovery.worker_reconciliation import _mark_graph_attempt_failed_tx
+            from ..delegation.events import append_event_tx
+            _mark_graph_attempt_failed_tx(db, task_id, assignment, 'owner_wait_continued')
+            append_event_tx(db, task_id, 'assignment_cancelled', 'owner-wait-continued:' + wait['wait_id'],
+                            dict(reason='owner_wait_continued', wait_id=wait['wait_id']),
+                            origin='runtime', assignment_ref=assignment)
+            worker_waits._change(db, wait, 'continued')
+            event(db, task_id, 'WORKER_WAIT_CONTINUATION_SCHEDULED', dict(
+                wait=wait, node_id=node['node_id'], revision=node['revision']))
+        else:
+            worker_waits.cancel_tx(db, task_id, 'recovered_replacement', assignment_ref=assignment, status='orphaned')
         changed=db.execute("UPDATE runtime_nodes SET status='pending',assignment_ref=NULL WHERE task_id=? AND assignment_ref=? AND result_json IS NULL",
                            (task_id,assignment)).rowcount
         if changed!=1:
             raise StoreError('lost_worker_result_changed')
         retry=dict(node=node['node_id'],revision=node['revision'],retry=len(retried)+1,
                    previous_assignment=assignment,observed_session='absent' if provision else 'not_provisioned')
+        if continuing:
+            retry['owner_wait_continuation'] = True
         if backoff:
             # The scheduler holds the node until retry_not_before
             # (TaskMachine._ready_nodes) and the chat shows the wait.

@@ -70,7 +70,7 @@ import uuid
 from dataclasses import dataclass
 
 MAX_READ_BYTES = 8 * 1024 * 1024
-TECHNICAL_STORAGE_NAMES = {".git", ".cortex"}
+TECHNICAL_STORAGE_NAMES = {".git", ".cortex", ".cortex-dev", ".cortex-dev-owner.json", ".cortex-workspace-dev.json"}
 _TEMP_NAME_ATTEMPTS = 8
 
 

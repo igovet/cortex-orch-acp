@@ -359,6 +359,10 @@ class Server:
             if name == 'read_report':
                 from .tool_read_api import record_report_delivery
                 record_report_delivery(self.store, channel, data, request_id)
+            from .orchestration.worker_messages import deliver
+            guidance = deliver(self.store, channel)
+            if guidance:
+                data = dict(data, owner_guidance=guidance)
             observe(name,'success',data.get('replayed',False),None,params.get('arguments'),data)
             return dict(content=[dict(type='text',text=json.dumps(data,ensure_ascii=False))], structuredContent=data, isError=False)
         except (StoreError, PortableError) as exc:

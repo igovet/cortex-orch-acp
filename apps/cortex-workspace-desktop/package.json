@@ -1,0 +1,27 @@
+{
+  "name": "@cortex/workspace-desktop",
+  "version": "1.0.6",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run && node scripts/rust-test.mjs",
+    "build": "vite build",
+    "build:native": "tauri build --no-bundle -- --locked",
+    "tauri": "tauri"
+  },
+  "dependencies": {
+    "@fontsource-variable/roboto": "5.3.0",
+    "@fontsource/cousine": "5.3.0",
+    "@tauri-apps/api": "2.10.1",
+    "solid-js": "1.9.18"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "2.10.1",
+    "@types/node": "24.19.2",
+    "typescript": "6.0.3",
+    "vite": "8.3.5",
+    "vite-plugin-solid": "2.11.15",
+    "vitest": "5.1.0"
+  }
+}

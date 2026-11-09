@@ -483,9 +483,10 @@ def test_unlinked_inode_never_bypasses_other_safety_checks(tmp_path, monkeypatch
     original_fstat = os.fstat
     def unsafe_fstat(fd):
         info = original_fstat(fd)
-        return SimpleNamespace(st_nlink=0,
-                               st_mode=info.st_mode | (0o044 if unsafe == "mode" else 0),
-                               st_uid=info.st_uid + (1 if unsafe == "owner" else 0))
+        values = {name: getattr(info, name) for name in dir(info) if name.startswith("st_")}
+        values.update(st_nlink=0, st_mode=info.st_mode | (0o044 if unsafe == "mode" else 0),
+                      st_uid=info.st_uid + (1 if unsafe == "owner" else 0))
+        return SimpleNamespace(**values)
     monkeypatch.setattr(registry.os, "fstat", unsafe_fstat)
     with pytest.raises(PortableError, match="unsafe_storage"):
         registry.read_owner_file(path)
@@ -518,6 +519,40 @@ def test_reopened_replacement_is_validated_not_trusted(tmp_path, monkeypatch, un
     monkeypatch.setattr(registry.os, "open", replacing_open)
     with pytest.raises(PortableError, match="unsafe_storage"):
         registry.read_owner_file(path)
+
+
+def test_bundled_discovery_uses_private_node_without_path_node(tmp_path, monkeypatch):
+    from cortex_runtime.connections import discovery, engine_update
+    from cortex_runtime.engine import install_resolution
+    tree = tmp_path / "bundle"
+    node = tree / "node/bin/node"
+    package = tree / "node_modules/@agentclientprotocol/claude-agent-acp"
+    node.parent.mkdir(parents=True)
+    node.write_text("fixture")
+    node.chmod(0o755)
+    package.mkdir(parents=True)
+    (package / "entry.js").write_text("fixture")
+    (package / "package.json").write_text(json.dumps(dict(version="0.97.0", bin="entry.js")))
+    monkeypatch.setattr(discovery, "bundled_root", lambda: tree)
+    verified = []
+    monkeypatch.setattr(install_resolution, "resolve_verified_install", lambda record, env: verified.append(record))
+    env = {"HOME": str(tmp_path), "PATH": "/no-node"}
+    found = discovery.discover_engine("claude-agent-acp", environ=env)
+    assert found.launch_command == (str(node), str(package / "entry.js"))
+    assert found.native_credential_dir == str(tmp_path / ".claude")
+    assert verified
+    monkeypatch.setattr(engine_update, "_npm", lambda _: pytest.fail("bundled first run must not use npm"))
+    assert engine_update.update_engine("claude-agent-acp", environ=env) is None
+    node.unlink()
+    assert discovery.discover_engine("claude-agent-acp", environ=env) is None
+
+
+def test_optional_update_without_npm_is_idle(tmp_path, monkeypatch):
+    from cortex_runtime.connections import discovery, engine_update
+    monkeypatch.setattr(discovery, "bundled_root", lambda: None)
+    env = {"HOME": str(tmp_path), "PATH": "/no-npm"}
+    assert engine_update.update_engine("codex-acp", environ=env) is None
+    assert not discovery.owned_root(env).exists()
 
 
 def test_changed_transaction_commits_but_exception_never_commits(tmp_path, monkeypatch):

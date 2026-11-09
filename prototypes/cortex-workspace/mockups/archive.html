@@ -1,0 +1,283 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<title>Archive - Cortex Workspace mockup</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script>(function(){var r=document.documentElement,t=new URLSearchParams(location.search).get('theme');try{t=t||localStorage.getItem('cw-theme')}catch(e){}t=t||'system';r.dataset.themeChoice=t;r.dataset.theme=t==='system'?(matchMedia('(prefers-color-scheme: light)').matches?'light':'dark'):t})()</script>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body data-sel="none">
+<input class="pt" type="checkbox" id="pt-sidebar" aria-label="Toggle sidebar">
+<input class="pt" type="checkbox" id="pt-inspector" aria-label="Toggle inspector">
+
+<header class="titlebar">
+  <label class="ib tb-toggle" for="pt-sidebar" title="Sidebar (Ctrl+B)"><i class="i i-panel-left"></i></label>
+  <div class="tb-side">
+    <button class="machine" popovertarget="m-machine" title="Switch machine">
+      <i class="i i-laptop"></i><span class="trunc">This machine</span>
+      <span class="st st-ok" style="margin-left:auto">Connected</span><i class="i s12 i-chevrons-v faint"></i>
+    </button>
+  </div>
+  <div class="tb-main">
+    <a class="ib" href="home.html" title="Back (Alt+Left)"><i class="i i-arrow-left"></i></a>
+    <button class="ib" title="Forward (Alt+Right)" aria-disabled="true"><i class="i i-arrow-right"></i></button>
+    <div class="crumbs"><span class="cur">Archive</span></div>
+    <div class="row sec muted" style="gap:14px;margin-left:10px"><span class="trunc">18 tasks</span><span class="trunc st-warn">3 soon</span><span class="trunc">1 waits for you</span></div>
+    <span class="grow"></span>
+    <div class="tb-actions"><button class="btn btn-line" data-dialog="dlg-delete">Delete archive&hellip;</button></div>
+    <div class="tb-fixed">
+      <a class="mock-chip" href="index.html" title="Static mockup. Back to the screen list">Mock</a>
+      
+      <button class="ib" aria-disabled="true" title="Terminal (Ctrl+J). Open a project or task to use a terminal"><i class="i i-panel-bottom"></i></button>
+      <button class="ib" aria-disabled="true" title="This screen has no inspector"><i class="i i-panel-right"></i></button>
+    </div>
+    <div class="win" aria-hidden="true">
+      <button tabindex="-1"><i class="i s14 i-minus"></i></button>
+      <button tabindex="-1"><i class="i s12 i-square"></i></button>
+      <button tabindex="-1"><i class="i s14 i-x"></i></button>
+    </div>
+  </div>
+</header>
+
+<div class="workspace">
+  <nav class="sidebar" aria-label="Workspace">
+    <div class="sb-top">
+      <a class="nav" href="new-task.html"><i class="i i-plus"></i>New task<span class="kbd">Ctrl+N</span></a>
+      <a class="nav" href="#"><i class="i i-inbox"></i>Inbox<span class="count">4</span></a>
+      <a class="nav" href="#"><i class="i i-search"></i>Search<span class="kbd">Ctrl+K</span></a>
+      <a class="nav" href="home.html"><i class="i i-home"></i>Home</a>
+      <a class="nav" href="archive.html" aria-current="page"><i class="i i-archive"></i>Archive<span class="count">18</span></a>
+    </div>
+    <div class="sb-scroll">
+      <div class="sb-h"><span>Pinned</span></div>
+      <a class="task-row" style="padding-left:8px" href="task.html"><i class="i s14 i-pin faint"></i><span class="trunc">Fix token refresh race</span></a>
+      <div class="sb-h"><span>Projects</span><button class="ib" style="width:22px;height:22px" title="Sort projects"><i class="i s14 i-chevrons-v"></i></button></div>
+      <a class="proj" href="board.html"><span class="mono-tile t1">A</span><span class="trunc">atlas-api</span><span class="sig st-bad">Conflict</span></a>
+      <div class="tasks">
+        <a class="task-row" href="task.html"><i class="i s14 i-question st-warn"></i><span class="trunc">Fix token refresh race</span><span class="sig">Question</span></a>
+        <a class="task-row" href="board.html?scope=sprint"><i class="i s14 i-layers faint"></i><span class="trunc">Sprint: Usage billing</span><span class="sig tnum">2/5</span></a>
+        <a class="task-row" href="board.html"><i class="i s14 i-loader st-run"></i><span class="trunc">Meter API calls per workspace</span><span class="sig">Working</span></a>
+        <a class="task-row" href="result.html"><i class="i s14 i-eye faint"></i><span class="trunc">Rate-limit the export endpoint</span><span class="sig">Review</span></a>
+        
+        <a class="task-row all" href="board.html">All 15</a>
+      </div>
+      <a class="proj" href="#"><span class="mono-tile t2">B</span><span class="trunc">billing-service</span><span class="sig st-warn">Needs you 1</span></a>
+      <a class="proj" href="#"><span class="mono-tile t3">N</span><span class="trunc">northwind-web</span><span class="sig st-warn">Needs you 1</span></a>
+      <a class="proj" href="#"><span class="mono-tile t4">M</span><span class="trunc">mobile-app</span><span class="sig muted">In review 1</span></a>
+      <a class="proj" href="#"><span class="mono-tile t5">I</span><span class="trunc">infra-terraform</span></a>
+      <a class="proj" href="#"><span class="mono-tile t6">D</span><span class="trunc">docs-site</span></a>
+    </div>
+    <button class="sb-usage" popovertarget="m-usage" title="Engine limits used this week. Snapshot 13:41" aria-label="Engine limits: Claude 62%, Codex 18% used this week">
+      <span class="um"><span>Claude</span><span class="bar"><i style="width:62%"></i></span><span class="tnum">62%</span></span>
+      <span class="um"><span>Codex</span><span class="bar"><i style="width:18%"></i></span><span class="tnum">18%</span></span>
+    </button>
+    <div class="sb-foot">
+      <button class="btn btn-sm" title="Add project"><i class="i s14 i-folder-plus"></i>Add project</button>
+      <span class="grow"></span>
+      <a class="ib" href="settings.html" title="Settings (Ctrl+,)"><i class="i i-settings"></i></a>
+      <button class="ib" title="Help and shortcuts (?)"><i class="i i-help"></i></button>
+    </div>
+  </nav>
+
+  <main class="main">
+    <div class="page"><div class="page-in">
+      <div class="page-h"><div><p>Kept for 30 days after archiving by default. <a class="lnk" href="settings.html?section=storage">Change it for each machine.</a> Merged commits stay in Git.</p></div></div>
+      <div class="tbar">
+        <input class="inp" style="width:240px;height:28px" placeholder="Filter archived tasks" aria-label="Filter archived tasks">
+        <button class="pick" style="height:28px"><span class="faint">Machine</span>All<i class="i s12 i-chevron-down"></i></button>
+        <button class="pick" style="height:28px"><span class="faint">Project</span>All<i class="i s12 i-chevron-down"></i></button>
+        <button class="pick" style="height:28px"><span class="faint">Outcome</span>All<i class="i s12 i-chevron-down"></i></button>
+        <span class="grow"></span>
+        <span class="cap faint">Next cleanup tonight at 03:00 on This machine</span>
+      </div>
+
+      <div class="sel-bar" data-panel="some" data-group="sel" hidden><span class="w500">2 selected</span><span class="grow"></span><button class="btn btn-sm">Clear</button><button class="btn btn-line btn-sm"><i class="i s12 i-undo"></i>Restore 2</button><button class="btn btn-line btn-sm" data-dialog="dlg-delete">Delete now&hellip;</button></div>
+
+      <section aria-labelledby="ar-wait">
+        <h2 class="sec-h" id="ar-wait"><i class="i s14 i-question st-warn"></i>Waiting for your decision <span class="n">1</span></h2>
+        <div class="surface" style="background:var(--warn-tint);border-color:var(--warn-line)">
+          <div class="srow"><span><span class="t">Spike: async webhook client</span><span class="d">atlas-api, 7 days in Done with unmerged work: 5 commits and 2 uncommitted files on <span class="mono">cw/async-webhooks</span>. It stays out of the Archive until you decide.</span></span><span class="ctl"><button class="btn btn-primary btn-sm" data-dialog="dlg-unmerged">Decide&hellip;</button></span></div>
+        </div>
+      </section>
+
+      <section aria-labelledby="ar-soon">
+        <h2 class="sec-h" id="ar-soon">Cleanup within 3 days <span class="n">3</span></h2>
+        <div class="surface"><div class="gt">
+          <div class="gr th ar-cols"><span></span><span>Task</span><span>Project</span><span class="ar-opt">Machine</span><span>Outcome</span><span>Cleanup in</span><span>Size</span><span></span><span></span></div>
+          <div class="gr ar-cols">
+            <input type="checkbox" class="row-ck" aria-label="Select Migrate the cache layer"  style="accent-color:var(--fg);margin:0">
+            <span class="trunc"><span class="w500">Migrate the cache layer</span><span class="sub trunc">Merged 29 Sep</span></span>
+            <span class="cap muted trunc">atlas-api</span>
+            <span class="cap muted trunc ar-opt">This machine</span>
+            <span class="st st-merge">Merged</span>
+            <span class="cd"><span class="cap st-warn w500 tnum">1 day left</span><span class="bar"><i class="soon" style="width:4%"></i></span></span>
+            <span class="cap muted tnum">48 MB</span>
+            <span class="row" style="gap:2px"><button class="btn btn-line btn-sm" title="Back to Done"><i class="i s12 i-undo"></i>Restore</button></span>
+            <button class="ib" style="width:24px;height:24px" popovertarget="m-arrow" title="More"><i class="i s14 i-more"></i></button>
+          </div>
+          <div class="gr ar-cols">
+            <input type="checkbox" class="row-ck" aria-label="Select Drop the old invoice view"  style="accent-color:var(--fg);margin:0">
+            <span class="trunc"><span class="w500">Drop the old invoice view</span><span class="sub trunc">Merged 30 Sep</span></span>
+            <span class="cap muted trunc">billing-service</span>
+            <span class="cap muted trunc ar-opt">This machine</span>
+            <span class="st st-merge">Merged</span>
+            <span class="cd"><span class="cap st-warn w500 tnum">2 days left</span><span class="bar"><i class="soon" style="width:7%"></i></span></span>
+            <span class="cap muted tnum">12 MB</span>
+            <span class="row" style="gap:2px"><button class="btn btn-line btn-sm" title="Back to Done"><i class="i s12 i-undo"></i>Restore</button></span>
+            <button class="ib" style="width:24px;height:24px" popovertarget="m-arrow" title="More"><i class="i s14 i-more"></i></button>
+          </div>
+          <div class="gr ar-cols">
+            <input type="checkbox" class="row-ck" aria-label="Select Try a smaller PDF renderer"  style="accent-color:var(--fg);margin:0">
+            <span class="trunc"><span class="w500">Try a smaller PDF renderer</span><span class="sub trunc">Cancelled 1 Oct, work deleted with your approval</span></span>
+            <span class="cap muted trunc">billing-service</span>
+            <span class="cap muted trunc ar-opt">GPU box</span>
+            <span class="st st-idle">Cancelled</span>
+            <span class="cd"><span class="cap st-warn w500 tnum">3 days left</span><span class="bar"><i class="soon" style="width:10%"></i></span></span>
+            <span class="cap muted tnum">3 MB</span>
+            <span class="row" style="gap:2px"><button class="btn btn-line btn-sm" title="Back to Done"><i class="i s12 i-undo"></i>Restore</button></span>
+            <button class="ib" style="width:24px;height:24px" popovertarget="m-arrow" title="More"><i class="i s14 i-more"></i></button>
+          </div>
+        </div></div>
+      </section>
+
+      <section aria-labelledby="ar-later">
+        <h2 class="sec-h" id="ar-later">Later <span class="n">13</span></h2>
+        <div class="surface"><div class="gt">
+          <div class="gr th ar-cols"><span></span><span>Task</span><span>Project</span><span class="ar-opt">Machine</span><span>Outcome</span><span>Cleanup in</span><span>Size</span><span></span><span></span></div>
+          <div class="gr ar-cols">
+            <input type="checkbox" class="row-ck" aria-label="Select Sign webhook payloads"  style="accent-color:var(--fg);margin:0">
+            <span class="trunc"><span class="w500">Sign webhook payloads</span><span class="sub trunc">Merged 27 Oct, PR #409</span></span>
+            <span class="cap muted trunc">atlas-api</span>
+            <span class="cap muted trunc ar-opt">This machine</span>
+            <span class="st st-merge">Merged</span>
+            <span class="cd"><span class="cap tnum">29 days left</span><span class="bar"><i class="" style="width:97%"></i></span></span>
+            <span class="cap muted tnum">21 MB</span>
+            <span class="row" style="gap:2px"><button class="btn btn-line btn-sm" title="Back to Done"><i class="i s12 i-undo"></i>Restore</button></span>
+            <button class="ib" style="width:24px;height:24px" popovertarget="m-arrow" title="More"><i class="i s14 i-more"></i></button>
+          </div>
+          <div class="gr ar-cols">
+            <input type="checkbox" class="row-ck" aria-label="Select Checkout flow copy pass"  style="accent-color:var(--fg);margin:0">
+            <span class="trunc"><span class="w500">Checkout flow copy pass</span><span class="sub trunc">Closed as is, not verified</span></span>
+            <span class="cap muted trunc">northwind-web</span>
+            <span class="cap muted trunc ar-opt">This machine</span>
+            <span class="st st-idle">Closed as is</span>
+            <span class="cd"><span class="cap tnum">22 days left</span><span class="bar"><i class="" style="width:73%"></i></span></span>
+            <span class="cap muted tnum">9 MB</span>
+            <span class="row" style="gap:2px"><button class="btn btn-line btn-sm" title="Back to Done"><i class="i s12 i-undo"></i>Restore</button></span>
+            <button class="ib" style="width:24px;height:24px" popovertarget="m-arrow" title="More"><i class="i s14 i-more"></i></button>
+          </div>
+          <div class="gr ar-cols">
+            <input type="checkbox" class="row-ck" aria-label="Select Terraform state split"  style="accent-color:var(--fg);margin:0">
+            <span class="trunc"><span class="w500">Terraform state split</span><span class="sub trunc">Failed: answer not certified</span></span>
+            <span class="cap muted trunc">infra-terraform</span>
+            <span class="cap muted trunc ar-opt">Build server</span>
+            <span class="st st-bad">Failed</span>
+            <span class="cd"><span class="cap tnum">16 days left</span><span class="bar"><i class="" style="width:53%"></i></span></span>
+            <span class="cap muted tnum">6 MB</span>
+            <span class="row" style="gap:2px"><button class="btn btn-line btn-sm" title="Back to Done"><i class="i s12 i-undo"></i>Restore</button></span>
+            <button class="ib" style="width:24px;height:24px" popovertarget="m-arrow" title="More"><i class="i s14 i-more"></i></button>
+          </div>
+          <a class="gr" href="#" style="min-height:34px;--cols:minmax(0,1fr)"><span class="cap muted">Show 10 more</span></a>
+        </div></div>
+      </section>
+
+      <section aria-labelledby="ar-block">
+        <h2 class="sec-h" id="ar-block">Cleanup blocked <span class="n">2</span></h2>
+        <div class="surface"><div class="gt">
+          <div class="gr th ar-cols"><span></span><span>Task</span><span>Project</span><span class="ar-opt">Machine</span><span>Outcome</span><span>Cleanup in</span><span>Size</span><span></span><span></span></div>
+          <div class="gr ar-cols">
+            <input type="checkbox" class="row-ck" aria-label="Select Add invoice numbering spike"  style="accent-color:var(--fg);margin:0">
+            <span class="trunc"><span class="w500">Add invoice numbering spike</span><span class="sub trunc">New uncommitted files appeared after archiving</span></span>
+            <span class="cap muted trunc">billing-service</span>
+            <span class="cap muted trunc ar-opt">This machine</span>
+            <span class="st st-idle">Closed as is</span>
+            <span class="cd"><span class="st st-warn"><i class="i s12 i-alert"></i>Needs you</span></span>
+            <span class="cap muted tnum">30 MB</span>
+            <span class="row" style="gap:2px"><button class="btn btn-line btn-sm" title="Back to Done"><i class="i s12 i-undo"></i>Restore</button></span>
+            <button class="ib" style="width:24px;height:24px" popovertarget="m-arrow" title="More"><i class="i s14 i-more"></i></button>
+          </div>
+          <div class="gr ar-cols">
+            <input type="checkbox" class="row-ck" aria-label="Select Nightly index rebuild"  style="accent-color:var(--fg);margin:0">
+            <span class="trunc"><span class="w500">Nightly index rebuild</span><span class="sub trunc">Machine offline since 13:47, cleans up at its next run</span></span>
+            <span class="cap muted trunc">docs-site</span>
+            <span class="cap muted trunc ar-opt">Build server</span>
+            <span class="st st-merge">Merged</span>
+            <span class="cd"><span class="st st-warn"><i class="i s12 i-alert"></i>Overdue</span></span>
+            <span class="cap muted tnum">Unavailable</span>
+            <span class="row" style="gap:2px"><button class="btn btn-line btn-sm" title="Back to Done"><i class="i s12 i-undo"></i>Restore</button></span>
+            <button class="ib" style="width:24px;height:24px" popovertarget="m-arrow" title="More"><i class="i s14 i-more"></i></button>
+          </div>
+        </div></div>
+      </section>
+    </div></div>
+  </main>
+
+</div>
+
+<div popover id="m-usage" class="pop-usage">
+  <div class="mi-h">Engine limits on This machine</div>
+  <div class="u-eng">
+    <div class="u-h"><span class="w500">Claude</span><span class="st st-ok"><i class="i s12 i-check-circle"></i>Connected</span></div>
+    <div class="u-win"><span>This week</span><span class="bar"><i style="width:62%"></i></span><span class="v">62% used</span><span class="rs">Resets Mon 09:00</span></div>
+    <div class="u-src">Observed 13:41, reported by the provider</div>
+  </div>
+  <div class="mi-sep"></div>
+  <div class="u-eng">
+    <div class="u-h"><span class="w500">Codex</span><span class="st st-ok"><i class="i s12 i-check-circle"></i>Connected</span></div>
+    <div class="u-win"><span>This week</span><span class="bar"><i style="width:18%"></i></span><span class="v">18% used</span><span class="rs">Resets Thu 02:00</span></div>
+    <div class="u-src">Observed 13:41, reported by the provider</div>
+  </div>
+  <div class="mi-sep"></div>
+  <a class="mi" href="settings.html?section=connections"><i class="i i-gauge"></i><span class="grow">All limits and windows</span></a>
+</div>
+<div popover id="m-machine" class="pop-tl">
+  <div class="mi-h">Machines</div>
+  <a class="mi" href="home.html"><i class="i i-laptop"></i><span class="grow">This machine<span class="sub">Local, connected</span></span><i class="i s14 i-check"></i></a>
+  <a class="mi" href="settings.html?section=machines"><i class="i i-server"></i><span class="grow">GPU box<span class="sub">Remote, connected through the server connector</span></span></a>
+  <a class="mi" href="settings.html?section=machines"><i class="i i-server"></i><span class="grow">Build server<span class="sub">Remote, offline, last seen 13:47</span></span></a>
+  <div class="mi-sep"></div>
+  <a class="mi" href="settings.html?section=machines&amp;dialog=add-machine"><i class="i i-plus"></i>Add remote machine&hellip;</a>
+  <a class="mi" href="settings.html?section=overview"><i class="i i-settings"></i>Machine settings</a>
+</div>
+<div popover id="m-new" class="pop-right">
+  <a class="mi" href="new-task.html"><i class="i i-plus"></i><span class="grow">New task</span><span class="kbd">Ctrl+N</span></a>
+  <a class="mi" href="new-task.html?kind=sprint"><i class="i i-layers"></i><span class="grow">New sprint</span><span class="kbd">Ctrl+Shift+N</span></a>
+</div>
+<div popover id="m-arrow" class="pop-right">
+  <button class="mi"><i class="i i-undo"></i>Restore</button>
+  <button class="mi"><i class="i i-eye"></i>Open read-only</button>
+  <div class="mi-sep"></div>
+  <button class="mi mi-danger" data-dialog="dlg-delete"><i class="i i-trash"></i>Delete now&hellip;</button>
+</div>
+<dialog class="dlg" id="dlg-unmerged" aria-labelledby="dlg-um-h">
+  <div class="dlg-h"><h2 id="dlg-um-h">Spike: async webhook client has unmerged work</h2><button class="ib" data-close title="Keep it"><i class="i i-x"></i></button></div>
+  <div class="dlg-b">
+    <div>This task has been in Done for 7 days, so it is due for the Archive. Its work is not merged, and archiving would delete that work when it is cleaned up. What should happen?</div>
+    <div class="pre">
+      <div class="chk"><i class="i s14 i-commit faint"></i><span>5 commits on <span class="mono">cw/async-webhooks</span></span><span class="src">Not in any other branch</span></div>
+      <div class="chk"><i class="i s14 i-file faint"></i><span>2 uncommitted files in the worktree</span><span class="src"><a class="lnk" href="#">Show diff</a></span></div>
+      <div class="chk"><i class="i s14 i-drive faint"></i><span>Worktree size</span><span class="src">84 MB</span></div>
+    </div>
+    <div style="display:grid;gap:6px">
+      <label class="rc"><input type="radio" name="unmerged" data-show="keep" data-group="um" checked><span><span class="t">Keep the work, do not archive</span><span class="d">The task stays in Done with its worktree. Ask again in 7 days.</span></span></label>
+      <label class="rc danger"><input type="radio" name="unmerged" data-show="drop" data-group="um"><span><span class="t">Delete the work and archive</span><span class="d">Discards 5 commits and 2 files at cleanup. This cannot be undone after that.</span></span></label>
+    </div>
+  </div>
+  <div class="dlg-f">
+    <a class="btn btn-sm" href="merge.html" style="margin-right:auto">Open Ready to merge</a>
+    <button class="btn btn-primary btn-lg" data-panel="keep" data-group="um" data-close autofocus>Keep the work</button>
+    <button class="btn btn-danger btn-lg" data-panel="drop" data-group="um" data-close hidden>Delete 5 commits and 2 files</button>
+  </div>
+</dialog>
+<dialog class="dlg" id="dlg-delete" aria-labelledby="dlg-del-h">
+  <div class="dlg-h"><h2 id="dlg-del-h">Delete from the Archive now?</h2><button class="ib" data-close title="Cancel"><i class="i i-x"></i></button></div>
+  <div class="dlg-b">
+    <ul class="conseq"><li><i class="i s14 i-trash"></i><span>16 tasks and their saved history, 212 MB freed</span></li><li><i class="i s14 i-alert"></i><span>2 tasks skipped: cleanup is blocked until you answer</span></li><li><i class="i s14 i-branch"></i><span>Merged commits, remote branches and pull requests stay in Git</span></li></ul>
+  </div>
+  <div class="dlg-f"><button class="btn btn-line btn-lg" data-close autofocus>Keep them</button><button class="btn btn-danger btn-lg" data-close>Delete 16 tasks permanently</button></div>
+</dialog>
+
+<script>(function(){var r=document.documentElement,q=new URLSearchParams(location.search);function m(){document.querySelectorAll('[data-set-theme]').forEach(function(b){var on=b.dataset.setTheme===r.dataset.themeChoice;b.setAttribute('aria-pressed',on);b.setAttribute('aria-current',on)})}function show(g,v){document.querySelectorAll('[data-show][data-group="'+g+'"]').forEach(function(x){if(x.hasAttribute('aria-selected'))x.setAttribute('aria-selected',x.dataset.show===v);if(x.hasAttribute('aria-current'))x.setAttribute('aria-current',x.dataset.show===v);if(x.type==='radio')x.checked=x.dataset.show===v});document.querySelectorAll('[data-panel][data-group="'+g+'"]').forEach(function(p){p.hidden=p.dataset.panel.split(' ').indexOf(v)<0});document.body.dataset[g]=v}function openD(id){var d=document.getElementById(id);if(d&&!d.open)d.showModal()}document.addEventListener('click',function(e){var b=e.target.closest('[data-set-theme]');if(b){var t=b.dataset.setTheme;r.dataset.themeChoice=t;r.dataset.theme=t==='system'?(matchMedia('(prefers-color-scheme: light)').matches?'light':'dark'):t;try{localStorage.setItem('cw-theme',t)}catch(x){}m();return}var o=e.target.closest('[data-dialog]');if(o){e.preventDefault();openD(o.dataset.dialog);if(o.dataset.show)show(o.dataset.group,o.dataset.show);return}var c=e.target.closest('[data-close]');if(c){c.closest('dialog').close();return}var s=e.target.closest('[data-show]');if(s){show(s.dataset.group,s.dataset.show);return}var a=e.target.closest('a[href$=".html"],a[href*=".html?"]');if(a){e.preventDefault();var u=new URL(a.href);u.searchParams.set('theme',r.dataset.themeChoice);location.href=u.href}});document.addEventListener('change',function(e){var f=e.target.closest('[data-follow-toggle]');if(f)document.body.dataset.follow=f.checked?'on':'off'});var gs={};document.querySelectorAll('[data-group]').forEach(function(x){gs[x.dataset.group]=1});Object.keys(gs).forEach(function(g){if(q.get(g))show(g,q.get(g))});if(q.get('follow')==='off'){document.body.dataset.follow='off';var f=document.querySelector('[data-follow-toggle]');if(f)f.checked=false}if(q.get('dialog')){openD('dlg-'+q.get('dialog'));if(document.activeElement)document.activeElement.blur()}m()})()</script>
+</body>
+</html>

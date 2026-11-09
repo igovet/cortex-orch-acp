@@ -96,7 +96,7 @@ _PACKED_REFS_CAP = 8 * 1024 * 1024
 _SHA_RE = re.compile(r"^[0-9a-f]{40}([0-9a-f]{24})?$")  # sha-1 (40) or sha-256 (64)
 _REF_NAME_RE = re.compile(r"^[A-Za-z0-9._/-]+$")
 
-_EXCLUDED_TOP_LEVEL = {".git", ".cortex"}
+_EXCLUDED_TOP_LEVEL = {".git", ".cortex", ".cortex-dev", ".cortex-dev-owner.json", ".cortex-workspace-dev.json"}
 # Installed dependencies and tool caches, at any depth: not source, never
 # reviewed, and a real JS/mobile project's node_modules alone exceeded
 # _MAX_FILES, so no revision could be captured and review never started.

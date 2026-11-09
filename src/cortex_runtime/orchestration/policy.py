@@ -144,7 +144,7 @@ def interrupt(store, task_id):
     with store.connection() as db:
         db.execute('BEGIN IMMEDIATE')
         task = db.execute('SELECT state FROM runtime_tasks WHERE task_id=?', (task_id,)).fetchone()
-        if task and task['state'] not in {'COMPLETED', 'FAILED', 'CANCELLED'}:
+        if task and task['state'] not in {'COMPLETED', 'FAILED', 'CANCELLED', 'PAUSED'}:
             if task['state'] != 'RECOVERING':
                 transition(db, task_id, 'RECOVERING')
             # The cancelled workers' open questions end with them; otherwise

@@ -1,6 +1,9 @@
 # Local Codex configuration and runtime state must never be released.
 .codex/
 .cortex/
+.cortex-dev/
+.cortex-dev-owner.json
+.cortex-workspace-dev.json
 .claude/
 
 # Local Python bytecode from the bundled plugin.
@@ -24,10 +27,26 @@ docs/implementation
 # runtime module itself). Reproduce with `npm ci` from package-lock.json.
 integrations/paseo/node_modules/
 
+# Cargo workspace build output (including future nested crates).
+target/
+
 # Checkout-local Python test environment (pytest); never a payload input.
 /.venv/
 /.verification-venv/
 /.cortex/
+
+# Vitest cache written at the repository root when the prototype tests run from here.
+/node_modules/.vite/
+/node_modules/.vitest-cache/
+
+# Standalone mock prototype build and local render evidence.
+prototypes/cortex-workspace/desktop/node_modules/
+prototypes/cortex-workspace/desktop/dist/
+prototypes/cortex-workspace/desktop/src-tauri/target/
+prototypes/cortex-workspace/desktop/.design-evidence/
+
+# Credential-free native container build inputs, caches and artifacts.
+/.workspace-build/
 
 # Local qualification scratch helpers and evidence.
 /tmp/

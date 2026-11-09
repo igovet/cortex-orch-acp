@@ -73,17 +73,17 @@ WORK_AREA = ("A writing worker may change any project path except private storag
 
 SCHEMAS = {
     'project_git': obj(dict(kind=dict(type='string',enum=['status','diff'],description='Read-only project status or complete working-tree diff against HEAD, including pre-existing edits. Inlines output up to 64 KiB (same bound as command_run), with output_truncated marking the rest; large_output_id always pages the complete retained bytes with read_large_output. Untracked file content is read through project_read.'),request_key=text('Unique observation identity; retries return the same retained snapshot.',128))),
-    'project_delete': obj(dict(path=text('Existing project-relative regular file. '+WORK_AREA+' Binary files are supported; no directory recursion. Root .gitignore deletion retains only the required /.cortex/ rule and returns deleted: false.',512),
+    'project_delete': obj(dict(path=text('Existing project-relative regular file. '+WORK_AREA+' Binary files are supported; no directory recursion. Root .gitignore deletion retains only the required channel-store ignore rule and returns deleted: false.',512),
                                expected_sha256=text('Lowercase hex SHA-256 of the file raw bytes as they are now (project_read returns it as sha256). A mismatch refuses the deletion.',64),
                                request_key=text(AUTO_KEY,128)), required=['path','expected_sha256']),
     'project_mkdir': obj(dict(path=text('Project-relative directory; missing parent directories are created too, and an existing directory returns created: false. '+WORK_AREA,512),
                               request_key=text(AUTO_KEY,128)), required=['path']),
-    'project_read': obj(dict(path=text('Project-relative regular file or directory; \'.\' is the project root. Never absolute, never containing \'..\' or a backslash, and never inside .cortex or .git. Missing paths return exists: false, sha256: "absent" (pass directly to project_write.expected_sha256), and parent_exists (informational: project_write creates missing parent directories). UTF-8 files return text and SHA-256; a supported image (PNG, JPEG, GIF or WEBP, detected by content, not extension) returns an MCP image content block plus sha256/size_bytes/mime/path as text, up to a 10 MiB cap (gateway_image_too_large above it); any other non-UTF-8 file returns only SHA-256, byte size and binary: true.',512),
+    'project_read': obj(dict(path=text('Project-relative regular file or directory; \'.\' is the project root. Never absolute, never containing \'..\' or a backslash, and never inside .cortex, .cortex-dev or .git. Missing paths return exists: false, sha256: "absent" (pass directly to project_write.expected_sha256), and parent_exists (informational: project_write creates missing parent directories). UTF-8 files return text and SHA-256; a supported image (PNG, JPEG, GIF or WEBP, detected by content, not extension) returns an MCP image content block plus sha256/size_bytes/mime/path as text, up to a 10 MiB cap (gateway_image_too_large above it); any other non-UTF-8 file returns only SHA-256, byte size and binary: true.',512),
                              offset=dict(type='integer',minimum=1,maximum=1000000000,description='1-based line offset for text or 1-based entry offset for directories; default 1. Never a character offset.'),
                              limit=dict(type='integer',minimum=1,maximum=2000,description='Maximum lines or directory entries; default and maximum 2000. The inline byte budget may return fewer; follow next_offset. Lines longer than 2000 characters, or a single line exceeding the inline budget, are explicitly truncated and never count toward complete read coverage.'),
                              line_numbers=dict(type='boolean',description='Default true: prefix text lines with their 1-based number and a tab. Set false for exact raw text. Never include number prefixes in project_edit strings or project_write content.')), required=['path']),
     'project_write': obj(dict(path=text('Project-relative file; missing parent directories are created (never through a symlink or file); symlinks are rejected. '+WORK_AREA,512),
-                              content=text('Complete replacement UTF-8 content, never a page or append. Existing files require complete, non-truncated project_read coverage of the current bytes on this same channel. Use project_edit for partial changes or appending. Root .gitignore writes retain a final /.cortex/ rule; returned hash describes the protected bytes.',1000000),
+                              content=text('Complete replacement UTF-8 content, never a page or append. Existing files require complete, non-truncated project_read coverage of the current bytes on this same channel. Use project_edit for partial changes or appending. Root .gitignore writes retain a final channel-store ignore rule; returned hash describes the protected bytes.',1000000),
                               expected_sha256=text('Current SHA-256 from project_read.full_content_sha256 after complete read coverage on this channel, or "absent" returned by project_read for a missing path; pass that value directly for creation. A partial read sha256 is only identity and cannot authorize whole-file overwrite; neither a supplied hash nor a drastic shrink bypasses the complete-read guard. A mismatch changes nothing.',64),
                               request_key=text(AUTO_KEY,128)), required=['path','content','expected_sha256']),
     'project_edit': obj(dict(
@@ -184,6 +184,9 @@ def _parent(root, value, *, create_parents=None):
 
 def channel_authority(db, channel):
     """The channel itself is live: not revoked, not expired, current owner."""
+    task = db.execute('SELECT state FROM runtime_tasks WHERE task_id=?', (channel.task_id,)).fetchone()
+    if task and task['state'] == 'PAUSED':
+        raise StoreError('task_paused')
     token = db.execute('SELECT revoked_at,expires_at FROM trusted_channels WHERE channel_id=?', (channel.channel_id,)).fetchone()
     from .state import now
     if not token or token['revoked_at'] or (token['expires_at'] and token['expires_at'] <= now()):

@@ -1,0 +1,615 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<title>Fix token refresh race - Cortex Workspace mockup</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script>(function(){var r=document.documentElement,t=new URLSearchParams(location.search).get('theme');try{t=t||localStorage.getItem('cw-theme')}catch(e){}t=t||'system';r.dataset.themeChoice=t;r.dataset.theme=t==='system'?(matchMedia('(prefers-color-scheme: light)').matches?'light':'dark'):t})()</script>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body class="term-auto" data-tab="conversation">
+<input class="pt" type="checkbox" id="pt-sidebar" aria-label="Hide sidebar">
+<input class="pt" type="checkbox" id="pt-inspector" aria-label="Toggle inspector">
+<input class="pt" type="checkbox" id="pt-terminal" aria-label="Toggle terminal">
+<input class="pt" type="checkbox" id="pt-detail" aria-label="Toggle worker pane">
+
+<header class="titlebar">
+  <label class="ib tb-toggle" for="pt-sidebar" title="Sidebar (Ctrl+B)"><i class="i i-panel-left"></i></label>
+  <div class="tb-side">
+    <button class="machine" popovertarget="m-machine" title="Switch machine">
+      <i class="i i-laptop"></i><span class="trunc">This machine</span>
+      <span class="st st-ok" style="margin-left:auto">Connected</span><i class="i s12 i-chevrons-v faint"></i>
+    </button>
+  </div>
+  <div class="tb-main">
+    <a class="ib" href="board.html" title="Back (Alt+Left)"><i class="i i-arrow-left"></i></a>
+    <button class="ib" title="Forward (Alt+Right)" aria-disabled="true"><i class="i i-arrow-right"></i></button>
+    <div class="crumbs">
+      <a href="board.html">atlas-api</a><span class="sep">/</span>
+      <span class="cur trunc" title="Click to rename">Fix token refresh race</span>
+    </div>
+    <button class="chip branch-chip" popovertarget="m-wt" title="Worktree details"><i class="i s12 i-branch"></i><span class="w-wide">Worktree</span><span class="mono trunc" style="max-width:170px">cw/fix-token-refresh</span></button>
+    <span class="grow"></span>
+    <div class="tb-actions">
+      <span class="chip" title="Current state and the next step"><i class="i s12 i-loader spin st-run"></i><span style="color:var(--fg)">Working</span><i class="i s12 i-chevron-right faint w-wide"></i><span class="w-wide">Review</span></span>
+      <button class="btn btn-primary" title="Go to the open question">Answer</button>
+      <a class="btn btn-line" href="stop.html" title="Pause this task. It can be resumed. (Ctrl+.)"><i class="i s12 i-stop st-bad"></i>Stop</a>
+      <button class="ib" popovertarget="m-task" title="Task actions"><i class="i i-more"></i></button>
+    </div>
+    <div class="tb-fixed">
+      <a class="mock-chip" href="index.html" title="Static mockup. Back to the screen list">Mock</a>
+      <label class="ib detail-toggle" for="pt-detail" title="Worker pane (Ctrl+\)"><i class="i i-columns"></i></label>
+      <label class="ib" for="pt-terminal" title="Terminal (Ctrl+J)"><i class="i i-panel-bottom"></i></label>
+      <label class="ib" for="pt-inspector" title="Inspector (Ctrl+Alt+B)"><i class="i i-panel-right"></i></label>
+    </div>
+    <div class="win" aria-hidden="true">
+      <button tabindex="-1"><i class="i s14 i-minus"></i></button>
+      <button tabindex="-1"><i class="i s12 i-square"></i></button>
+      <button tabindex="-1"><i class="i s14 i-x"></i></button>
+    </div>
+  </div>
+</header>
+
+<div class="workspace">
+  <nav class="sidebar" aria-label="Workspace">
+    <div class="sb-top">
+      <a class="nav" href="new-task.html"><i class="i i-plus"></i>New task<span class="kbd">Ctrl+N</span></a>
+      <a class="nav" href="#"><i class="i i-inbox"></i>Inbox<span class="count">4</span></a>
+      <a class="nav" href="#"><i class="i i-search"></i>Search<span class="kbd">Ctrl+K</span></a>
+      <a class="nav" href="home.html"><i class="i i-home"></i>Home</a>
+      <a class="nav" href="archive.html"><i class="i i-archive"></i>Archive<span class="count">18</span></a>
+    </div>
+    <div class="sb-scroll">
+      <div class="sb-h"><span>Pinned</span></div>
+      <a class="task-row" style="padding-left:8px" href="task.html"><i class="i s14 i-pin faint"></i><span class="trunc">Fix token refresh race</span></a>
+      <div class="sb-h"><span>Projects</span><button class="ib" style="width:22px;height:22px" title="Sort projects"><i class="i s14 i-chevrons-v"></i></button></div>
+      <a class="proj" href="board.html"><span class="mono-tile t1">A</span><span class="trunc">atlas-api</span><span class="sig st-bad">Conflict</span></a>
+      <div class="tasks">
+        <a class="task-row" href="task.html" aria-current="page"><i class="i s14 i-question st-warn"></i><span class="trunc">Fix token refresh race</span><span class="sig">Question</span></a>
+        <a class="task-row" href="board.html?scope=sprint"><i class="i s14 i-layers faint"></i><span class="trunc">Sprint: Usage billing</span><span class="sig tnum">2/5</span></a>
+        <a class="task-row" href="board.html"><i class="i s14 i-loader st-run"></i><span class="trunc">Meter API calls per workspace</span><span class="sig">Working</span></a>
+        <a class="task-row" href="result.html"><i class="i s14 i-eye faint"></i><span class="trunc">Rate-limit the export endpoint</span><span class="sig">Review</span></a>
+        <a class="task-row all" href="board.html">All 15</a>
+      </div>
+      <a class="proj" href="#"><span class="mono-tile t2">B</span><span class="trunc">billing-service</span><span class="sig st-warn">Needs you 1</span></a>
+      <a class="proj" href="#"><span class="mono-tile t3">N</span><span class="trunc">northwind-web</span><span class="sig st-warn">Needs you 1</span></a>
+      <a class="proj" href="#"><span class="mono-tile t4">M</span><span class="trunc">mobile-app</span><span class="sig muted">In review 1</span></a>
+      <a class="proj" href="#"><span class="mono-tile t5">I</span><span class="trunc">infra-terraform</span></a>
+      <a class="proj" href="#"><span class="mono-tile t6">D</span><span class="trunc">docs-site</span></a>
+    </div>
+    <button class="sb-usage" popovertarget="m-usage" title="Engine limits used this week. Snapshot 13:41" aria-label="Engine limits: Claude 62%, Codex 18% used this week">
+      <span class="um"><span>Claude</span><span class="bar"><i style="width:62%"></i></span><span class="tnum">62%</span></span>
+      <span class="um"><span>Codex</span><span class="bar"><i style="width:18%"></i></span><span class="tnum">18%</span></span>
+    </button>
+    <div class="sb-foot">
+      <button class="btn btn-sm" title="Add project"><i class="i s14 i-folder-plus"></i>Add project</button>
+      <span class="grow"></span>
+      <a class="ib" href="settings.html" title="Settings (Ctrl+,)"><i class="i i-settings"></i></a>
+      <button class="ib" title="Help and shortcuts (?)"><i class="i i-help"></i></button>
+    </div>
+  </nav>
+
+  <main class="main">
+    <div class="planbar">
+      <a class="rev" href="#" title="r2 added the migration node after the race was traced">Plan r2</a>
+      <div class="phases" aria-label="Task phase">
+        <span class="phase done">Planned</span><i class="i s12 i-chevron-right"></i>
+        <span class="phase now">Executing 2/5</span><i class="i s12 i-chevron-right"></i>
+        <span class="phase">Independent review</span><i class="i s12 i-chevron-right"></i>
+        <span class="phase">Verification</span><i class="i s12 i-chevron-right"></i>
+        <span class="phase">Completion</span>
+      </div>
+      <span class="grow"></span>
+      <span class="meter" title="Coordinator context: latest actual window fill, not a token sum"><span class="faint">Context</span><span class="track"><span class="fill" style="width:41%"></span></span><span class="tnum" style="color:var(--fg)">41%</span><span class="tnum faint">82k of 200k</span></span>
+      <span title="Task tokens so far. Plan figure is a snapshot taken when the route was chosen."><span class="faint">Usage</span> <span class="tnum" style="color:var(--fg)">182k</span> <span class="faint w-wide">Plan 38%, snapshot 13:41</span></span>
+    </div>
+
+    <div class="tabs" role="tablist" aria-label="Task views">
+      <button class="tab" role="tab" data-show="conversation" data-group="tab" aria-selected="true">Conversation</button>
+      <button class="tab" role="tab" data-show="workers" data-group="tab" aria-selected="false">Workers <span class="n">2 active of 6</span></button>
+      <button class="tab" role="tab" data-show="changes" data-group="tab" aria-selected="false">Changes <span class="tnum n"><span class="add">+85</span> <span class="del">&minus;5</span></span></button>
+      <button class="tab" role="tab" data-show="code" data-group="tab" aria-selected="false">Code</button>
+      <button class="tab" role="tab" data-show="terminal" data-group="tab" aria-selected="false">Terminal</button>
+      <span class="grow"></span>
+      <button class="sel view-sel" popovertarget="m-view" title="How much step detail the conversation shows">Normal<i class="i s12 i-chevron-down"></i></button>
+    </div>
+
+    <div class="main-body">
+      <div class="task-body">
+
+        <!-- Conversation -->
+        <section class="task-panel" data-panel="conversation" data-group="tab" aria-label="Conversation">
+          <div class="timeline has-queue">
+            <div class="tl-in">
+              <div class="brief">
+                <div>Clients get random 401s when two tabs refresh at once. Find the race in the token refresh path, fix it, and prove it with a concurrency test. Keep the public API unchanged.</div>
+                <div class="meta"><span>Created 13:41</span><span>Base <span class="mono">main</span> at <span class="mono">4f2a91c</span></span><span>Title generated <a href="#">Edit</a></span></div>
+              </div>
+
+              <div class="ai">I traced the 401s to two concurrent refreshes rotating the same token row. The second call reads a token that was already revoked. Plan r2 locks the rotation, adds a version column, and covers it with a concurrency test.</div>
+              <button class="fold"><i class="i s14 i-chevron-right"></i>Worked 4m 12s, 18 steps, 6 files</button>
+
+              <div class="surface">
+                <div class="plan-h"><i class="i s14 i-list faint"></i>Plan r2<span class="r">Executing 2 of 5 done, changed from r1: added migration</span></div>
+                <div class="node"><span class="s"><span class="st st-ok"><i class="i s14 i-check-circle"></i>Done</span></span>Trace the 401 race<span class="who">Code Explorer</span></div>
+                <div class="node"><span class="s"><span class="st st-ok"><i class="i s14 i-check-circle"></i>Done</span></span>Reproduce it with a failing test<span class="who">Test Author</span></div>
+                <div class="node"><span class="s"><span class="st st-run"><i class="i s14 i-loader spin"></i>Running</span></span>Lock the refresh path<span class="who">Backend Dev</span></div>
+                <div class="node"><span class="s"><span class="st st-warn"><i class="i s14 i-question"></i>Waiting for you</span></span>Concurrency regression suite<span class="who">QA Engineer</span></div>
+                <div class="node"><span class="s"><span class="st st-idle"><i class="i s14 i-hourglass"></i>Pending</span></span>Add the token version migration<span class="who">Migration Dev</span></div>
+              </div>
+
+              <div class="ai">The lock and the regression suite touch different files, so they run side by side. The migration waits for the lock.</div>
+
+              <div class="surface">
+                <div class="wt-h"><i class="i s14 i-users faint"></i>Started 3 workers<span class="r">Same worktree, <span class="mono">cw/fix-token-refresh</span></span></div>
+                <button class="wrow" data-show="backend" data-group="worker" data-narrow-tab="workers" aria-selected="true">
+                  <i class="i i-loader spin st-run"></i>
+                  <span class="trunc"><span class="role">Backend Dev</span><br><span class="goal">Editing auth/refresh.py, <span class="add">+18</span> <span class="del">&minus;4</span></span></span>
+                  <span class="route">Opus, High</span><span class="st st-run">Working</span><span class="el">6m 12s</span>
+                </button>
+                <div class="wexp">
+                  <div class="cmd"><i class="i s12 i-terminal faint"></i><code>pytest tests/auth/test_race.py -q</code><span class="st st-run"><i class="i s12 i-loader spin"></i>Running 0:41</span><button class="btn btn-sm" title="Stop this command only. The worker keeps running.">Stop&hellip;</button></div>
+                </div>
+                <button class="wrow" data-show="qa" data-group="worker" data-narrow-tab="workers" aria-selected="false">
+                  <i class="i i-question st-warn"></i>
+                  <span class="trunc"><span class="role">QA Engineer</span><br><span class="goal">Asked which concurrency level to assert</span></span>
+                  <span class="route">Sonnet, Medium</span><span class="st st-warn">Waiting for you</span><span class="el">3m 40s</span>
+                </button>
+                <button class="wrow" data-show="migration" data-group="worker" data-narrow-tab="workers" aria-selected="false">
+                  <i class="i i-hourglass faint"></i>
+                  <span class="trunc"><span class="role">Migration Dev</span><br><span class="goal">Waits for Lock the refresh path</span></span>
+                  <span class="route faint">Not assigned</span><span class="st st-idle">Waiting</span><span class="el"></span>
+                </button>
+                <button class="wrow" data-show="author" data-group="worker" data-narrow-tab="workers" aria-selected="false" style="min-height:34px">
+                  <i class="i i-check-circle faint"></i>
+                  <span class="goal trunc">2 finished: Code Explorer, Test Author</span>
+                  <span></span><span class="st st-idle">View results</span><span class="el"></span>
+                </button>
+              </div>
+
+              <div class="answered"><i class="i s14 i-shield"></i>You allowed once: run the test database outside the sandbox<span class="faint">14:01</span></div>
+
+              <div class="mine">Keep the 30 second refresh timeout. Do not raise it to make the test pass.</div>
+              <div class="mine-meta"><i class="i s12 i-check"></i>Steer received, applies after the current step<span>14:04</span></div>
+
+              <div class="dc">
+                <div class="dc-h"><i class="i s14 i-question"></i>Question from QA Engineer<span class="r">waiting 3m</span></div>
+                <div class="dc-q">Which concurrency level should the regression test assert?</div>
+                <div class="dc-opts">
+                  <button class="opt"><span class="n">1</span>50 parallel refreshes<span class="sub">Matches production peak</span></button>
+                  <button class="opt"><span class="n">2</span>200 parallel refreshes<span class="sub">Stress, 40s per run</span></button>
+                  <button class="opt"><span class="n">3</span>Both, with 200 marked slow</button>
+                  <button class="opt"><span class="n">&hellip;</span>Other answer</button>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="dock">
+            <div class="queue">
+              <div class="queue-h"><i class="i s14 i-queue faint"></i>Queued 2, not sent yet<span class="warn">Queue may be lost if the app closes</span></div>
+              <div class="qrow">
+                <button class="ib grip" style="width:22px;height:24px" title="Drag to reorder"><i class="i s14 i-grip"></i></button>
+                <span class="grow trunc">When the lock lands, also update the auth runbook.</span>
+                <button class="btn btn-sm">Edit</button><button class="btn btn-sm">Send now</button>
+                <button class="ib" style="width:24px;height:24px" title="Remove from queue"><i class="i s14 i-x"></i></button>
+              </div>
+              <div class="qrow">
+                <button class="ib grip" style="width:22px;height:24px" title="Drag to reorder"><i class="i s14 i-grip"></i></button>
+                <span class="grow trunc">Then split the fix into two commits for review.</span>
+                <button class="btn btn-sm">Edit</button><button class="btn btn-sm">Send now</button>
+                <button class="ib" style="width:24px;height:24px" title="Remove from queue"><i class="i s14 i-x"></i></button>
+              </div>
+            </div>
+            <div class="composer">
+              <textarea aria-label="Message Cortex" placeholder="Message Cortex about this task, @ to attach files">Also log a warning when the lock wait exceeds 2 seconds.</textarea>
+              <div class="c-bar">
+                <button class="ib" title="Attach files"><i class="i i-plus"></i></button>
+                <div class="c-route">
+                  <button class="sel" popovertarget="m-model" title="Coordinator model (Ctrl+Shift+M)"><i class="i s14 i-cpu"></i><span class="sel-t">Opus</span><i class="i s12 i-chevron-down"></i></button>
+                  <button class="sel" popovertarget="m-effort" title="Reasoning effort"><i class="i s14 i-gauge"></i><span class="sel-t">High</span><i class="i s12 i-chevron-down"></i></button>
+                  <button class="sel" popovertarget="m-mode" title="Access mode"><i class="i s14 i-shield"></i><span class="sel-t">Development</span><i class="i s12 i-chevron-down"></i></button>
+                  <button class="sel" popovertarget="m-lang" title="Cortex message language"><i class="i s14 i-globe"></i><span class="sel-t">Auto</span><i class="i s12 i-chevron-down"></i></button>
+                </div>
+                <div class="c-end">
+                  <span class="ctx" title="Context: 82k of 200k"><span class="ring" style="--p:41%"></span><span class="ctx-t">41%</span></span>
+                  <button class="ib" title="Voice input. Text lands in this draft and is never sent on its own."><i class="i i-mic"></i></button>
+                  <button class="btn btn-line c-send" title="Keep it here, unsent. You can edit, reorder or delete it.">Queue<span class="key">Ctrl+Enter</span></button>
+                  <button class="btn btn-primary c-send" title="Send now. Cortex applies it after the current step.">Steer<span class="key">Enter</span></button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- Workers list -->
+        <section class="task-panel" data-panel="workers" data-group="tab" aria-label="Workers" hidden>
+          <div class="wlist">
+            <div class="wg">Coordinator</div>
+            <button class="wcard" data-show="cortex" data-group="worker" aria-selected="false">
+              <span class="l1"><span class="ic"><i class="i s14 i-bot"></i></span>Cortex<span class="st st-run"><i class="i s12 i-loader spin"></i>Coordinating</span></span>
+              <span class="l2 trunc" style="display:block">Waiting on Backend Dev and your answer</span>
+              <span class="l3"><span>Opus, High</span><span>18m</span><span>Context 41%</span><span>Usage 67k</span></span>
+            </button>
+            <div class="wg">Execution<span class="n">3</span></div>
+            <button class="wcard" data-show="backend" data-group="worker" aria-selected="true">
+              <span class="l1"><span class="ic"><i class="i s14 i-loader spin st-run"></i></span>Backend Dev<span class="st st-run">Working</span></span>
+              <span class="l2 trunc" style="display:block">Running pytest tests/auth/test_race.py</span>
+              <span class="l3"><span>Opus, High</span><span>6m 12s</span><span>Context 38%</span><span>Usage 64k</span></span>
+            </button>
+            <button class="wcard" data-show="qa" data-group="worker" aria-selected="false">
+              <span class="l1"><span class="ic"><i class="i s14 i-question st-warn"></i></span>QA Engineer<span class="st st-warn">Waiting for you</span></span>
+              <span class="l2 trunc" style="display:block">Asked which concurrency level to assert</span>
+              <span class="l3"><span>Sonnet, Medium</span><span>3m 40s</span><span>Context 22%</span><span>Usage 21k</span></span>
+            </button>
+            <button class="wcard" data-show="migration" data-group="worker" aria-selected="false">
+              <span class="l1"><span class="ic"><i class="i s14 i-hourglass faint"></i></span>Migration Dev<span class="st st-idle">Waiting</span></span>
+              <span class="l2 trunc" style="display:block">Waits for Lock the refresh path</span>
+              <span class="l3"><span>Route not assigned</span><span>Context unavailable</span><span>Usage unavailable</span></span>
+            </button>
+            <div class="wg">Review<span class="n">1</span></div>
+            <button class="wcard" data-show="reviewer" data-group="worker" aria-selected="false">
+              <span class="l1"><span class="ic"><i class="i s14 i-circle faint"></i></span>Security Reviewer<span class="st st-idle">Not started</span></span>
+              <span class="l2 trunc" style="display:block">Starts after execution finishes</span>
+            </button>
+            <div class="wg">Verification</div>
+            <button class="wcard lane" data-show="verify" data-group="worker" aria-selected="false">
+              <span class="l1"><span class="ic"><i class="i s14 i-circle faint"></i></span>Runtime verification<span class="st st-idle">Not run</span></span>
+              <span class="l2 trunc" style="display:block">Run by Cortex, not by a worker</span>
+            </button>
+            <div class="wg">Finished<span class="n">2</span></div>
+            <button class="wcard" data-show="author" data-group="worker" aria-selected="false">
+              <span class="l1"><span class="ic"><i class="i s14 i-check-circle st-ok"></i></span>Test Author<span class="st st-ok">Finished</span></span>
+              <span class="l2 trunc" style="display:block">Added the failing race test, 1 check not run</span>
+              <span class="l3"><span>Sonnet, Medium</span><span>2m 51s</span><span>Usage 18k</span></span>
+            </button>
+            <button class="wcard" data-show="explorer" data-group="worker" aria-selected="false">
+              <span class="l1"><span class="ic"><i class="i s14 i-check-circle st-ok"></i></span>Code Explorer<span class="st st-ok">Finished</span></span>
+              <span class="l2 trunc" style="display:block">Traced the 401 race to token rotation</span>
+              <span class="l3"><span>Sonnet, Low</span><span>2m 41s</span><span>Usage 12k</span></span>
+            </button>
+          </div>
+        </section>
+
+        <div class="note-panel task-panel" data-panel="changes code terminal" data-group="tab" hidden>
+          <span class="w500">Shown on their own screens in this mockup</span>
+          <span><a class="lnk" href="result.html?tab=changes">Changes</a> and <a class="lnk" href="code.html">Code</a> have full screens. The bottom terminal panel works here.</span>
+        </div>
+
+        <!-- Worker detail: second pane on wide windows, right half of the Workers tab otherwise -->
+        <section class="detail" aria-label="Worker details">
+
+          <div class="d-panel" data-panel="backend" data-group="worker">
+            <div class="d-h">
+              <div class="d-title">Backend Dev<span class="st st-run"><i class="i s12 i-loader spin"></i>Working</span>
+                <span class="act"><a class="btn btn-line btn-sm" href="worker.html" title="Open the full live view">Full view</a><button class="btn btn-line btn-sm" title="Stop this worker. The task keeps running.">Stop&hellip;</button><button class="ib" style="width:24px;height:24px" title="Worker actions"><i class="i s14 i-more"></i></button></span></div>
+              <div class="d-goal">Lock the refresh path so concurrent refreshes share one rotation.</div>
+              <div class="d-grid">
+                <span><span class="l">Route</span>Opus, High</span><span><span class="l">Attempt</span>2 of 2</span><span><span class="l">Elapsed</span>6m 12s</span>
+                <span><span class="l">Context</span>38%, 76k of 200k</span><span><span class="l">Usage</span>64k</span>
+              </div>
+            </div>
+            <div class="d-tools">
+              <div class="seg" role="group" aria-label="Filter activity"><button aria-current="true">All</button><button aria-current="false">Edits</button><button aria-current="false">Commands</button><button aria-current="false">Errors</button></div>
+              <span class="grow"></span><span class="st st-ok"><i class="i s12 i-arrow-down"></i>Following</span>
+            </div>
+            <div class="feed"><div class="feed-in">
+              <div class="ev"><span class="tm">14:02</span><span class="ic"><i class="i s14 i-file"></i></span><span class="tx dim">Read <code>auth/refresh.py</code></span><span class="rt"></span></div>
+              <div class="ev"><span class="tm">14:02</span><span class="ic"><i class="i s14 i-search"></i></span><span class="tx dim">Searched <code>rotate_refresh_token</code></span><span class="rt">6 matches</span></div>
+              <div class="ev"><span class="tm">14:03</span><span class="ic"><i class="i s14 i-message"></i></span><span class="tx">Holding a row lock across the rotation stops the double issue. Adding SELECT FOR UPDATE.</span><span class="rt"></span></div>
+              <div class="ev"><span class="tm">14:04</span><span class="ic"><i class="i s14 i-pencil"></i></span><span class="tx">Edited <code>auth/refresh.py</code></span><span class="rt tnum"><span class="add">+18</span> <span class="del">&minus;4</span></span></div>
+              <div class="ev-sub"><div class="diff">
+                <div class="h">@@ rotate_refresh_token(session, token_id) @@</div>
+                <div class="d">-    row = session.get(RefreshToken, token_id)</div>
+                <div class="a">+    row = (session.query(RefreshToken)</div>
+                <div class="a">+           .filter_by(id=token_id)</div>
+                <div class="a">+           .with_for_update().one())</div>
+              </div></div>
+              <div class="ev"><span class="tm">14:05</span><span class="ic"><i class="i s14 i-terminal"></i></span><span class="tx"><code>pytest tests/auth -q</code></span><span class="rt"><span class="st st-ok"><i class="i s12 i-check-circle"></i>Passed, 9s</span></span></div>
+              <div class="ev"><span class="tm">14:06</span><span class="ic"><i class="i s14 i-alert st-bad"></i></span><span class="tx">mypy: incompatible return type in <code>auth/refresh.py:88</code></span><span class="rt"><span class="st st-bad">Error</span></span></div>
+              <div class="ev"><span class="tm">14:06</span><span class="ic"><i class="i s14 i-pencil"></i></span><span class="tx">Edited <code>auth/models.py</code></span><span class="rt tnum"><span class="add">+3</span> <span class="del">&minus;1</span></span></div>
+              <div class="ev"><span class="tm">14:07</span><span class="ic"><i class="i s14 i-terminal"></i></span><span class="tx"><code>git diff --stat</code></span><span class="rt">Native, no Cortex receipt</span></div>
+              <div class="ev"><span class="tm">14:07</span><span class="ic"><i class="i s14 i-terminal st-run"></i></span><span class="tx"><code>pytest tests/auth/test_race.py -q</code></span><span class="rt"><span class="st st-run"><i class="i s12 i-loader spin"></i>Running 0:41</span></span></div>
+              <div class="ev-sub"><div class="tail">collected 12 items
+tests/auth/test_race.py ........<span class="run">.</span></div>
+                <div class="row" style="margin-top:4px"><button class="btn btn-sm">Full output</button><button class="btn btn-sm" title="Stop this command only. The worker keeps running.">Stop command&hellip;</button></div></div>
+              <div class="ev-msg">Use the existing retry helper, not a new one.
+                <div class="ms"><i class="i s12 i-clock"></i>You, 14:07. Pending delivery at the next step<a href="#">Withdraw</a></div></div>
+            </div></div>
+            <div class="d-dock"><div class="composer">
+              <textarea aria-label="Message Backend Dev" placeholder="Message Backend Dev&hellip;"></textarea>
+              <div class="c-bar">
+                <div class="c-route">
+                  <button class="sel" popovertarget="m-delivery" title="When this message reaches the worker"><i class="i s14 i-clock"></i><span class="sel-t">Next step</span><i class="i s12 i-chevron-down"></i></button>
+                  <span class="cap faint trunc">Does not widen its scope or access</span>
+                </div>
+                <div class="c-end">
+                  <button class="ib" title="Voice input. Text lands in this draft and is never sent on its own."><i class="i i-mic"></i></button>
+                  <button class="btn btn-primary btn-sm c-send" aria-disabled="true" title="Type a message first" style="width:28px;height:28px;padding:0;border-radius:50%"><i class="i s14 i-arrow-up"></i></button>
+                </div>
+              </div>
+            </div></div>
+          </div>
+
+          <div class="d-panel" data-panel="qa" data-group="worker" hidden>
+            <div class="d-h">
+              <div class="d-title">QA Engineer<span class="st st-warn"><i class="i s12 i-question"></i>Waiting for you</span>
+                <span class="act"><button class="btn btn-line btn-sm">Stop&hellip;</button></span></div>
+              <div class="d-goal">Build the concurrency regression suite for token refresh.</div>
+              <div class="d-grid"><span><span class="l">Route</span>Sonnet, Medium</span><span><span class="l">Attempt</span>1 of 1</span><span><span class="l">Elapsed</span>3m 40s</span><span><span class="l">Context</span>22%, 44k of 200k</span><span><span class="l">Usage</span>21k</span></div>
+            </div>
+            <div class="d-scroll">
+              <div class="res-sec"><div class="res-h">Open question</div>Which concurrency level should the regression test assert? Answer it in the conversation. An answer there is delivered to this worker.</div>
+              <div class="res-sec"><div class="res-h">Latest activity</div>
+                <div class="ev"><span class="tm">13:58</span><span class="ic"><i class="i s14 i-file"></i></span><span class="tx dim">Read <code>tests/auth/conftest.py</code></span><span class="rt"></span></div>
+                <div class="ev"><span class="tm">13:59</span><span class="ic"><i class="i s14 i-question st-warn"></i></span><span class="tx">Asked a question and paused.</span><span class="rt"></span></div>
+              </div>
+            </div>
+          </div>
+
+          <div class="d-panel" data-panel="migration" data-group="worker" hidden>
+            <div class="d-h">
+              <div class="d-title">Migration Dev<span class="st st-idle"><i class="i s12 i-hourglass"></i>Waiting</span></div>
+              <div class="d-goal">Add the token version migration.</div>
+              <div class="d-grid"><span><span class="l">Route</span>Not assigned</span><span><span class="l">Context</span>Unavailable</span><span><span class="l">Usage</span>Unavailable</span></div>
+            </div>
+            <div class="d-scroll"><div class="res-sec"><div class="res-h">Waits for</div>Lock the refresh path (Backend Dev, Working). It starts on its own when that node is done.</div></div>
+          </div>
+
+          <div class="d-panel" data-panel="reviewer" data-group="worker" hidden>
+            <div class="d-h">
+              <div class="d-title">Security Reviewer<span class="st st-idle"><i class="i s12 i-circle"></i>Not started</span></div>
+              <div class="d-goal">Independent review of the finished change.</div>
+              <div class="d-grid"><span><span class="l">Route</span>Not assigned</span><span><span class="l">Context</span>Unavailable</span><span><span class="l">Usage</span>Unavailable</span></div>
+            </div>
+            <div class="d-scroll"><div class="res-sec"><div class="res-h">Starts when</div>All execution nodes are done. Cortex starts the review, you do not need to.</div></div>
+          </div>
+
+          <div class="d-panel" data-panel="verify" data-group="worker" hidden>
+            <div class="d-h">
+              <div class="d-title">Runtime verification<span class="st st-idle"><i class="i s12 i-circle"></i>Not run</span></div>
+              <div class="d-goal">Checks run by Cortex itself after review. This is not a worker, so it cannot be messaged.</div>
+            </div>
+            <div class="d-scroll"><div class="res-sec"><div class="res-h">Planned checks</div>
+              <div class="chk"><i class="i s14 i-circle faint"></i><code>pytest tests/auth</code><span class="src">Not run</span></div>
+              <div class="chk"><i class="i s14 i-circle faint"></i><code>mypy auth</code><span class="src">Not run</span></div>
+            </div></div>
+          </div>
+
+          <div class="d-panel" data-panel="cortex" data-group="worker" hidden>
+            <div class="d-h">
+              <div class="d-title">Cortex<span class="st st-run"><i class="i s12 i-loader spin"></i>Coordinating</span></div>
+              <div class="d-goal">Coordinator for this task. Message it from the composer in Conversation.</div>
+              <div class="d-grid"><span><span class="l">Route</span>Opus, High</span><span><span class="l">Elapsed</span>18m</span><span><span class="l">Context</span>41%, 82k of 200k</span><span><span class="l">Usage</span>67k</span></div>
+            </div>
+            <div class="d-scroll"><div class="res-sec"><div class="res-h">Now</div>Waiting on Backend Dev and your answer to QA Engineer. One steer is received and applies after the current step.</div></div>
+          </div>
+
+          <div class="d-panel" data-panel="author" data-group="worker" hidden>
+            <div class="d-h">
+              <div class="d-title">Test Author<span class="st st-ok"><i class="i s12 i-check-circle"></i>Finished</span>
+                <span class="act"><a class="btn btn-line btn-sm" href="#">Open report</a></span></div>
+              <div class="d-goal">Reproduce the race with a failing test.</div>
+              <div class="d-grid"><span><span class="l">Route</span>Sonnet, Medium</span><span><span class="l">Attempts</span>2</span><span><span class="l">Elapsed</span>2m 51s</span><span><span class="l">Finished</span>13:56</span><span><span class="l">Usage</span>18k</span></div>
+            </div>
+            <div class="d-scroll">
+              <div class="res-sec"><div class="res-h">Result</div>Added <code>tests/auth/test_race.py</code>. It fails on <code>main</code> in 9 of 10 runs with two parallel refreshes.</div>
+              <div class="res-sec"><div class="res-h">Checks</div>
+                <div class="chk"><i class="i s14 i-check-circle st-ok"></i><span>Race test fails on main as expected</span><span class="src">Recorded by runtime</span></div>
+                <div class="chk"><i class="i s14 i-check-circle st-ok"></i><code>ruff check tests/auth</code><span class="src">Recorded by runtime</span></div>
+                <div class="chk"><i class="i s14 i-circle faint"></i><span>Full auth suite <span class="faint">not run: test database was busy</span></span><span class="src">Reported by worker</span></div>
+              </div>
+              <div class="res-sec"><div class="res-h">Recorded edits</div>
+                <div class="chk"><i class="i s14 i-pencil faint"></i><code>tests/auth/test_race.py</code><span class="src tnum"><span class="add">+64</span> <span class="del">&minus;0</span></span></div>
+                <div class="cap faint" style="margin-top:4px">Edits this worker recorded. Side effects of its commands may not appear. The full task diff is in Changes.</div>
+              </div>
+              <div class="res-sec"><div class="res-h">Attempts</div>
+                <div class="chk"><i class="i s14 i-x-circle st-bad"></i><span>Attempt 1 <span class="faint">interrupted: route unavailable</span></span><span class="src">13:49</span></div>
+                <div class="chk"><i class="i s14 i-check-circle st-ok"></i><span>Attempt 2 <span class="faint">finished</span></span><span class="src">13:56</span></div>
+              </div>
+              <div class="res-sec"><div class="res-h">Activity</div>31 events saved. <a href="#" style="text-decoration:underline;text-underline-offset:2px">Show full history</a></div>
+            </div>
+            <div class="d-dock"><button class="btn btn-line" style="width:100%" title="Finished workers cannot be messaged directly">Ask Cortex about this worker</button></div>
+          </div>
+
+          <div class="d-panel" data-panel="explorer" data-group="worker" hidden>
+            <div class="d-h">
+              <div class="d-title">Code Explorer<span class="st st-ok"><i class="i s12 i-check-circle"></i>Finished</span>
+                <span class="act"><a class="btn btn-line btn-sm" href="#">Open report</a></span></div>
+              <div class="d-goal">Trace the 401 race.</div>
+              <div class="d-grid"><span><span class="l">Route</span>Sonnet, Low</span><span><span class="l">Attempts</span>1</span><span><span class="l">Elapsed</span>2m 41s</span><span><span class="l">Finished</span>13:47</span><span><span class="l">Usage</span>12k</span></div>
+            </div>
+            <div class="d-scroll">
+              <div class="res-sec"><div class="res-h">Result</div>Two refreshes read the same row before either commits. The second one presents a token the first has revoked.</div>
+              <div class="res-sec"><div class="res-h">Checks</div><div class="cap muted">No checks were run. This worker only read code.</div></div>
+              <div class="res-sec"><div class="res-h">Activity</div>22 events saved. <a href="#" style="text-decoration:underline;text-underline-offset:2px">Show full history</a></div>
+            </div>
+            <div class="d-dock"><button class="btn btn-line" style="width:100%" title="Finished workers cannot be messaged directly">Ask Cortex about this worker</button></div>
+          </div>
+        </section>
+      </div>
+    </div>
+
+    <section class="terminal" aria-label="Terminal">
+      <div class="term-h">
+        <span class="term-tab" aria-selected="true"><i class="i s12 i-terminal"></i>bash</span>
+        <span class="term-tab" aria-selected="false"><i class="i s12 i-terminal"></i>tests</span>
+        <button class="ib" style="width:24px;height:24px" title="New shell in this worktree"><i class="i s14 i-plus"></i></button>
+        <span class="mono faint" style="margin-left:6px">~/work/atlas-api/.worktrees/fix-token-refresh</span>
+      </div>
+      <div class="term-body"><b>cw/fix-token-refresh</b> $ git log --oneline -3
+4f2a91c Merge pull request from cw/retry-after
+a03be17 Add session cleanup job
+<b>cw/fix-token-refresh</b> $ git status --short
+ M auth/models.py
+ M auth/refresh.py
+?? tests/auth/test_race.py
+<b>cw/fix-token-refresh</b> $ </div>
+    </section>
+  </main>
+
+  <aside class="inspector" aria-label="Inspector">
+    <div class="ins-sec">
+      <div class="ins-h"><span>State</span></div>
+      <div class="st st-run" style="margin-bottom:6px"><i class="i s14 i-loader spin"></i>Working, Executing 2/5</div>
+      <div class="cap muted">1 question for you. Next step is Review.</div>
+    </div>
+    <div class="ins-sec">
+      <div class="ins-h"><span>Worktree</span><button class="btn btn-sm">Open</button></div>
+      <dl class="kv">
+        <dt>Path</dt><dd class="mono">.worktrees/fix-token-refresh</dd>
+        <dt>Branch</dt><dd class="mono">cw/fix-token-refresh</dd>
+        <dt>Base</dt><dd class="mono">main, 0 behind</dd>
+        <dt>Merge into</dt><dd class="mono">main</dd>
+        <dt>Uncommitted</dt><dd>3 files</dd>
+        <dt>Conflicts</dt><dd>None</dd>
+      </dl>
+    </div>
+    <div class="ins-sec">
+      <div class="ins-h"><span>Checks</span></div>
+      <div class="chk-sum">
+        <span class="st st-ok"><i class="i s12 i-check-circle"></i>3 passed</span>
+        <span class="st st-bad"><i class="i s12 i-x-circle"></i>1 failed</span>
+        <span class="st st-idle"><i class="i s12 i-circle"></i>2 not run</span>
+        <span class="st st-idle"><i class="i s12 i-help"></i>1 unverified</span>
+      </div>
+      <div class="chk"><i class="i s14 i-x-circle st-bad"></i><code>mypy auth</code><span class="src">Reported by worker</span></div>
+      <div class="chk"><i class="i s14 i-circle faint"></i><span>Full auth suite</span><span class="src">Not run</span></div>
+      <div class="chk"><i class="i s14 i-help faint"></i><span>Load smoke</span><span class="src">Unverified</span></div>
+    </div>
+    <div class="ins-sec">
+      <div class="ins-h"><span>Workers</span><span>2 active, 2 finished</span></div>
+      <div class="wins"><i class="i s14 i-loader spin st-run"></i><span class="trunc">Backend Dev</span><span class="st st-run">Working</span></div>
+      <div class="wins"><i class="i s14 i-question st-warn"></i><span class="trunc">QA Engineer</span><span class="st st-warn">Waiting for you</span></div>
+      <div class="wins"><i class="i s14 i-hourglass faint"></i><span class="trunc">Migration Dev</span><span class="st st-idle">Waiting</span></div>
+      <div class="wins"><i class="i s14 i-circle faint"></i><span class="trunc">Security Reviewer</span><span class="st st-idle">Not started</span></div>
+      <div class="wins"><i class="i s14 i-check-circle st-ok"></i><span class="trunc">Test Author</span><span class="st st-ok">Finished</span></div>
+      <div class="wins"><i class="i s14 i-check-circle st-ok"></i><span class="trunc">Code Explorer</span><span class="st st-ok">Finished</span></div>
+    </div>
+    <div class="ins-sec">
+      <div class="ins-h"><span>Route and access</span></div>
+      <dl class="kv">
+        <dt>Model</dt><dd>Opus, High</dd>
+        <dt>Access</dt><dd>Development</dd>
+        <dt>Language</dt><dd>Auto</dd>
+      </dl>
+    </div>
+    <div class="ins-sec">
+      <div class="ins-h"><span>Usage</span></div>
+      <dl class="kv">
+        <dt>Context</dt><dd>41%, 82k of 200k</dd>
+        <dt>Task tokens</dt><dd>182k</dd>
+        <dt>Plan</dt><dd>38%, snapshot 13:41</dd>
+      </dl>
+    </div>
+    <div class="ins-sec">
+      <div class="ins-h"><span>Engine limits</span><span>Observed 13:41</span></div>
+      <dl class="kv">
+        <dt>Claude</dt><dd>62% of this week, resets Mon 09:00</dd>
+        <dt>Codex</dt><dd>18% of this week, resets Thu 02:00</dd>
+      </dl>
+    </div>
+  </aside>
+</div>
+
+<div popover id="m-usage" class="pop-usage">
+  <div class="mi-h">Engine limits on This machine</div>
+  <div class="u-eng">
+    <div class="u-h"><span class="w500">Claude</span><span class="st st-ok"><i class="i s12 i-check-circle"></i>Connected</span></div>
+    <div class="u-win"><span>This week</span><span class="bar"><i style="width:62%"></i></span><span class="v">62% used</span><span class="rs">Resets Mon 09:00</span></div>
+    <div class="u-src">Observed 13:41, reported by the provider</div>
+  </div>
+  <div class="mi-sep"></div>
+  <div class="u-eng">
+    <div class="u-h"><span class="w500">Codex</span><span class="st st-ok"><i class="i s12 i-check-circle"></i>Connected</span></div>
+    <div class="u-win"><span>This week</span><span class="bar"><i style="width:18%"></i></span><span class="v">18% used</span><span class="rs">Resets Thu 02:00</span></div>
+    <div class="u-src">Observed 13:41, reported by the provider</div>
+  </div>
+  <div class="mi-sep"></div>
+  <a class="mi" href="settings.html?section=connections"><i class="i i-gauge"></i><span class="grow">All limits and windows</span></a>
+</div>
+<div popover id="m-machine" class="pop-tl">
+  <div class="mi-h">Machines</div>
+  <a class="mi" href="home.html"><i class="i i-laptop"></i><span class="grow">This machine<span class="sub">Local, connected</span></span><i class="i s14 i-check"></i></a>
+  <a class="mi" href="settings.html?section=machines"><i class="i i-server"></i><span class="grow">GPU box<span class="sub">Remote, connected through the server connector</span></span></a>
+  <a class="mi" href="settings.html?section=machines"><i class="i i-server"></i><span class="grow">Build server<span class="sub">Remote, offline, last seen 13:47</span></span></a>
+  <div class="mi-sep"></div>
+  <a class="mi" href="settings.html?section=machines&amp;dialog=add-machine"><i class="i i-plus"></i>Add remote machine&hellip;</a>
+  <a class="mi" href="settings.html?section=overview"><i class="i i-settings"></i>Machine settings</a>
+</div>
+<div popover id="m-wt" class="pop-anchor" style="width:300px;padding:10px 12px">
+  <div class="st st-idle" style="margin-bottom:8px"><i class="i s12 i-branch"></i>Separate worktree</div>
+  <dl class="kv">
+    <dt>Branch</dt><dd class="mono">cw/fix-token-refresh</dd>
+    <dt>Base</dt><dd class="mono">main, 0 behind</dd>
+    <dt>Merge into</dt><dd class="mono">main</dd>
+    <dt>Uncommitted</dt><dd>3 files</dd>
+  </dl>
+  <div class="row" style="margin-top:10px"><button class="btn btn-line btn-sm">Open terminal here</button><button class="btn btn-line btn-sm">Change target&hellip;</button></div>
+</div>
+<div popover id="m-task" class="pop-right">
+  <button class="mi" data-dialog="dlg-close"><i class="i i-x"></i>Close task&hellip;</button>
+  <div class="mi" aria-disabled="true"><i class="i i-archive"></i><span class="grow">Archive<span class="sub">Available when the task is done</span></span></div>
+  <button class="mi"><i class="i i-pin"></i>Pin</button>
+  <div class="mi-sep"></div>
+  <button class="mi"><i class="i i-external"></i>Open in VS Code</button>
+  <button class="mi"><i class="i i-branch"></i>Copy branch</button>
+  <button class="mi"><i class="i i-help"></i>Diagnostics</button>
+</div>
+<div popover id="m-view" class="pop-right">
+  <button class="mi"><span class="grow">Normal<span class="sub">Steps fold into one line per turn</span></span><i class="i s14 i-check"></i></button>
+  <button class="mi"><span class="grow">Detailed<span class="sub">Every step stays open</span></span></button>
+</div>
+<div popover id="m-model" class="pop-up" style="width:280px">
+  <div class="mi-h">Coordinator model for this task</div>
+  <button class="mi"><span class="grow">Opus<span class="sub">claude-agent-acp</span></span><i class="i s14 i-check"></i></button>
+  <button class="mi"><span class="grow">Sonnet<span class="sub">claude-agent-acp</span></span></button>
+  <button class="mi"><span class="grow">GPT Codex<span class="sub">codex-acp</span></span></button>
+  <div class="mi" aria-disabled="true"><span class="grow">Local model<span class="sub">Unavailable: no engine on this machine</span></span></div>
+</div>
+<div popover id="m-effort" class="pop-up">
+  <div class="mi-h">Effort</div>
+  <button class="mi"><span class="grow">Low</span></button>
+  <button class="mi"><span class="grow">Medium</span></button>
+  <button class="mi"><span class="grow">High</span><i class="i s14 i-check"></i></button>
+  <div class="mi" aria-disabled="true"><span class="grow">Max<span class="sub">Unavailable on this route</span></span></div>
+</div>
+<div popover id="m-mode" class="pop-up" style="width:300px">
+  <div class="mi-h">Access mode</div>
+  <button class="mi"><span class="grow">Development<span class="sub">Writes in the project without asking</span></span><i class="i s14 i-check"></i></button>
+  <button class="mi"><span class="grow">Guarded<span class="sub">Asks before anything outside the scope</span></span></button>
+  <button class="mi"><span class="grow">Auto<span class="sub">Cortex answers routine permission cards</span></span></button>
+</div>
+<div popover id="m-lang" class="pop-up">
+  <div class="mi-h">Cortex message language</div>
+  <button class="mi"><span class="grow">Auto</span><i class="i s14 i-check"></i></button>
+  <button class="mi"><span class="grow">English</span></button>
+  <button class="mi"><span class="grow">Russian</span></button>
+</div>
+<div popover id="m-delivery" class="pop-up" style="width:300px">
+  <div class="mi-h">Delivery to this worker</div>
+  <button class="mi"><span class="grow">Next step<span class="sub">At the next tool result or input</span></span><i class="i s14 i-check"></i></button>
+  <div class="mi" aria-disabled="true"><span class="grow">Interrupt now<span class="sub">Unavailable: not qualified for this engine</span></span></div>
+</div>
+
+<script>(function(){var r=document.documentElement,q=new URLSearchParams(location.search);function m(){document.querySelectorAll('[data-set-theme]').forEach(function(b){b.setAttribute('aria-pressed',b.dataset.setTheme===r.dataset.themeChoice)})}function show(g,v){document.querySelectorAll('[data-show][data-group="'+g+'"]').forEach(function(x){if(x.hasAttribute('aria-selected'))x.setAttribute('aria-selected',x.dataset.show===v)});document.querySelectorAll('[data-panel][data-group="'+g+'"]').forEach(function(p){p.hidden=p.dataset.panel.split(' ').indexOf(v)<0});if(g==='tab')document.body.dataset.tab=v}document.addEventListener('click',function(e){var b=e.target.closest('[data-set-theme]');if(b){var t=b.dataset.setTheme;r.dataset.themeChoice=t;r.dataset.theme=t==='system'?(matchMedia('(prefers-color-scheme: light)').matches?'light':'dark'):t;try{localStorage.setItem('cw-theme',t)}catch(x){}m();return}var s=e.target.closest('[data-show]');if(s){show(s.dataset.group,s.dataset.show);if(s.dataset.narrowTab&&innerWidth<1800)show('tab',s.dataset.narrowTab);return}var a=e.target.closest('a[href$=".html"],a[href*=".html?"]');if(a){e.preventDefault();var u=new URL(a.href);u.searchParams.set('theme',r.dataset.themeChoice);location.href=u.href}});['tab','worker'].forEach(function(g){if(q.get(g))show(g,q.get(g))});m()})()</script>
+<dialog class="dlg" id="dlg-close" aria-labelledby="dlg-close-h">
+  <div class="dlg-h"><h2 id="dlg-close-h">Close &ldquo;Fix token refresh race&rdquo;?</h2><button class="ib" data-close title="Keep working"><i class="i i-x"></i></button></div>
+  <div class="dlg-b">
+    <ul class="conseq"><li><i class="i s14 i-users"></i><span>2 workers will be stopped: Backend Dev and QA Engineer</span></li><li><i class="i s14 i-question"></i><span>1 open question will be withdrawn</span></li><li><i class="i s14 i-queue"></i><span>2 queued messages and 1 pending worker message will not be applied</span></li><li><i class="i s14 i-eye"></i><span>Review and verification did not finish, so the result is marked not verified</span></li><li><i class="i s14 i-file"></i><span>Changes stay in the worktree: 3 files, <span class="add">+85</span> <span class="del">&minus;5</span></span></li></ul>
+    <div style="display:grid;gap:6px">
+      <label class="rc"><input type="radio" name="close-choice" data-show="as-is" data-group="choice" checked><span><span class="t">Close as is</span><span class="d">Keep what was done and decide about merging later. The result carries a lasting Not verified by Cortex warning.</span></span></label>
+      <label class="rc danger"><input type="radio" name="close-choice" data-show="cancel" data-group="choice"><span><span class="t">Cancel task</span><span class="d">Nothing from this task is needed. The task moves to Done as Cancelled. The worktree stays until you delete it.</span></span></label>
+    </div>
+    <div class="note-box plain"><i class="i s14 i-pause"></i><span>Only want to pause? <a class="lnk" href="stop.html">Stop</a> keeps everything and can be resumed. It needs no confirmation.</span></div>
+  </div>
+  <div class="dlg-f">
+    <span class="note">Deleting unmerged work is a separate question at archive time.</span>
+    <button class="btn btn-line btn-lg" data-close autofocus>Keep working</button>
+    <button class="btn btn-primary btn-lg" data-panel="as-is" data-group="choice" data-close>Close task</button>
+    <button class="btn btn-danger btn-lg" data-panel="cancel" data-group="choice" data-close hidden>Cancel task</button>
+  </div>
+</dialog>
+<script>(function(){var q=new URLSearchParams(location.search);function ch(v){document.querySelectorAll('[data-panel][data-group="choice"]').forEach(function(p){p.hidden=p.dataset.panel!==v});document.querySelectorAll('input[data-group="choice"]').forEach(function(i){i.checked=i.dataset.show===v})}document.addEventListener('click',function(e){var o=e.target.closest('[data-dialog]');if(o){document.getElementById(o.dataset.dialog).showModal();return}var c=e.target.closest('[data-close]');if(c)c.closest('dialog').close()},true);document.addEventListener('change',function(e){if(e.target.matches('input[data-group="choice"]'))ch(e.target.dataset.show)});if(q.get('choice'))ch(q.get('choice'));if(q.get('dialog')){var d=document.getElementById('dlg-'+q.get('dialog'));if(d){d.showModal();if(document.activeElement)document.activeElement.blur()}}})()</script>
+</body>
+</html>

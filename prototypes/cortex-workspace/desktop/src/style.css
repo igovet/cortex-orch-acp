@@ -1,0 +1,27 @@
+/* Archived round-one shell only, loaded for the legacy surfaces. The Workspace's styles live in src/workspace/ui/. */
+/* A slim bar stays above every archived concept, including concept B, which takes over the window below it. */
+.archive .archive-bar { position: fixed; top: 0; left: 0; right: 0; z-index: 100; height: 28px; margin: 0; padding: 0 12px; display: flex; align-items: center; gap: 8px; background: #2b2b33; color: #f2f2f5; font: 13px/1 system-ui, sans-serif; }
+.archive .archive-bar a { color: #c9d8ff; padding: 2px 4px; }
+.archive .cb-root { top: 28px; }
+.archive { padding-top: 28px; }
+.archive { position: fixed; inset: 0; overflow: auto; font-family: system-ui, sans-serif; color: #20242b; background: #f5f6f8; font-size: 16px; line-height: 1.5; color-scheme: light; }
+.archive * { box-sizing: border-box; }
+.archive .prototype-shell { padding: 16px 24px; background: #fff; border-bottom: 1px solid #c4c8ce; }
+.archive .mock-indicator { margin: 0 0 12px; font-weight: 600; }
+.archive .shell-controls, .archive .shell-controls nav { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
+.archive .shell-controls { justify-content: space-between; }
+.archive a { color: #244a88; padding: 8px; }
+.archive a[aria-current="page"] { font-weight: 700; text-decoration-thickness: 3px; }
+.archive button, .archive select { font: inherit; color: inherit; background: #fff; border: 1px solid #747b86; border-radius: 4px; padding: 8px 12px; min-height: 40px; }
+.archive label { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.archive button { cursor: pointer; }
+.archive :focus-visible { outline: 3px solid #244a88; outline-offset: 3px; }
+.archive .fixture-revision { margin: 12px 0 0; color: #4c5561; font-size: 0.875rem; }
+.archive > main { padding: 24px; }
+.archive .scenario-summary { max-width: 80ch; margin-bottom: 24px; }
+.archive .scenario-summary p { margin: 4px 0; }
+.archive h1 { font-size: 1.5rem; margin: 0 0 12px; }
+.archive p { overflow-wrap: anywhere; }
+.archive .skip-link { position: absolute; top: -100px; background: #fff; }
+.archive .skip-link:focus { top: 8px; left: 8px; }
+@media (max-width: 600px) { .archive .prototype-shell, .archive > main { padding: 16px; } .archive .shell-controls { align-items: flex-start; flex-direction: column; } }

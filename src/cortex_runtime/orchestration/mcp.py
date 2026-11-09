@@ -98,6 +98,13 @@ def dispatch(store, channel, operation, args):
     validate(schema, args)
     machine = TaskMachine(store)
     from .gateway import _authority
+    if operation == 'check_preflight':
+        from .check_preflight import probe
+        from ..task_workspace import task_root
+        with store.connection() as db:
+            _authority(db, channel)
+            root = task_root(db, channel.task_id)
+        return probe(root, args['argv'])
     if operation == 'task_get_context':
         return _task_get_context(store, channel)
     if operation == 'answer_submit':
@@ -160,6 +167,15 @@ def dispatch(store, channel, operation, args):
                 _authority(db, channel)
                 record_presented_failures(db, channel.task_id, channel.attempt_id, channel.channel_id, args['checks'])
                 db.commit()
+            from .check_preflight import require_executable
+            from .worker_checks import _policy_blocker
+            from ..task_workspace import task_root
+            with store.connection() as db:
+                _authority(db, channel)
+                root = task_root(db, channel.task_id)
+            require_executable(root, [c['command'] for c in args['checks']
+                                     if c.get('command') and c['outcome'] in ('not_run', 'unverified')
+                                     and not _policy_blocker(dict(argv=c['command']), c)])
             # Observed changes that match an unread situational skill refuse
             # the result before anything is recorded, so a retry after
             # read_skill (even with this request_key) goes through. A request

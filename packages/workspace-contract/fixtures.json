@@ -1,0 +1,1519 @@
+[
+  {
+    "name": "create",
+    "type": "Command",
+    "value": {
+      "protocol": {
+        "major": 1,
+        "minor": 0
+      },
+      "requestId": "req-1",
+      "projectId": "project-1",
+      "actorId": "local-peer",
+      "operation": "tasks.create",
+      "target": "task-1",
+      "expectedVersion": "0",
+      "ownerEpoch": null,
+      "payload": {
+        "description": "Build a thing\nKeep multiline 😀"
+      }
+    },
+    "valid": true
+  },
+  {
+    "name": "start",
+    "type": "Command",
+    "value": {
+      "protocol": {
+        "major": 1,
+        "minor": 0
+      },
+      "requestId": "req-2",
+      "projectId": "project-1",
+      "actorId": "local-peer",
+      "operation": "tasks.start",
+      "target": "task-1",
+      "expectedVersion": "1",
+      "ownerEpoch": null,
+      "payload": {}
+    },
+    "valid": true
+  },
+  {
+    "name": "answer",
+    "type": "Command",
+    "value": {
+      "protocol": {
+        "major": 1,
+        "minor": 0
+      },
+      "requestId": "req-1",
+      "projectId": "project-1",
+      "actorId": "local-peer",
+      "operation": "decisions.answer",
+      "target": "task-1",
+      "expectedVersion": "2",
+      "ownerEpoch": "3",
+      "payload": {
+        "executionId": "exec",
+        "acpSessionId": "session",
+        "batchId": null,
+        "answers": [
+          {
+            "decisionId": "decision",
+            "expectedVersion": "2",
+            "questionId": "question",
+            "optionId": null,
+            "text": "Other\nanswer"
+          }
+        ]
+      }
+    },
+    "valid": true
+  },
+  {
+    "name": "receipt",
+    "type": "Receipt",
+    "value": {
+      "requestId": "req-1",
+      "outcome": "recorded",
+      "target": "task-1",
+      "entityVersion": "9007199254740993",
+      "recordedAt": "2026-11-05T00:00:00Z",
+      "additive": true
+    },
+    "valid": true
+  },
+  {
+    "name": "capabilities",
+    "type": "Capabilities",
+    "value": {
+      "protocol": {
+        "major": 1,
+        "minor": 0
+      },
+      "buildIdentity": "1.0.6+test",
+      "schemaFingerprint": "e24bf2391268aea08e621a7aa8e1f65d71132c2f01329f4fbef393961b52155c",
+      "mappingVersion": "1",
+      "operations": [
+        "capabilities.get",
+        "project.snapshot",
+        "tasks.list",
+        "tasks.get",
+        "tasks.create",
+        "tasks.start",
+        "executions.get",
+        "decisions.list",
+        "decisions.get",
+        "decisions.answer",
+        "results.get",
+        "history.page",
+        "events.page",
+        "requests.get"
+      ],
+      "limits": {
+        "tasksPerPage": 50,
+        "eventsPerPage": 100,
+        "historyPerPage": 100,
+        "pageContentBytes": 65536,
+        "frameBytes": 1048576,
+        "textCharacters": 32000,
+        "requestIdCharacters": 128
+      },
+      "generation": "9007199254740993",
+      "acpCapabilities": {}
+    },
+    "valid": true
+  },
+  {
+    "name": "query",
+    "type": "Query",
+    "value": {
+      "protocol": {
+        "major": 1,
+        "minor": 0
+      },
+      "requestId": "r",
+      "projectId": "p",
+      "operation": "tasks.list",
+      "limit": 50
+    },
+    "valid": true
+  },
+  {
+    "name": "task",
+    "type": "Task",
+    "value": {
+      "taskId": "t",
+      "description": "task",
+      "title": null,
+      "titleAvailability": "not_connected",
+      "version": "1",
+      "executionId": null,
+      "phase": "not_started",
+      "runtimeState": null,
+      "executionState": "not_started",
+      "waitReason": null,
+      "lastConfirmedAt": null,
+      "warnings": []
+    },
+    "valid": true
+  },
+  {
+    "name": "execution",
+    "type": "Execution",
+    "value": {
+      "executionId": "e",
+      "taskId": "t",
+      "version": "1",
+      "runtimeTaskId": null,
+      "acpSessionId": null,
+      "runtimePlanRevision": null,
+      "ownerEpoch": null,
+      "state": "starting",
+      "warnings": []
+    },
+    "valid": true
+  },
+  {
+    "name": "decision",
+    "type": "Decision",
+    "value": {
+      "decisionId": "d",
+      "kind": "question",
+      "questionId": "q",
+      "batchId": null,
+      "executionId": "e",
+      "acpSessionId": "s",
+      "scope": "worker",
+      "prompt": "Which?",
+      "options": [
+        {
+          "optionId": "o",
+          "label": "A"
+        }
+      ],
+      "version": "1",
+      "ownerEpoch": "1",
+      "requirementRevision": "2",
+      "status": "pending",
+      "allowedOperations": [
+        "decisions.answer"
+      ]
+    },
+    "valid": true
+  },
+  {
+    "name": "result",
+    "type": "Result",
+    "value": {
+      "resultId": "r",
+      "version": "1",
+      "taskId": "t",
+      "executionId": "e",
+      "kind": "work",
+      "text": "result",
+      "evidence": [
+        {
+          "reference": "report",
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      ],
+      "checks": [
+        {
+          "name": "unrun",
+          "outcome": "not_run",
+          "evidenceRef": null
+        }
+      ],
+      "observedWorkspaceDigest": null
+    },
+    "valid": true
+  },
+  {
+    "name": "event",
+    "type": "Event",
+    "value": {
+      "eventId": "ev",
+      "sequence": "9007199254740993",
+      "entityId": "t",
+      "entityVersion": "2",
+      "kind": "task",
+      "recordedAt": "now"
+    },
+    "valid": true
+  },
+  {
+    "name": "history",
+    "type": "HistoryRow",
+    "value": {
+      "historyId": "h",
+      "sequence": "1",
+      "revision": "0",
+      "kind": "tool",
+      "text": "safe content",
+      "toolStatus": "completed",
+      "availability": "available"
+    },
+    "valid": true
+  },
+  {
+    "name": "TaskPage",
+    "type": "TaskPage",
+    "value": {
+      "items": [
+        {
+          "taskId": "t",
+          "description": "task",
+          "title": null,
+          "titleAvailability": "not_connected",
+          "version": "1",
+          "executionId": null,
+          "phase": "not_started",
+          "runtimeState": null,
+          "executionState": "not_started",
+          "waitReason": null,
+          "lastConfirmedAt": null,
+          "warnings": []
+        }
+      ],
+      "nextCursor": null,
+      "highWatermark": "9007199254740993"
+    },
+    "valid": true
+  },
+  {
+    "name": "EventPage",
+    "type": "EventPage",
+    "value": {
+      "items": [
+        {
+          "eventId": "ev",
+          "sequence": "9007199254740993",
+          "entityId": "t",
+          "entityVersion": "2",
+          "kind": "task",
+          "recordedAt": "now"
+        }
+      ],
+      "nextCursor": null,
+      "highWatermark": "9007199254740993"
+    },
+    "valid": true
+  },
+  {
+    "name": "HistoryPage",
+    "type": "HistoryPage",
+    "value": {
+      "items": [
+        {
+          "historyId": "h",
+          "sequence": "1",
+          "revision": "0",
+          "kind": "tool",
+          "text": "safe content",
+          "toolStatus": "completed",
+          "availability": "available"
+        }
+      ],
+      "nextCursor": null,
+      "highWatermark": "9007199254740993"
+    },
+    "valid": true
+  },
+  {
+    "name": "DecisionPage",
+    "type": "DecisionPage",
+    "value": {
+      "items": [
+        {
+          "decisionId": "d",
+          "kind": "question",
+          "questionId": "q",
+          "batchId": null,
+          "executionId": "e",
+          "acpSessionId": "s",
+          "scope": "worker",
+          "prompt": "Which?",
+          "options": [
+            {
+              "optionId": "o",
+              "label": "A"
+            }
+          ],
+          "version": "1",
+          "ownerEpoch": "1",
+          "requirementRevision": "2",
+          "status": "pending",
+          "allowedOperations": [
+            "decisions.answer"
+          ]
+        }
+      ],
+      "nextCursor": null,
+      "highWatermark": "9007199254740993"
+    },
+    "valid": true
+  },
+  {
+    "name": "snapshot",
+    "type": "ProjectSnapshot",
+    "value": {
+      "projectId": "p",
+      "version": "1",
+      "highWatermark": "1",
+      "tasks": {
+        "items": [
+          {
+            "taskId": "t",
+            "description": "task",
+            "title": null,
+            "titleAvailability": "not_connected",
+            "version": "1",
+            "executionId": null,
+            "phase": "not_started",
+            "runtimeState": null,
+            "executionState": "not_started",
+            "waitReason": null,
+            "lastConfirmedAt": null,
+            "warnings": []
+          }
+        ],
+        "nextCursor": null,
+        "highWatermark": "1"
+      }
+    },
+    "valid": true
+  },
+  {
+    "name": "extra-command",
+    "type": "Command",
+    "value": {
+      "protocol": {
+        "major": 1,
+        "minor": 0
+      },
+      "requestId": "req-1",
+      "projectId": "project-1",
+      "actorId": "local-peer",
+      "operation": "tasks.create",
+      "target": "task-1",
+      "expectedVersion": "0",
+      "ownerEpoch": null,
+      "payload": {
+        "description": "Build a thing\nKeep multiline 😀"
+      },
+      "extra": 1
+    },
+    "valid": false
+  },
+  {
+    "name": "extra-payload",
+    "type": "Command",
+    "value": {
+      "protocol": {
+        "major": 1,
+        "minor": 0
+      },
+      "requestId": "req-1",
+      "projectId": "project-1",
+      "actorId": "local-peer",
+      "operation": "tasks.create",
+      "target": "task-1",
+      "expectedVersion": "0",
+      "ownerEpoch": null,
+      "payload": {
+        "description": "hi",
+        "title": "forbidden"
+      }
+    },
+    "valid": false
+  },
+  {
+    "name": "numeric-version",
+    "type": "Command",
+    "value": {
+      "protocol": {
+        "major": 1,
+        "minor": 0
+      },
+      "requestId": "req-1",
+      "projectId": "project-1",
+      "actorId": "local-peer",
+      "operation": "tasks.create",
+      "target": "task-1",
+      "expectedVersion": 9007199254740992,
+      "ownerEpoch": null,
+      "payload": {
+        "description": "Build a thing\nKeep multiline 😀"
+      }
+    },
+    "valid": false
+  },
+  {
+    "name": "leading-zero",
+    "type": "Command",
+    "value": {
+      "protocol": {
+        "major": 1,
+        "minor": 0
+      },
+      "requestId": "req-1",
+      "projectId": "project-1",
+      "actorId": "local-peer",
+      "operation": "tasks.create",
+      "target": "task-1",
+      "expectedVersion": "00",
+      "ownerEpoch": null,
+      "payload": {
+        "description": "Build a thing\nKeep multiline 😀"
+      }
+    },
+    "valid": false
+  },
+  {
+    "name": "oversize-request",
+    "type": "Command",
+    "value": {
+      "protocol": {
+        "major": 1,
+        "minor": 0
+      },
+      "requestId": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "projectId": "project-1",
+      "actorId": "local-peer",
+      "operation": "tasks.create",
+      "target": "task-1",
+      "expectedVersion": "0",
+      "ownerEpoch": null,
+      "payload": {
+        "description": "Build a thing\nKeep multiline 😀"
+      }
+    },
+    "valid": false
+  },
+  {
+    "name": "missing-field",
+    "type": "Command",
+    "value": {
+      "protocol": {
+        "major": 1,
+        "minor": 0
+      },
+      "requestId": "req-1",
+      "projectId": "project-1",
+      "operation": "tasks.create",
+      "target": "task-1",
+      "expectedVersion": "0",
+      "ownerEpoch": null,
+      "payload": {
+        "description": "Build a thing\nKeep multiline 😀"
+      }
+    },
+    "valid": false
+  },
+  {
+    "name": "unsupported-operation",
+    "type": "Command",
+    "value": {
+      "protocol": {
+        "major": 1,
+        "minor": 0
+      },
+      "requestId": "req-1",
+      "projectId": "project-1",
+      "actorId": "local-peer",
+      "operation": "shell.run",
+      "target": "task-1",
+      "expectedVersion": "0",
+      "ownerEpoch": null,
+      "payload": {
+        "description": "Build a thing\nKeep multiline 😀"
+      }
+    },
+    "valid": false
+  },
+  {
+    "name": "create-version",
+    "type": "Command",
+    "value": {
+      "protocol": {
+        "major": 1,
+        "minor": 0
+      },
+      "requestId": "req-1",
+      "projectId": "project-1",
+      "actorId": "local-peer",
+      "operation": "tasks.create",
+      "target": "task-1",
+      "expectedVersion": "1",
+      "ownerEpoch": null,
+      "payload": {
+        "description": "Build a thing\nKeep multiline 😀"
+      }
+    },
+    "valid": false
+  },
+  {
+    "name": "empty-description",
+    "type": "Command",
+    "value": {
+      "protocol": {
+        "major": 1,
+        "minor": 0
+      },
+      "requestId": "req-1",
+      "projectId": "project-1",
+      "actorId": "local-peer",
+      "operation": "tasks.create",
+      "target": "task-1",
+      "expectedVersion": "0",
+      "ownerEpoch": null,
+      "payload": {
+        "description": ""
+      }
+    },
+    "valid": false
+  },
+  {
+    "name": "numeric-sequence",
+    "type": "Event",
+    "value": {
+      "eventId": "ev",
+      "sequence": 9007199254740992,
+      "entityId": "t",
+      "entityVersion": "2",
+      "kind": "task",
+      "recordedAt": "now"
+    },
+    "valid": false
+  },
+  {
+    "name": "null-answer-epoch",
+    "type": "Command",
+    "value": {
+      "protocol": {
+        "major": 1,
+        "minor": 0
+      },
+      "requestId": "req-1",
+      "projectId": "project-1",
+      "actorId": "local-peer",
+      "operation": "decisions.answer",
+      "target": "task-1",
+      "expectedVersion": "2",
+      "ownerEpoch": null,
+      "payload": {
+        "executionId": "exec",
+        "acpSessionId": "session",
+        "batchId": null,
+        "answers": [
+          {
+            "decisionId": "decision",
+            "expectedVersion": "2",
+            "questionId": "question",
+            "optionId": null,
+            "text": "Other\nanswer"
+          }
+        ]
+      }
+    },
+    "valid": false
+  },
+  {
+    "name": "too-many-tasks",
+    "type": "TaskPage",
+    "value": {
+      "items": [
+        {
+          "taskId": "t",
+          "description": "task",
+          "title": null,
+          "titleAvailability": "not_connected",
+          "version": "1",
+          "executionId": null,
+          "phase": "not_started",
+          "runtimeState": null,
+          "executionState": "not_started",
+          "waitReason": null,
+          "lastConfirmedAt": null,
+          "warnings": []
+        },
+        {
+          "taskId": "t",
+          "description": "task",
+          "title": null,
+          "titleAvailability": "not_connected",
+          "version": "1",
+          "executionId": null,
+          "phase": "not_started",
+          "runtimeState": null,
+          "executionState": "not_started",
+          "waitReason": null,
+          "lastConfirmedAt": null,
+          "warnings": []
+        },
+        {
+          "taskId": "t",
+          "description": "task",
+          "title": null,
+          "titleAvailability": "not_connected",
+          "version": "1",
+          "executionId": null,
+          "phase": "not_started",
+          "runtimeState": null,
+          "executionState": "not_started",
+          "waitReason": null,
+          "lastConfirmedAt": null,
+          "warnings": []
+        },
+        {
+          "taskId": "t",
+          "description": "task",
+          "title": null,
+          "titleAvailability": "not_connected",
+          "version": "1",
+          "executionId": null,
+          "phase": "not_started",
+          "runtimeState": null,
+          "executionState": "not_started",
+          "waitReason": null,
+          "lastConfirmedAt": null,
+          "warnings": []
+        },
+        {
+          "taskId": "t",
+          "description": "task",
+          "title": null,
+          "titleAvailability": "not_connected",
+          "version": "1",
+          "executionId": null,
+          "phase": "not_started",
+          "runtimeState": null,
+          "executionState": "not_started",
+          "waitReason": null,
+          "lastConfirmedAt": null,
+          "warnings": []
+        },
+        {
+          "taskId": "t",
+          "description": "task",
+          "title": null,
+          "titleAvailability": "not_connected",
+          "version": "1",
+          "executionId": null,
+          "phase": "not_started",
+          "runtimeState": null,
+          "executionState": "not_started",
+          "waitReason": null,
+          "lastConfirmedAt": null,
+          "warnings": []
+        },
+        {
+          "taskId": "t",
+          "description": "task",
+          "title": null,
+          "titleAvailability": "not_connected",
+          "version": "1",
+          "executionId": null,
+          "phase": "not_started",
+          "runtimeState": null,
+          "executionState": "not_started",
+          "waitReason": null,
+          "lastConfirmedAt": null,
+          "warnings": []
+        },
+        {
+          "taskId": "t",
+          "description": "task",
+          "title": null,
+          "titleAvailability": "not_connected",
+          "version": "1",
+          "executionId": null,
+          "phase": "not_started",
+          "runtimeState": null,
+          "executionState": "not_started",
+          "waitReason": null,
+          "lastConfirmedAt": null,
+          "warnings": []
+        },
+        {
+          "taskId": "t",
+          "description": "task",
+          "title": null,
+          "titleAvailability": "not_connected",
+          "version": "1",
+          "executionId": null,
+          "phase": "not_started",
+          "runtimeState": null,
+          "executionState": "not_started",
+          "waitReason": null,
+          "lastConfirmedAt": null,
+          "warnings": []
+        },
+        {
+          "taskId": "t",
+          "description": "task",
+          "title": null,
+          "titleAvailability": "not_connected",
+          "version": "1",
+          "executionId": null,
+          "phase": "not_started",
+          "runtimeState": null,
+          "executionState": "not_started",
+          "waitReason": null,
+          "lastConfirmedAt": null,
+          "warnings": []
+        },
+        {
+          "taskId": "t",
+          "description": "task",
+          "title": null,
+          "titleAvailability": "not_connected",
+          "version": "1",
+          "executionId": null,
+          "phase": "not_started",
+          "runtimeState": null,
+          "executionState": "not_started",
+          "waitReason": null,
+          "lastConfirmedAt": null,
+          "warnings": []
+        },
+        {
+          "taskId": "t",
+          "description": "task",
+          "title": null,
+          "titleAvailability": "not_connected",
+          "version": "1",
+          "executionId": null,
+          "phase": "not_started",
+          "runtimeState": null,
+          "executionState": "not_started",
+          "waitReason": null,
+          "lastConfirmedAt": null,
+          "warnings": []
+        },
+        {
+          "taskId": "t",
+          "description": "task",
+          "title": null,
+          "titleAvailability": "not_connected",
+          "version": "1",
+          "executionId": null,
+          "phase": "not_started",
+          "runtimeState": null,
+          "executionState": "not_started",
+          "waitReason": null,
+          "lastConfirmedAt": null,
+          "warnings": []
+        },
+        {
+          "taskId": "t",
+          "description": "task",
+          "title": null,
+          "titleAvailability": "not_connected",
+          "version": "1",
+          "executionId": null,
+          "phase": "not_started",
+          "runtimeState": null,
+          "executionState": "not_started",
+          "waitReason": null,
+          "lastConfirmedAt": null,
+          "warnings": []
+        },
+        {
+          "taskId": "t",
+          "description": "task",
+          "title": null,
+          "titleAvailability": "not_connected",
+          "version": "1",
+          "executionId": null,
+          "phase": "not_started",
+          "runtimeState": null,
+          "executionState": "not_started",
+          "waitReason": null,
+          "lastConfirmedAt": null,
+          "warnings": []
+        },
+        {
+          "taskId": "t",
+          "description": "task",
+          "title": null,
+          "titleAvailability": "not_connected",
+          "version": "1",
+          "executionId": null,
+          "phase": "not_started",
+          "runtimeState": null,
+          "executionState": "not_started",
+          "waitReason": null,
+          "lastConfirmedAt": null,
+          "warnings": []
+        },
+        {
+          "taskId": "t",
+          "description": "task",
+          "title": null,
+          "titleAvailability": "not_connected",
+          "version": "1",
+          "executionId": null,
+          "phase": "not_started",
+          "runtimeState": null,
+          "executionState": "not_started",
+          "waitReason": null,
+          "lastConfirmedAt": null,
+          "warnings": []
+        },
+        {
+          "taskId": "t",
+          "description": "task",
+          "title": null,
+          "titleAvailability": "not_connected",
+          "version": "1",
+          "executionId": null,
+          "phase": "not_started",
+          "runtimeState": null,
+          "executionState": "not_started",
+          "waitReason": null,
+          "lastConfirmedAt": null,
+          "warnings": []
+        },
+        {
+          "taskId": "t",
+          "description": "task",
+          "title": null,
+          "titleAvailability": "not_connected",
+          "version": "1",
+          "executionId": null,
+          "phase": "not_started",
+          "runtimeState": null,
+          "executionState": "not_started",
+          "waitReason": null,
+          "lastConfirmedAt": null,
+          "warnings": []
+        },
+        {
+          "taskId": "t",
+          "description": "task",
+          "title": null,
+          "titleAvailability": "not_connected",
+          "version": "1",
+          "executionId": null,
+          "phase": "not_started",
+          "runtimeState": null,
+          "executionState": "not_started",
+          "waitReason": null,
+          "lastConfirmedAt": null,
+          "warnings": []
+        },
+        {
+          "taskId": "t",
+          "description": "task",
+          "title": null,
+          "titleAvailability": "not_connected",
+          "version": "1",
+          "executionId": null,
+          "phase": "not_started",
+          "runtimeState": null,
+          "executionState": "not_started",
+          "waitReason": null,
+          "lastConfirmedAt": null,
+          "warnings": []
+        },
+        {
+          "taskId": "t",
+          "description": "task",
+          "title": null,
+          "titleAvailability": "not_connected",
+          "version": "1",
+          "executionId": null,
+          "phase": "not_started",
+          "runtimeState": null,
+          "executionState": "not_started",
+          "waitReason": null,
+          "lastConfirmedAt": null,
+          "warnings": []
+        },
+        {
+          "taskId": "t",
+          "description": "task",
+          "title": null,
+          "titleAvailability": "not_connected",
+          "version": "1",
+          "executionId": null,
+          "phase": "not_started",
+          "runtimeState": null,
+          "executionState": "not_started",
+          "waitReason": null,
+          "lastConfirmedAt": null,
+          "warnings": []
+        },
+        {
+          "taskId": "t",
+          "description": "task",
+          "title": null,
+          "titleAvailability": "not_connected",
+          "version": "1",
+          "executionId": null,
+          "phase": "not_started",
+          "runtimeState": null,
+          "executionState": "not_started",
+          "waitReason": null,
+          "lastConfirmedAt": null,
+          "warnings": []
+        },
+        {
+          "taskId": "t",
+          "description": "task",
+          "title": null,
+          "titleAvailability": "not_connected",
+          "version": "1",
+          "executionId": null,
+          "phase": "not_started",
+          "runtimeState": null,
+          "executionState": "not_started",
+          "waitReason": null,
+          "lastConfirmedAt": null,
+          "warnings": []
+        },
+        {
+          "taskId": "t",
+          "description": "task",
+          "title": null,
+          "titleAvailability": "not_connected",
+          "version": "1",
+          "executionId": null,
+          "phase": "not_started",
+          "runtimeState": null,
+          "executionState": "not_started",
+          "waitReason": null,
+          "lastConfirmedAt": null,
+          "warnings": []
+        },
+        {
+          "taskId": "t",
+          "description": "task",
+          "title": null,
+          "titleAvailability": "not_connected",
+          "version": "1",
+          "executionId": null,
+          "phase": "not_started",
+          "runtimeState": null,
+          "executionState": "not_started",
+          "waitReason": null,
+          "lastConfirmedAt": null,
+          "warnings": []
+        },
+        {
+          "taskId": "t",
+          "description": "task",
+          "title": null,
+          "titleAvailability": "not_connected",
+          "version": "1",
+          "executionId": null,
+          "phase": "not_started",
+          "runtimeState": null,
+          "executionState": "not_started",
+          "waitReason": null,
+          "lastConfirmedAt": null,
+          "warnings": []
+        },
+        {
+          "taskId": "t",
+          "description": "task",
+          "title": null,
+          "titleAvailability": "not_connected",
+          "version": "1",
+          "executionId": null,
+          "phase": "not_started",
+          "runtimeState": null,
+          "executionState": "not_started",
+          "waitReason": null,
+          "lastConfirmedAt": null,
+          "warnings": []
+        },
+        {
+          "taskId": "t",
+          "description": "task",
+          "title": null,
+          "titleAvailability": "not_connected",
+          "version": "1",
+          "executionId": null,
+          "phase": "not_started",
+          "runtimeState": null,
+          "executionState": "not_started",
+          "waitReason": null,
+          "lastConfirmedAt": null,
+          "warnings": []
+        },
+        {
+          "taskId": "t",
+          "description": "task",
+          "title": null,
+          "titleAvailability": "not_connected",
+          "version": "1",
+          "executionId": null,
+          "phase": "not_started",
+          "runtimeState": null,
+          "executionState": "not_started",
+          "waitReason": null,
+          "lastConfirmedAt": null,
+          "warnings": []
+        },
+        {
+          "taskId": "t",
+          "description": "task",
+          "title": null,
+          "titleAvailability": "not_connected",
+          "version": "1",
+          "executionId": null,
+          "phase": "not_started",
+          "runtimeState": null,
+          "executionState": "not_started",
+          "waitReason": null,
+          "lastConfirmedAt": null,
+          "warnings": []
+        },
+        {
+          "taskId": "t",
+          "description": "task",
+          "title": null,
+          "titleAvailability": "not_connected",
+          "version": "1",
+          "executionId": null,
+          "phase": "not_started",
+          "runtimeState": null,
+          "executionState": "not_started",
+          "waitReason": null,
+          "lastConfirmedAt": null,
+          "warnings": []
+        },
+        {
+          "taskId": "t",
+          "description": "task",
+          "title": null,
+          "titleAvailability": "not_connected",
+          "version": "1",
+          "executionId": null,
+          "phase": "not_started",
+          "runtimeState": null,
+          "executionState": "not_started",
+          "waitReason": null,
+          "lastConfirmedAt": null,
+          "warnings": []
+        },
+        {
+          "taskId": "t",
+          "description": "task",
+          "title": null,
+          "titleAvailability": "not_connected",
+          "version": "1",
+          "executionId": null,
+          "phase": "not_started",
+          "runtimeState": null,
+          "executionState": "not_started",
+          "waitReason": null,
+          "lastConfirmedAt": null,
+          "warnings": []
+        },
+        {
+          "taskId": "t",
+          "description": "task",
+          "title": null,
+          "titleAvailability": "not_connected",
+          "version": "1",
+          "executionId": null,
+          "phase": "not_started",
+          "runtimeState": null,
+          "executionState": "not_started",
+          "waitReason": null,
+          "lastConfirmedAt": null,
+          "warnings": []
+        },
+        {
+          "taskId": "t",
+          "description": "task",
+          "title": null,
+          "titleAvailability": "not_connected",
+          "version": "1",
+          "executionId": null,
+          "phase": "not_started",
+          "runtimeState": null,
+          "executionState": "not_started",
+          "waitReason": null,
+          "lastConfirmedAt": null,
+          "warnings": []
+        },
+        {
+          "taskId": "t",
+          "description": "task",
+          "title": null,
+          "titleAvailability": "not_connected",
+          "version": "1",
+          "executionId": null,
+          "phase": "not_started",
+          "runtimeState": null,
+          "executionState": "not_started",
+          "waitReason": null,
+          "lastConfirmedAt": null,
+          "warnings": []
+        },
+        {
+          "taskId": "t",
+          "description": "task",
+          "title": null,
+          "titleAvailability": "not_connected",
+          "version": "1",
+          "executionId": null,
+          "phase": "not_started",
+          "runtimeState": null,
+          "executionState": "not_started",
+          "waitReason": null,
+          "lastConfirmedAt": null,
+          "warnings": []
+        },
+        {
+          "taskId": "t",
+          "description": "task",
+          "title": null,
+          "titleAvailability": "not_connected",
+          "version": "1",
+          "executionId": null,
+          "phase": "not_started",
+          "runtimeState": null,
+          "executionState": "not_started",
+          "waitReason": null,
+          "lastConfirmedAt": null,
+          "warnings": []
+        },
+        {
+          "taskId": "t",
+          "description": "task",
+          "title": null,
+          "titleAvailability": "not_connected",
+          "version": "1",
+          "executionId": null,
+          "phase": "not_started",
+          "runtimeState": null,
+          "executionState": "not_started",
+          "waitReason": null,
+          "lastConfirmedAt": null,
+          "warnings": []
+        },
+        {
+          "taskId": "t",
+          "description": "task",
+          "title": null,
+          "titleAvailability": "not_connected",
+          "version": "1",
+          "executionId": null,
+          "phase": "not_started",
+          "runtimeState": null,
+          "executionState": "not_started",
+          "waitReason": null,
+          "lastConfirmedAt": null,
+          "warnings": []
+        },
+        {
+          "taskId": "t",
+          "description": "task",
+          "title": null,
+          "titleAvailability": "not_connected",
+          "version": "1",
+          "executionId": null,
+          "phase": "not_started",
+          "runtimeState": null,
+          "executionState": "not_started",
+          "waitReason": null,
+          "lastConfirmedAt": null,
+          "warnings": []
+        },
+        {
+          "taskId": "t",
+          "description": "task",
+          "title": null,
+          "titleAvailability": "not_connected",
+          "version": "1",
+          "executionId": null,
+          "phase": "not_started",
+          "runtimeState": null,
+          "executionState": "not_started",
+          "waitReason": null,
+          "lastConfirmedAt": null,
+          "warnings": []
+        },
+        {
+          "taskId": "t",
+          "description": "task",
+          "title": null,
+          "titleAvailability": "not_connected",
+          "version": "1",
+          "executionId": null,
+          "phase": "not_started",
+          "runtimeState": null,
+          "executionState": "not_started",
+          "waitReason": null,
+          "lastConfirmedAt": null,
+          "warnings": []
+        },
+        {
+          "taskId": "t",
+          "description": "task",
+          "title": null,
+          "titleAvailability": "not_connected",
+          "version": "1",
+          "executionId": null,
+          "phase": "not_started",
+          "runtimeState": null,
+          "executionState": "not_started",
+          "waitReason": null,
+          "lastConfirmedAt": null,
+          "warnings": []
+        },
+        {
+          "taskId": "t",
+          "description": "task",
+          "title": null,
+          "titleAvailability": "not_connected",
+          "version": "1",
+          "executionId": null,
+          "phase": "not_started",
+          "runtimeState": null,
+          "executionState": "not_started",
+          "waitReason": null,
+          "lastConfirmedAt": null,
+          "warnings": []
+        },
+        {
+          "taskId": "t",
+          "description": "task",
+          "title": null,
+          "titleAvailability": "not_connected",
+          "version": "1",
+          "executionId": null,
+          "phase": "not_started",
+          "runtimeState": null,
+          "executionState": "not_started",
+          "waitReason": null,
+          "lastConfirmedAt": null,
+          "warnings": []
+        },
+        {
+          "taskId": "t",
+          "description": "task",
+          "title": null,
+          "titleAvailability": "not_connected",
+          "version": "1",
+          "executionId": null,
+          "phase": "not_started",
+          "runtimeState": null,
+          "executionState": "not_started",
+          "waitReason": null,
+          "lastConfirmedAt": null,
+          "warnings": []
+        },
+        {
+          "taskId": "t",
+          "description": "task",
+          "title": null,
+          "titleAvailability": "not_connected",
+          "version": "1",
+          "executionId": null,
+          "phase": "not_started",
+          "runtimeState": null,
+          "executionState": "not_started",
+          "waitReason": null,
+          "lastConfirmedAt": null,
+          "warnings": []
+        },
+        {
+          "taskId": "t",
+          "description": "task",
+          "title": null,
+          "titleAvailability": "not_connected",
+          "version": "1",
+          "executionId": null,
+          "phase": "not_started",
+          "runtimeState": null,
+          "executionState": "not_started",
+          "waitReason": null,
+          "lastConfirmedAt": null,
+          "warnings": []
+        }
+      ],
+      "nextCursor": null,
+      "highWatermark": "1"
+    },
+    "valid": false
+  },
+  {
+    "name": "unknown-outcome",
+    "type": "Receipt",
+    "value": {
+      "requestId": "req-1",
+      "outcome": "future_success",
+      "target": "task-1",
+      "entityVersion": "9007199254740993",
+      "recordedAt": "2026-11-05T00:00:00Z",
+      "additive": true
+    },
+    "valid": true
+  },
+  {
+    "name": "additive-protocol",
+    "type": "Capabilities",
+    "valid": true,
+    "value": {
+      "protocol": {
+        "major": 1,
+        "minor": 12,
+        "futureField": true
+      },
+      "buildIdentity": "1.0.6+test",
+      "schemaFingerprint": "e24bf2391268aea08e621a7aa8e1f65d71132c2f01329f4fbef393961b52155c",
+      "mappingVersion": "1",
+      "operations": [
+        "capabilities.get",
+        "project.snapshot",
+        "tasks.list",
+        "tasks.get",
+        "tasks.create",
+        "tasks.start",
+        "executions.get",
+        "decisions.list",
+        "decisions.get",
+        "decisions.answer",
+        "results.get",
+        "history.page",
+        "events.page",
+        "requests.get"
+      ],
+      "limits": {
+        "tasksPerPage": 50,
+        "eventsPerPage": 100,
+        "historyPerPage": 100,
+        "pageContentBytes": 65536,
+        "frameBytes": 1048576,
+        "textCharacters": 32000,
+        "requestIdCharacters": 128
+      },
+      "generation": "9007199254740993",
+      "acpCapabilities": {}
+    }
+  },
+  {
+    "name": "too-large-task-query",
+    "type": "Query",
+    "valid": false,
+    "value": {
+      "protocol": {
+        "major": 1,
+        "minor": 0
+      },
+      "requestId": "r",
+      "projectId": "p",
+      "operation": "tasks.list",
+      "limit": 51
+    }
+  },
+  {
+    "name": "newline-sequence",
+    "type": "Event",
+    "valid": false,
+    "value": {
+      "eventId": "ev",
+      "sequence": "1\n",
+      "entityId": "t",
+      "entityVersion": "2",
+      "kind": "task",
+      "recordedAt": "now"
+    }
+  },
+  {
+    "name": "boolean-version",
+    "type": "Command",
+    "valid": false,
+    "value": {
+      "protocol": {
+        "major": 1,
+        "minor": 0
+      },
+      "requestId": "req-1",
+      "projectId": "project-1",
+      "actorId": "local-peer",
+      "operation": "tasks.create",
+      "target": "task-1",
+      "expectedVersion": true,
+      "ownerEpoch": null,
+      "payload": {
+        "description": "Build a thing\nKeep multiline 😀"
+      }
+    }
+  },
+  {
+    "name": "boolean-protocol",
+    "type": "Command",
+    "valid": false,
+    "value": {
+      "protocol": {
+        "major": true,
+        "minor": 0
+      },
+      "requestId": "req-1",
+      "projectId": "project-1",
+      "actorId": "local-peer",
+      "operation": "tasks.create",
+      "target": "task-1",
+      "expectedVersion": "0",
+      "ownerEpoch": null,
+      "payload": {
+        "description": "Build a thing\nKeep multiline 😀"
+      }
+    }
+  },
+  {
+    "name": "nested-extra-command",
+    "type": "Command",
+    "valid": false,
+    "value": {
+      "protocol": {
+        "major": 1,
+        "minor": 0,
+        "extra": true
+      },
+      "requestId": "req-1",
+      "projectId": "project-1",
+      "actorId": "local-peer",
+      "operation": "tasks.create",
+      "target": "task-1",
+      "expectedVersion": "0",
+      "ownerEpoch": null,
+      "payload": {
+        "description": "Build a thing\nKeep multiline 😀"
+      }
+    }
+  },
+  {
+    "name": "empty-answer-batch",
+    "type": "Command",
+    "valid": false,
+    "value": {
+      "protocol": {
+        "major": 1,
+        "minor": 0
+      },
+      "requestId": "req-1",
+      "projectId": "project-1",
+      "actorId": "local-peer",
+      "operation": "decisions.answer",
+      "target": "task-1",
+      "expectedVersion": "2",
+      "ownerEpoch": "3",
+      "payload": {
+        "executionId": "exec",
+        "acpSessionId": "session",
+        "batchId": null,
+        "answers": []
+      }
+    }
+  }
+]

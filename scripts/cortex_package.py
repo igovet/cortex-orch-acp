@@ -19,7 +19,15 @@ BASE = '1.0.6'
 PAYLOAD_ENTRIES = (
     'src', 'skills', 'agent-sources', 'assets', 'policy', 'report-templates', 'integrations',
     'package-identity.json', 'pinned-dependencies.json', 'profiles.json',
-    'runtime-payload.json',
+    'runtime-payload.json', 'crates/workspace-service/agent_launcher.py',
+    'crates/workspace-service/machine_tools.py', 'crates/workspace-service/task_git.py',
+    'crates/workspace-service/same_branch.py',
+    'crates/workspace-service/scheduler.py', 'crates/workspace-service/mcp_discovery.py',
+    'crates/workspace-service/task_titles.py', 'crates/workspace-service/directory_search.py',
+    'crates/workspace-service/maintenance.py', 'crates/workspace-service/engine_connections.py',
+    'crates/workspace-service/owner_workflows.py', 'crates/workspace-service/sprint_recovery.py',
+    'crates/workspace-service/planning_jobs.py',
+    'packaging/engines', 'packaging/voice',
 )
 PASEO_PLUGIN = ROOT / 'integrations' / 'paseo'
 

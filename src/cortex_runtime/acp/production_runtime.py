@@ -229,6 +229,7 @@ class ProductionOrchestratingRuntime:
         project_root=None, source_origin=None, source_event_id=None, host_elicitor=None,
         emit_tool_call=None, host_permission_requester=None, host_fs_requester=None,
         host_mcp_servers=None, prompt_blocks=None, client_surface=None, emit_display_update=None,
+        resume_recorded=False,
     ):
         if not project_root:
             raise RouteUnresolved("project_root_unresolved")
@@ -241,7 +242,7 @@ class ProductionOrchestratingRuntime:
                 emit_tool_call=emit_tool_call, emit_display_update=emit_display_update,
                 host_mcp_servers=host_mcp_servers,
                 prompt_blocks=prompt_blocks,
-                client_surface=client_surface,
+                client_surface=client_surface, resume_recorded=resume_recorded,
             )
         except PortableError as error:
             # Every qualification/configuration/ownership refusal this

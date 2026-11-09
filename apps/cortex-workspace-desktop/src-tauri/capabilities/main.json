@@ -1,0 +1,20 @@
+{
+  "identifier": "main",
+  "description": "Only the bundled main window can use the closed Workspace bridge, receive invalidations and drive its own undecorated frame.",
+  "local": true,
+  "windows": [
+    "main"
+  ],
+  "permissions": [
+    "allow-workspace-request",
+    "allow-workspace-notify",
+    "allow-workspace-close",
+    "core:event:allow-listen",
+    "core:event:allow-unlisten",
+    "core:window:allow-minimize",
+    "core:window:allow-toggle-maximize",
+    "core:window:allow-is-maximized",
+    "core:window:allow-close",
+    "core:window:allow-start-dragging"
+  ]
+}

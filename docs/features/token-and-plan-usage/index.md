@@ -142,6 +142,10 @@ The default (no-paid) pytest suite never spawns the real CLI: every call passes 
 The automated tests verify per-call aggregation, cache-inclusive fallback totals, and unknown-call disclosure. They do not establish rendered Paseo behavior; that requires an isolated real-client observation.
 
 
+## Codex weekly display
+
+Workspace reads Codex's retained rollout rate-limit windows without a model call. The quota reader preserves each window's reported `window_minutes` as optional `windowMinutes` display metadata. Only a positive integer duration of 10080 minutes qualifies for the weekly display, in either the `primary` or `secondary` slot. Slot names alone are insufficient: some accounts report their weekly limit as `primary` with no secondary window. Missing duration, short windows and expired windows are not presented as weekly usage. The original slot names and routing quota associations are unchanged. Regression coverage: `tests/test_workspace_weekly_usage.py`.
+
 ## Model applicability is owner data
 
 Reported window labels do not imply a model family. Routing consumers apply exact `quota_windows` associations from the winning routing file. Unmapped labels conservatively apply to every model; unknown numeric evidence is never zero. Shared and scoped windows keep their original timestamps, expiry and latest-observation/cache behavior. A window whose `resets_at` has passed no longer counts as used: it is unknown until the engine reports its replacement, and it is never treated as zero. Raw status lists remaining reported live windows (excluding Claude's retired session window and paid overage) without estimating model headroom. See [exact quota-window associations](../../configuration.md#exact-quota-window-associations). The implementation and fake CLI/cache tests do not establish a current live quota observation or production adoption.

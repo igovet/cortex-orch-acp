@@ -128,12 +128,9 @@ def visible_windows(record, environ: Mapping[str, str] | None = None,
     Cache reads, token totals and context occupancy are not subscription use.
     """
     now = time.time() if now is None else now
-    if record.engine == "codex-acp":
-        source = _codex_windows(record)
-    elif record.engine == "claude-agent-acp":
-        source = _windows_for(record, environ, now)
-    else:
+    if record.engine not in ("codex-acp", "claude-agent-acp"):
         return []
+    source = _windows_for(record, environ, now)
     result = []
     for name, window in source.items():
         if not isinstance(name, str) or not isinstance(window, Mapping) or "overage" in name.casefold():
@@ -145,7 +142,11 @@ def visible_windows(record, environ: Mapping[str, str] | None = None,
             reset = None
         elif reset <= now:
             continue
-        result.append({"name": name, "usedPercent": float(used), "resetsAt": reset})
+        item = {"name": name, "usedPercent": float(used), "resetsAt": reset}
+        minutes = window.get("window_minutes")
+        if type(minutes) is int and minutes > 0:
+            item["windowMinutes"] = minutes
+        result.append(item)
     return sorted(result, key=lambda item: item["name"])
 
 
@@ -292,7 +293,8 @@ def _codex_windows(record) -> dict:
     for name in ("primary", "secondary"):
         window = limits.get(name)
         if isinstance(window, Mapping) and isinstance(window.get("used_percent"), (int, float)):
-            windows[name] = dict(used=window["used_percent"], resets_at=window.get("resets_at"))
+            windows[name] = dict(used=window["used_percent"], resets_at=window.get("resets_at"),
+                                 window_minutes=window.get("window_minutes"))
     return windows
 
 
@@ -393,7 +395,21 @@ def _read_claude_usage_cli(record, environ: Mapping[str, str] | None, now: float
     path_value = base.get("PATH", "")
     binary = shutil.which("claude", path=path_value) if path_value else shutil.which("claude")
     if not binary:
-        return None
+        # Packaged desktop services do not inherit an interactive shell's PATH.
+        # Use the same verified SDK native executable shipped for account login.
+        try:
+            import platform
+            from ..engine.install_resolution import resolve_verified_install, _resolve_node_package_dir
+            install = resolve_verified_install(record)
+            arch = {"x86_64": "x64", "aarch64": "arm64"}.get(platform.machine())
+            package = _resolve_node_package_dir(Path(install.package_json).parent,
+                                                "@anthropic-ai/claude-agent-sdk-linux-" + (arch or ""), "package.json")
+            candidate = package / "claude" if package else None
+            if candidate is None or not candidate.is_file() or not os.access(candidate, os.X_OK):
+                return None
+            binary = str(candidate)
+        except Exception:
+            return None
     try:
         # Re-verifies this connection against the on-disk registry before
         # trusting its credential_ref -- the same guarantee

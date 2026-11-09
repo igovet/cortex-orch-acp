@@ -1,0 +1,221 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<title>Merge conflict - Cortex Workspace mockup</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script>(function(){var r=document.documentElement,t=new URLSearchParams(location.search).get('theme');try{t=t||localStorage.getItem('cw-theme')}catch(e){}t=t||'system';r.dataset.themeChoice=t;r.dataset.theme=t==='system'?(matchMedia('(prefers-color-scheme: light)').matches?'light':'dark'):t})()</script>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body data-tab="changes">
+<input class="pt" type="checkbox" id="pt-sidebar" aria-label="Toggle sidebar">
+<input class="pt" type="checkbox" id="pt-inspector" aria-label="Toggle inspector">
+<input class="pt" type="checkbox" id="pt-terminal" aria-label="Toggle terminal">
+
+<header class="titlebar">
+  <label class="ib tb-toggle" for="pt-sidebar" title="Sidebar (Ctrl+B)"><i class="i i-panel-left"></i></label>
+  <div class="tb-side">
+    <button class="machine" popovertarget="m-machine" title="Switch machine">
+      <i class="i i-laptop"></i><span class="trunc">This machine</span>
+      <span class="st st-ok" style="margin-left:auto">Connected</span><i class="i s12 i-chevrons-v faint"></i>
+    </button>
+  </div>
+  <div class="tb-main">
+    <a class="ib" href="board.html" title="Back (Alt+Left)"><i class="i i-arrow-left"></i></a>
+    <button class="ib" title="Forward (Alt+Right)" aria-disabled="true"><i class="i i-arrow-right"></i></button>
+    <div class="crumbs"><a href="board.html">atlas-api</a><span class="sep">/</span><span class="cur trunc">Rebase usage rollups onto main</span></div>
+    <button class="chip branch-chip"><i class="i s12 i-branch"></i><span class="mono trunc" style="max-width:150px">cw/usage-rollups</span></button>
+    <span class="grow"></span>
+    <div class="tb-actions"><span class="chip" data-panel="none failed" data-group="cx"><i class="i s12 i-alert st-bad"></i><span style="color:var(--fg)">Conflict</span></span>
+      <span class="chip" data-panel="running" data-group="cx" hidden><i class="i s12 i-loader spin st-run"></i><span style="color:var(--fg)">Cortex resolving</span></span>
+      <span class="chip" data-panel="done" data-group="cx" hidden><i class="i s12 i-merge st-merge"></i><span style="color:var(--fg)">Ready to merge</span></span>
+      <button class="ib" title="Task actions"><i class="i i-more"></i></button></div>
+    <div class="tb-fixed">
+      <a class="mock-chip" href="index.html" title="Static mockup. Back to the screen list">Mock</a>
+      
+      <label class="ib" for="pt-terminal" title="Terminal (Ctrl+J)"><i class="i i-panel-bottom"></i></label>
+      <label class="ib" for="pt-inspector" title="Inspector (Ctrl+Alt+B)"><i class="i i-panel-right"></i></label>
+    </div>
+    <div class="win" aria-hidden="true">
+      <button tabindex="-1"><i class="i s14 i-minus"></i></button>
+      <button tabindex="-1"><i class="i s12 i-square"></i></button>
+      <button tabindex="-1"><i class="i s14 i-x"></i></button>
+    </div>
+  </div>
+</header>
+
+<div class="workspace">
+  <nav class="sidebar" aria-label="Workspace">
+    <div class="sb-top">
+      <a class="nav" href="new-task.html"><i class="i i-plus"></i>New task<span class="kbd">Ctrl+N</span></a>
+      <a class="nav" href="#"><i class="i i-inbox"></i>Inbox<span class="count">4</span></a>
+      <a class="nav" href="#"><i class="i i-search"></i>Search<span class="kbd">Ctrl+K</span></a>
+      <a class="nav" href="home.html"><i class="i i-home"></i>Home</a>
+      <a class="nav" href="archive.html"><i class="i i-archive"></i>Archive<span class="count">18</span></a>
+    </div>
+    <div class="sb-scroll">
+      <div class="sb-h"><span>Pinned</span></div>
+      <a class="task-row" style="padding-left:8px" href="task.html"><i class="i s14 i-pin faint"></i><span class="trunc">Fix token refresh race</span></a>
+      <div class="sb-h"><span>Projects</span><button class="ib" style="width:22px;height:22px" title="Sort projects"><i class="i s14 i-chevrons-v"></i></button></div>
+      <a class="proj" href="board.html"><span class="mono-tile t1">A</span><span class="trunc">atlas-api</span><span class="sig st-bad">Conflict</span></a>
+      <div class="tasks">
+        <a class="task-row" href="task.html"><i class="i s14 i-question st-warn"></i><span class="trunc">Fix token refresh race</span><span class="sig">Question</span></a>
+        <a class="task-row" href="board.html?scope=sprint"><i class="i s14 i-layers faint"></i><span class="trunc">Sprint: Usage billing</span><span class="sig tnum">2/5</span></a>
+        <a class="task-row" href="board.html"><i class="i s14 i-loader st-run"></i><span class="trunc">Meter API calls per workspace</span><span class="sig">Working</span></a>
+        <a class="task-row" href="result.html"><i class="i s14 i-eye faint"></i><span class="trunc">Rate-limit the export endpoint</span><span class="sig">Review</span></a>
+        <a class="task-row" href="conflict.html" aria-current="page"><i class="i s14 i-alert st-bad"></i><span class="trunc">Rebase usage rollups onto main</span><span class="sig">Conflict</span></a>
+        <a class="task-row all" href="board.html">All 15</a>
+      </div>
+      <a class="proj" href="#"><span class="mono-tile t2">B</span><span class="trunc">billing-service</span><span class="sig st-warn">Needs you 1</span></a>
+      <a class="proj" href="#"><span class="mono-tile t3">N</span><span class="trunc">northwind-web</span><span class="sig st-warn">Needs you 1</span></a>
+      <a class="proj" href="#"><span class="mono-tile t4">M</span><span class="trunc">mobile-app</span><span class="sig muted">In review 1</span></a>
+      <a class="proj" href="#"><span class="mono-tile t5">I</span><span class="trunc">infra-terraform</span></a>
+      <a class="proj" href="#"><span class="mono-tile t6">D</span><span class="trunc">docs-site</span></a>
+    </div>
+    <button class="sb-usage" popovertarget="m-usage" title="Engine limits used this week. Snapshot 13:41" aria-label="Engine limits: Claude 62%, Codex 18% used this week">
+      <span class="um"><span>Claude</span><span class="bar"><i style="width:62%"></i></span><span class="tnum">62%</span></span>
+      <span class="um"><span>Codex</span><span class="bar"><i style="width:18%"></i></span><span class="tnum">18%</span></span>
+    </button>
+    <div class="sb-foot">
+      <button class="btn btn-sm" title="Add project"><i class="i s14 i-folder-plus"></i>Add project</button>
+      <span class="grow"></span>
+      <a class="ib" href="settings.html" title="Settings (Ctrl+,)"><i class="i i-settings"></i></a>
+      <button class="ib" title="Help and shortcuts (?)"><i class="i i-help"></i></button>
+    </div>
+  </nav>
+
+  <main class="main">
+    <div class="tabs" role="tablist" aria-label="Task views">
+      <a class="tab" role="tab" href="task.html" aria-selected="false">Conversation</a>
+      <a class="tab" role="tab" href="result.html?tab=workers" aria-selected="false">Workers <span class="n">2 finished</span></a>
+      <button class="tab" role="tab" data-show="changes" data-group="tab" aria-selected="true">Changes <span class="tnum n"><span class="add">+64</span> <span class="del">&minus;31</span></span></button>
+      <a class="tab" role="tab" href="code.html" aria-selected="false">Code</a>
+      <a class="tab" role="tab" href="task.html?tab=terminal" aria-selected="false">Terminal</a>
+    </div>
+    <div class="strip bad" data-panel="none running" data-group="cx"><i class="i s14 i-alert st-bad"></i><span>Merging <span class="mono">main</span> into <span class="mono">cw/usage-rollups</span> stopped at 2 conflicts. Nothing was stashed or reset.</span><span class="acts"><button class="btn btn-line btn-sm">Abort merge</button></span></div>
+    <div class="strip ok" data-panel="done" data-group="cx" hidden><i class="i s14 i-check-circle st-ok"></i><span>Cortex resolved the last block and the checks ran. Nothing is merged until you confirm it in Ready to merge.</span><span class="acts"><button class="btn btn-line btn-sm">Abort merge</button></span></div>
+    <div class="strip warn" data-panel="failed" data-group="cx" hidden><i class="i s14 i-alert st-warn"></i><span>Cortex could not resolve <span class="mono">usage_rollups.py</span> and changed nothing: both signatures of <span class="mono">load</span> need a decision from you.</span><span class="acts"><button class="btn btn-line btn-sm">Abort merge</button></span></div>
+    <div class="cf-ways" data-panel="none failed" data-group="cx">
+      <div class="cf-way"><i class="i i-pencil"></i><span class="grow"><span class="t">Resolve it yourself</span><span class="d">Choose ours, theirs or both for the block below, then finish the merge.</span></span><span class="cap muted" style="flex:none">1 block left</span></div>
+      <div class="cf-way"><i class="i i-sparkles"></i><span class="grow"><span class="t">Let Cortex resolve</span><span class="d">It resolves the block and runs the checks. The result comes back through Ready to merge for your review.</span></span><button class="btn btn-primary" style="flex:none" data-dialog="dlg-cortex">Let Cortex resolve&hellip;</button></div>
+    </div>
+    <div class="cx-run" data-panel="running" data-group="cx" hidden>
+      <span class="cx-step"><i class="i s14 i-check-circle st-ok"></i>Read both sides</span><i class="i s12 i-chevron-right faint"></i>
+      <span class="cx-step now"><i class="i s14 i-loader spin st-run"></i>Resolving <span class="mono">usage_rollups.py</span></span><i class="i s12 i-chevron-right faint"></i>
+      <span class="cx-step todo"><i class="i s14 i-circle"></i>Run the checks</span><i class="i s12 i-chevron-right faint"></i>
+      <span class="cx-step todo"><i class="i s14 i-circle"></i>Ready to merge</span>
+      <span class="r"><span class="tnum faint">0:41</span><a class="btn btn-line btn-sm" href="worker.html">Watch</a><a class="btn btn-sm" href="conflict.html">Stop and resolve myself</a></span>
+    </div>
+    <div class="cx-run" data-panel="done" data-group="cx" hidden>
+      <span class="cx-step"><i class="i s14 i-check-circle st-ok"></i>Read both sides</span><i class="i s12 i-chevron-right faint"></i>
+      <span class="cx-step"><i class="i s14 i-check-circle st-ok"></i>Resolved 1 block</span><i class="i s12 i-chevron-right faint"></i>
+      <span class="cx-step"><i class="i s14 i-check-circle st-ok"></i>Checks: 5 passed, 1 not run</span><i class="i s12 i-chevron-right faint"></i>
+      <span class="cx-step now"><i class="i s14 i-merge st-merge"></i>Waiting for your review</span>
+      <span class="r"><span class="faint">Finished 14:06</span></span>
+    </div>
+    <div class="cf-body">
+      <div class="flist">
+        <div class="wg">Conflicts<span class="n">2</span></div>
+        <button class="fitem" aria-current="true"><span class="gs gs-c" title="Conflict">C</span><span class="trunc">usage_rollups.py</span><span class="r st-bad" data-panel="none failed" data-group="cx">1 left</span><span class="r st-run" data-panel="running" data-group="cx" hidden>Cortex</span><span class="r st-ok" data-panel="done" data-group="cx" hidden>Resolved</span></button>
+        <button class="fitem"><span class="gs gs-c" title="Conflict">C</span><span class="trunc">schema.sql</span><span class="r st-ok">Resolved</span></button>
+        <div class="wg">Merged cleanly<span class="n">4</span></div>
+        <button class="fitem"><span class="gs gs-m">M</span><span class="trunc">rollup_jobs.py</span></button>
+        <button class="fitem"><span class="gs gs-m">M</span><span class="trunc">usage_api.py</span></button>
+        <button class="fitem"><span class="gs gs-a">A</span><span class="trunc">test_rollups.py</span></button>
+        <button class="fitem"><span class="gs gs-m">M</span><span class="trunc">settings.py</span></button>
+      </div>
+      <div class="cf-main">
+        <div class="fhead"><i class="i s14 i-file faint"></i><code>atlas/usage/usage_rollups.py</code><span>Block 1 of 1</span><span class="r"><button class="ib" style="width:24px;height:24px" title="Previous conflict"><i class="i s14 i-arrow-up"></i></button><button class="ib" style="width:24px;height:24px" title="Next conflict"><i class="i s14 i-arrow-down"></i></button></span></div>
+        <div class="cf-scroll">
+          <div class="cf3">
+            <div><div class="cf-col"><b>Base</b><span class="mono">a03be17</span></div><div class="code" style="min-width:0"><div class="cl"><span class="n">56</span><span class="m"></span><span class="c"><span class="tok-k">def</span> <span class="tok-f">roll_up</span>(day):</span></div><div class="cl"><span class="n">57</span><span class="m"></span><span class="c">    <span class="tok-s">""</span><span class="tok-s">"Sum a day."</span><span class="tok-s">""</span></span></div><div class="cl hit"><span class="n">58</span><span class="m"></span><span class="c">    rows = <span class="tok-f">load</span>(day)</span></div><div class="cl"><span class="n">59</span><span class="m"></span><span class="c">    totals = <span class="tok-f">sum_rows</span>(rows)</span></div><div class="cl"><span class="n">60</span><span class="m"></span><span class="c">    <span class="tok-f">write_rollup</span>(day, totals)</span></div><div class="cl"><span class="n">61</span><span class="m"></span><span class="c">    <span class="tok-k">return</span> totals</span></div></div></div>
+            <div><div class="cf-col"><b>Ours</b><span class="mono">cw/usage-rollups</span></div><div class="code" style="min-width:0"><div class="cl"><span class="n">56</span><span class="m"></span><span class="c"><span class="tok-k">def</span> <span class="tok-f">roll_up</span>(day):</span></div><div class="cl"><span class="n">57</span><span class="m"></span><span class="c">    <span class="tok-s">""</span><span class="tok-s">"Sum a day."</span><span class="tok-s">""</span></span></div><div class="cl hit"><span class="n">58</span><span class="m"></span><span class="c">    rows = <span class="tok-f">load</span>(day, n=<span class="tok-n">500</span>)</span></div><div class="cl"><span class="n">59</span><span class="m"></span><span class="c">    totals = <span class="tok-f">sum_rows</span>(rows)</span></div><div class="cl"><span class="n">60</span><span class="m"></span><span class="c">    <span class="tok-f">write_rollup</span>(day, totals)</span></div><div class="cl"><span class="n">61</span><span class="m"></span><span class="c">    <span class="tok-k">return</span> totals</span></div></div></div>
+            <div><div class="cf-col"><b>Theirs</b><span class="mono">main</span></div><div class="code" style="min-width:0"><div class="cl hit"><span class="n">59</span><span class="m"></span><span class="c"><span class="tok-k">def</span> <span class="tok-f">roll_up</span>(day, tz=<span class="tok-s">"UTC"</span>):</span></div><div class="cl"><span class="n">60</span><span class="m"></span><span class="c">    <span class="tok-s">""</span><span class="tok-s">"Sum a day."</span><span class="tok-s">""</span></span></div><div class="cl hit"><span class="n">61</span><span class="m"></span><span class="c">    rows = <span class="tok-f">load</span>(day, tz)</span></div><div class="cl"><span class="n">62</span><span class="m"></span><span class="c">    totals = <span class="tok-f">sum_rows</span>(rows)</span></div><div class="cl"><span class="n">63</span><span class="m"></span><span class="c">    <span class="tok-f">write_rollup</span>(day, totals)</span></div><div class="cl"><span class="n">64</span><span class="m"></span><span class="c">    <span class="tok-k">return</span> totals</span></div></div></div>
+          </div>
+          <div class="cf-block" data-panel="none failed" data-group="cx"><i class="i s14 i-alert st-bad"></i><span>Both sides changed how events are loaded</span><span class="r"><button class="btn btn-line btn-sm">Accept ours</button><button class="btn btn-line btn-sm">Accept theirs</button><button class="btn btn-primary btn-sm">Accept both</button></span></div>
+          <div class="cf-block" data-panel="running" data-group="cx" hidden><i class="i s14 i-loader spin st-run"></i><span>Cortex is working on this block. Your choices are paused until it finishes.</span></div>
+          <div class="cf-block ok" data-panel="done" data-group="cx" hidden><i class="i s14 i-check-circle st-ok"></i><span>Resolved by Cortex: kept <code>tz</code> from <span class="mono">main</span> and <code>n=500</code> from this branch.</span></div>
+          <div class="cf-col"><b>Result</b><span data-panel="none failed" data-group="cx">Preview of Accept both. Editable, this is what will be committed</span><span data-panel="running" data-group="cx" hidden>Current preview. Cortex will replace it</span><span data-panel="done" data-group="cx" hidden>Written by Cortex. You review it in Ready to merge</span></div>
+          <div class="cf-result"><div class="code selectable" style="min-width:0;padding:4px 0"><div class="cl"><span class="n">59</span><span class="m"></span><span class="c"><span class="tok-k">def</span> <span class="tok-f">roll_up</span>(day, tz=<span class="tok-s">"UTC"</span>):</span></div><div class="cl"><span class="n">60</span><span class="m"></span><span class="c">    <span class="tok-s">""</span><span class="tok-s">"Sum a day."</span><span class="tok-s">""</span></span></div><div class="cl hit"><span class="n">61</span><span class="m"></span><span class="c">    rows = <span class="tok-f">load</span>(day, tz, n=<span class="tok-n">500</span>)</span></div><div class="cl"><span class="n">62</span><span class="m"></span><span class="c">    totals = <span class="tok-f">sum_rows</span>(rows)</span></div><div class="cl"><span class="n">63</span><span class="m"></span><span class="c">    <span class="tok-f">write_rollup</span>(day, totals)</span></div><div class="cl"><span class="n">64</span><span class="m"></span><span class="c">    <span class="tok-k">return</span> totals</span></div></div></div>
+        </div>
+        <div class="chg-foot"><span class="cap muted" data-panel="none failed" data-group="cx">1 of 2 files resolved. Finish merge unlocks when the last block is resolved.</span><span class="cap muted" data-panel="running" data-group="cx" hidden>1 of 2 files resolved. Abort merge stays available while Cortex works.</span><span class="cap muted" data-panel="done" data-group="cx" hidden>2 of 2 files resolved. Cortex never merges on its own.</span><span class="grow"></span><button class="btn btn-line" data-panel="none running failed" data-group="cx" aria-disabled="true" title="Resolve every block first">Finish merge</button><a class="btn btn-primary" data-panel="done" data-group="cx" href="merge.html?state=cortex-done" hidden>Review in Ready to merge</a></div>
+      </div>
+    </div>
+    <section class="terminal" aria-label="Terminal">
+      <div class="term-h">
+        <span class="term-tab" aria-selected="true"><i class="i s12 i-terminal"></i>bash</span>
+        <button class="ib" style="width:24px;height:24px" title="New shell in this checkout"><i class="i s14 i-plus"></i></button>
+        <span class="mono faint" style="margin-left:6px">~/work/atlas-api/.worktrees/usage-rollups</span>
+      </div>
+      <div class="term-body"><b>cw/usage-rollups</b> $ git status --short
+UU atlas/usage/usage_rollups.py
+<b>cw/usage-rollups</b> $ </div>
+    </section>
+  </main>
+<aside class="inspector" aria-label="Inspector">
+    <div class="ins-sec">
+      <div class="ins-h"><span>State</span></div>
+      <div data-panel="none failed" data-group="cx"><div class="st st-bad" style="margin-bottom:6px"><i class="i s14 i-alert"></i>Conflict, needs you</div><div class="cap muted">Waiting 24m. The task is paused until this is resolved or aborted.</div></div>
+      <div data-panel="running" data-group="cx" hidden><div class="st st-run" style="margin-bottom:6px"><i class="i s14 i-loader spin"></i>Cortex is resolving</div><div class="cap muted">Handed over by you at 14:05. You can stop it and take over at any time.</div></div>
+      <div data-panel="done" data-group="cx" hidden><div class="st st-merge" style="margin-bottom:6px"><i class="i s14 i-merge"></i>Ready to merge, needs your review</div><div class="cap muted">Cortex finished at 14:06. It does not merge without your confirmation.</div></div>
+    </div>
+    <div class="ins-sec">
+      <div class="ins-h"><span>Merge</span></div>
+      <dl class="kv"><dt>From</dt><dd class="mono">main</dd><dt>Into</dt><dd class="mono">cw/usage-rollups</dd><dt>Conflicts</dt><dd><span data-panel="none running failed" data-group="cx">1 block left in 1 file</span><span data-panel="done" data-group="cx" hidden>None left</span></dd></dl>
+    </div>
+  </aside>
+</div>
+
+<dialog class="dlg" id="dlg-cortex" aria-labelledby="dlg-cortex-h">
+  <div class="dlg-h"><h2 id="dlg-cortex-h">Let Cortex resolve this conflict?</h2><button class="ib" data-close title="Keep resolving myself"><i class="i i-x"></i></button></div>
+  <div class="dlg-b">
+    <div class="lab">What Cortex will do</div>
+    <ul class="conseq">
+      <li><i class="i s14 i-file"></i><span>Read both sides, the base and the commits behind them.</span></li>
+      <li><i class="i s14 i-pencil"></i><span>Resolve the 1 block left in <span class="mono">usage_rollups.py</span>. Your choice in <span class="mono">schema.sql</span> stays as you made it.</span></li>
+      <li><i class="i s14 i-check-circle"></i><span>Run the required checks in the worktree <span class="mono">cw/usage-rollups</span>.</span></li>
+      <li><i class="i s14 i-merge"></i><span>Send the result to Ready to merge as a normal diff, for your review.</span></li>
+    </ul>
+    <div class="note-box plain"><i class="i s14 i-shield"></i><span>Cortex never merges or pushes on its own. Nothing reaches <span class="mono">main</span> until you confirm it, and Abort merge stays available the whole time.</span></div>
+    <div class="fld"><span class="lab">Guidance for Cortex <span class="faint">Optional</span></span><textarea class="inp" rows="2" placeholder="For example: keep the tz argument from main"></textarea></div>
+  </div>
+  <div class="dlg-f">
+    <span class="note">Uses Opus, High, the route of this task.</span>
+    <button class="btn btn-line btn-lg" data-close autofocus>Cancel</button>
+    <a class="btn btn-primary btn-lg" href="conflict.html?cx=running">Let Cortex resolve</a>
+  </div>
+</dialog>
+<div popover id="m-usage" class="pop-usage">
+  <div class="mi-h">Engine limits on This machine</div>
+  <div class="u-eng">
+    <div class="u-h"><span class="w500">Claude</span><span class="st st-ok"><i class="i s12 i-check-circle"></i>Connected</span></div>
+    <div class="u-win"><span>This week</span><span class="bar"><i style="width:62%"></i></span><span class="v">62% used</span><span class="rs">Resets Mon 09:00</span></div>
+    <div class="u-src">Observed 13:41, reported by the provider</div>
+  </div>
+  <div class="mi-sep"></div>
+  <div class="u-eng">
+    <div class="u-h"><span class="w500">Codex</span><span class="st st-ok"><i class="i s12 i-check-circle"></i>Connected</span></div>
+    <div class="u-win"><span>This week</span><span class="bar"><i style="width:18%"></i></span><span class="v">18% used</span><span class="rs">Resets Thu 02:00</span></div>
+    <div class="u-src">Observed 13:41, reported by the provider</div>
+  </div>
+  <div class="mi-sep"></div>
+  <a class="mi" href="settings.html?section=connections"><i class="i i-gauge"></i><span class="grow">All limits and windows</span></a>
+</div>
+<div popover id="m-machine" class="pop-tl">
+  <div class="mi-h">Machines</div>
+  <a class="mi" href="home.html"><i class="i i-laptop"></i><span class="grow">This machine<span class="sub">Local, connected</span></span><i class="i s14 i-check"></i></a>
+  <a class="mi" href="settings.html?section=machines"><i class="i i-server"></i><span class="grow">GPU box<span class="sub">Remote, connected through the server connector</span></span></a>
+  <a class="mi" href="settings.html?section=machines"><i class="i i-server"></i><span class="grow">Build server<span class="sub">Remote, offline, last seen 13:47</span></span></a>
+  <div class="mi-sep"></div>
+  <a class="mi" href="settings.html?section=machines&amp;dialog=add-machine"><i class="i i-plus"></i>Add remote machine&hellip;</a>
+  <a class="mi" href="settings.html?section=overview"><i class="i i-settings"></i>Machine settings</a>
+</div>
+<div popover id="m-new" class="pop-right">
+  <a class="mi" href="new-task.html"><i class="i i-plus"></i><span class="grow">New task</span><span class="kbd">Ctrl+N</span></a>
+  <a class="mi" href="new-task.html?kind=sprint"><i class="i i-layers"></i><span class="grow">New sprint</span><span class="kbd">Ctrl+Shift+N</span></a>
+</div>
+
+
+<script>(function(){var r=document.documentElement,q=new URLSearchParams(location.search);function m(){document.querySelectorAll('[data-set-theme]').forEach(function(b){var on=b.dataset.setTheme===r.dataset.themeChoice;b.setAttribute('aria-pressed',on);b.setAttribute('aria-current',on)})}function show(g,v){document.querySelectorAll('[data-show][data-group="'+g+'"]').forEach(function(x){if(x.hasAttribute('aria-selected'))x.setAttribute('aria-selected',x.dataset.show===v);if(x.hasAttribute('aria-current'))x.setAttribute('aria-current',x.dataset.show===v);if(x.type==='radio')x.checked=x.dataset.show===v});document.querySelectorAll('[data-panel][data-group="'+g+'"]').forEach(function(p){p.hidden=p.dataset.panel.split(' ').indexOf(v)<0});document.body.dataset[g]=v}function openD(id){var d=document.getElementById(id);if(d&&!d.open)d.showModal()}document.addEventListener('click',function(e){var b=e.target.closest('[data-set-theme]');if(b){var t=b.dataset.setTheme;r.dataset.themeChoice=t;r.dataset.theme=t==='system'?(matchMedia('(prefers-color-scheme: light)').matches?'light':'dark'):t;try{localStorage.setItem('cw-theme',t)}catch(x){}m();return}var o=e.target.closest('[data-dialog]');if(o){e.preventDefault();openD(o.dataset.dialog);if(o.dataset.show)show(o.dataset.group,o.dataset.show);return}var c=e.target.closest('[data-close]');if(c){c.closest('dialog').close();return}var s=e.target.closest('[data-show]');if(s){show(s.dataset.group,s.dataset.show);return}var a=e.target.closest('a[href$=".html"],a[href*=".html?"]');if(a){e.preventDefault();var u=new URL(a.href);u.searchParams.set('theme',r.dataset.themeChoice);location.href=u.href}});document.addEventListener('change',function(e){var f=e.target.closest('[data-follow-toggle]');if(f)document.body.dataset.follow=f.checked?'on':'off'});var gs={};document.querySelectorAll('[data-group]').forEach(function(x){gs[x.dataset.group]=1});Object.keys(gs).forEach(function(g){if(q.get(g))show(g,q.get(g))});if(q.get('follow')==='off'){document.body.dataset.follow='off';var f=document.querySelector('[data-follow-toggle]');if(f)f.checked=false}if(q.get('dialog')){openD('dlg-'+q.get('dialog'));if(document.activeElement)document.activeElement.blur()}m()})()</script>
+</body>
+</html>

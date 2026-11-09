@@ -31,6 +31,63 @@ Paseo history restoration validates message identity and replay completeness;
 the 0.14.0 SDK's derived message and reasoning IDs are supported by the replay gate. See
 [history recovery](integrations/paseo/HISTORY.md) for verification limits.
 
+For local desktop Debian builds, run `./scripts/build-dev-deb.sh` or
+`./scripts/build-prod-deb.sh`; archives stay under git-ignored `.workspace-build/`.
+Run the prod wrapper explicitly for a non-official production-channel build in a disposable environment; its Debian version ends in `.local` and is rejected by the GitHub publisher. Dev remains the default, with a separate store.
+See [local build instructions](docs/project/packaging.md#local-desktop-debian-builds). An installed interaction pass does not qualify an archive that emits a native crash or allocator diagnostic; the installed gate must remain fail-closed. The Linux task window leaves GPU compositing available. Approved closure waits for outstanding service replies, then terminates only its WebKit web process through the public API before destroying the view, avoiding its EGL/Skia exit race without disabling compositing. Failed closure leaves a visible reason; the independent service stays alive. Disposable software-display checks are not real-GPU performance qualification.
+
+Workspace Git status, diff and log inspect raw content without requiring installed clean/smudge filters. Write commands retain normal filter and hook requirements; repository configuration is not changed.
+
+Ready desktop results retain an explicit Accept control in Conversation and the diff review, separate from committing or merging. Same-branch tasks use Finish and Commit wording in review, the sidebar and inspector as well as their action controls; completed inspector outcomes appear once. Finished worker summaries unescape prose consistently, and worker notes use the full activity column rather than the icon column.
+
+Workspace's local data API exposes retained coordinator messages and tool activity
+with bounded continuation, plus confirmed model/effort labels for task and worker
+projections. Older worker activity stays loaded across refreshes of the same attempt.
+Review controls read committed runtime WAL data, so an active store does not falsely disable Accept.
+Unknown routes remain absent rather than inheriting machine defaults.
+See [recorded activity and routes](docs/cortex-workspace/local-task-execution.md#recorded-data-and-pending-questions).
+
+Workspace settings include release updates, native/API-key engine connections and
+local Russian voice-model status. Add project also offers Clone from GitHub or
+an absolute local bare Git repository path.
+See the [desktop control map and verification limits](docs/cortex-workspace/maintenance-and-controls.md).
+Alt+Left/Right navigate Workspace history in the native window. Published worker
+reports stay open across background refreshes and display the whole report as formatted Markdown, including tables, lists and code. Worker and coordinator cards keep recorded model/effort visible in the full activity view; missing values are not invented. Saved profiles show their actual policy sections.
+Removing and re-adding a project restores its retained history even when the projection has not changed.
+New task worktrees use readable description-based names instead of transport ids;
+existing checkouts keep their saved paths when the default root changes. Work waiting
+for merge confirmation keeps its owner-action highlight. Result cards separate headings,
+paragraphs, quotes and code, and omit empty outcome counters.
+Plain project folders support tasks and result acceptance without Git. Git initialization is explicit;
+local Commit, squash merge and task closure need no remote. Local-only repositories omit network controls and push/PR wording; generated commit messages are English independently of conversation language. Task actions open the actual checkout in the detected editor, with a visible reason when unavailable. Worktree settings allow writable external `.cortex/worktrees` folders, retain refused drafts with a persistent reason, and never move existing checkouts. Diagnostics list each failing check and its recovery steps, including in Copy report. Accept binds the reviewed runtime-evidence version while displaying its result number; late progress/transcript updates do not invalidate unchanged work. Refused or unconfirmed acceptance stays beside the result with a Refresh action, even after its toast closes;
+withdrawn probes do not count as failed worker checks. Check programs are probed in the real verification environment before accepting a plan; workers can declare checks early through the same preflight. Probe launch failures remain unavailable observations, not false missing-program diagnoses. Missing tools require project-private installation or an executable alternative, with an immediate owner question when neither is possible. Review separates human-only items as **Check manually**, outside outcome counts and acceptance blockers. Rerun is available only for recorded commands, with fresh output and a bounded deadline; policy-prohibited checks stay explicitly not run. Legacy technical check blockers remain honest evidence and allow explicit acknowledged acceptance; an informational answer needs no invented tests. Sprint planning produces a description-only plan without starting implementation. Unusable model output and engine setup failures show a readable reason beside Retry planning, not just a cancelled badge; Create tasks saves drafts, and only an explicit task/queue start executes them. Planned tasks carry only their own item's scope and relevant plain-text owner answers, not sibling work or internal conversation records. Explicit unanswered owner questions belong to the relevant item. Review previews new text files as additions, preserves the implementation summary on no-file follow-ups, and retains unchanged missing-tool recovery. Local integration stages only non-helper user paths and restores prior staging if saving fails. See [local review and Git behavior](docs/cortex-workspace/local-task-execution.md).
+Clickable controls use a pointer; disabled controls use the default cursor and text fields keep the text cursor.
+Ready to merge distinguishes local content already in the target branch from its last-fetched push status. Already-contained work offers owner-confirmed closure, not another merge. Shared-checkout tasks on their target branch use recorded task-file evidence: committed content offers closure even after later sibling edits; known pending files offer Commit to that branch without sweeping other files into the commit. Unknown attribution offers Close as is or Done outside the app, never a same-branch merge. Board cards can be moved manually only to Done, with “Done outside the app” confirmation after the task stops. This durable owner decision is not acceptance, merging or passing checks; sprint dependencies can continue. See [local review and Git behavior](docs/cortex-workspace/local-task-execution.md).
+Pointer and keyboard focus keep their behavior without adding decorative outlines or shifting controls.
+
+Workspace saves a task from its description, then names it asynchronously through
+its configured model route. Owner renames always win; unavailable naming
+keeps the description fallback and marks title generation as failed. See [local task execution](docs/cortex-workspace/local-task-execution.md#automatic-task-titles).
+
+Workspace task creation, conversations, direct-worker messages and multiline “Other answer” fields accept dropped files,
+clipboard images and picked files (eight files, 512 KiB combined). Queue Edit
+restores both text and file contents. See [attachments](docs/cortex-workspace/local-task-execution.md#attachments).
+
+Workspace supports on-device Russian dictation (Ctrl+D or microphone), with live
+preview, Cancel, Insert and an explicit Insert and send action. A verified model
+download runs once on first use; audio stays local. See [voice input](docs/cortex-workspace/local-task-execution.md#local-voice-input).
+
+Workspace includes a local project terminal (Ctrl+J): your own shell, owned by the
+machine service, with retained output across window closure. It starts in the registered
+project, not a task worktree; the worktree-local terminal action is disabled with that reason. Close shell stops its
+jobs; it is full owner shell access, not a sandbox. The native desktop notifies when a new question arrives outside the open task or sprint, subject to the desktop notification service and the Appearance setting. Notifications name the work, not question bodies; failed delivery stays explicit in the app.
+See [terminal limits](docs/cortex-workspace/security.md#owner-terminal-built-local-linux).
+
+Workspace resumes automatic sprints after answered questions, but keeps owner and
+failed-check pauses. Skipped executable worker checks run automatically; check
+reruns, including the native desktop button, use retained commands and real verification receipts, not model promises.
+See [service-owned work](docs/cortex-workspace/local-task-execution.md#archive-and-service-owned-work).
+
 ---
 
 Routing marks stored references to disabled models as inactive without deleting them; its enabled-model picker excludes denied models. Routing settings use each exact model's observed effort levels, including ordered effort ladders. Unknown levels are marked; saved unsupported values remain visible and unchanged. See [configuration](docs/configuration.md#manage-settings-in-paseo).
@@ -238,7 +295,7 @@ for the full Git-hosted install and update reference.
 
 **Automatic native-account setup (`codex-acp` and `claude-agent-acp`).** On
 plugin or agent startup, Cortex seeds missing default-preset files and downloads
-its own qualified, pinned adapters in the background through npm into
+its own qualified adapters from the Workspace package bundle when present. Checkout-only installs can download pinned adapters in the background through npm into
 `$XDG_DATA_HOME/cortex/engines`, or `~/.local/share/cortex/engines`. When an
 engine's native login marker exists, Cortex registers its missing connection
 and immediately loads its model list, without sending a model prompt. Existing
@@ -366,6 +423,22 @@ This removes only Cortex's own `$XDG_CONFIG_HOME/cortex`,
 store. It never touches engine installs, real credentials outside those
 Cortex-owned roots, your project files, or Git history. See
 [uninstall](docs/project/packaging.md#uninstall).
+
+## Cortex Workspace desktop (in development)
+
+Cortex Workspace is a desktop application being built alongside Cortex. Its local slice is built and checked, but it is not released. A user-level service owns the Cortex agent process and talks to Cortex through the `_cortex/workspace` extension method, in addition to the standard ACP methods. The service listens only on a private Unix socket and opens no network port. The Ubuntu package is built in a Docker container with `python3 -B scripts/build_workspace_desktop.py`; a local build is the dev channel. Releases start manually through GitHub Actions: choose `main` for production (`v<debian-version>`, Latest), or `dev` for a separate dev prerelease (`dev-v<debian-version>`, never Latest). Both appear in one release list. Dev and production can coexist, including in the same project folder: Dev uses `.cortex-dev` beside release `.cortex` without reading or migrating release data. There is one store per logical project per channel, shared by its linked worktrees. Project metadata stays inside the channel store; Dev reserves `.cortex-dev/owner.json`, not a root JSON file. Saved sprint plans can restore missing member drafts after an upgrade, without reading release history; the queue pauses for review before any new start. Dev installs manually and has no in-app updates. See the [release steps](docs/project/packaging.md#manual-workspace-releases). See [Cortex Workspace](docs/cortex-workspace/index.md) for the design, the contract and the current status, and [SECURITY.md](SECURITY.md) for its trust boundary.
+
+Both dev and release `.deb` packages include the complete Cortex runtime. Debian versions now put an increasing UTC build stamp before the content hash, with a `z` prefix that sorts above all older hash-only versions. The embedded runtime identity is unchanged; see [build ordering and reproducibility](docs/cortex-workspace/platforms.md#debian-build-ordering-and-reproducibility). Install with `sudo apt install ./cortex-workspace-dev_*.deb` (or the release package), then launch the application: no checkout, settings clone or `service.env` is required. The package arranges service startup at login; the desktop starts its own unit in an existing session. Upgrade restarts active user units best effort, and removal leaves user data intact. Both channels include qualified Codex/Claude adapters, their locked dependencies and checksum-verified Node 24.14.1 under `/usr/lib/<package>/engines`; first activation needs neither npm nor an adapter download. Native logins stay in `~/.codex` and `~/.claude`, never copied. Models still require account access and network; missing login or failed discovery is shown separately from service connectivity. Installer, systemd and sandbox qualification limits are in [platforms](docs/cortex-workspace/platforms.md).
+
+The real task conversation reads durable Cortex messages, plans, tool activity, questions and results. Owner messages and the unsent queue survive reopening. Workers show retained activity and accept owner guidance at their next successful Cortex tool call; this is not an immediate interrupt. Task Stop records a resumable pause, distinct from cancelling an engine turn or an individual worker. Task-level and pending worker questions remain visible but cannot be answered until Resume, including after service restart. Worker waits continue through a recorded replacement attempt, not a claim of reviving the old engine; access is revalidated on the new channel. Stopping one worker still cancels its own wait. An opened worker report is shown whole, retrieved internally in bounded public pages; one byte-budgeted continuation loads older task activity, command-control and guidance together, including attachment and delivery details. Check-rerun and review-comment controls return requests to Cortex, not synthetic passing evidence. See the [local conversation contract](docs/cortex-workspace/protocol.md).
+
+The task execution slice adds per-task route/access/language choices, linked task worktrees sharing one project store, task-owned diffs, guarded squash/PR actions, real runtime-row purge with space reclamation, project overrides and window-independent automatic queues. Automatic LLM titles remain unavailable. Pre-save MCP listing now uses the existing sandbox with a bounded deadline, and Open logs opens private rotating status events (never raw stderr). Sprint-created tasks inherit their route and target; partial composer-setting failures name what was acknowledged. These additions still require fresh installed-package and native-rendered qualification. See [local task execution](docs/cortex-workspace/local-task-execution.md) for safety refusals, evidence limits and focused checks.
+
+Task and project ages use recorded timestamps, not refresh time, and elapsed times use whole seconds/minutes/hours. All work shows unmaterialized sprint planning explicitly. Pending worker questions reach the task, Inbox and sidebar even while other workers continue. Weekly Claude/Codex limits use the runtime quota reader, with bundled Claude CLI fallback when no global CLI is on PATH; no five-hour or OpenCode usage is displayed. Codex weekly display follows the reported 10080-minute duration, whether the provider calls that slot primary or secondary. Missing duration or expired quota remains unavailable.
+
+First activation and background setup are followed by fresh configuration reads. Settings conflicts keep the draft for explicit review and reapplication, while Git Commit uses the visible local message immediately. Sprint planning requires a connected, selectable model before creating planning work. Worktree reset uses the service-reported channel default and never moves existing checkouts. See [local task execution](docs/cortex-workspace/local-task-execution.md).
+
+Workspace invalidations use connection-local SQLite hooks on supported Store writers; they do not install a callback dependency on independent or older SQLite writers. See [storage](docs/project/storage.md#workspace-adapter-tables) for upgrade and inspection behavior.
 
 ## Other ACP clients
 

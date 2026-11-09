@@ -60,7 +60,7 @@ _MAX_TOTAL_BYTES = 512 * 1024 * 1024
 _MAX_FILE_BYTES = 64 * 1024 * 1024
 _TIME_BUDGET_SECONDS = 20.0
 _READ_CHUNK = 1024 * 1024
-_EXCLUDED_TOP_LEVEL = {".git", ".cortex"}
+_EXCLUDED_TOP_LEVEL = {".git", ".cortex", ".cortex-dev", ".cortex-dev-owner.json", ".cortex-workspace-dev.json"}
 
 WORKSPACE_SCHEMA = '''
 CREATE TABLE IF NOT EXISTS workspace_snapshots (
@@ -244,8 +244,9 @@ def _link_project_store(work_root: str, project_root: str) -> None:
     pre/post digest of the real project root
     (``acp.orchestrating_runtime``) still refuses a turn that changed it.
     """
-    link = os.path.join(work_root, ".cortex")
-    store_path = os.path.join(project_root, ".cortex")
+    from ..project_storage import project_store_name, project_store_directory
+    link = os.path.join(work_root, project_store_name())
+    store_path = str(project_store_directory(project_root))
     if not os.path.isdir(store_path) or os.path.lexists(link):
         return
     parent_mode = os.stat(work_root).st_mode

@@ -1391,7 +1391,8 @@ def validate_routing(data: Mapping) -> None:
 def _candidate_paths(project_root, environ) -> list[Path]:
     environ = os.environ if environ is None else environ
     home = Path(environ.get("HOME") or str(Path.home()))
-    paths = [Path(project_root) / ".cortex" / "routing.json"] if project_root else []
+    from ..project_storage import project_store_name
+    paths = [Path(project_root) / project_store_name() / "routing.json"] if project_root else []
     if environ.get(ENV_VAR):
         paths.append(Path(environ[ENV_VAR]))
     xdg = environ.get("XDG_CONFIG_HOME") or ""

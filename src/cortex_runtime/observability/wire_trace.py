@@ -192,7 +192,7 @@ def _gate(environ, runtime_root):
     # never disable tracing. A .git/.cortex anywhere inside the dev home's
     # own subtree still refuses.
     for parent in _ancestors_up_to(directory, dev):
-        if (parent / ".git").exists() or parent.name == ".cortex":
+        if (parent / ".git").exists() or parent.name in {".cortex", ".cortex-dev"}:
             raise ValueError("dev_wire_trace_refused")
         if parent.exists() and parent.resolve() != parent:
             raise ValueError("dev_wire_trace_refused")
@@ -214,7 +214,7 @@ class WireTrace:
         # Same W2 scoping as _gate: only the trace directory's own subtree
         # up to and including the dev home is checked for .git/.cortex.
         dev = self.directory.parents[3]
-        if any((p / ".git").exists() or p.name == ".cortex"
+        if any((p / ".git").exists() or p.name in {".cortex", ".cortex-dev"}
                for p in _ancestors_up_to(self.directory, dev)):
             raise ValueError("unsafe_trace_directory")
         if dev.parent.resolve() != dev.parent:

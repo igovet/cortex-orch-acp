@@ -3,6 +3,17 @@
 > Status: migrated from the former ACP reference. Statements were not re-verified line by line against source in this pass; claims without a source path are unverified until reviewed.
 
 
+Workspace's owner-only `orchestration/task_pause.py` additionally records a durable
+`PAUSED` hold outside the model transition route. It saves the previous lifecycle
+and pending question/worker-wait identities transactionally with public invalidation. Only
+explicit owner Resume restores that state, checking the displayed version and owner
+epoch; normal model transitions cannot leave the hold. Turn cancellation alone does
+not create or remove it. Pending worker questions and runtime access decisions survive
+service restart. The runtime fences the old worker and records a replacement continuation
+with the saved decision; it does not revive the engine or transfer access grants.
+Resume never invents a user message or answer. Stopping an individual worker still
+cancels its wait. See [Workspace Stop and Resume](../../cortex-workspace/local-task-execution.md#task-stop-and-resume).
+
 The task state machine is defined in `orchestration/state.py`:
 
 `CREATED → PLANNING → PLAN_READY → EXECUTING → REVIEWING → VERIFYING → RECONCILING → COMPLETED`.
@@ -34,6 +45,18 @@ check assessment and disclosure guard as synthesis. An omitted gap or blank
 blocker refuses the proposal without changing state. Accepted disclosures are
 stored and shown in the answer's "Not verified" section; exact retries preserve
 that content.
+
+## Omitted worker checks
+
+Plan submission and verification repair probe check-program availability in the real read-only verification sandbox before recording commands. Workers and coordinators can declare a check early through the availability preflight; this lookup never executes the proposed check and cannot count as passing evidence. It uses verification's final launch preparation and working directory; an incomplete sandbox/launch probe reports `check_preflight_unavailable`, not a missing executable. A wrapper without an inner program is refused as an incomplete command. Missing programs require isolated project-private tools or another executable approach, never sudo or system changes. If neither is possible, the responsible model must ask the owner immediately through its existing question route, not defer that decision to publication. New executable gap declarations with absent programs are refused while the worker channel remains active. Human-only judgements have no command and appear separately as **Check manually**, never as a pass or failure or an owner-acceptance blocker. Policy-prohibited checks stay explicitly not run and are not automatically executed.
+
+Before reconciliation synthesis, executable worker checks reported as `not_run`
+receive one runtime verification attempt per exact check and observed source
+revision. Matching final-verification evidence avoids duplicate execution. The
+runtime retains technical launch/policy blockers without automatic retry or a
+fabricated pass. Fresh successful executions close gaps only with current source,
+publication, review and complete-output bindings. Workspace exposes the same
+runner for identified owner reruns; see [local task execution](../../cortex-workspace/local-task-execution.md#archive-and-service-owned-work).
 
 ## Runtime-composed synthesis
 

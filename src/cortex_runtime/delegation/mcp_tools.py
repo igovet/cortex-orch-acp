@@ -528,6 +528,7 @@ _OPERATION_DESCRIPTIONS = dict(
     task_get_context="Read the current runtime task, original goal, validated plan, results and user answers.",
     list_route_options="Read the live engine-confirmed model routes the owner configured, each with its tier and tier source, permitted efforts, per-route policy, automatic eligibility, availability and quota band; role tiers at low/normal/high complexity and each role's kind of work; engine affinity per kind of work (only engines with an automatically eligible route); the models the owner prefers for each kind of work, which dispatch ranks ahead of unconfirmed plan hints; under preferred_when, models the owner prefers only when a node meets a free-text condition, which you judge per node; stretch models (light models also used for some standard work) and flagship routes with their extra request names. Use exact route labels in plan_submit model. Informational: dispatch revalidates every route. Explicit user model requests, confirmed only from recorded user messages/answers, precede pins, preferences, usage ranking and automatic tier selection on covered exact-route nodes in every tier. A model requirement in the project root's own AGENTS.md or CLAUDE.md counts as the owner's request for the role purpose it names and precedes them the same way (decided_by project_instruction with the file path); a newer user message outranks it and a prohibition there never grants. Hard policy or unavailable routes refuse visibly without substitution. Within a tier, plan usage only breaks the last tie between otherwise equal routes and never overrides an eligible route you name; a known usage >=95% is hot and ranks behind every non-hot route, a named one included; unknown usage is unavailable, never inferred hot. Without user consent flagship remains escalation-only.",
     answer_submit="Submit a direct answer to an informational question before any plan or workers exist, a final summary after the user chose to finish when answering a runtime stop question or a question asked after verification, an answer to a follow-up question that reopened a completed task before any new plan, or a final summary when a user message returned reviewed and verified work to planning before any new plan. The runtime records and delivers the answer; this does not certify code changes or tests. Put gap disclosures only in not_verified; do not repeat them in text or chat. An authored not-verified section (including alternate English/Russian headings) alongside not_verified is refused; preserve other context outside that section.",
+    check_preflight="Declare each planned check early, before implementation depends on it. Tests program availability inside the real runtime verification environment without running the check. Missing tools require project-private installation without system changes or an executable alternative. If neither is possible, ask the owner immediately through the existing question route. This observation is not test evidence.",
     plan_submit="For changes or substantial delegated work, submit a dependency plan for runtime validation. Accepted only while the task is planning. The runtime chooses routes, schedules assignments, requires review and runs verification. plan.tasks and plan.verification each need at least one item; [] is rejected for either.",
     verification_submit="After the runtime verification failed and the work itself is fine: replace only the verification commands and verify again, without redoing the reviewed work.",
     synthesis_submit="Submit a final synthesis grounded in the retained reports and verification. Accepted only while reconciling: after every task, the review and the verification finished, never while planning (a user message after verification returns the task to planning). Open text with a short user-facing explanation -- what was done, what it means for the user, what is needed from them -- before supporting evidence; keep report ids, raw reason codes and route/model names out of it unless the user asked about them, and describe checks by their consequence rather than a bare status word. Every retained not_run or unverified worker check that runtime verification did not close must be listed in not_verified with its concrete blocker (do not plan new work only to close such a gap), with blocker (and description whenever item is an exact retained check name) written in the task's selected chat language -- item itself stays the exact check name, unchanged by language, whenever it closes a retained gap. Put gap disclosures only in structured not_verified, never a second not-verified section or recap in text. Alternate English/Russian disclosure headings are refused too; preserve other context outside that section. The runtime then completes the task and shows text (with not_verified rendered once) to the user as the final chat message, so do not repeat it in chat; use it only when nothing is left for the user to decide; otherwise ask with user_question_request.",
@@ -647,11 +648,11 @@ _COORDINATOR_ONLY_CLAUSE = " and do not call plan_submit in the same turn"
 # What the senior consultant is never offered. Besides project source and
 # commands, it requests no paths and asks the user nothing: missing evidence
 # is a limitation in its report.
-_CONSULTANT_WITHHELD = frozenset({"command_run", "project_read", "project_git", "access_request", "ask_question",
+_CONSULTANT_WITHHELD = frozenset({"check_preflight", "command_run", "project_read", "project_git", "access_request", "ask_question",
                                  "replan_request", "scope_request", "escalation_request"})
 # Withheld operations this module's dispatch refuses itself; the gateway
 # refuses the others.
-_CONSULTANT_REFUSED = frozenset({"access_request", "ask_question",
+_CONSULTANT_REFUSED = frozenset({"check_preflight", "access_request", "ask_question",
                                "replan_request", "scope_request", "escalation_request"})
 
 
@@ -798,6 +799,15 @@ def tool_definitions(role_kind: str, *, role_id: str | None = None, stage: str |
 
 
 def dispatch(store, channel: ChannelContext, operation: str, args: Mapping[str, Any], *, request_id=None) -> dict:
+    result = _dispatch(store, channel, operation, args, request_id=request_id)
+    # Only successful channel-verified calls are delivery points. A revoked
+    # result channel cannot consume pending guidance after finishing.
+    from ..orchestration.worker_messages import deliver
+    guidance = deliver(store, channel)
+    return dict(result, owner_guidance=guidance) if guidance else result
+
+
+def _dispatch(store, channel: ChannelContext, operation: str, args: Mapping[str, Any], *, request_id=None) -> dict:
     """Validate and perform one delegation operation for ``channel``'s role.
 
     Raises ``StoreError('wrong_channel_role', ...)`` if ``operation`` is not
@@ -808,6 +818,10 @@ def dispatch(store, channel: ChannelContext, operation: str, args: Mapping[str, 
     coordinator schema's shape.
     """
     from ..orchestration import gateway
+    with store.connection() as db:
+        task = db.execute("SELECT state FROM runtime_tasks WHERE task_id=?", (channel.task_id,)).fetchone()
+        if task and task["state"] == "PAUSED":
+            raise StoreError("task_paused")
     if operation in {"tools_discover", "read_batch"}:
         from ..tool_read_api import dispatch as read_dispatch
         return read_dispatch(store, channel, operation, args, request_id=request_id)

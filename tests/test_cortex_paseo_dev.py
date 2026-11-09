@@ -250,6 +250,9 @@ def test_gui_xvfb_fails_closed_when_xvfb_is_unavailable(tmp_path):
 
 def test_gui_custom_port(tmp_path):
     """The gui subcommand must use custom CDP port when specified."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as available:
+        available.bind(("127.0.0.1", 0))
+        port = available.getsockname()[1]
     dev_home = tmp_path / "test-paseo-dev"
     dev_home.mkdir()
 
@@ -262,13 +265,13 @@ def test_gui_custom_port(tmp_path):
 
     result = subprocess.run(
         [sys.executable, str(SCRIPT), "gui", "--user-data-dir", str(tmp_path / "electron-profile"), "--paseo", str(fake_paseo),
-         "--home", str(dev_home), "--port", "8888"],
+         "--home", str(dev_home), "--port", str(port)],
         capture_output=True, text=True, cwd=str(ROOT)
     )
 
     assert result.returncode == 0
-    assert "--remote-debugging-port=8888" in result.stdout
-    assert "Chrome DevTools Protocol: http://127.0.0.1:8888" in result.stdout
+    assert f"--remote-debugging-port={port}" in result.stdout
+    assert f"Chrome DevTools Protocol: http://127.0.0.1:{port}" in result.stdout
 
 
 def test_gui_refuses_busy_explicit_port_before_starting_xvfb(tmp_path):

@@ -1,0 +1,245 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<title>New task - Cortex Workspace mockup</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script>(function(){var r=document.documentElement,t=new URLSearchParams(location.search).get('theme');try{t=t||localStorage.getItem('cw-theme')}catch(e){}t=t||'system';r.dataset.themeChoice=t;r.dataset.theme=t==='system'?(matchMedia('(prefers-color-scheme: light)').matches?'light':'dark'):t})()</script>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body data-kind="task" data-state="empty">
+<input class="pt" type="checkbox" id="pt-sidebar" aria-label="Toggle sidebar">
+<input class="pt" type="checkbox" id="pt-inspector" aria-label="Toggle inspector">
+
+<header class="titlebar">
+  <label class="ib tb-toggle" for="pt-sidebar" title="Sidebar (Ctrl+B)"><i class="i i-panel-left"></i></label>
+  <div class="tb-side">
+    <button class="machine" popovertarget="m-machine" title="Switch machine">
+      <i class="i i-laptop"></i><span class="trunc">This machine</span>
+      <span class="st st-ok" style="margin-left:auto">Connected</span><i class="i s12 i-chevrons-v faint"></i>
+    </button>
+  </div>
+  <div class="tb-main">
+    <a class="ib" href="home.html" title="Back (Alt+Left)"><i class="i i-arrow-left"></i></a>
+    <button class="ib" title="Forward (Alt+Right)" aria-disabled="true"><i class="i i-arrow-right"></i></button>
+    <div class="crumbs"><span class="cur" data-panel="task" data-group="kind">New task</span><span class="cur" data-panel="sprint" data-group="kind" hidden>New sprint</span></div>
+    
+    <span class="grow"></span>
+    <div class="tb-actions"></div>
+    <div class="tb-fixed">
+      <a class="mock-chip" href="index.html" title="Static mockup. Back to the screen list">Mock</a>
+      
+      <button class="ib" aria-disabled="true" title="Terminal (Ctrl+J). Open a project or task to use a terminal"><i class="i i-panel-bottom"></i></button>
+      <button class="ib" aria-disabled="true" title="This screen has no inspector"><i class="i i-panel-right"></i></button>
+    </div>
+    <div class="win" aria-hidden="true">
+      <button tabindex="-1"><i class="i s14 i-minus"></i></button>
+      <button tabindex="-1"><i class="i s12 i-square"></i></button>
+      <button tabindex="-1"><i class="i s14 i-x"></i></button>
+    </div>
+  </div>
+</header>
+
+<div class="workspace">
+  <nav class="sidebar" aria-label="Workspace">
+    <div class="sb-top">
+      <a class="nav" href="new-task.html" aria-current="page"><i class="i i-plus"></i>New task<span class="kbd">Ctrl+N</span></a>
+      <a class="nav" href="#"><i class="i i-inbox"></i>Inbox<span class="count">4</span></a>
+      <a class="nav" href="#"><i class="i i-search"></i>Search<span class="kbd">Ctrl+K</span></a>
+      <a class="nav" href="home.html"><i class="i i-home"></i>Home</a>
+      <a class="nav" href="archive.html"><i class="i i-archive"></i>Archive<span class="count">18</span></a>
+    </div>
+    <div class="sb-scroll">
+      <div class="sb-h"><span>Pinned</span></div>
+      <a class="task-row" style="padding-left:8px" href="task.html"><i class="i s14 i-pin faint"></i><span class="trunc">Fix token refresh race</span></a>
+      <div class="sb-h"><span>Projects</span><button class="ib" style="width:22px;height:22px" title="Sort projects"><i class="i s14 i-chevrons-v"></i></button></div>
+      <a class="proj" href="board.html"><span class="mono-tile t1">A</span><span class="trunc">atlas-api</span><span class="sig st-bad">Conflict</span></a>
+      <div class="tasks">
+        <a class="task-row" href="task.html"><i class="i s14 i-question st-warn"></i><span class="trunc">Fix token refresh race</span><span class="sig">Question</span></a>
+        <a class="task-row" href="board.html?scope=sprint"><i class="i s14 i-layers faint"></i><span class="trunc">Sprint: Usage billing</span><span class="sig tnum">2/5</span></a>
+        <a class="task-row" href="board.html"><i class="i s14 i-loader st-run"></i><span class="trunc">Meter API calls per workspace</span><span class="sig">Working</span></a>
+        <a class="task-row" href="result.html"><i class="i s14 i-eye faint"></i><span class="trunc">Rate-limit the export endpoint</span><span class="sig">Review</span></a>
+        
+        <a class="task-row all" href="board.html">All 15</a>
+      </div>
+      <a class="proj" href="#"><span class="mono-tile t2">B</span><span class="trunc">billing-service</span><span class="sig st-warn">Needs you 1</span></a>
+      <a class="proj" href="#"><span class="mono-tile t3">N</span><span class="trunc">northwind-web</span><span class="sig st-warn">Needs you 1</span></a>
+      <a class="proj" href="#"><span class="mono-tile t4">M</span><span class="trunc">mobile-app</span><span class="sig muted">In review 1</span></a>
+      <a class="proj" href="#"><span class="mono-tile t5">I</span><span class="trunc">infra-terraform</span></a>
+      <a class="proj" href="#"><span class="mono-tile t6">D</span><span class="trunc">docs-site</span></a>
+    </div>
+    <button class="sb-usage" popovertarget="m-usage" title="Engine limits used this week. Snapshot 13:41" aria-label="Engine limits: Claude 62%, Codex 18% used this week">
+      <span class="um"><span>Claude</span><span class="bar"><i style="width:62%"></i></span><span class="tnum">62%</span></span>
+      <span class="um"><span>Codex</span><span class="bar"><i style="width:18%"></i></span><span class="tnum">18%</span></span>
+    </button>
+    <div class="sb-foot">
+      <button class="btn btn-sm" title="Add project"><i class="i s14 i-folder-plus"></i>Add project</button>
+      <span class="grow"></span>
+      <a class="ib" href="settings.html" title="Settings (Ctrl+,)"><i class="i i-settings"></i></a>
+      <button class="ib" title="Help and shortcuts (?)"><i class="i i-help"></i></button>
+    </div>
+  </nav>
+
+  <main class="main">
+    <div class="create"><div class="create-in">
+      <div class="create-top">
+        <div class="seg tall" role="group" aria-label="What to create">
+          <button data-show="task" data-group="kind" aria-current="true">Task</button>
+          <button data-show="sprint" data-group="kind" aria-current="false">Sprint</button>
+        </div>
+        <button class="pick" popovertarget="m-project" title="Project"><span class="mono-tile t1">A</span>atlas-api<i class="i s12 i-chevron-down"></i></button>
+        <button class="pick" popovertarget="m-sprint" data-panel="task" data-group="kind" title="Add to a sprint"><i class="i s14 i-layers faint"></i>No sprint<i class="i s12 i-chevron-down"></i></button>
+        <span class="grow"></span>
+        <span class="cap faint">Defaults come from This machine</span>
+      </div>
+
+      <div class="composer" style="margin-top:2px">
+        <div class="micbar" data-panel="mic" data-group="state" hidden><i class="i s14 i-mic st-bad"></i><span class="mic-time">0:12</span><span class="mic-lv"><i style="height:6px"></i><i style="height:12px"></i><i style="height:18px"></i><i style="height:10px"></i><i style="height:15px"></i><i style="height:8px"></i><i style="height:16px"></i><i style="height:11px"></i><i style="height:5px"></i><i style="height:13px"></i><i style="height:9px"></i><i style="height:14px"></i></span><span class="mic-text">limit the data export endpoint to sixty requests a minute&hellip;</span><button class="btn btn-sm" data-show="empty" data-group="state">Cancel</button><button class="btn btn-line btn-sm" data-show="named" data-group="state">Insert</button></div>
+        <div data-panel="task" data-group="kind">
+          <textarea aria-label="Describe the task" data-panel="empty mic error" data-group="state" placeholder="Describe the task. Use @ to add files, or paste images and logs."></textarea>
+          <textarea aria-label="Describe the task" data-panel="naming named failed" data-group="state" hidden>Limit the data export endpoint to 60 requests per minute per workspace, and return a clear 429 with Retry-After when a client goes over.</textarea>
+        </div>
+        <div data-panel="sprint" data-group="kind" hidden><textarea aria-label="Describe the sprint">Admins need to export an audit log of who did what, with a date range, and we must keep it for a year.</textarea></div>
+        <div class="c-bar">
+                <button class="ib" title="Attach files, images or logs"><i class="i i-plus"></i></button>
+          <div class="c-route">
+                  <button class="sel" popovertarget="m-model" title="Coordinator model (Ctrl+Shift+M)"><i class="i s14 i-cpu"></i><span class="sel-t">Opus</span><i class="i s12 i-chevron-down"></i></button>
+                  <button class="sel" popovertarget="m-effort" title="Reasoning effort"><i class="i s14 i-gauge"></i><span class="sel-t">High</span><i class="i s12 i-chevron-down"></i></button>
+                  <button class="sel" popovertarget="m-mode" title="Access mode"><i class="i s14 i-shield"></i><span class="sel-t">Development</span><i class="i s12 i-chevron-down"></i></button>
+                  <button class="sel" popovertarget="m-lang" title="Cortex message language"><i class="i s14 i-globe"></i><span class="sel-t">Auto</span><i class="i s12 i-chevron-down"></i></button>
+          </div>
+          <div class="c-end">
+                  <button class="ib" data-show="mic" data-group="state" title="Voice input. Text lands in this draft and is never sent on its own."><i class="i i-mic"></i></button>
+          </div>
+              </div>
+      </div>
+      <div class="err" data-panel="error" data-group="state" hidden>Describe what needs doing.</div>
+
+      <div data-panel="task" data-group="kind" style="display:grid;gap:14px">
+        <dl class="title-prev">
+          <dt>Title</dt>
+          <dd data-panel="empty mic error" data-group="state"><span class="muted">Cortex writes this from your description. You can rename it.</span></dd>
+          <dd data-panel="naming" data-group="state" hidden><span class="shimmer">Limit the data export endpoint to 60 requests per m&hellip;</span> <span class="faint">Naming&hellip;</span></dd>
+          <dd data-panel="named" data-group="state" hidden><span class="tt">Rate-limit the export endpoint</span></dd>
+          <dd data-panel="failed" data-group="state" hidden><span class="tt muted">Limit the data export endpoint to 60 requests per m&hellip;</span></dd>
+          <dd data-panel="named" data-group="state" hidden><button class="btn btn-sm"><i class="i s12 i-pencil"></i>Rename</button></dd>
+          <dd data-panel="failed" data-group="state" hidden class="row"><span class="cap st-warn">Title not generated</span><button class="btn btn-sm">Retry</button><button class="btn btn-sm">Rename</button></dd>
+        </dl>
+
+        <div class="fld">
+          <span class="lab">Where it works</span>
+          <div class="two">
+            <label class="rc"><input type="radio" name="checkout" data-show="wt" data-group="checkout" checked><span><span class="t">Separate worktree</span><span class="d">New branch <span class="mono" data-panel="empty mic error naming failed" data-group="state">cw/&hellip;</span><span class="mono" data-panel="named" data-group="state" hidden>cw/export-rate-limit</span> from <span class="mono">main</span>. Your open checkout is not touched.</span></span></label>
+            <label class="rc"><input type="radio" name="checkout" data-show="main" data-group="checkout"><span><span class="t">Main checkout</span><span class="d">Works in <span class="mono">~/work/atlas-api</span> on the open branch <span class="mono">main</span>. 2 uncommitted files are there now.</span></span></label>
+          </div>
+          <div class="note-box" data-panel="main" data-group="checkout" hidden><i class="i s14 i-alert st-warn"></i><span>Cortex edits the same files you have open, and your uncommitted changes count as part of the task. Rules for two tasks writing here at once are not settled yet.</span></div>
+        </div>
+
+        <div class="fld" style="grid-template-columns:auto minmax(0,1fr);align-items:center;gap:10px">
+          <span class="lab">Merge into</span>
+          <span class="row"><button class="pick mono" popovertarget="m-target" style="height:28px"><i class="i s14 i-branch faint"></i>main<i class="i s12 i-chevron-down"></i></button><span class="hint">Git default branch. The task stops at Ready to merge for your confirmation.</span></span>
+        </div>
+      </div>
+
+      <div data-panel="sprint" data-group="kind" hidden style="display:grid;gap:14px">
+        <div class="note-box plain"><i class="i s14 i-layers"></i><span>A sprint starts with a separate planning conversation. Cortex asks questions and proposes linked tasks. Nothing runs until you create them and start the sprint.</span></div>
+        <div class="fld">
+          <span class="lab">How tasks run after planning <span class="faint">You can switch this later</span></span>
+          <div class="two">
+            <label class="rc"><input type="radio" name="sprint-run" checked><span><span class="t">Manual</span><span class="d">You start each ready task. Starting one never starts its neighbours.</span></span></label>
+            <label class="rc"><input type="radio" name="sprint-run"><span><span class="t">Automatic</span><span class="d">One task at a time, in dependency order. Questions and failures pause the queue.</span></span></label>
+          </div>
+        </div>
+        <div class="fld" style="grid-template-columns:auto minmax(0,1fr);align-items:center;gap:10px">
+          <span class="lab">Merge into</span>
+          <span class="row"><button class="pick mono" popovertarget="m-target" style="height:28px"><i class="i s14 i-branch faint"></i>main<i class="i s12 i-chevron-down"></i></button><span class="hint">Git default branch for this sprint. Each task can override it.</span></span>
+        </div>
+      </div>
+
+      <div class="create-foot">
+        <span class="cap faint note" data-panel="task" data-group="kind">Ctrl+Enter starts now</span>
+        <button class="btn btn-line btn-lg" data-panel="task" data-group="kind">Save as draft</button>
+        <a class="btn btn-primary btn-lg" href="task.html" data-panel="task" data-group="kind">Start now</a>
+        <a class="btn btn-primary btn-lg" href="sprint.html" data-panel="sprint" data-group="kind" hidden>Start planning</a>
+      </div>
+    </div></div>
+  </main>
+
+</div>
+
+<div popover id="m-usage" class="pop-usage">
+  <div class="mi-h">Engine limits on This machine</div>
+  <div class="u-eng">
+    <div class="u-h"><span class="w500">Claude</span><span class="st st-ok"><i class="i s12 i-check-circle"></i>Connected</span></div>
+    <div class="u-win"><span>This week</span><span class="bar"><i style="width:62%"></i></span><span class="v">62% used</span><span class="rs">Resets Mon 09:00</span></div>
+    <div class="u-src">Observed 13:41, reported by the provider</div>
+  </div>
+  <div class="mi-sep"></div>
+  <div class="u-eng">
+    <div class="u-h"><span class="w500">Codex</span><span class="st st-ok"><i class="i s12 i-check-circle"></i>Connected</span></div>
+    <div class="u-win"><span>This week</span><span class="bar"><i style="width:18%"></i></span><span class="v">18% used</span><span class="rs">Resets Thu 02:00</span></div>
+    <div class="u-src">Observed 13:41, reported by the provider</div>
+  </div>
+  <div class="mi-sep"></div>
+  <a class="mi" href="settings.html?section=connections"><i class="i i-gauge"></i><span class="grow">All limits and windows</span></a>
+</div>
+<div popover id="m-machine" class="pop-tl">
+  <div class="mi-h">Machines</div>
+  <a class="mi" href="home.html"><i class="i i-laptop"></i><span class="grow">This machine<span class="sub">Local, connected</span></span><i class="i s14 i-check"></i></a>
+  <a class="mi" href="settings.html?section=machines"><i class="i i-server"></i><span class="grow">GPU box<span class="sub">Remote, connected through the server connector</span></span></a>
+  <a class="mi" href="settings.html?section=machines"><i class="i i-server"></i><span class="grow">Build server<span class="sub">Remote, offline, last seen 13:47</span></span></a>
+  <div class="mi-sep"></div>
+  <a class="mi" href="settings.html?section=machines&amp;dialog=add-machine"><i class="i i-plus"></i>Add remote machine&hellip;</a>
+  <a class="mi" href="settings.html?section=overview"><i class="i i-settings"></i>Machine settings</a>
+</div>
+<div popover id="m-new" class="pop-right">
+  <a class="mi" href="new-task.html"><i class="i i-plus"></i><span class="grow">New task</span><span class="kbd">Ctrl+N</span></a>
+  <a class="mi" href="new-task.html?kind=sprint"><i class="i i-layers"></i><span class="grow">New sprint</span><span class="kbd">Ctrl+Shift+N</span></a>
+</div>
+<div popover id="m-project" class="pop-anchor" style="width:260px">
+  <div class="mi-h">Project on This machine</div>
+  <button class="mi"><span class="mono-tile t1">A</span><span class="grow">atlas-api</span><i class="i s14 i-check"></i></button>
+  <button class="mi"><span class="mono-tile t2">B</span><span class="grow">billing-service</span></button>
+  <button class="mi"><span class="mono-tile t3">N</span><span class="grow">northwind-web</span></button>
+</div>
+<div popover id="m-sprint" class="pop-anchor" style="width:260px">
+  <button class="mi"><span class="grow">No sprint</span><i class="i s14 i-check"></i></button>
+  <button class="mi"><i class="i i-layers"></i><span class="grow">Usage billing</span></button>
+</div>
+<div popover id="m-target" class="pop-anchor" style="width:280px">
+  <div class="mi-h">Merge into</div>
+  <button class="mi"><span class="grow"><span class="mono">main</span><span class="sub">Git default branch</span></span><i class="i s14 i-check"></i></button>
+  <button class="mi"><span class="grow"><span class="mono">release/2.4</span></span></button>
+  <div class="mi-sep"></div>
+  <button class="mi">Other branch&hellip;</button>
+</div>
+<div popover id="m-model" class="pop-anchor" style="width:280px">
+  <div class="mi-h">Coordinator model for this task</div>
+  <button class="mi"><span class="grow">Opus<span class="sub">claude-agent-acp</span></span><i class="i s14 i-check"></i></button>
+  <button class="mi"><span class="grow">Sonnet<span class="sub">claude-agent-acp</span></span></button>
+  <button class="mi"><span class="grow">GPT Codex<span class="sub">codex-acp</span></span></button>
+  <div class="mi" aria-disabled="true"><span class="grow">Local model<span class="sub">Unavailable: no engine on this machine</span></span></div>
+</div>
+<div popover id="m-effort" class="pop-anchor">
+  <div class="mi-h">Effort</div>
+  <button class="mi"><span class="grow">Low</span></button>
+  <button class="mi"><span class="grow">Medium</span></button>
+  <button class="mi"><span class="grow">High</span><i class="i s14 i-check"></i></button>
+  <div class="mi" aria-disabled="true"><span class="grow">Max<span class="sub">Unavailable on this route</span></span></div>
+</div>
+<div popover id="m-mode" class="pop-anchor" style="width:300px">
+  <div class="mi-h">Access mode</div>
+  <button class="mi"><span class="grow">Development<span class="sub">Writes in the project without asking</span></span><i class="i s14 i-check"></i></button>
+  <button class="mi"><span class="grow">Guarded<span class="sub">Asks before anything outside the scope</span></span></button>
+  <button class="mi"><span class="grow">Auto<span class="sub">Cortex answers routine permission cards</span></span></button>
+</div>
+<div popover id="m-lang" class="pop-anchor">
+  <div class="mi-h">Cortex message language</div>
+  <button class="mi"><span class="grow">Auto</span><i class="i s14 i-check"></i></button>
+  <button class="mi"><span class="grow">English</span></button>
+  <button class="mi"><span class="grow">Russian</span></button>
+</div>
+
+<script>(function(){var r=document.documentElement,q=new URLSearchParams(location.search);function m(){document.querySelectorAll('[data-set-theme]').forEach(function(b){var on=b.dataset.setTheme===r.dataset.themeChoice;b.setAttribute('aria-pressed',on);b.setAttribute('aria-current',on)})}function show(g,v){document.querySelectorAll('[data-show][data-group="'+g+'"]').forEach(function(x){if(x.hasAttribute('aria-selected'))x.setAttribute('aria-selected',x.dataset.show===v);if(x.hasAttribute('aria-current'))x.setAttribute('aria-current',x.dataset.show===v);if(x.type==='radio')x.checked=x.dataset.show===v});document.querySelectorAll('[data-panel][data-group="'+g+'"]').forEach(function(p){p.hidden=p.dataset.panel.split(' ').indexOf(v)<0});document.body.dataset[g]=v}function openD(id){var d=document.getElementById(id);if(d&&!d.open)d.showModal()}document.addEventListener('click',function(e){var b=e.target.closest('[data-set-theme]');if(b){var t=b.dataset.setTheme;r.dataset.themeChoice=t;r.dataset.theme=t==='system'?(matchMedia('(prefers-color-scheme: light)').matches?'light':'dark'):t;try{localStorage.setItem('cw-theme',t)}catch(x){}m();return}var o=e.target.closest('[data-dialog]');if(o){e.preventDefault();openD(o.dataset.dialog);if(o.dataset.show)show(o.dataset.group,o.dataset.show);return}var c=e.target.closest('[data-close]');if(c){c.closest('dialog').close();return}var s=e.target.closest('[data-show]');if(s){show(s.dataset.group,s.dataset.show);return}var a=e.target.closest('a[href$=".html"],a[href*=".html?"]');if(a){e.preventDefault();var u=new URL(a.href);u.searchParams.set('theme',r.dataset.themeChoice);location.href=u.href}});document.addEventListener('change',function(e){var f=e.target.closest('[data-follow-toggle]');if(f)document.body.dataset.follow=f.checked?'on':'off'});var gs={};document.querySelectorAll('[data-group]').forEach(function(x){gs[x.dataset.group]=1});Object.keys(gs).forEach(function(g){if(q.get(g))show(g,q.get(g))});if(q.get('follow')==='off'){document.body.dataset.follow='off';var f=document.querySelector('[data-follow-toggle]');if(f)f.checked=false}if(q.get('dialog')){openD('dlg-'+q.get('dialog'));if(document.activeElement)document.activeElement.blur()}m()})()</script>
+</body>
+</html>

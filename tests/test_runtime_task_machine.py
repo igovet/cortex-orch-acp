@@ -1332,6 +1332,8 @@ def test_stop_asks_the_user_and_only_their_answer_lets_the_coordinator_close(mac
 def test_only_retries_and_review_fixes_escalate_the_route(machine):
     from cortex_runtime.orchestration.state import attempt_routing, event
     state, channel = machine
+    (state.store.directory / 'routing.json').write_text(json.dumps(
+        exact_policy({'codex-acp': {'fixture-model': 'standard'}})))
     hard = plan(); hard['tasks'][0]['complexity'] = 'high'
     state.submit_plan(channel, hard, 'p'); state.move(channel.task_id, 'EXECUTING')
     node = state.claim_ready(channel.task_id, channel.channel_id)[0]
@@ -1351,6 +1353,8 @@ def test_only_retries_and_review_fixes_escalate_the_route(machine):
 def test_a_planned_provider_preference_reaches_routing(machine):
     from cortex_runtime.orchestration.state import attempt_routing
     state, channel = machine
+    (state.store.directory / 'routing.json').write_text(json.dumps(
+        exact_policy({'codex-acp': {'fixture-model': 'standard'}})))
     preferred = plan(); preferred['tasks'][0].pop('model'); preferred['tasks'][0]['provider'] = 'codex-acp'
     state.submit_plan(channel, preferred, 'p'); state.move(channel.task_id, 'EXECUTING')
     node = state.claim_ready(channel.task_id, channel.channel_id)[0]
@@ -1684,6 +1688,8 @@ def test_retry_uses_prior_audit_even_after_assignment_ref_changes(machine):
         db.execute("INSERT INTO delegation_provisioning(idempotency_key,task_id,attempt_id,role_id,step,status,owner_epoch,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
                    (current['assignment_ref'], channel.task_id, 'xa_current', 'worker-backend-dev', 'ready', 'ready', 0, 'now', 'now'))
         db.commit()
+    (state.store.directory / 'routing.json').write_text(json.dumps(
+        exact_policy({'codex-acp': {'gpt-5.6-terra': 'standard'}})))
     routed = attempt_routing(state.store, channel.task_id, 'xa_current')
     assert routed.escalate is True
     assert routed.model_hint == 'claude-agent-acp'

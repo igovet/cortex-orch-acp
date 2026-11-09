@@ -109,13 +109,46 @@ for the other scripts and the installed-question component check.
 
 ## The non-paid default command
 
-The ordinary command automatically uses `-n auto --dist loadgroup` when the
-optional pytest-xdist plugin is loaded and no worker/distribution choice was given.
-Without xdist it runs serially, without unknown-option errors:
+Run the fixed, no-argument entry point from the checkout (also supported when
+tracked files are read-only):
 
 ```
-PYTHONDONTWRITEBYTECODE=1 python3 -B -m pytest -q
+python3 -B scripts/run_tests_fast.py
 ```
+
+It uses `.venv/bin/python`, eight xdist workers, `--dist=loadgroup`, explicit
+batches of at most 32 files, a 60-second per-test timeout (including setup and
+teardown), and GNU `timeout --kill-after=5 180` for each batch. A timed-out test
+names the test and fails its worker; workers are not restarted to hide a crash.
+Any nonzero batch exit makes the final exit nonzero, while later batches still
+run. Bytecode and pytest cache writes are disabled. Fresh HOME/XDG roots are
+created outside Git; no dependencies are installed by the runner.
+
+Before the first batch the runner runs `cargo build --locked -p workspace-service`
+into `target/` on the dev channel, bounded by GNU `timeout --kill-after=5 300`, and
+points `WORKSPACE_TEST_SERVICE_BINARY` at the result. Service tests launch that real
+binary, so an older build would test older code: a missing `cargo` or a failed build
+stops the run with exit 2 instead of reusing it. `cargo` comes from `PATH`, then
+`$CARGO_HOME/bin` or `~/.cargo/bin`. `target/` is git-ignored, so this works when
+tracked files are read-only. A direct pytest run does not build; those tests refuse
+a binary older than any input in its `target/debug/workspace-service.d` and name
+the build command. A binary chosen through `WORKSPACE_TEST_SERVICE_BINARY` with no
+`.d` file beside it is not compared.
+
+Install the local prerequisites before entering a read-only verification sandbox:
+
+```
+uv pip install --python .venv/bin/python pytest-xdist==3.8.0 pytest-timeout==2.4.0
+```
+
+Missing dependencies are an error, not a serial fallback. `tests/test_fast_suite.py`
+independently inventories test files and checks the batch selection, stale
+exclusions, the service build, successful execution, real failure, and a
+deliberately hanging test.
+No files are currently excluded. Every future exclusion must appear by exact
+name and reason in `SLOW_FILES` in the runner and here; the explicit slower
+command is `python3 -B scripts/run_tests_fast.py --slow` (currently an empty list).
+Do not use the old unbounded whole-suite pytest command.
 
 Two environment requirements are not cosmetic; both were learned by losing
 runs to them:
@@ -148,12 +181,11 @@ real containment evidence. See [verification](verification.md#running-the-suite-
 
 ### Parallel run
 
-With [pytest-xdist](https://pypi.org/project/pytest-xdist/) installed
-(`pip install --user pytest-xdist`), the default suite runs across all cores.
-The equivalent explicit invocation is:
+The default runner fixes the worker count at eight instead of depending on
+host CPU count or inherited pytest arguments. For a small targeted group use:
 
 ```
-PYTHONDONTWRITEBYTECODE=1 python3 -B -m pytest -q -n auto --dist loadgroup
+timeout --kill-after=5 300 env PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -B -m pytest -q -n 8 --dist=loadgroup --timeout=60 --timeout-method=thread tests/test_fast_suite.py tests/test_pytest_parallel.py
 ```
 
 Use `--dist loadgroup`. It spreads tests one by one and keeps tests marked
@@ -164,7 +196,7 @@ worker. The default and explicit commands select the same tests.
 For serial debugging, use `CORTEX_PYTEST_SERIAL=1` (works with or without xdist):
 
 ```
-CORTEX_PYTEST_SERIAL=1 PYTHONDONTWRITEBYTECODE=1 python3 -B -m pytest -q
+timeout --kill-after=5 300 env CORTEX_PYTEST_SERIAL=1 PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -B -m pytest -q -n 0 --timeout=60 --timeout-method=thread tests/test_fast_suite.py
 ```
 
 With xdist installed, `-n 0` is also an explicit serial escape. Explicit `-n`
@@ -195,13 +227,44 @@ both real child exit codes; each child remains serial with its existing timeout.
 Do not put unconditional xdist flags in ini `addopts`: that breaks the optional
 plugin fallback and can multiply workers inside nested pytest subprocesses.
 
-Without pytest-xdist, the serial command still works and the `xdist_group`
-marker has no effect.
+For targeted pytest only, without pytest-xdist the legacy conftest auto-parallel
+hook remains inert. The default runner deliberately requires xdist and timeout.
 
 For a release-grade run, verify in a throwaway clone rather than the working
 checkout: `git clone --no-hardlinks`, overlay the working diff, stamp there
 (`python3 -B scripts/cortex_package.py stamp`), then run the command above.
 The stamp must reproduce byte-identically in the real checkout.
+
+### Bounded timing observations (2026-11-05)
+
+On this 20-CPU workstation, Python 3.14.4 / pytest 9.2.0 / xdist 3.8.0:
+
+- Diagnostic baseline: 399 files in 34 groups of at most 12, eight workers,
+  45-second per-test and 180-second per-group bounds: **422.53 s**, exit 1.
+- Repaired default: `timeout 900 python3 -B scripts/run_tests_fast.py`,
+  400 files in 13 groups of at most 32, eight workers, 60-second per-test and
+  180-second per-group bounds: **313.72 s**, exit **0**, **9708 passed,
+  143 skipped**, no failures. No test files were removed or excluded; five
+  additional cases cover independent SQLite writers, missing Workspace tables,
+  legacy-hook repair and immutable inspection.
+- No test hit the 45-second diagnostic deadline; no real hang was reproduced.
+  The baseline summed test-case time was 2108.52 s (parallel time, not a measured
+  serial wall clock). Slowest file totals were emission scale 327.57 s,
+  composed synthesis 128.66 s, and runtime task machine 66.28 s. The slowest
+  individual test took 33.16 s, in emission scale.
+- Separate eight-worker, one-file wall-clock checks measured emission scale
+  **45.17 s** (41 passed), composed synthesis **15.50 s** (112 passed), and
+  runtime task machine **10.45 s** (153 passed); all exited 0.
+
+The baseline also found missing local plugin dependencies, a fixed-port collision,
+and incomplete stat test doubles under Python 3.14. The SQLite writer failures
+are fixed by connection-local outbox hooks; the original orchestration-overhead,
+read-API actor-scope and retention regressions pass unchanged. The passing default
+is no-paid automated evidence, not live or full release qualification; conditional
+skips remain unqualified. The original hours-long process was absent at inspection;
+its exact cause cannot be reconstructed from these measurements. These timings
+are not an SLA, a controlled before/after performance comparison, or a claim that
+the historical Python 3.12 measurements above were reproduced.
 
 ## Opt-in installed-binary checks (no paid call)
 
@@ -282,3 +345,19 @@ After changes to the observed-change/submission boundary, also run
 `python3 -B -m pytest -q tests/test_artifact_revision.py` and
 `python3 -B -m pytest -q tests/test_runtime_task_machine.py` to verify revision
 coverage and unchanged-task review behavior.
+
+## Cortex Workspace local slice
+
+The Workspace checks are listed with their commands in [verification](verification.md#cortex-workspace-local-slice-checks-no-paid-plus-container). The test files, grouped by area:
+
+- Wire contract and generation: `tests/test_workspace_contract.py`, with the Node vectors in `packages/workspace-contract/test.mjs`.
+- Pins and prerequisites: `tests/test_workspace_pins.py`.
+- Adapter, identity, projections, outbox, decisions, starts and results: `tests/test_workspace_api.py`, `tests/test_workspace_extension.py`, `tests/test_workspace_outbox.py`, `tests/test_workspace_decisions.py`, `tests/test_workspace_start.py` and `tests/test_workspace_results.py`.
+- Service, journey and integration: `tests/test_workspace_service_integration.py` and `tests/test_workspace_journey.py`.
+- Machine helper against a real repository and a private configuration root: `tests/test_workspace_machine_tools.py`. Weekly limits, source fallback without a global CLI, scoped-window aggregation and exclusion of session quotas: `tests/test_workspace_weekly_usage.py`.
+- Channel stores: `tests/test_workspace_channels.py` exercises release-canary preservation, dev-only format-11 migration/inspection, both private paths and effective Git ignores. Rust service tests exercise coexistence and unowned-dev-store refusal.
+- Question notifications: `packages/workspace-ui/test/notifications.test.tsx` checks off-task delivery, deduplication, disabled/open-task suppression and delivery failure. The native `notification::tests` checks payload shape; `delivery_to_private_bus` is explicitly ignored unless run in a disposable container under `dbus-run-session` with `CORTEX_NOTIFICATION_TEST_BUS=private-container`, where it verifies a real Notify exchange and missing-service failure, not rendered desktop behavior.
+- Packaging and channels: `tests/test_workspace_packaging.py`, `tests/test_workspace_container_build.py`, `tests/test_workspace_rendered_harness.py`, `tests/test_workspace_channels.py` and `tests/test_workspace_clone_dev_settings.py`. The rendered-harness tests cover stale-node versus process-death handling and series rejection of failed, missing, duplicated or contradictory evidence, including the CLI exit/count verdict. Archive checks compare the complete stamped runtime payload and normal-user file modes. `python3 -B scripts/build_workspace_desktop.py --check-install` adds the clean Ubuntu apt install, bundled-runtime activation, legacy-shape upgrade and data-preserving removal smoke; unavailable systemd managers and denied sandbox namespaces remain unverified.
+- Domain and presentation packages: `npm` test scripts in `packages/workspace-domain`, `packages/workspace-ui`, `apps/cortex-workspace-desktop` and `prototypes/cortex-workspace/desktop`.
+
+The glob `tests/test_workspace_*.py` also runs any other Workspace test file. Passing counts change with the suite and are not evidence on their own; the retained command receipts are.

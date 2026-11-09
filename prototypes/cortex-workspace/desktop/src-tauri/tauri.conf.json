@@ -1,0 +1,27 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Cortex Workspace Mock",
+  "version": "1.0.6",
+  "identifier": "example.cortex.workspace.mock",
+  "build": {
+    "beforeDevCommand": "npm run dev -- --mode a",
+    "devUrl": "http://127.0.0.1:5181/a",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Cortex Workspace Mock",
+        "width": 1280,
+        "height": 800
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'none'; img-src 'self' data:"
+    }
+  },
+  "bundle": {
+    "active": false
+  }
+}

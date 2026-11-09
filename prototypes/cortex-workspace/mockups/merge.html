@@ -1,0 +1,291 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<title>Ready to merge - Cortex Workspace mockup</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script>(function(){var r=document.documentElement,t=new URLSearchParams(location.search).get('theme');try{t=t||localStorage.getItem('cw-theme')}catch(e){}t=t||'system';r.dataset.themeChoice=t;r.dataset.theme=t==='system'?(matchMedia('(prefers-color-scheme: light)').matches?'light':'dark'):t})()</script>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body data-tab="changes" data-how="squash">
+<input class="pt" type="checkbox" id="pt-sidebar" aria-label="Toggle sidebar">
+<input class="pt" type="checkbox" id="pt-inspector" aria-label="Toggle inspector">
+<input class="pt" type="checkbox" id="pt-terminal" aria-label="Toggle terminal">
+
+<header class="titlebar">
+  <label class="ib tb-toggle" for="pt-sidebar" title="Sidebar (Ctrl+B)"><i class="i i-panel-left"></i></label>
+  <div class="tb-side">
+    <button class="machine" popovertarget="m-machine" title="Switch machine">
+      <i class="i i-laptop"></i><span class="trunc">This machine</span>
+      <span class="st st-ok" style="margin-left:auto">Connected</span><i class="i s12 i-chevrons-v faint"></i>
+    </button>
+  </div>
+  <div class="tb-main">
+    <a class="ib" href="board.html" title="Back (Alt+Left)"><i class="i i-arrow-left"></i></a>
+    <button class="ib" title="Forward (Alt+Right)" aria-disabled="true"><i class="i i-arrow-right"></i></button>
+    <div class="crumbs"><a href="board.html">atlas-api</a><span class="sep">/</span><a href="board.html?scope=sprint" data-panel="ready" data-group="state">Usage billing</a><span class="sep" data-panel="ready" data-group="state">/</span><span class="cur trunc" data-panel="ready" data-group="state">Add the usage events table</span><span class="cur trunc" data-panel="conflict cortex-running cortex-done" data-group="state" hidden>Rebase usage rollups onto main</span></div>
+    <button class="chip branch-chip"><i class="i s12 i-branch"></i><span class="mono trunc" style="max-width:150px" data-panel="ready" data-group="state">cw/usage-events</span><span class="mono trunc" style="max-width:150px" data-panel="conflict cortex-running cortex-done" data-group="state" hidden>cw/usage-rollups</span></button>
+    <span class="grow"></span>
+    <div class="tb-actions"><span class="chip" data-panel="ready cortex-done" data-group="state"><i class="i s12 i-merge st-merge"></i><span style="color:var(--fg)">Ready to merge</span></span>
+      <span class="chip" data-panel="conflict" data-group="state" hidden><i class="i s12 i-alert st-bad"></i><span style="color:var(--fg)">Conflict</span></span>
+      <span class="chip" data-panel="cortex-running" data-group="state" hidden><i class="i s12 i-loader spin st-run"></i><span style="color:var(--fg)">Cortex resolving</span></span>
+      <button class="btn btn-primary" data-dialog="dlg-merge" data-panel="ready" data-group="state">Merge&hellip;</button>
+      <button class="ib" title="Task actions"><i class="i i-more"></i></button></div>
+    <div class="tb-fixed">
+      <a class="mock-chip" href="index.html" title="Static mockup. Back to the screen list">Mock</a>
+      
+      <label class="ib" for="pt-terminal" title="Terminal (Ctrl+J)"><i class="i i-panel-bottom"></i></label>
+      <label class="ib" for="pt-inspector" title="Inspector (Ctrl+Alt+B)"><i class="i i-panel-right"></i></label>
+    </div>
+    <div class="win" aria-hidden="true">
+      <button tabindex="-1"><i class="i s14 i-minus"></i></button>
+      <button tabindex="-1"><i class="i s12 i-square"></i></button>
+      <button tabindex="-1"><i class="i s14 i-x"></i></button>
+    </div>
+  </div>
+</header>
+
+<div class="workspace">
+  <nav class="sidebar" aria-label="Workspace">
+    <div class="sb-top">
+      <a class="nav" href="new-task.html"><i class="i i-plus"></i>New task<span class="kbd">Ctrl+N</span></a>
+      <a class="nav" href="#"><i class="i i-inbox"></i>Inbox<span class="count">4</span></a>
+      <a class="nav" href="#"><i class="i i-search"></i>Search<span class="kbd">Ctrl+K</span></a>
+      <a class="nav" href="home.html"><i class="i i-home"></i>Home</a>
+      <a class="nav" href="archive.html"><i class="i i-archive"></i>Archive<span class="count">18</span></a>
+    </div>
+    <div class="sb-scroll">
+      <div class="sb-h"><span>Pinned</span></div>
+      <a class="task-row" style="padding-left:8px" href="task.html"><i class="i s14 i-pin faint"></i><span class="trunc">Fix token refresh race</span></a>
+      <div class="sb-h"><span>Projects</span><button class="ib" style="width:22px;height:22px" title="Sort projects"><i class="i s14 i-chevrons-v"></i></button></div>
+      <a class="proj" href="board.html"><span class="mono-tile t1">A</span><span class="trunc">atlas-api</span><span class="sig st-bad">Conflict</span></a>
+      <div class="tasks">
+        <a class="task-row" href="task.html"><i class="i s14 i-question st-warn"></i><span class="trunc">Fix token refresh race</span><span class="sig">Question</span></a>
+        <a class="task-row" href="board.html?scope=sprint"><i class="i s14 i-layers faint"></i><span class="trunc">Sprint: Usage billing</span><span class="sig tnum">2/5</span></a>
+        <a class="task-row" href="board.html"><i class="i s14 i-loader st-run"></i><span class="trunc">Meter API calls per workspace</span><span class="sig">Working</span></a>
+        <a class="task-row" href="result.html"><i class="i s14 i-eye faint"></i><span class="trunc">Rate-limit the export endpoint</span><span class="sig">Review</span></a>
+        <a class="task-row" href="merge.html" aria-current="page"><i class="i s14 i-merge st-merge"></i><span class="trunc">Add the usage events table</span><span class="sig">Merge</span></a>
+        <a class="task-row all" href="board.html">All 15</a>
+      </div>
+      <a class="proj" href="#"><span class="mono-tile t2">B</span><span class="trunc">billing-service</span><span class="sig st-warn">Needs you 1</span></a>
+      <a class="proj" href="#"><span class="mono-tile t3">N</span><span class="trunc">northwind-web</span><span class="sig st-warn">Needs you 1</span></a>
+      <a class="proj" href="#"><span class="mono-tile t4">M</span><span class="trunc">mobile-app</span><span class="sig muted">In review 1</span></a>
+      <a class="proj" href="#"><span class="mono-tile t5">I</span><span class="trunc">infra-terraform</span></a>
+      <a class="proj" href="#"><span class="mono-tile t6">D</span><span class="trunc">docs-site</span></a>
+    </div>
+    <button class="sb-usage" popovertarget="m-usage" title="Engine limits used this week. Snapshot 13:41" aria-label="Engine limits: Claude 62%, Codex 18% used this week">
+      <span class="um"><span>Claude</span><span class="bar"><i style="width:62%"></i></span><span class="tnum">62%</span></span>
+      <span class="um"><span>Codex</span><span class="bar"><i style="width:18%"></i></span><span class="tnum">18%</span></span>
+    </button>
+    <div class="sb-foot">
+      <button class="btn btn-sm" title="Add project"><i class="i s14 i-folder-plus"></i>Add project</button>
+      <span class="grow"></span>
+      <a class="ib" href="settings.html" title="Settings (Ctrl+,)"><i class="i i-settings"></i></a>
+      <button class="ib" title="Help and shortcuts (?)"><i class="i i-help"></i></button>
+    </div>
+  </nav>
+
+  <main class="main">
+    <div class="planbar">
+      <a class="rev" href="#">Plan r1</a>
+      <div class="phases" aria-label="Task phase">
+        <span class="phase done">Planned</span><i class="i s12 i-chevron-right"></i>
+        <span class="phase done">Executed</span><i class="i s12 i-chevron-right"></i>
+        <span class="phase done">Reviewed</span><i class="i s12 i-chevron-right"></i>
+        <span class="phase done">Verification ran</span><i class="i s12 i-chevron-right"></i>
+        <span class="phase now" data-panel="ready conflict" data-group="state">Accepted v1</span><span class="phase now" data-panel="cortex-running" data-group="state" hidden>Resolving conflict</span><span class="phase now" data-panel="cortex-done" data-group="state" hidden>Result v2</span><i class="i s12 i-chevron-right"></i>
+        <span class="phase">Merged</span>
+      </div>
+      <span class="grow"></span>
+      
+      <span><span class="faint">Usage</span> <span class="tnum" style="color:var(--fg)">96k</span></span>
+    </div>
+    <div class="tabs" role="tablist" aria-label="Task views">
+      <a class="tab" role="tab" href="task.html" aria-selected="false">Conversation</a>
+      <a class="tab" role="tab" href="result.html?tab=workers" aria-selected="false">Workers <span class="n">3 finished</span></a>
+      <button class="tab" role="tab" data-show="changes" data-group="tab" aria-selected="true">Changes <span class="tnum n" data-panel="ready" data-group="state"><span class="add">+212</span> <span class="del">&minus;6</span></span><span class="tnum n" data-panel="conflict cortex-running cortex-done" data-group="state" hidden><span class="add">+64</span> <span class="del">&minus;31</span></span></button>
+      <a class="tab" role="tab" href="code.html" aria-selected="false">Code</a>
+      <a class="tab" role="tab" href="task.html?tab=terminal" aria-selected="false">Terminal</a>
+    </div>
+    <div class="ready"><div class="ready-in">
+      <div class="rcard" data-panel="ready" data-group="state">
+        <div class="rcard-h"><i class="i s14 i-merge st-merge"></i>Ready to merge<span class="r">Accepted v1 by you, 13:54</span></div>
+        <div class="rcard-b">Stores one row per billable event, with a daily rollup index. This task is part of the Usage billing sprint, and <a class="lnk" href="board.html?scope=sprint">Chart usage on the billing page</a> waits for it to be merged.</div>
+        <div class="outc">
+          <div><span class="v st-ok"><i class="i i-check-circle"></i>6</span><span class="l">Passed</span></div>
+          <div><span class="v st-idle"><i class="i i-x-circle"></i>0</span><span class="l">Failed</span></div>
+          <div><span class="v st-idle"><i class="i i-circle"></i>1</span><span class="l">Not run</span></div>
+          <div><span class="v st-idle"><i class="i i-help"></i>0</span><span class="l">Unverified</span></div>
+        </div>
+        <div class="rcard-f"><span class="flow"><span class="mono">cw/usage-events</span><i class="i s14 i-arrow-right faint"></i><span class="mono">main</span><span class="st st-warn" style="margin-left:6px"><i class="i s12 i-alert"></i>3 behind</span></span><span class="grow"></span>
+          <button class="btn btn-sm" data-dialog="dlg-merge" data-show="pr" data-group="how">Create PR&hellip;</button>
+          <button class="btn btn-primary btn-sm" data-dialog="dlg-merge">Merge&hellip;</button></div>
+      </div>
+      <div class="rcard" data-panel="conflict" data-group="state" hidden>
+        <div class="rcard-h"><i class="i s14 i-alert st-bad"></i>Conflict with main<span class="r">Merge blocked</span></div>
+        <div class="rcard-b">Updating <span class="mono">cw/usage-rollups</span> from <span class="mono">main</span> stopped with 1 block left in <span class="mono">usage_rollups.py</span>. Nothing was stashed or reset, and this task cannot merge until the conflict is resolved.</div>
+        <div class="ways2">
+          <div><span class="t">Resolve it yourself</span><span class="d">Choose ours, theirs or both for each block, then finish the merge.</span><a class="btn btn-line btn-sm" href="conflict.html">Open the conflict</a></div>
+          <div><span class="t">Let Cortex resolve</span><span class="d">It resolves the block and runs the checks. The result comes back here for your review.</span><button class="btn btn-primary btn-sm" data-dialog="dlg-cortex">Let Cortex resolve&hellip;</button></div>
+        </div>
+        <div class="rcard-f"><span class="flow"><span class="mono">cw/usage-rollups</span><i class="i s14 i-arrow-right faint"></i><span class="mono">main</span></span><span class="grow"></span><button class="btn btn-line btn-sm">Abort merge</button></div>
+      </div>
+      <div class="rcard" data-panel="cortex-running" data-group="state" hidden>
+        <div class="rcard-h"><i class="i s14 i-loader spin st-run"></i>Cortex is resolving the conflict<span class="r tnum">0:41</span></div>
+        <div class="rcard-b">The result comes back here for your review. Nothing reaches <span class="mono">main</span> until you confirm it.</div>
+        <div class="cx-steps">
+          <span class="cx-step"><i class="i s14 i-check-circle st-ok"></i>Read both sides and the base</span>
+          <span class="cx-step now"><i class="i s14 i-loader spin st-run"></i>Resolving <span class="mono">usage_rollups.py</span></span>
+          <span class="cx-step todo"><i class="i s14 i-circle"></i>Run the checks</span>
+          <span class="cx-step todo"><i class="i s14 i-circle"></i>Back to Ready to merge</span>
+        </div>
+        <div class="rcard-f"><span class="flow"><span class="mono">cw/usage-rollups</span><i class="i s14 i-arrow-right faint"></i><span class="mono">main</span></span><span class="grow"></span><a class="btn btn-sm" href="conflict.html?cx=running">Open the conflict</a><a class="btn btn-sm" href="merge.html?state=conflict">Stop and resolve myself</a><button class="btn btn-line btn-sm">Abort merge</button></div>
+      </div>
+      <div class="rcard" data-panel="cortex-done" data-group="state" hidden>
+        <div class="rcard-h"><i class="i s14 i-merge st-merge"></i>Ready to merge, resolved by Cortex<span class="r">Finished 14:06</span></div>
+        <div class="rcard-b">Cortex kept <code>tz</code> from <span class="mono">main</span> and <code>n=500</code> from this branch in <span class="mono">usage_rollups.py</span>. This is result v2. Review it, then confirm the merge yourself.</div>
+        <div class="outc">
+          <div><span class="v st-ok"><i class="i i-check-circle"></i>5</span><span class="l">Passed</span></div>
+          <div><span class="v st-idle"><i class="i i-x-circle"></i>0</span><span class="l">Failed</span></div>
+          <div><span class="v st-idle"><i class="i i-circle"></i>1</span><span class="l">Not run</span></div>
+          <div><span class="v st-idle"><i class="i i-help"></i>0</span><span class="l">Unverified</span></div>
+        </div>
+        <div class="rcard-f"><span class="flow"><span class="mono">cw/usage-rollups</span><i class="i s14 i-arrow-right faint"></i><span class="mono">main</span></span><span class="grow"></span><button class="btn btn-line btn-sm">Abort merge</button><a class="btn btn-sm" href="conflict.html?cx=done">Review the diff</a><button class="btn btn-primary btn-sm" aria-disabled="true" title="Review result v2 first">Merge&hellip;</button></div>
+      </div>
+      <div class="cap faint">Every task stops here, including tasks in an automatic sprint. You choose the branch and confirm each merge or pull request.</div>
+    </div></div>
+    <section class="terminal" aria-label="Terminal">
+      <div class="term-h">
+        <span class="term-tab" aria-selected="true"><i class="i s12 i-terminal"></i>bash</span>
+        <button class="ib" style="width:24px;height:24px" title="New shell in this checkout"><i class="i s14 i-plus"></i></button>
+        <span class="mono faint" style="margin-left:6px" data-panel="ready" data-group="state">~/work/atlas-api/.worktrees/usage-events</span><span class="mono faint" style="margin-left:6px" data-panel="conflict cortex-running cortex-done" data-group="state" hidden>~/work/atlas-api/.worktrees/usage-rollups</span>
+      </div>
+      <div class="term-body" data-panel="ready" data-group="state"><b>cw/usage-events</b> $ git log --oneline -1
+9be2a41 Add usage events table
+<b>cw/usage-events</b> $ </div>
+      <div class="term-body" data-panel="conflict cortex-running cortex-done" data-group="state" hidden><b>cw/usage-rollups</b> $ git status --short
+UU atlas/usage/usage_rollups.py
+<b>cw/usage-rollups</b> $ </div>
+    </section>
+  </main>
+<aside class="inspector" aria-label="Inspector">
+    <div class="ins-sec">
+      <div class="ins-h"><span>State</span></div>
+      <div data-panel="ready" data-group="state"><div class="st st-merge" style="margin-bottom:6px"><i class="i s14 i-merge"></i>Ready to merge</div><div class="cap muted">Waiting for you to confirm.</div></div>
+      <div data-panel="conflict" data-group="state" hidden><div class="st st-bad" style="margin-bottom:6px"><i class="i s14 i-alert"></i>Conflict, needs you</div><div class="cap muted">Resolve it yourself, hand it to Cortex or abort the merge.</div></div>
+      <div data-panel="cortex-running" data-group="state" hidden><div class="st st-run" style="margin-bottom:6px"><i class="i s14 i-loader spin"></i>Cortex is resolving</div><div class="cap muted">Handed over by you at 14:05.</div></div>
+      <div data-panel="cortex-done" data-group="state" hidden><div class="st st-merge" style="margin-bottom:6px"><i class="i s14 i-merge"></i>Ready to merge, needs your review</div><div class="cap muted">Cortex does not merge without your confirmation.</div></div>
+    </div>
+    <div class="ins-sec" data-panel="conflict cortex-running cortex-done" data-group="state" hidden>
+      <div class="ins-h"><span>Worktree</span></div>
+      <dl class="kv"><dt>Branch</dt><dd class="mono">cw/usage-rollups</dd><dt>Merge into</dt><dd class="mono">main</dd><dt>Conflicts</dt><dd><span data-panel="conflict cortex-running" data-group="state">1 block left in 1 file</span><span data-panel="cortex-done" data-group="state" hidden>None left</span></dd></dl>
+    </div>
+    <div class="ins-sec" data-panel="ready" data-group="state">
+      <div class="ins-h"><span>Worktree</span></div>
+      <dl class="kv"><dt>Branch</dt><dd class="mono">cw/usage-events</dd><dt>Merge into</dt><dd class="mono">main</dd><dt>Behind</dt><dd>3 commits</dd><dt>Uncommitted</dt><dd>None</dd></dl>
+    </div>
+    <div class="ins-sec" data-panel="ready" data-group="state">
+      <div class="ins-h"><span>Sprint</span></div>
+      <dl class="kv"><dt>Sprint</dt><dd>Usage billing</dd><dt>Run mode</dt><dd>Automatic</dd><dt>Blocks</dt><dd>1 task</dd></dl>
+    </div>
+  </aside>
+</div>
+
+<dialog class="dlg" id="dlg-cortex" aria-labelledby="dlg-cortex-h">
+  <div class="dlg-h"><h2 id="dlg-cortex-h">Let Cortex resolve this conflict?</h2><button class="ib" data-close title="Keep resolving myself"><i class="i i-x"></i></button></div>
+  <div class="dlg-b">
+    <div class="lab">What Cortex will do</div>
+    <ul class="conseq">
+      <li><i class="i s14 i-file"></i><span>Read both sides, the base and the commits behind them.</span></li>
+      <li><i class="i s14 i-pencil"></i><span>Resolve the 1 block left in <span class="mono">usage_rollups.py</span>. Your choice in <span class="mono">schema.sql</span> stays as you made it.</span></li>
+      <li><i class="i s14 i-check-circle"></i><span>Run the required checks in the worktree <span class="mono">cw/usage-rollups</span>.</span></li>
+      <li><i class="i s14 i-merge"></i><span>Send the result to Ready to merge as a normal diff, for your review.</span></li>
+    </ul>
+    <div class="note-box plain"><i class="i s14 i-shield"></i><span>Cortex never merges or pushes on its own. Nothing reaches <span class="mono">main</span> until you confirm it, and Abort merge stays available the whole time.</span></div>
+    <div class="fld"><span class="lab">Guidance for Cortex <span class="faint">Optional</span></span><textarea class="inp" rows="2" placeholder="For example: keep the tz argument from main"></textarea></div>
+  </div>
+  <div class="dlg-f">
+    <span class="note">Uses Opus, High, the route of this task.</span>
+    <button class="btn btn-line btn-lg" data-close autofocus>Cancel</button>
+    <a class="btn btn-primary btn-lg" href="merge.html?state=cortex-running">Let Cortex resolve</a>
+  </div>
+</dialog>
+<div popover id="m-usage" class="pop-usage">
+  <div class="mi-h">Engine limits on This machine</div>
+  <div class="u-eng">
+    <div class="u-h"><span class="w500">Claude</span><span class="st st-ok"><i class="i s12 i-check-circle"></i>Connected</span></div>
+    <div class="u-win"><span>This week</span><span class="bar"><i style="width:62%"></i></span><span class="v">62% used</span><span class="rs">Resets Mon 09:00</span></div>
+    <div class="u-src">Observed 13:41, reported by the provider</div>
+  </div>
+  <div class="mi-sep"></div>
+  <div class="u-eng">
+    <div class="u-h"><span class="w500">Codex</span><span class="st st-ok"><i class="i s12 i-check-circle"></i>Connected</span></div>
+    <div class="u-win"><span>This week</span><span class="bar"><i style="width:18%"></i></span><span class="v">18% used</span><span class="rs">Resets Thu 02:00</span></div>
+    <div class="u-src">Observed 13:41, reported by the provider</div>
+  </div>
+  <div class="mi-sep"></div>
+  <a class="mi" href="settings.html?section=connections"><i class="i i-gauge"></i><span class="grow">All limits and windows</span></a>
+</div>
+<div popover id="m-machine" class="pop-tl">
+  <div class="mi-h">Machines</div>
+  <a class="mi" href="home.html"><i class="i i-laptop"></i><span class="grow">This machine<span class="sub">Local, connected</span></span><i class="i s14 i-check"></i></a>
+  <a class="mi" href="settings.html?section=machines"><i class="i i-server"></i><span class="grow">GPU box<span class="sub">Remote, connected through the server connector</span></span></a>
+  <a class="mi" href="settings.html?section=machines"><i class="i i-server"></i><span class="grow">Build server<span class="sub">Remote, offline, last seen 13:47</span></span></a>
+  <div class="mi-sep"></div>
+  <a class="mi" href="settings.html?section=machines&amp;dialog=add-machine"><i class="i i-plus"></i>Add remote machine&hellip;</a>
+  <a class="mi" href="settings.html?section=overview"><i class="i i-settings"></i>Machine settings</a>
+</div>
+<div popover id="m-new" class="pop-right">
+  <a class="mi" href="new-task.html"><i class="i i-plus"></i><span class="grow">New task</span><span class="kbd">Ctrl+N</span></a>
+  <a class="mi" href="new-task.html?kind=sprint"><i class="i i-layers"></i><span class="grow">New sprint</span><span class="kbd">Ctrl+Shift+N</span></a>
+</div>
+<dialog class="dlg wide" id="dlg-merge" aria-labelledby="dlg-merge-h">
+  <div class="dlg-h"><h2 id="dlg-merge-h">Finish &ldquo;Add the usage events table&rdquo;</h2><button class="ib" data-close title="Cancel"><i class="i i-x"></i></button></div>
+  <div class="dlg-b">
+    <div class="two">
+      <div class="fld"><span class="lab">From</span><span class="pick mono" style="cursor:default"><i class="i s14 i-branch faint"></i>cw/usage-events</span></div>
+      <div class="fld"><span class="lab">Merge into <span class="faint">Git default branch</span></span><button class="pick wide mono" popovertarget="m-target" title="Change the target for this task"><i class="i s14 i-branch faint"></i>main<i class="i s12 i-chevron-down"></i></button></div>
+    </div>
+    <div class="two">
+      <label class="rc"><input type="radio" name="merge-how" data-show="squash" data-group="how" checked><span><span class="t">Squash merge locally</span><span class="d">One commit on <span class="mono">main</span>. Nothing is pushed.</span></span></label>
+      <label class="rc"><input type="radio" name="merge-how" data-show="pr" data-group="how"><span><span class="t">Create a pull request</span><span class="d">Pushes <span class="mono">cw/usage-events</span> to <span class="mono">origin</span> and opens a PR.</span></span></label>
+    </div>
+    <div class="pre">
+      <div class="chk"><i class="i s14 i-check-circle st-ok"></i><span>Result v1 accepted by you</span><span class="src">13:54</span></div>
+      <div class="chk"><i class="i s14 i-alert st-warn"></i><span>Behind <span class="mono">main</span> by 3 commits</span><span class="src"><a class="btn btn-line btn-sm" style="height:22px" href="merge.html?state=conflict">Update from main</a></span></div>
+      <div class="chk"><i class="i s14 i-check-circle st-ok"></i><span>Worktree is clean</span><span class="src">No uncommitted files</span></div>
+      <div class="chk"><i class="i s14 i-circle faint"></i><span>Checks: 6 passed, 1 not run</span><span class="src"><a class="lnk" href="#">See checks</a></span></div>
+    </div>
+    <div data-panel="squash" data-group="how" style="display:grid;gap:10px">
+      <div class="fld"><span class="lab">Commit message <span class="faint">Generated, you can edit it</span></span><textarea class="inp" rows="3">Add the usage events table
+
+Stores one row per billable event, with a daily rollup index.</textarea></div>
+      <label class="ck"><input type="checkbox" checked><span>Delete the worktree after merging<span class="hint" style="display:block">Never removes unmerged or uncommitted work.</span></span></label>
+    </div>
+    <div data-panel="pr" data-group="how" style="display:grid;gap:10px" hidden>
+      <div class="fld"><span class="lab">Title</span><input class="inp" value="Add the usage events table"></div>
+      <div class="fld"><span class="lab">Description <span class="faint">Generated from Result v1, with its checks</span></span><textarea class="inp" rows="3">Stores one row per billable event, with a daily rollup index.
+
+Checks: 6 passed, 1 not run (load test, no fixture on this machine).</textarea></div>
+      <label class="ck"><input type="checkbox"><span>Open as a draft pull request</span></label>
+    </div>
+  </div>
+  <div class="dlg-f">
+    <span class="note">Nothing happens until you confirm.</span>
+    <button class="btn btn-line btn-lg" data-close autofocus>Cancel</button>
+    <button class="btn btn-primary btn-lg" data-panel="squash" data-group="how" data-close>Confirm merge into main</button>
+    <button class="btn btn-primary btn-lg" data-panel="pr" data-group="how" data-close hidden>Push and create PR</button>
+  </div>
+  <div popover id="m-target" class="pop-anchor" style="width:300px">
+  <div class="mi-h">Merge into</div>
+  <button class="mi"><span class="grow"><span class="mono">main</span><span class="sub">Git default branch</span></span><i class="i s14 i-check"></i></button>
+  <button class="mi"><span class="grow"><span class="mono">release/2.4</span></span></button>
+  <button class="mi"><span class="grow"><span class="mono">sprint/usage-billing</span><span class="sub">Branch of this sprint</span></span></button>
+  <div class="mi-sep"></div>
+  <button class="mi">Other branch&hellip;</button>
+</div>
+</dialog>
+
+<script>(function(){var r=document.documentElement,q=new URLSearchParams(location.search);function m(){document.querySelectorAll('[data-set-theme]').forEach(function(b){var on=b.dataset.setTheme===r.dataset.themeChoice;b.setAttribute('aria-pressed',on);b.setAttribute('aria-current',on)})}function show(g,v){document.querySelectorAll('[data-show][data-group="'+g+'"]').forEach(function(x){if(x.hasAttribute('aria-selected'))x.setAttribute('aria-selected',x.dataset.show===v);if(x.hasAttribute('aria-current'))x.setAttribute('aria-current',x.dataset.show===v);if(x.type==='radio')x.checked=x.dataset.show===v});document.querySelectorAll('[data-panel][data-group="'+g+'"]').forEach(function(p){p.hidden=p.dataset.panel.split(' ').indexOf(v)<0});document.body.dataset[g]=v}function openD(id){var d=document.getElementById(id);if(d&&!d.open)d.showModal()}document.addEventListener('click',function(e){var b=e.target.closest('[data-set-theme]');if(b){var t=b.dataset.setTheme;r.dataset.themeChoice=t;r.dataset.theme=t==='system'?(matchMedia('(prefers-color-scheme: light)').matches?'light':'dark'):t;try{localStorage.setItem('cw-theme',t)}catch(x){}m();return}var o=e.target.closest('[data-dialog]');if(o){e.preventDefault();openD(o.dataset.dialog);if(o.dataset.show)show(o.dataset.group,o.dataset.show);return}var c=e.target.closest('[data-close]');if(c){c.closest('dialog').close();return}var s=e.target.closest('[data-show]');if(s){show(s.dataset.group,s.dataset.show);return}var a=e.target.closest('a[href$=".html"],a[href*=".html?"]');if(a){e.preventDefault();var u=new URL(a.href);u.searchParams.set('theme',r.dataset.themeChoice);location.href=u.href}});document.addEventListener('change',function(e){var f=e.target.closest('[data-follow-toggle]');if(f)document.body.dataset.follow=f.checked?'on':'off'});var gs={};document.querySelectorAll('[data-group]').forEach(function(x){gs[x.dataset.group]=1});Object.keys(gs).forEach(function(g){if(q.get(g))show(g,q.get(g))});if(q.get('follow')==='off'){document.body.dataset.follow='off';var f=document.querySelector('[data-follow-toggle]');if(f)f.checked=false}if(q.get('dialog')){openD('dlg-'+q.get('dialog'));if(document.activeElement)document.activeElement.blur()}m()})()</script>
+</body>
+</html>

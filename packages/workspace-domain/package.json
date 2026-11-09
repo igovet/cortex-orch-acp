@@ -1,0 +1,19 @@
+{
+  "name": "@cortex/workspace-domain",
+  "version": "1.0.6",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@types/node": "^24.19.2",
+    "typescript": "6.0.3",
+    "vite": "8.3.5",
+    "vitest": "5.1.0"
+  }
+}

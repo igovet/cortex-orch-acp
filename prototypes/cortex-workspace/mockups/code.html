@@ -1,0 +1,221 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<title>Code - Cortex Workspace mockup</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script>(function(){var r=document.documentElement,t=new URLSearchParams(location.search).get('theme');try{t=t||localStorage.getItem('cw-theme')}catch(e){}t=t||'system';r.dataset.themeChoice=t;r.dataset.theme=t==='system'?(matchMedia('(prefers-color-scheme: light)').matches?'light':'dark'):t})()</script>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body class="term-auto" data-view="file" data-left="files">
+<input class="pt" type="checkbox" id="pt-sidebar" aria-label="Toggle sidebar">
+<input class="pt" type="checkbox" id="pt-inspector" aria-label="Toggle inspector">
+<input class="pt" type="checkbox" id="pt-terminal" aria-label="Toggle terminal">
+
+<header class="titlebar">
+  <label class="ib tb-toggle" for="pt-sidebar" title="Sidebar (Ctrl+B)"><i class="i i-panel-left"></i></label>
+  <div class="tb-side">
+    <button class="machine" popovertarget="m-machine" title="Switch machine">
+      <i class="i i-laptop"></i><span class="trunc">This machine</span>
+      <span class="st st-ok" style="margin-left:auto">Connected</span><i class="i s12 i-chevrons-v faint"></i>
+    </button>
+  </div>
+  <div class="tb-main">
+    <a class="ib" href="board.html" title="Back (Alt+Left)"><i class="i i-arrow-left"></i></a>
+    <button class="ib" title="Forward (Alt+Right)" aria-disabled="true"><i class="i i-arrow-right"></i></button>
+    <div class="crumbs"><a href="board.html">atlas-api</a><span class="sep">/</span><span class="cur">Code</span></div>
+    
+    <span class="grow"></span>
+    <div class="tb-actions"><button class="btn btn-line" title="Search in files (Ctrl+Shift+F)" data-show="search" data-group="left"><i class="i s14 i-search"></i>Search</button></div>
+    <div class="tb-fixed">
+      <a class="mock-chip" href="index.html" title="Static mockup. Back to the screen list">Mock</a>
+      
+      <label class="ib" for="pt-terminal" title="Terminal (Ctrl+J)"><i class="i i-panel-bottom"></i></label>
+      <label class="ib" for="pt-inspector" title="Inspector (Ctrl+Alt+B)"><i class="i i-panel-right"></i></label>
+    </div>
+    <div class="win" aria-hidden="true">
+      <button tabindex="-1"><i class="i s14 i-minus"></i></button>
+      <button tabindex="-1"><i class="i s12 i-square"></i></button>
+      <button tabindex="-1"><i class="i s14 i-x"></i></button>
+    </div>
+  </div>
+</header>
+
+<div class="workspace">
+  <nav class="sidebar" aria-label="Workspace">
+    <div class="sb-top">
+      <a class="nav" href="new-task.html"><i class="i i-plus"></i>New task<span class="kbd">Ctrl+N</span></a>
+      <a class="nav" href="#"><i class="i i-inbox"></i>Inbox<span class="count">4</span></a>
+      <a class="nav" href="#"><i class="i i-search"></i>Search<span class="kbd">Ctrl+K</span></a>
+      <a class="nav" href="home.html"><i class="i i-home"></i>Home</a>
+      <a class="nav" href="archive.html"><i class="i i-archive"></i>Archive<span class="count">18</span></a>
+    </div>
+    <div class="sb-scroll">
+      <div class="sb-h"><span>Pinned</span></div>
+      <a class="task-row" style="padding-left:8px" href="task.html"><i class="i s14 i-pin faint"></i><span class="trunc">Fix token refresh race</span></a>
+      <div class="sb-h"><span>Projects</span><button class="ib" style="width:22px;height:22px" title="Sort projects"><i class="i s14 i-chevrons-v"></i></button></div>
+      <a class="proj" href="board.html" aria-current="page"><span class="mono-tile t1">A</span><span class="trunc">atlas-api</span><span class="sig st-bad">Conflict</span></a>
+      <div class="tasks">
+        <a class="task-row" href="task.html"><i class="i s14 i-question st-warn"></i><span class="trunc">Fix token refresh race</span><span class="sig">Question</span></a>
+        <a class="task-row" href="board.html?scope=sprint"><i class="i s14 i-layers faint"></i><span class="trunc">Sprint: Usage billing</span><span class="sig tnum">2/5</span></a>
+        <a class="task-row" href="board.html"><i class="i s14 i-loader st-run"></i><span class="trunc">Meter API calls per workspace</span><span class="sig">Working</span></a>
+        <a class="task-row" href="result.html"><i class="i s14 i-eye faint"></i><span class="trunc">Rate-limit the export endpoint</span><span class="sig">Review</span></a>
+        
+        <a class="task-row all" href="board.html">All 15</a>
+      </div>
+      <a class="proj" href="#"><span class="mono-tile t2">B</span><span class="trunc">billing-service</span><span class="sig st-warn">Needs you 1</span></a>
+      <a class="proj" href="#"><span class="mono-tile t3">N</span><span class="trunc">northwind-web</span><span class="sig st-warn">Needs you 1</span></a>
+      <a class="proj" href="#"><span class="mono-tile t4">M</span><span class="trunc">mobile-app</span><span class="sig muted">In review 1</span></a>
+      <a class="proj" href="#"><span class="mono-tile t5">I</span><span class="trunc">infra-terraform</span></a>
+      <a class="proj" href="#"><span class="mono-tile t6">D</span><span class="trunc">docs-site</span></a>
+    </div>
+    <button class="sb-usage" popovertarget="m-usage" title="Engine limits used this week. Snapshot 13:41" aria-label="Engine limits: Claude 62%, Codex 18% used this week">
+      <span class="um"><span>Claude</span><span class="bar"><i style="width:62%"></i></span><span class="tnum">62%</span></span>
+      <span class="um"><span>Codex</span><span class="bar"><i style="width:18%"></i></span><span class="tnum">18%</span></span>
+    </button>
+    <div class="sb-foot">
+      <button class="btn btn-sm" title="Add project"><i class="i s14 i-folder-plus"></i>Add project</button>
+      <span class="grow"></span>
+      <a class="ib" href="settings.html" title="Settings (Ctrl+,)"><i class="i i-settings"></i></a>
+      <button class="ib" title="Help and shortcuts (?)"><i class="i i-help"></i></button>
+    </div>
+  </nav>
+
+  <main class="main">
+    <div class="pstrip">
+      <button class="scope-btn" popovertarget="m-checkout" title="Choose which checkout this view shows"><i class="i s14 i-branch faint"></i><span class="faint" style="font-weight:400">Worktree</span><span class="mono trunc" style="max-width:190px">cw/fix-token-refresh</span><i class="i s12 i-chevron-down"></i></button>
+      <div class="seg" role="tablist" aria-label="Project view">
+        <a role="tab" href="board.html" aria-selected="false"><i class="i s14 i-board"></i>Board</a>
+        <a role="tab" href="board.html?view=list" aria-selected="false"><i class="i s14 i-list"></i>List</a>
+      </div>
+      <div class="ptabs" role="tablist" aria-label="Project areas">
+        <a class="ptab" role="tab" href="code.html" aria-selected="true">Code</a>
+        <a class="ptab" role="tab" href="git.html" aria-selected="false">Git</a>
+        <a class="ptab" role="tab" href="git.html?right=branches" aria-selected="false">Worktrees</a>
+        <a class="ptab" role="tab" href="board.html?view=knowledge" aria-selected="false">Knowledge and skills</a>
+        <a class="ptab" role="tab" href="board.html?view=settings" aria-selected="false">Settings</a>
+      </div>
+    </div>
+    <div class="strip warn"><i class="i s14 i-alert st-warn"></i><span>Cortex is working in this worktree. Your edits change the files it is checking and can block verification.</span><span class="acts"><a class="btn btn-line btn-sm" href="stop.html">Stop the task first</a><button class="btn btn-sm">Edit anyway</button></span></div>
+    <div class="code-body">
+      <aside class="side-pane" aria-label="Files">
+        <div class="side-h">
+          <div class="seg" role="group" aria-label="Left pane"><button data-show="files" data-group="left" aria-current="true">Files</button><button data-show="search" data-group="left" aria-current="false">Search</button></div>
+          <span class="grow"></span>
+          <button class="ib" style="width:26px;height:26px" title="Collapse all"><i class="i s14 i-chevrons-v"></i></button>
+        </div>
+        <div class="side-opts" data-panel="files" data-group="left"><label class="sw-l"><span class="sw"><input type="checkbox" aria-label="Only changed files"><i></i></span>Only changed</label><span class="grow"></span><span class="cap faint">3 changed</span></div>
+        <div data-panel="files" data-group="left" style="display:contents"><div class="tree" role="tree" aria-label="Files">
+            <button class="tn" style="--d:0"><i class="i s14 i-chevron-down"></i><span>auth</span></button>
+            <button class="tn" style="--d:1"><i class="i s14 i-file"></i><span>__init__.py</span></button>
+            <button class="tn" style="--d:1"><i class="i s14 i-file"></i><span>errors.py</span></button>
+            <button class="tn" style="--d:1"><i class="i s14 i-file"></i><span>models.py</span><span class="gs gs-m" title="Modified">M</span></button>
+            <button class="tn" style="--d:1" aria-current="true"><i class="i s14 i-file"></i><span>refresh.py</span><span class="gs gs-m" title="Modified">M</span></button>
+            <button class="tn" style="--d:1"><i class="i s14 i-file"></i><span>sessions.py</span></button>
+            <button class="tn" style="--d:0"><i class="i s14 i-chevron-right"></i><span>billing</span></button>
+            <button class="tn" style="--d:0"><i class="i s14 i-chevron-right"></i><span>docs</span></button>
+            <button class="tn" style="--d:0"><i class="i s14 i-chevron-down"></i><span>tests</span></button>
+            <button class="tn" style="--d:1"><i class="i s14 i-chevron-down"></i><span>auth</span></button>
+            <button class="tn" style="--d:2"><i class="i s14 i-file"></i><span>conftest.py</span></button>
+            <button class="tn" style="--d:2"><i class="i s14 i-file"></i><span>test_race.py</span><span class="gs gs-a" title="Untracked">U</span></button>
+            <button class="tn" style="--d:2"><i class="i s14 i-file"></i><span>test_refresh.py</span></button>
+            <button class="tn" style="--d:0"><i class="i s14 i-file"></i><span>pyproject.toml</span></button>
+            <button class="tn" style="--d:0"><i class="i s14 i-file"></i><span>README.md</span></button>
+          </div></div>
+        <div data-panel="search" data-group="left" hidden style="display:contents"><div class="tree" aria-label="Search results">
+            <div style="padding:2px 4px 6px"><input class="inp" style="height:28px" value="with_for_update" aria-label="Search files"><div class="row" style="margin-top:6px"><span class="cap faint">4 matches in 3 files</span><span class="grow"></span><button class="ib cap" style="width:24px;height:22px" title="Match case">Aa</button></div></div>
+            <div class="res-file"><i class="i s12 i-file faint"></i>auth/refresh.py<span class="faint" style="font-weight:400;margin-left:auto">1</span></div>
+            <button class="res-hit"><span class="n">16</span><span>.<mark>with_for_update</mark>().one())</span></button>
+            <div class="res-file"><i class="i s12 i-file faint"></i>auth/sessions.py<span class="faint" style="font-weight:400;margin-left:auto">2</span></div>
+            <button class="res-hit"><span class="n">44</span><span>query.<mark>with_for_update</mark>(nowait=True)</span></button>
+            <button class="res-hit"><span class="n">71</span><span>row = q.<mark>with_for_update</mark>().first()</span></button>
+            <div class="res-file"><i class="i s12 i-file faint"></i>billing/ledger.py<span class="faint" style="font-weight:400;margin-left:auto">1</span></div>
+            <button class="res-hit"><span class="n">102</span><span>.<mark>with_for_update</mark>(skip_locked=True)</span></button>
+          </div></div>
+      </aside>
+      <section class="ed" aria-label="Editor">
+        <div class="etabs" role="tablist" aria-label="Open files">
+            <span class="etab" role="tab" aria-selected="true">refresh.py<span class="x" title="Close"><i class="i s12 i-x"></i></span></span>
+            <span class="etab" role="tab" aria-selected="false">models.py<span class="x" title="Close"><i class="i s12 i-x"></i></span></span>
+            <span class="etab" role="tab" aria-selected="false"><em>test_race.py</em><span class="x" title="Close"><i class="i s12 i-x"></i></span></span>
+            <span class="etab-tools">
+              <div class="seg" role="group" aria-label="View">
+                <button data-show="file" data-group="view" aria-current="true">File</button>
+                <button data-show="inline" data-group="view" aria-current="false">Inline diff</button>
+                <button data-show="split" data-group="view" aria-current="false">Side by side</button>
+              </div>
+            </span>
+          </div>
+          <div class="ecrumb"><i class="i s12 i-folder faint"></i>auth<i class="i s12 i-chevron-right faint"></i><span style="color:var(--fg)">refresh.py</span>
+            <span class="r"><span class="tnum"><span class="add">+18</span> <span class="del">&minus;4</span> against <span class="mono">main</span></span><button class="btn btn-sm" title="Quick open (Ctrl+P)">Go to file</button><button class="btn btn-sm">Open in VS Code</button></span></div>
+        <div class="ebody" data-panel="file" data-group="view"><div class="code"><div class="cl"><span class="n">1</span><span class="m"></span><span class="c"><span class="tok-s">""</span><span class="tok-s">"Refresh token rotation."</span><span class="tok-s">""</span></span></div><div class="cl"><span class="n">2</span><span class="m"></span><span class="c"><span class="tok-k">from</span> datetime <span class="tok-k">import</span> datetime, timezone</span></div><div class="cl"><span class="n">3</span><span class="m"></span><span class="c"></span></div><div class="cl"><span class="n">4</span><span class="m"></span><span class="c"><span class="tok-k">from</span> sqlalchemy.orm <span class="tok-k">import</span> <span class="tok-t">Session</span></span></div><div class="cl"><span class="n">5</span><span class="m"></span><span class="c"></span></div><div class="cl"><span class="n">6</span><span class="m"></span><span class="c"><span class="tok-k">from</span> .errors <span class="tok-k">import</span> <span class="tok-t">TokenReused</span></span></div><div class="cl"><span class="n">7</span><span class="m"></span><span class="c"><span class="tok-k">from</span> .models <span class="tok-k">import</span> <span class="tok-t">RefreshToken</span></span></div><div class="cl"><span class="n">8</span><span class="m"></span><span class="c"></span></div><div class="cl"><span class="n">9</span><span class="m"></span><span class="c">ROTATION_TIMEOUT = <span class="tok-n">30</span>  <span class="tok-c"># seconds, keep in step with the client</span></span></div><div class="cl"><span class="n">10</span><span class="m"></span><span class="c"></span></div><div class="cl"><span class="n">11</span><span class="m"></span><span class="c"></span></div><div class="cl"><span class="n">12</span><span class="m"></span><span class="c"><span class="tok-k">def</span> <span class="tok-f">rotate_refresh_token</span>(session: <span class="tok-t">Session</span>, token_id: str) -&gt; <span class="tok-t">RefreshToken</span>:</span></div><div class="cl"><span class="n">13</span><span class="m"></span><span class="c">    <span class="tok-s">""</span><span class="tok-s">"Rotate a refresh token, revoking the old row."</span><span class="tok-s">""</span></span></div><div class="cl chg"><span class="n">14</span><span class="m"></span><span class="c">    row = (session.<span class="tok-f">query</span>(<span class="tok-t">RefreshToken</span>)</span></div><div class="cl chg"><span class="n">15</span><span class="m"></span><span class="c">           .<span class="tok-f">filter_by</span>(id=token_id)</span></div><div class="cl chg"><span class="n">16</span><span class="m"></span><span class="c">           .<span class="tok-f">with_for_update</span>().<span class="tok-f">one</span>())</span></div><div class="cl"><span class="n">17</span><span class="m"></span><span class="c">    <span class="tok-k">if</span> row.revoked_at <span class="tok-k">is</span> <span class="tok-k">not</span> <span class="tok-k">None</span>:</span></div><div class="cl"><span class="n">18</span><span class="m"></span><span class="c">        <span class="tok-k">raise</span> <span class="tok-t">TokenReused</span>(token_id)</span></div><div class="cl"><span class="n">19</span><span class="m"></span><span class="c"></span></div><div class="cl"><span class="n">20</span><span class="m"></span><span class="c">    now = datetime.<span class="tok-f">now</span>(timezone.utc)</span></div><div class="cl"><span class="n">21</span><span class="m"></span><span class="c">    row.revoked_at = now</span></div><div class="cl chg"><span class="n">22</span><span class="m"></span><span class="c">    replacement = <span class="tok-t">RefreshToken</span>.<span class="tok-f">issue_for</span>(row.user_id, version=row.version + <span class="tok-n">1</span>)</span></div><div class="cl"><span class="n">23</span><span class="m"></span><span class="c">    session.<span class="tok-f">add</span>(replacement)</span></div><div class="cl"><span class="n">24</span><span class="m"></span><span class="c">    session.<span class="tok-f">commit</span>()</span></div><div class="cl"><span class="n">25</span><span class="m"></span><span class="c">    <span class="tok-k">return</span> replacement</span></div><div class="cl"><span class="n">26</span><span class="m"></span><span class="c"></span></div><div class="cl"><span class="n">27</span><span class="m"></span><span class="c"></span></div><div class="cl"><span class="n">28</span><span class="m"></span><span class="c"><span class="tok-k">def</span> <span class="tok-f">revoke_all</span>(session: <span class="tok-t">Session</span>, user_id: str) -&gt; int:</span></div><div class="cl"><span class="n">29</span><span class="m"></span><span class="c">    <span class="tok-s">""</span><span class="tok-s">"Revoke every live token for a user."</span><span class="tok-s">""</span></span></div><div class="cl"><span class="n">30</span><span class="m"></span><span class="c">    live = session.<span class="tok-f">query</span>(<span class="tok-t">RefreshToken</span>).<span class="tok-f">filter_by</span>(user_id=user_id, revoked_at=<span class="tok-k">None</span>)</span></div><div class="cl"><span class="n">31</span><span class="m"></span><span class="c">    count = <span class="tok-n">0</span></span></div><div class="cl"><span class="n">32</span><span class="m"></span><span class="c">    <span class="tok-k">for</span> row <span class="tok-k">in</span> live:</span></div><div class="cl"><span class="n">33</span><span class="m"></span><span class="c">        row.revoked_at = datetime.<span class="tok-f">now</span>(timezone.utc)</span></div><div class="cl"><span class="n">34</span><span class="m"></span><span class="c">        count += <span class="tok-n">1</span></span></div><div class="cl"><span class="n">35</span><span class="m"></span><span class="c">    session.<span class="tok-f">commit</span>()</span></div><div class="cl"><span class="n">36</span><span class="m"></span><span class="c">    <span class="tok-k">return</span> count</span></div><div class="cl"><span class="n">37</span><span class="m"></span><span class="c"></span></div><div class="cl"><span class="n">38</span><span class="m"></span><span class="c"></span></div><div class="cl"><span class="n">39</span><span class="m"></span><span class="c"><span class="tok-k">def</span> <span class="tok-f">purge_expired</span>(session: <span class="tok-t">Session</span>, before: datetime) -&gt; int:</span></div><div class="cl"><span class="n">40</span><span class="m"></span><span class="c">    <span class="tok-s">""</span><span class="tok-s">"Delete revoked rows older than the retention window."</span><span class="tok-s">""</span></span></div><div class="cl"><span class="n">41</span><span class="m"></span><span class="c">    rows = session.<span class="tok-f">query</span>(<span class="tok-t">RefreshToken</span>).<span class="tok-f">filter</span>(<span class="tok-t">RefreshToken</span>.revoked_at &lt; before)</span></div><div class="cl"><span class="n">42</span><span class="m"></span><span class="c">    deleted = rows.<span class="tok-f">delete</span>(synchronize_session=<span class="tok-k">False</span>)</span></div><div class="cl"><span class="n">43</span><span class="m"></span><span class="c">    session.<span class="tok-f">commit</span>()</span></div><div class="cl"><span class="n">44</span><span class="m"></span><span class="c">    <span class="tok-k">return</span> deleted</span></div></div></div>
+        <div class="ebody" data-panel="inline" data-group="view" hidden style="padding:0"><div class="code"><div class="dl hunk"><span>@@ -11,13 +11,15 @@ ROTATION_TIMEOUT = 30</span><span class="hact"><button class="btn btn-sm">Stage hunk</button><button class="btn btn-sm">Revert hunk</button></span></div><div class="dl"><span class="n">11</span><span class="n">11</span><span class="m"></span><span class="c"></span></div><div class="dl"><span class="n">12</span><span class="n">12</span><span class="m"></span><span class="c"><span class="tok-k">def</span> <span class="tok-f">rotate_refresh_token</span>(session: <span class="tok-t">Session</span>, token_id: str) -&gt; <span class="tok-t">RefreshToken</span>:</span></div><div class="dl"><span class="n">13</span><span class="n">13</span><span class="m"></span><span class="c">    <span class="tok-s">""</span><span class="tok-s">"Rotate a refresh token, revoking the old row."</span><span class="tok-s">""</span></span></div><div class="dl del"><span class="n">14</span><span class="n"></span><span class="m">&minus;</span><span class="c">    row = session.<span class="tok-f">get</span>(<span class="tok-t">RefreshToken</span>, token_id)</span></div><div class="dl add"><span class="n"></span><span class="n">14</span><span class="m">+</span><span class="c">    row = (session.<span class="tok-f">query</span>(<span class="tok-t">RefreshToken</span>)</span></div><div class="dl add"><span class="n"></span><span class="n">15</span><span class="m">+</span><span class="c">           .<span class="tok-f">filter_by</span>(id=token_id)</span></div><div class="dl add"><span class="n"></span><span class="n">16</span><span class="m">+</span><span class="c">           .<span class="tok-f">with_for_update</span>().<span class="tok-f">one</span>())</span></div><div class="dl"><span class="n">15</span><span class="n">17</span><span class="m"></span><span class="c">    <span class="tok-k">if</span> row.revoked_at <span class="tok-k">is</span> <span class="tok-k">not</span> <span class="tok-k">None</span>:</span></div><div class="dl"><span class="n">16</span><span class="n">18</span><span class="m"></span><span class="c">        <span class="tok-k">raise</span> <span class="tok-t">TokenReused</span>(token_id)</span></div><div class="dl"><span class="n">17</span><span class="n">19</span><span class="m"></span><span class="c"></span></div><div class="dl"><span class="n">18</span><span class="n">20</span><span class="m"></span><span class="c">    now = datetime.<span class="tok-f">now</span>(timezone.utc)</span></div><div class="dl"><span class="n">19</span><span class="n">21</span><span class="m"></span><span class="c">    row.revoked_at = now</span></div><div class="dl del"><span class="n">20</span><span class="n"></span><span class="m">&minus;</span><span class="c">    replacement = <span class="tok-t">RefreshToken</span>.<span class="tok-f">issue_for</span>(row.user_id)</span></div><div class="dl add"><span class="n"></span><span class="n">22</span><span class="m">+</span><span class="c">    replacement = <span class="tok-t">RefreshToken</span>.<span class="tok-f">issue_for</span>(row.user_id, version=row.version + <span class="tok-n">1</span>)</span></div><div class="dl"><span class="n">21</span><span class="n">23</span><span class="m"></span><span class="c">    session.<span class="tok-f">add</span>(replacement)</span></div><div class="dl"><span class="n">22</span><span class="n">24</span><span class="m"></span><span class="c">    session.<span class="tok-f">commit</span>()</span></div><div class="dl"><span class="n">23</span><span class="n">25</span><span class="m"></span><span class="c">    <span class="tok-k">return</span> replacement</span></div></div><div class="cap faint" style="padding:8px 12px">Showing hunk 1 of 3. The whole change is +18 &minus;4.</div></div>
+        <div class="ebody" data-panel="split" data-group="view" hidden style="padding:0"><div class="sbs"><div class="side"><div class="sl gap"><span class="n"></span><span class="m"></span><span class="c faint">@@ -11,13 +11,15 @@ ROTATION_TIMEOUT = 30</span></div><div class="sl"><span class="n">11</span><span class="m"></span><span class="c"></span></div><div class="sl"><span class="n">12</span><span class="m"></span><span class="c"><span class="tok-k">def</span> <span class="tok-f">rotate_refresh_token</span>(session: <span class="tok-t">Session</span>, token_id: str) -&gt; <span class="tok-t">RefreshToken</span>:</span></div><div class="sl"><span class="n">13</span><span class="m"></span><span class="c">    <span class="tok-s">""</span><span class="tok-s">"Rotate a refresh token, revoking the old row."</span><span class="tok-s">""</span></span></div><div class="sl del"><span class="n">14</span><span class="m">&minus;</span><span class="c">    row = session.<span class="tok-f">get</span>(<span class="tok-t">RefreshToken</span>, token_id)</span></div><div class="sl gap"><span class="n"></span><span class="m"></span><span class="c"></span></div><div class="sl gap"><span class="n"></span><span class="m"></span><span class="c"></span></div><div class="sl"><span class="n">15</span><span class="m"></span><span class="c">    <span class="tok-k">if</span> row.revoked_at <span class="tok-k">is</span> <span class="tok-k">not</span> <span class="tok-k">None</span>:</span></div><div class="sl"><span class="n">16</span><span class="m"></span><span class="c">        <span class="tok-k">raise</span> <span class="tok-t">TokenReused</span>(token_id)</span></div><div class="sl"><span class="n">17</span><span class="m"></span><span class="c"></span></div><div class="sl"><span class="n">18</span><span class="m"></span><span class="c">    now = datetime.<span class="tok-f">now</span>(timezone.utc)</span></div><div class="sl"><span class="n">19</span><span class="m"></span><span class="c">    row.revoked_at = now</span></div><div class="sl del"><span class="n">20</span><span class="m">&minus;</span><span class="c">    replacement = <span class="tok-t">RefreshToken</span>.<span class="tok-f">issue_for</span>(row.user_id)</span></div><div class="sl"><span class="n">21</span><span class="m"></span><span class="c">    session.<span class="tok-f">add</span>(replacement)</span></div><div class="sl"><span class="n">22</span><span class="m"></span><span class="c">    session.<span class="tok-f">commit</span>()</span></div><div class="sl"><span class="n">23</span><span class="m"></span><span class="c">    <span class="tok-k">return</span> replacement</span></div></div><div class="side"><div class="sl gap"><span class="n"></span><span class="m"></span><span class="c faint"></span></div><div class="sl"><span class="n">11</span><span class="m"></span><span class="c"></span></div><div class="sl"><span class="n">12</span><span class="m"></span><span class="c"><span class="tok-k">def</span> <span class="tok-f">rotate_refresh_token</span>(session: <span class="tok-t">Session</span>, token_id: str) -&gt; <span class="tok-t">RefreshToken</span>:</span></div><div class="sl"><span class="n">13</span><span class="m"></span><span class="c">    <span class="tok-s">""</span><span class="tok-s">"Rotate a refresh token, revoking the old row."</span><span class="tok-s">""</span></span></div><div class="sl add"><span class="n">14</span><span class="m">+</span><span class="c">    row = (session.<span class="tok-f">query</span>(<span class="tok-t">RefreshToken</span>)</span></div><div class="sl add"><span class="n">15</span><span class="m">+</span><span class="c">           .<span class="tok-f">filter_by</span>(id=token_id)</span></div><div class="sl add"><span class="n">16</span><span class="m">+</span><span class="c">           .<span class="tok-f">with_for_update</span>().<span class="tok-f">one</span>())</span></div><div class="sl"><span class="n">17</span><span class="m"></span><span class="c">    <span class="tok-k">if</span> row.revoked_at <span class="tok-k">is</span> <span class="tok-k">not</span> <span class="tok-k">None</span>:</span></div><div class="sl"><span class="n">18</span><span class="m"></span><span class="c">        <span class="tok-k">raise</span> <span class="tok-t">TokenReused</span>(token_id)</span></div><div class="sl"><span class="n">19</span><span class="m"></span><span class="c"></span></div><div class="sl"><span class="n">20</span><span class="m"></span><span class="c">    now = datetime.<span class="tok-f">now</span>(timezone.utc)</span></div><div class="sl"><span class="n">21</span><span class="m"></span><span class="c">    row.revoked_at = now</span></div><div class="sl add"><span class="n">22</span><span class="m">+</span><span class="c">    replacement = <span class="tok-t">RefreshToken</span>.<span class="tok-f">issue_for</span>(row.user_id, version=row.version + <span class="tok-n">1</span>)</span></div><div class="sl"><span class="n">23</span><span class="m"></span><span class="c">    session.<span class="tok-f">add</span>(replacement)</span></div><div class="sl"><span class="n">24</span><span class="m"></span><span class="c">    session.<span class="tok-f">commit</span>()</span></div><div class="sl"><span class="n">25</span><span class="m"></span><span class="c">    <span class="tok-k">return</span> replacement</span></div></div></div><div class="cap faint" style="padding:8px 12px">Showing hunk 1 of 3. The whole change is +18 &minus;4.</div></div>
+      </section>
+    </div>
+    <section class="terminal" aria-label="Terminal">
+      <div class="term-h">
+        <span class="term-tab" aria-selected="true"><i class="i s12 i-terminal"></i>bash</span>
+        <button class="ib" style="width:24px;height:24px" title="New shell in this checkout"><i class="i s14 i-plus"></i></button>
+        <span class="mono faint" style="margin-left:6px">~/work/atlas-api/.worktrees/fix-token-refresh</span>
+      </div>
+      <div class="term-body"><b>cw/fix-token-refresh</b> $ git status --short
+ M auth/models.py
+ M auth/refresh.py
+?? tests/auth/test_race.py
+<b>cw/fix-token-refresh</b> $ </div>
+    </section>
+  </main>
+<aside class="inspector" aria-label="Inspector">
+    <div class="ins-sec">
+      <div class="ins-h"><span>File</span></div>
+      <dl class="kv"><dt>Path</dt><dd class="mono">auth/refresh.py</dd><dt>Language</dt><dd>Python</dd><dt>Lines</dt><dd>44</dd><dt>Changed by</dt><dd>Backend Dev</dd></dl><button class="btn btn-sm" style="margin-top:8px" data-show="inline" data-group="view">Show diff</button>
+    </div>
+    <div class="ins-sec">
+      <div class="ins-h"><span>Checkout</span></div>
+      <dl class="kv"><dt>Task</dt><dd>Fix token refresh race</dd><dt>Branch</dt><dd class="mono">cw/fix-token-refresh</dd><dt>Autosave</dt><dd>Off</dd></dl>
+    </div>
+  </aside>
+</div>
+
+<div popover id="m-usage" class="pop-usage">
+  <div class="mi-h">Engine limits on This machine</div>
+  <div class="u-eng">
+    <div class="u-h"><span class="w500">Claude</span><span class="st st-ok"><i class="i s12 i-check-circle"></i>Connected</span></div>
+    <div class="u-win"><span>This week</span><span class="bar"><i style="width:62%"></i></span><span class="v">62% used</span><span class="rs">Resets Mon 09:00</span></div>
+    <div class="u-src">Observed 13:41, reported by the provider</div>
+  </div>
+  <div class="mi-sep"></div>
+  <div class="u-eng">
+    <div class="u-h"><span class="w500">Codex</span><span class="st st-ok"><i class="i s12 i-check-circle"></i>Connected</span></div>
+    <div class="u-win"><span>This week</span><span class="bar"><i style="width:18%"></i></span><span class="v">18% used</span><span class="rs">Resets Thu 02:00</span></div>
+    <div class="u-src">Observed 13:41, reported by the provider</div>
+  </div>
+  <div class="mi-sep"></div>
+  <a class="mi" href="settings.html?section=connections"><i class="i i-gauge"></i><span class="grow">All limits and windows</span></a>
+</div>
+<div popover id="m-machine" class="pop-tl">
+  <div class="mi-h">Machines</div>
+  <a class="mi" href="home.html"><i class="i i-laptop"></i><span class="grow">This machine<span class="sub">Local, connected</span></span><i class="i s14 i-check"></i></a>
+  <a class="mi" href="settings.html?section=machines"><i class="i i-server"></i><span class="grow">GPU box<span class="sub">Remote, connected through the server connector</span></span></a>
+  <a class="mi" href="settings.html?section=machines"><i class="i i-server"></i><span class="grow">Build server<span class="sub">Remote, offline, last seen 13:47</span></span></a>
+  <div class="mi-sep"></div>
+  <a class="mi" href="settings.html?section=machines&amp;dialog=add-machine"><i class="i i-plus"></i>Add remote machine&hellip;</a>
+  <a class="mi" href="settings.html?section=overview"><i class="i i-settings"></i>Machine settings</a>
+</div>
+<div popover id="m-new" class="pop-right">
+  <a class="mi" href="new-task.html"><i class="i i-plus"></i><span class="grow">New task</span><span class="kbd">Ctrl+N</span></a>
+  <a class="mi" href="new-task.html?kind=sprint"><i class="i i-layers"></i><span class="grow">New sprint</span><span class="kbd">Ctrl+Shift+N</span></a>
+</div>
+<div popover id="m-checkout" class="pop-anchor" style="width:320px">
+  <div class="mi-h">Main checkout</div>
+  <button class="mi"><i class="i i-folder"></i><span class="grow"><span class="mono">main</span><span class="sub">~/work/atlas-api, 2 uncommitted files</span></span></button>
+  <div class="mi-h">Worktrees</div>
+  <button class="mi"><i class="i i-branch"></i><span class="grow"><span class="mono">cw/fix-token-refresh</span><span class="sub">Fix token refresh race, working</span></span><i class="i s14 i-check"></i></button>
+  <button class="mi"><i class="i i-branch"></i><span class="grow"><span class="mono">cw/export-rate-limit</span><span class="sub">Rate-limit the export endpoint, review</span></span></button>
+  <button class="mi"><i class="i i-branch"></i><span class="grow"><span class="mono">cw/usage-rollups</span><span class="sub">Rebase usage rollups onto main, conflict</span></span></button>
+</div>
+
+<script>(function(){var r=document.documentElement,q=new URLSearchParams(location.search);function m(){document.querySelectorAll('[data-set-theme]').forEach(function(b){var on=b.dataset.setTheme===r.dataset.themeChoice;b.setAttribute('aria-pressed',on);b.setAttribute('aria-current',on)})}function show(g,v){document.querySelectorAll('[data-show][data-group="'+g+'"]').forEach(function(x){if(x.hasAttribute('aria-selected'))x.setAttribute('aria-selected',x.dataset.show===v);if(x.hasAttribute('aria-current'))x.setAttribute('aria-current',x.dataset.show===v);if(x.type==='radio')x.checked=x.dataset.show===v});document.querySelectorAll('[data-panel][data-group="'+g+'"]').forEach(function(p){p.hidden=p.dataset.panel.split(' ').indexOf(v)<0});document.body.dataset[g]=v}function openD(id){var d=document.getElementById(id);if(d&&!d.open)d.showModal()}document.addEventListener('click',function(e){var b=e.target.closest('[data-set-theme]');if(b){var t=b.dataset.setTheme;r.dataset.themeChoice=t;r.dataset.theme=t==='system'?(matchMedia('(prefers-color-scheme: light)').matches?'light':'dark'):t;try{localStorage.setItem('cw-theme',t)}catch(x){}m();return}var o=e.target.closest('[data-dialog]');if(o){e.preventDefault();openD(o.dataset.dialog);if(o.dataset.show)show(o.dataset.group,o.dataset.show);return}var c=e.target.closest('[data-close]');if(c){c.closest('dialog').close();return}var s=e.target.closest('[data-show]');if(s){show(s.dataset.group,s.dataset.show);return}var a=e.target.closest('a[href$=".html"],a[href*=".html?"]');if(a){e.preventDefault();var u=new URL(a.href);u.searchParams.set('theme',r.dataset.themeChoice);location.href=u.href}});document.addEventListener('change',function(e){var f=e.target.closest('[data-follow-toggle]');if(f)document.body.dataset.follow=f.checked?'on':'off'});var gs={};document.querySelectorAll('[data-group]').forEach(function(x){gs[x.dataset.group]=1});Object.keys(gs).forEach(function(g){if(q.get(g))show(g,q.get(g))});if(q.get('follow')==='off'){document.body.dataset.follow='off';var f=document.querySelector('[data-follow-toggle]');if(f)f.checked=false}if(q.get('dialog')){openD('dlg-'+q.get('dialog'));if(document.activeElement)document.activeElement.blur()}m()})()</script>
+</body>
+</html>

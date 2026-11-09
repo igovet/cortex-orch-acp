@@ -1,0 +1,105 @@
+{
+  "name": "Workspace desktop release",
+  "on": {
+    "workflow_dispatch": {}
+  },
+  "permissions": {
+    "contents": "read"
+  },
+  "concurrency": {
+    "group": "workspace-desktop-release-${{ github.ref }}",
+    "cancel-in-progress": false
+  },
+  "jobs": {
+    "build": {
+      "if": "github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev')",
+      "runs-on": "ubuntu-24.04",
+      "timeout-minutes": 60,
+      "permissions": {
+        "contents": "read"
+      },
+      "outputs": {
+        "version": "${{ steps.release.outputs.version }}"
+      },
+      "steps": [
+        {
+          "uses": "actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+          "with": {
+            "ref": "${{ github.sha }}",
+            "persist-credentials": false
+          }
+        },
+        {
+          "name": "Bind selected branch to the triggering revision",
+          "run": "git checkout -B \"${GITHUB_REF#refs/heads/}\" \"$GITHUB_SHA\""
+        },
+        {
+          "name": "Read package identity",
+          "id": "identity",
+          "run": "python3 -B - <<'PY'\nimport json, os, re\nfrom pathlib import Path\nversion = json.loads(Path(\"package-identity.json\").read_text())[\"version\"]\nif not re.fullmatch(r\"1\\.0\\.6\\+sha256\\.[0-9a-f]{16}\", version):\n    raise SystemExit(\"invalid package identity\")\nwith open(os.environ[\"GITHUB_OUTPUT\"], \"a\") as output:\n    output.write(\"version=\" + version + \"\\n\")\nPY"
+        },
+        {
+          "name": "Build selected channel in the shared container",
+          "run": "case \"$GITHUB_REF\" in\n  refs/heads/main) channel_flag=--release ;;\n  refs/heads/dev) channel_flag=--ci-dev ;;\n  *) exit 1 ;;\nesac\npython3 -B scripts/build_workspace_desktop.py \"$channel_flag\" --jobs 2"
+        },
+        {
+          "name": "Inspect archive and gather artifacts",
+          "run": "mkdir release-artifacts\ncp .workspace-build/build-*/artifacts/\"${PACKAGE}\"_*.deb release-artifacts/\ncp .workspace-build/build-*/manifest.json release-artifacts/manifest.json\nfor archive in release-artifacts/*.deb; do\n  dpkg-deb -c \"$archive\"\n  dpkg-deb -I \"$archive\"\ndone\nset -- release-artifacts/*.deb\n[ \"$#\" -eq 1 ]\nversion=\"$(dpkg-deb -f \"$1\" Version)\"\nprintf 'version=%s\\n' \"$version\" >> \"$GITHUB_OUTPUT\"\n(cd release-artifacts; for archive in *.deb; do sha256sum \"$archive\" > \"$archive.sha256\"; done)",
+          "id": "release"
+        },
+        {
+          "uses": "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02",
+          "with": {
+            "name": "workspace-desktop-release",
+            "path": "release-artifacts/",
+            "if-no-files-found": "error",
+            "retention-days": 14
+          }
+        }
+      ],
+      "env": {
+        "PACKAGE": "${{ github.ref == 'refs/heads/main' && 'cortex-workspace' || 'cortex-workspace-dev' }}"
+      }
+    },
+    "publish": {
+      "needs": "build",
+      "if": "github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev')",
+      "runs-on": "ubuntu-24.04",
+      "timeout-minutes": 10,
+      "permissions": {
+        "contents": "write"
+      },
+      "steps": [
+        {
+          "uses": "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093",
+          "with": {
+            "name": "workspace-desktop-release",
+            "path": "release-artifacts"
+          }
+        },
+        {
+          "name": "Check exact version tag (fail closed except for 404)",
+          "id": "tag",
+          "env": {
+            "GH_TOKEN": "${{ github.token }}",
+            "VERSION": "${{ needs.build.outputs.version }}"
+          },
+          "run": "python3 -B - <<'PY'\nimport os, re, urllib.error, urllib.request\nversion = os.environ[\"VERSION\"]\nif not re.fullmatch(r\"1\\.0\\.6\\+(?:z[0-9]{20}\\.)?sha256\\.[0-9a-f]{16}\", version):\n    raise SystemExit(\"invalid package identity\")\nprefix = os.environ[\"TAG_PREFIX\"]\nif prefix not in (\"v\", \"dev-v\"):\n    raise SystemExit(\"invalid tag prefix\")\nurl = os.environ[\"GITHUB_API_URL\"] + \"/repos/\" + os.environ[\"GITHUB_REPOSITORY\"] + \"/git/ref/tags/\" + prefix + version\nrequest = urllib.request.Request(url, headers={\n    \"Authorization\": \"Bearer \" + os.environ[\"GH_TOKEN\"],\n    \"Accept\": \"application/vnd.github+json\",\n    \"X-GitHub-Api-Version\": \"2022-11-28\",\n})\ntry:\n    with urllib.request.urlopen(request, timeout=30):\n        exists = True\nexcept urllib.error.HTTPError as error:\n    if error.code != 404:\n        raise SystemExit(\"tag lookup failed: HTTP \" + str(error.code))\n    exists = False\nwith open(os.environ[\"GITHUB_OUTPUT\"], \"a\") as output:\n    output.write(\"exists=\" + str(exists).lower() + \"\\n\")\nPY"
+        },
+        {
+          "name": "Publish only a previously untagged version",
+          "if": "steps.tag.outputs.exists == 'false'",
+          "env": {
+            "GH_TOKEN": "${{ github.token }}",
+            "VERSION": "${{ needs.build.outputs.version }}",
+            "GH_REPO": "${{ github.repository }}"
+          },
+          "run": "case \"$GITHUB_REF\" in\n  refs/heads/main)\n    title=\"Cortex Workspace $VERSION\"\n    notes=\"Ubuntu desktop package. Installation and service activation are explicit owner actions.\"\n    flags=(--latest)\n    ;;\n  refs/heads/dev)\n    title=\"Cortex Workspace Dev $VERSION\"\n    notes=\"Development build. Install the dev .deb manually; dev has no in-app updates.\"\n    flags=(--prerelease --latest=false)\n    ;;\n  *) exit 1 ;;\nesac\ngh release create \"$TAG_PREFIX$VERSION\" release-artifacts/*.deb release-artifacts/*.deb.sha256 \\\n  --target \"$GITHUB_SHA\" --title \"$title\" --notes \"$notes\" \"${flags[@]}\""
+        }
+      ],
+      "env": {
+        "TAG_PREFIX": "${{ github.ref == 'refs/heads/main' && 'v' || 'dev-v' }}"
+      }
+    }
+  }
+}

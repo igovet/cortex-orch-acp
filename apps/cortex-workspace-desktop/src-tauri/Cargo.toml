@@ -1,0 +1,30 @@
+[package]
+name = "cortex-workspace-desktop"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[features]
+default = ["desktop", "custom-protocol"]
+desktop = ["dep:tauri", "dep:gtk", "dep:webkit2gtk", "dep:base64"]
+custom-protocol = ["tauri/custom-protocol"]
+
+[[bin]]
+name = "cortex-workspace-desktop"
+path = "src/main.rs"
+required-features = ["desktop"]
+
+[build-dependencies]
+tauri-build = { version = "=2.5.6", features = [] }
+
+[dependencies]
+tauri = { version = "=2.10.1", optional = true, features = [] }
+workspace-service = { path = "../../../crates/workspace-service" }
+workspace-protocol = { path = "../../../crates/workspace-protocol" }
+gtk = { version = "=0.18.2", optional = true }
+webkit2gtk = { version = "=2.0.2", optional = true, features = ["v2_40"] }
+base64 = { version = "=0.22.1", optional = true }
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.154"
+tokio = { version = "=1.54.1", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time"] }

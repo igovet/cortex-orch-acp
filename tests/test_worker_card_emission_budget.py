@@ -170,7 +170,7 @@ def test_paseo_worker_card_has_no_transcript_body_but_panel_history_is_full(tmp_
     assert len(tools) == 30
 
 
-def test_worker_interim_prose_is_not_published_to_card_or_history(tmp_path):
+def test_worker_interim_prose_is_retained_in_history_not_the_card(tmp_path):
     updates, _session, harness = run_worker_session(
         tmp_path, client_name="zed", tools=10, words_per_block=3,
     )
@@ -179,9 +179,9 @@ def test_worker_interim_prose_is_not_published_to_card_or_history(tmp_path):
             "SELECT payload_json FROM task_events WHERE event_type='progress' "
             "AND payload_json LIKE '%worker_activity%'"
         )]
-    assert not any("[worker message]" in str(item.get("text", "")) for item in payloads)
-    assert not any("Interim narration before first tool" in str(item.get("text", "")) for item in payloads)
-    assert not any("word0 word1 word2" in str(item.get("text", "")) for item in payloads)
+    assert any("[worker message]" in str(item.get("text", "")) for item in payloads)
+    assert any("Interim narration before first tool" in str(item.get("text", "")) for item in payloads)
+    assert any("word0 word1 word2" in str(item.get("text", "")) for item in payloads)
     assert any("[final response] Worker finished:" in str(item.get("text", "")) for item in payloads)
     assert not any("[worker message]" in json.dumps(item) for item in _worker_updates(updates))
     assert not any("Interim narration before first tool" in json.dumps(item) for item in _worker_updates(updates))

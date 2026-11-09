@@ -1,0 +1,17 @@
+# Consistency and recovery
+
+**Status: planned rules. The local desktop slice implements the rules below for its subset, with no-paid checks; no recovery claim is made beyond those checks.**
+
+The authoritative service coordinates clients; local caches are not acceptance evidence. Commit runtime-owned state and corresponding public event atomically where supported. Use snapshot plus cursor, bounded replay and resnapshot on a gap. Reordered or duplicate events must not produce duplicate effects. Reject stale entity versions, old owner epochs and revoked device identities.
+
+After service crash, reconnect and reconcile actual child and external state; do not replay prompts, terminal commands or ambiguous Git pushes. An unconfirmed external outcome remains unknown until independently inspected. Lost connections display age of last confirmed state. A changed result digest invalidates prior acceptance. Device races and crash points require executable tests, not UI-only assurances.
+
+The service supervises each activated project's child beside its socket, so startup and a slow handshake never delay `service.status`. A child that exits or breaks the protocol is replaced with backoff; a registered folder that is away (a disk not mounted yet, a deleted folder) leaves that project waiting with its reason and comes back when the folder does, and it never stops the service. A child that answers late is not abandoned: that one request stays unknown, the late reply is dropped, and the journal poller resnapshots when the child answers. Nothing here replays a command or a prompt.
+
+## Local desktop slice (built)
+
+The adapter appends each public invalidation in the same SQLite transaction as the private write that caused it. Connection-local TEMP triggers on the adapter's source tables call one append helper on each supported Store connection, so a failed append rolls back the state change, including in autocommit. No persistent trigger requires independent or older SQLite writers to load Workspace code or retain its optional tables. Those external writes are outside the notification guarantee; the hooks are not a security boundary. Normal writable initialization removes the legacy persistent hooks in its schema transaction; non-initializing inspection never repairs the durable schema. Public project sequences are allocated only from the adapter's own outbox state, never from runtime event or transcript identities. Reconnecting clients receive a snapshot and then events after the cursor. A gap, a wrong project or a backwards version resynchronizes the client.
+
+A task start is recorded as prepared, claimed, dispatched or unknown before the prompt pipeline runs. A restart after dispatch leaves the execution unknown and never replays the prompt. Answers to a single question or a complete batch are all-or-nothing. Only the winning request runs the existing continuation; if that handoff fails, the answer reports `answer_continuation_unconfirmed` rather than success.
+
+The service owns the ACP child. Closing a client detaches its subscription and leaves the child running; explicit stop cancels the owned controller, closes the child's input, waits a bounded grace period and then kills only its own child. A restarted service creates fresh controllers and snapshots without replaying any start or prompt. Test evidence and its limits are recorded in [verification](../project/verification.md).

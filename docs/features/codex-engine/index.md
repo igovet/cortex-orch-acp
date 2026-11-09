@@ -25,10 +25,12 @@ tool schema rather than guessing. Individual tools and normal bootstrap loading
 remain unchanged. Native exec can already combine independent calls in one
 model turn: no additional turn, token or cost saving is established there.
 
+Workspace Debian packages include this adapter, Codex 0.164.0 and its Linux binary, a locked npm dependency tree and Node 24.14.1. Discovery prefers the current channel's read-only `/usr/lib/<package>/engines` tree with its own Node; the private patch remains in connection state. No first-run npm/download is required. See [offline packaging](../../project/packaging.md#offline-workspace-engines) and the [licence inventory](../../project/bundled-engine-licenses.md).
+
 ## Approved installed adapter selection
 
 Incoming ACP startup and approved engine installations advance existing connections
-to strictly newer approved owned installs, preserving accounts, routes and model
+to newer approved owned installs (or relocate the same version to the verified Workspace bundle), preserving accounts, routes and model
 settings. Unregistered versions never displace a registered install; launch-time
 digest/private-patch checks remain mandatory. There is no per-connection pin;
 `CORTEX_ENGINE_FOLLOW=off` disables following for rollback. See

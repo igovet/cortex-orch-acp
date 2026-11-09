@@ -30,10 +30,15 @@ uses `_meta.claudeCode.toolName=compact`, not the display title.
 No-paid tests inspect these exact installed sources and initialize the real
 adapter with empty isolated account/config directories, without a prompt.
 They do not prove model execution, effective native-tool enforcement,
-cancellation during real inference or GUI behavior. Discovery prefers the
-newest registered installation and retains all earlier registered versions
+cancellation during real inference or GUI behavior. Workspace discovery prefers its channel-local read-only bundle with Node 24.14.1,
+this adapter, SDK 0.3.310 and native parts; no npm/download is required. See
+[offline packaging](../../project/packaging.md#offline-workspace-engines) and the
+[2026-11-06 owner distribution-risk decision](../../project/bundled-engine-licenses.md#public-distribution-owner-risk-decision-2026-11-06).
+Public releases keep native-account login unchanged by owner choice, not recorded
+Anthropic permission; the Agent SDK authentication interpretation remains unresolved.
+Checkout discovery prefers the newest registered installation and retains all earlier registered versions
 for rollback. Incoming ACP startup and approved engine installations now advance
-existing connections to strictly newer approved owned installs, preserving accounts,
+existing connections to newer approved owned installs, or relocate the same version to the verified Workspace bundle, preserving accounts,
 routes and model settings. The source path is
 `configuration.management.follow_approved_adapters`. There is no per-connection
 pin; `CORTEX_ENGINE_FOLLOW=off` disables following for rollback. See

@@ -2,7 +2,7 @@
 
 The canonical store is `<project>/.cortex/cortex.sqlite3`, with task documents,
 reports, drafts and the newest-first `pipeline.md` beside it. A project never
-uses a home-wide Cortex database.
+uses a home-wide Cortex database. Workspace Dev selects `<project>/.cortex-dev/cortex.sqlite3` instead, with its documents and drafts beside it. Each channel has exactly one store per logical project, shared by linked worktrees. The host selects a fixed channel, not an arbitrary path. Dev never reads or imports the default/release store or legacy `.codex/cortex` storage; an existing release `.cortex` does not prevent opening the folder in Dev. See [channel stores](../cortex-workspace/backlog/CW-S12.md).
 
 A normal writable `Store(..., initialize=True)` open installs additive schema
 groups and upgrades format 11 to 12 under the migration lock with a verified
@@ -17,8 +17,8 @@ that need those tables. Format 11 still reports
 This constructor contract does not make later explicitly requested Store
 operations read-only.
 
-Live gateway, external-tool relay, runtime startup, configuration API project reads
-and owner command-control/retention callers use `Store(..., initialize=False, runtime_access=True)` instead.
+Live gateway, external-tool relay, runtime startup, configuration API project reads,
+Workspace product review-action reads and owner command-control/retention callers use `Store(..., initialize=False, runtime_access=True)` instead.
 This validation-only mode takes the ordinary shared access lock and reads current
 committed WAL data alongside other runtime connections. It never migrates,
 repairs schema or backfills rows, and retains the same format-11 migration-required
@@ -43,6 +43,10 @@ conflicts, failed reads and missing copies are retained.
 
 Task state is durable before recovery decisions. In-memory state may accelerate
 reads but cannot be the only record of a mutation or background-task failure.
+
+## Workspace adapter tables
+
+The Cortex Workspace adapter adds an optional, additive table group to the project store: `workspace_projects`, `workspace_tasks`, `workspace_executions`, `workspace_starts`, `workspace_requests`, `workspace_outbox_state` and `workspace_outbox`. The group is installed only by a normal writable open, with the other schema groups, and the store format stays 12. A store without these tables remains valid. A partial group fails closed. Splitting a project copies only that project's adapter rows and counters. Public invalidation hooks are TEMP triggers installed per Store connection only when the adapter tables are available, not persistent dependencies on Workspace code for independent or older SQLite writers. Writable initialization removes the previous persistent outbox hooks in the schema transaction; non-initializing opens leave main unchanged, including any legacy hooks awaiting a writable repair. Legacy hooks are not duplicated by TEMP hooks. The connection-local hooks and transactional guarantees are described in [consistency and recovery](../cortex-workspace/consistency-and-recovery.md).
 
 ## Attempt tree listings
 

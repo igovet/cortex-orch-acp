@@ -1,0 +1,23 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/workspace-protocol",
+    "crates/workspace-service",
+    "apps/cortex-workspace-desktop/src-tauri",
+    "prototypes/cortex-workspace/desktop/src-tauri",
+]
+default-members = ["crates/workspace-protocol"]
+
+[workspace.package]
+version = "1.0.6"
+edition = "2021"
+rust-version = "1.99.1"
+publish = false
+
+# Reviewed inputs; update these together with the lockfiles.
+[workspace.metadata.cortex-pins]
+rust = "1.99.1"
+tauri-cli = "2.10.1"
+tauri = "2.10.1"
+tauri-build = "2.5.6"
+lock-sha256 = "0783649608f74fff629ec5bc39670674719e3b315faf2d0de6038628a35b0fcf"

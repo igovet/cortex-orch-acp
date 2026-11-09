@@ -34,6 +34,8 @@ from .delegation.workspace_isolation import WORKSPACE_SCHEMA
 from .delegation.integration import INTEGRATION_SCHEMA
 from .routing.store import ROUTING_SCHEMA
 from .observability.store import OBSERVABILITY_SCHEMA
+from .workspace_api.storage import (WORKSPACE_API_SCHEMA, WORKSPACE_API_TABLES, WORKSPACE_START_TABLES,
+                                    WORKSPACE_OUTBOX_SCHEMA, WORKSPACE_OUTBOX_TABLES)
 from .store import APPLICATION_ID, SCHEMA, regular, sync_directory
 from .trusted_channel import IDENTITY_SCHEMA
 
@@ -241,6 +243,13 @@ _SELECTIONS = {
     "fallback_consent_records": "SELECT x.* FROM fallback_consent_records x JOIN tasks t ON t.id=x.task_id WHERE t.project_root=?",
     "observability_events": "SELECT x.* FROM observability_events x JOIN tasks t ON t.id=x.task_id WHERE t.project_root=?",
     "usage_records": "SELECT x.* FROM usage_records x JOIN tasks t ON t.id=x.task_id WHERE t.project_root=?",
+    "workspace_projects": "SELECT x.* FROM workspace_projects x WHERE x.project_root=?",
+    "workspace_tasks": "SELECT x.* FROM workspace_tasks x JOIN workspace_projects p USING(project_id) WHERE p.project_root=?",
+    "workspace_executions": "SELECT x.* FROM workspace_executions x JOIN workspace_tasks w USING(task_id) JOIN workspace_projects p USING(project_id) WHERE p.project_root=?",
+    "workspace_requests": "SELECT x.* FROM workspace_requests x JOIN workspace_projects p USING(project_id) WHERE p.project_root=?",
+    "workspace_starts": "SELECT x.* FROM workspace_starts x JOIN workspace_projects p USING(project_id) WHERE p.project_root=?",
+    "workspace_outbox_state": "SELECT x.* FROM workspace_outbox_state x JOIN workspace_projects p USING(project_id) WHERE p.project_root=?",
+    "workspace_outbox": "SELECT x.* FROM workspace_outbox x JOIN workspace_projects p USING(project_id) WHERE p.project_root=?",
 }
 
 _COPY_ORDER = (
@@ -264,6 +273,8 @@ _COPY_ORDER = (
     "workspace_snapshots", "workspace_integrations",
     "configuration_route_extras", "attempt_route_audit", "fallback_consent_records",
     "observability_events", "usage_records",
+    "workspace_projects", "workspace_tasks", "workspace_executions", "workspace_requests",
+    "workspace_outbox_state", "workspace_outbox", "workspace_starts",
     "deliveries",
 )
 
@@ -454,10 +465,31 @@ def _observability_present(db):
     return names == _OBSERVABILITY_TABLES
 
 
+def _workspace_start_present(db):
+    names = _table_names(db) & WORKSPACE_START_TABLES
+    if names and not _workspace_api_present(db):
+        raise StoreError("unsupported_storage")
+    return names == WORKSPACE_START_TABLES
+
+
+def _workspace_outbox_present(db):
+    names = _table_names(db) & WORKSPACE_OUTBOX_TABLES
+    if names and (names != WORKSPACE_OUTBOX_TABLES or not _workspace_api_present(db)):
+        raise StoreError("unsupported_storage")
+    return names == WORKSPACE_OUTBOX_TABLES
+
+
+def _workspace_api_present(db):
+    names = _table_names(db) & WORKSPACE_API_TABLES
+    if names and names != WORKSPACE_API_TABLES:
+        raise StoreError("unsupported_storage")
+    return names == WORKSPACE_API_TABLES
+
+
 def _expected_layout():
     db = sqlite3.connect(":memory:")
     try:
-        db.executescript(SCHEMA + IDENTITY_SCHEMA + CATALOG_SCHEMA + CONFIGURATION_SCHEMA + ACP_SESSION_SCHEMA + ACCESS_MODE_SCHEMA + DELEGATION_SCHEMA + WORK_GRAPH_SCHEMA + TASK_EVENTS_SCHEMA + RUNTIME_SCHEMA + CAPACITY_SCHEMA + EVIDENCE_SCHEMA + REPLAY_SCHEMA + PENDING_QUESTIONS_SCHEMA + TASK_LANGUAGE_SCHEMA + TASK_STOPPED_SCHEMA + CONTEXT_GENERATIONS_SCHEMA + PROCESS_REGISTRY_SCHEMA + LARGE_OUTPUT_SCHEMA + WORKSPACE_SCHEMA + INTEGRATION_SCHEMA + ROUTING_SCHEMA + OBSERVABILITY_SCHEMA)
+        db.executescript(SCHEMA + IDENTITY_SCHEMA + CATALOG_SCHEMA + CONFIGURATION_SCHEMA + ACP_SESSION_SCHEMA + ACCESS_MODE_SCHEMA + DELEGATION_SCHEMA + WORK_GRAPH_SCHEMA + TASK_EVENTS_SCHEMA + RUNTIME_SCHEMA + CAPACITY_SCHEMA + EVIDENCE_SCHEMA + REPLAY_SCHEMA + PENDING_QUESTIONS_SCHEMA + TASK_LANGUAGE_SCHEMA + TASK_STOPPED_SCHEMA + CONTEXT_GENERATIONS_SCHEMA + PROCESS_REGISTRY_SCHEMA + LARGE_OUTPUT_SCHEMA + WORKSPACE_SCHEMA + INTEGRATION_SCHEMA + ROUTING_SCHEMA + OBSERVABILITY_SCHEMA + WORKSPACE_API_SCHEMA + WORKSPACE_OUTBOX_SCHEMA)
         tables = _table_names(db)
         columns = {
             table: tuple(tuple(row) for row in db.execute(f"PRAGMA table_xinfo({_identifier(table)})"))
@@ -467,7 +499,7 @@ def _expected_layout():
             table: tuple(tuple(row) for row in db.execute(f"PRAGMA foreign_key_list({_identifier(table)})"))
             for table in tables
         }
-        core = tables - _RUNTIME_TABLES - _IDENTITY_TABLES - _CATALOG_TABLES - _CONFIGURATION_TABLES - _ACP_TABLES - _ACCESS_TABLES - _DELEGATION_TABLES - _WORK_GRAPH_TABLES - _TASK_EVENTS_TABLES - _CAPACITY_TABLES - _EVIDENCE_TABLES - _PERMISSION_RECEIPT_TABLES - _REPLAY_TABLES - _QUESTIONS_TABLES - _LANGUAGE_TABLES - _STOPPED_TABLES - _GENERATIONS_TABLES - _PROCESS_REGISTRY_TABLES - _BUDGET_TABLES - _WORKSPACE_TABLES - _ROUTING_TABLES - _OBSERVABILITY_TABLES
+        core = tables - _RUNTIME_TABLES - _IDENTITY_TABLES - _CATALOG_TABLES - _CONFIGURATION_TABLES - _ACP_TABLES - _ACCESS_TABLES - _DELEGATION_TABLES - _WORK_GRAPH_TABLES - _TASK_EVENTS_TABLES - _CAPACITY_TABLES - _EVIDENCE_TABLES - _PERMISSION_RECEIPT_TABLES - _REPLAY_TABLES - _QUESTIONS_TABLES - _LANGUAGE_TABLES - _STOPPED_TABLES - _GENERATIONS_TABLES - _PROCESS_REGISTRY_TABLES - _BUDGET_TABLES - _WORKSPACE_TABLES - _ROUTING_TABLES - _OBSERVABILITY_TABLES - WORKSPACE_API_TABLES - WORKSPACE_OUTBOX_TABLES - WORKSPACE_START_TABLES
         return core, columns, foreign_keys
     finally:
         db.close()
@@ -510,6 +542,9 @@ def _validate_format(db):
     workspace_present = _workspace_present(db)
     routing_present = _routing_present(db)
     observability_present = _observability_present(db)
+    workspace_api_present = _workspace_api_present(db)
+    workspace_outbox_present = _workspace_outbox_present(db)
+    workspace_start_present = _workspace_start_present(db)
     expected = (
         core
         | (_IDENTITY_TABLES if identity_present else set())
@@ -535,6 +570,9 @@ def _validate_format(db):
         | (_WORKSPACE_TABLES if workspace_present else set())
         | (_ROUTING_TABLES if routing_present else set())
         | (_OBSERVABILITY_TABLES if observability_present else set())
+        | (WORKSPACE_API_TABLES if workspace_api_present else set())
+        | (WORKSPACE_OUTBOX_TABLES if workspace_outbox_present else set())
+        | (WORKSPACE_START_TABLES if workspace_start_present else set())
     )
     views = db.execute("SELECT 1 FROM sqlite_master WHERE type='view' LIMIT 1").fetchone()
     if actual != expected or views is not None:
@@ -773,7 +811,7 @@ def _create_destination(source_db, temporary, project_root):
         # a fresh store: core SCHEMA plus the identity tables,
         # regardless of whether the (possibly legacy, pre-T005) source has
         # them. A legacy source simply leaves them empty in the destination.
-        target.executescript("BEGIN IMMEDIATE;\n" + SCHEMA + IDENTITY_SCHEMA + CATALOG_SCHEMA + CONFIGURATION_SCHEMA + ACP_SESSION_SCHEMA + ACCESS_MODE_SCHEMA + DELEGATION_SCHEMA + WORK_GRAPH_SCHEMA + TASK_EVENTS_SCHEMA + RUNTIME_SCHEMA + CAPACITY_SCHEMA + EVIDENCE_SCHEMA + REPLAY_SCHEMA + PENDING_QUESTIONS_SCHEMA + TASK_LANGUAGE_SCHEMA + TASK_STOPPED_SCHEMA + CONTEXT_GENERATIONS_SCHEMA + PROCESS_REGISTRY_SCHEMA + LARGE_OUTPUT_SCHEMA + WORKSPACE_SCHEMA + INTEGRATION_SCHEMA + ROUTING_SCHEMA + OBSERVABILITY_SCHEMA +
+        target.executescript("BEGIN IMMEDIATE;\n" + SCHEMA + IDENTITY_SCHEMA + CATALOG_SCHEMA + CONFIGURATION_SCHEMA + ACP_SESSION_SCHEMA + ACCESS_MODE_SCHEMA + DELEGATION_SCHEMA + WORK_GRAPH_SCHEMA + TASK_EVENTS_SCHEMA + RUNTIME_SCHEMA + CAPACITY_SCHEMA + EVIDENCE_SCHEMA + REPLAY_SCHEMA + PENDING_QUESTIONS_SCHEMA + TASK_LANGUAGE_SCHEMA + TASK_STOPPED_SCHEMA + CONTEXT_GENERATIONS_SCHEMA + PROCESS_REGISTRY_SCHEMA + LARGE_OUTPUT_SCHEMA + WORKSPACE_SCHEMA + INTEGRATION_SCHEMA + ROUTING_SCHEMA + OBSERVABILITY_SCHEMA + WORKSPACE_API_SCHEMA + WORKSPACE_OUTBOX_SCHEMA +
                              f"PRAGMA application_id={APPLICATION_ID};\nCOMMIT;")
         target.execute("BEGIN IMMEDIATE")
         source_identity_present = _identity_present(source_db)
@@ -800,6 +838,9 @@ def _create_destination(source_db, temporary, project_root):
         source_workspace_present = _workspace_present(source_db)
         source_routing_present = _routing_present(source_db)
         source_observability_present = _observability_present(source_db)
+        source_workspace_api_present = _workspace_api_present(source_db)
+        source_workspace_outbox_present = _workspace_outbox_present(source_db)
+        source_workspace_start_present = _workspace_start_present(source_db)
         expected = {}
         for table in _COPY_ORDER:
             columns = [row[1] for row in target.execute(f"PRAGMA table_info({_identifier(table)})")]
@@ -903,6 +944,12 @@ def _create_destination(source_db, temporary, project_root):
                 # carry; leave the destination's freshly-created
                 # observability tables empty for the same reason.
                 rows = ()
+            elif table in WORKSPACE_API_TABLES and not source_workspace_api_present:
+                rows = ()
+            elif table in WORKSPACE_OUTBOX_TABLES and not source_workspace_outbox_present:
+                rows = ()
+            elif table in WORKSPACE_START_TABLES and not source_workspace_start_present:
+                rows = ()
             elif table == "deliveries":
                 rows = _selected_deliveries(source_db, project_root)
             else:
@@ -965,8 +1012,9 @@ def split_project(source_directory, project_root, backup, *, access_stopped=Fals
     source_directory = _canonical_directory(source_directory, "unsafe_storage", private=True)
     project_root = _canonical_directory(project_root, "invalid_project")
     source = source_directory / "cortex.sqlite3"; regular(source)
+    from .project_storage import project_store_directory
     destination_directory = _canonical_directory(
-        project_root / ".cortex", "unsafe_destination", private=True
+        project_store_directory(project_root), "unsafe_destination", private=True
     )
     destination = destination_directory / "cortex.sqlite3"
     backup = _fresh_path(backup, "split_backup_exists")
@@ -1025,8 +1073,8 @@ def split_project(source_directory, project_root, backup, *, access_stopped=Fals
         ):
             path = Path(row[0])
             allowed = {
-                project_root / ".cortex" / "draft-reports",
-                project_root / ".cortex" / "pipeline-drafts",
+                project_store_directory(project_root) / "draft-reports",
+                project_store_directory(project_root) / "pipeline-drafts",
             }
             if not path.is_absolute() or path.parent not in allowed:
                 raise StoreError("split_source_relations_invalid")

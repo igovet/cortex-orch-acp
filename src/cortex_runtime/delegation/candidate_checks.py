@@ -177,7 +177,8 @@ def run_candidate_check(
         raise CandidateCheckError("candidate_digest_mismatch")
     stage = Path(candidate.get("stage_path", ""))
     project = Path(candidate.get("project_root", ""))
-    cortex = project / ".cortex"
+    from ..project_storage import project_store_directory
+    cortex = project_store_directory(project)
     if not stage.is_dir() or not project.is_dir() or not cortex.is_dir():
         raise CandidateCheckError("candidate_paths_unavailable")
     if not stage.is_absolute() or not project.is_absolute() or not cortex.is_absolute():
