@@ -66,7 +66,7 @@ documents and the SQLite metadata/relations index live under the one
 project-local `.cortex` store (`<project>/.cortex/cortex.sqlite3`, published
 document bodies under `<project>/.cortex/` alongside it); there is no
 `.codex/cortex` anywhere. `tests/test_package.py` asserts exactly one
-`.cortex/cortex.sqlite3` per project. Both the newest-first catalogue and
+`.cortex/cortex.sqlite3` per project in the default/release channel. Workspace Dev uses the separate `.cortex-dev/cortex.sqlite3` beside it: exactly one store per logical project per channel, including linked worktrees. Dev never imports, reads or migrates the release store. Both the newest-first catalogue and
 report content use bounded cursor reads. Workers select relevant reports rather
 than reading everything.
 
@@ -90,7 +90,7 @@ For this release use semantic version 1.0.6. After any package payload
 edit, regenerate its complete content hash with
 `python3 -B scripts/cortex_package.py stamp` before release-sensitive checks.
 Run package, profile-generation and test checks sequentially in the same
-checkout. Use the smallest meaningful tests first. Source-only profile checks use
+checkout. Before handing any desktop .deb to the owner, require the exact archive to pass the installed-package real-input gate in docs/project/verification.md, sequentially on disposable virtual screens, never in the owner’s session. Use the smallest meaningful tests first. Source-only profile checks use
 `python3 -B scripts/generate_agent_profiles.py check` (the script takes one
 positional action, `check` or `write`; it has no `--check` or `--dry-run` flag).
 
@@ -125,7 +125,7 @@ remain prohibited in routine live qualification. Check native login
 status without printing credentials before relying on either engine.
 
 The no-paid default automated suite
-(`PYTHONDONTWRITEBYTECODE=1 python3 -B -m pytest -q`, see
+(`python3 -B scripts/run_tests_fast.py`, see
 `docs/project/test-matrix.md`) cannot reach a paid engine and is not a
 substitute for live qualification. The only paid probes are
 `scripts/cortex_codex_probe.py` and `scripts/cortex_claude_probe.py`; both
@@ -134,6 +134,13 @@ only on an explicit owner request and pass a reference naming that request
 (for example `owner-request-<date>-cli`). `scripts/cortex_acp_smoke.py` is the no-paid
 startup smoke harness (schema-validated launch/protocol surface only, not GUI
 evidence).
+
+The default runner uses `.venv/bin/python`, eight parallel workers, batches of
+at most 32 files, a 60-second per-test deadline and GNU `timeout 180` per batch.
+Install checkout-local `pytest-xdist==3.8.0` and `pytest-timeout==2.4.0` first;
+missing dependencies fail explicitly. Do not run the old unbounded whole-suite
+pytest command. Targeted pytest commands must also use GNU `timeout` and a
+per-test deadline; keep package, profile and test checks sequential.
 
 
 This release-verification obligation belongs to the owner of the Cortex

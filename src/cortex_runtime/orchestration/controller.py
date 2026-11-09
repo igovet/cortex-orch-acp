@@ -288,7 +288,7 @@ def _verification_command(root, scratch, argv):
         yield command, fds
 
 
-def _verification_observation(runtime, task_id, context, expected, emit_tool_call, cancel, run_id):
+def _verification_observation(runtime, task_id, context, expected, emit_tool_call, cancel, run_id, *, start_index=0, timeout_seconds=None, cwd=None):
     """Run retained literal argv commands to completion with complete output.
 
     Project writes outside its git-ignored directories are discarded with
@@ -299,6 +299,9 @@ def _verification_observation(runtime, task_id, context, expected, emit_tool_cal
     Missing OS isolation is a failure, never an unsandboxed fallback.
     """
     root = Path(runtime._task_workspace_root(task_id))
+    check_cwd = Path(cwd or root).resolve()
+    if not check_cwd.is_relative_to(root.resolve()):
+        return dict(blocker="verification_directory_unavailable", stale=False)
     before = revision.capture_revision(str(root))
     digest = before.get('dirty_digest') or before.get('digest')
     if not digest:
@@ -306,17 +309,17 @@ def _verification_observation(runtime, task_id, context, expected, emit_tool_cal
     if not expected or expected != digest:
         return dict(blocker='verification_review_revision_changed', stale=True)
     checks = []
-    for index, argv in enumerate(context['plan']['verification']):
+    for index, argv in enumerate(context['plan']['verification'], start=start_index):
         ref = f"verification:{context['revision']}:{run_id}:{index}"
         if cancel.is_set():
             return dict(checks=checks, digest=digest, stale=True)
         if emit_tool_call:
             emit_tool_call(dict(tool_call_id=ref, new=True, title='Verify project', kind='execute',
-                                status='in_progress', raw_input=dict(argv=argv, cwd=str(root))))
+                                status='in_progress', raw_input=dict(argv=argv, cwd=str(check_cwd))))
         from ..observability.wire_trace import get_trace
         trace = get_trace()
         if trace is not None:
-            trace.record("verification", "out", dict(argv=argv, cwd=str(root)),
+            trace.record("verification", "out", dict(argv=argv, cwd=str(check_cwd)),
                          task_id=task_id, command_ref=ref)
         with tempfile.TemporaryDirectory(prefix='cortex-verification-') as scratch, contextlib.ExitStack() as stack:
             # The owner's toolchain (npm, node in their home), as a worker's
@@ -330,6 +333,8 @@ def _verification_observation(runtime, task_id, context, expected, emit_tool_cal
             profile = READ_ONLY_COMMAND_PROFILE
             try:
                 command, fds = stack.enter_context(_verification_command(root, scratch, argv))
+                if "--chdir" in command:
+                    command[command.index("--chdir") + 1] = str(check_cwd)
             except StoreError as error:
                 if trace is not None:
                     trace.record("verification", "in", dict(blocker=str(error)),
@@ -342,14 +347,15 @@ def _verification_observation(runtime, task_id, context, expected, emit_tool_cal
                     db.execute('BEGIN IMMEDIATE')
                     # Execution metadata is diagnostic until authoritative credit;
                     # never emit a verification lifecycle event from this runner.
+                    directory_binding = dict(cwd=str(check_cwd)) if check_cwd != root.resolve() else {}
                     event(db, task_id, 'CHECK_EXECUTION_STARTED', dict(
                         command_ref=ref, argv=argv, revision=context['revision'],
-                        revision_digest=digest, index=index, profile=profile))
+                        revision_digest=digest, index=index, profile=profile, **directory_binding))
                     started_event_id = db.execute('SELECT last_insert_rowid()').fetchone()[0]
                     db.commit()
                 try:
                     proc = subprocess.Popen(launch, stdin=subprocess.DEVNULL, stdout=output, stderr=subprocess.STDOUT, pass_fds=launch_fds,
-                                            env={'PATH': '/usr/bin:/bin'}, start_new_session=True)
+                                            env={'PATH': '/usr/bin:/bin'}, cwd=str(check_cwd), start_new_session=True)
                 except Exception as error:
                     with runtime._store.connection() as db:
                         db.execute('BEGIN IMMEDIATE')
@@ -367,13 +373,18 @@ def _verification_observation(runtime, task_id, context, expected, emit_tool_cal
                 finally:
                     for extra in set(launch_fds) - set(fds):
                         os.close(extra)
-                # No time limit, as for a worker's command_run: a project's
-                # full suite runs to completion; only a task stop ends it.
+                # Final verification keeps its existing lifetime; explicit worker
+                # reruns supply a deadline so the owner's action cannot hang.
                 interrupted = False
+                timed_out = False
                 started = time.monotonic()
                 shown_minutes = 0
                 total = len(context['plan']['verification'])
                 while proc.poll() is None:
+                    if timeout_seconds is not None and time.monotonic() - started >= timeout_seconds:
+                        timed_out = True
+                        _kill_verification(proc)
+                        break
                     if cancel.wait(.1):
                         interrupted = True
                         _kill_verification(proc)
@@ -384,7 +395,7 @@ def _verification_observation(runtime, task_id, context, expected, emit_tool_cal
                     if emit_tool_call and minutes > shown_minutes:
                         shown_minutes = minutes
                         emit_tool_call(dict(tool_call_id=ref, title=f'Verify project · {index + 1}/{total} · {minutes} min',
-                                            kind='execute', status='in_progress', raw_input=dict(argv=argv, cwd=str(root))))
+                                            kind='execute', status='in_progress', raw_input=dict(argv=argv, cwd=str(check_cwd))))
                 code = proc.wait()
                 if trace is not None:
                     # Read the spool separately; retention below still receives
@@ -409,15 +420,16 @@ def _verification_observation(runtime, task_id, context, expected, emit_tool_cal
                 saved = persist_output_stream(
                     runtime._store, task_id=task_id, owner_scope='coordinator',
                     source_kind='terminal', source_ref=ref, stream=output,
-                    exit_code=code, failure='interrupted' if interrupted else None,
+                    exit_code=code, failure='timeout' if timed_out else 'interrupted' if interrupted else None,
                 )
                 output_tail = _verification_output_tail(output)
-        failed = interrupted or code != 0 or not unchanged
-        observed = dict(argv=argv,exit_code=code,complete=not interrupted and unchanged,
+        failed = interrupted or timed_out or code != 0 or not unchanged
+        observed = dict(argv=argv,exit_code=code,complete=not interrupted and not timed_out and unchanged,
+                        failure="timeout" if timed_out else None,
                         revision_digest=digest,large_output_id=saved['id'],profile=profile,
                         command_ref=ref,started_event_id=started_event_id,
                         # The full output is retained separately; this excerpt is only for repair context.
-                        output_tail=output_tail if failed else None)
+                        output_tail=output_tail, **directory_binding)
         with runtime._store.connection() as db:
             db.execute('BEGIN IMMEDIATE')
             event(db, task_id, 'CHECK_EXECUTION_FINISHED',
@@ -721,6 +733,8 @@ def _run(runtime, task_id, session_id, channel, session_ref, content, emit_updat
     open_text = threading.Event()
     emit_update = _tracking_text(emit_update, open_text)
     context = machine.create(task_id, content)
+    if context['state'] == 'PAUSED':
+        return StopReason.CANCELLED
     from .recovery import reconcile_results
     if context['state'] not in {'COMPLETED', 'FAILED', 'CANCELLED'}:
         try:
@@ -755,6 +769,8 @@ def _run(runtime, task_id, session_id, channel, session_ref, content, emit_updat
         fingerprint = machine.change_fingerprint(task_id)
         context = machine.context(task_id)
         state = context['state']
+        if state == 'PAUSED':
+            return StopReason.CANCELLED
         if state not in {'REVIEWING', 'VERIFYING'}:
             speculation.close('review_not_approved')
         from .policy import apply_pending_steering
@@ -792,6 +808,10 @@ def _run(runtime, task_id, session_id, channel, session_ref, content, emit_updat
         if state == 'RECONCILING':
             _await_synthesis_settlement(runtime, task_id, cancel_event)
             if cancel_event.is_set() or _transport_lost(runtime, task_id):
+                continue
+            from .worker_checks import automatic as execute_skipped_checks
+            execute_skipped_checks(runtime, task_id, cancel_event, emit_tool_call)
+            if cancel_event.is_set():
                 continue
             from .synthesis import complete as compose_synthesis
             def workers_absent(db):
@@ -1199,11 +1219,18 @@ def _run(runtime, task_id, session_id, channel, session_ref, content, emit_updat
                 # the project) gets its permission card here.
                 _wait_for_change(runtime, machine, task_id, fingerprint, workers, cancel_event, language, relay_requests=True)
                 continue
+            if (open_waits and all(n['status'] != 'running' or n.get('wait') and n['wait']['status'] == 'open' for n in nodes)):
+                if any(w.get('kind') == 'access' and w.get('retry_at') for w in open_waits):
+                    cancel_event.wait(_POLL_SECONDS)
+                    continue
+                runtime._set_state(task_id, 'waiting_for_user', wait_reason='worker_question')
+                return StopReason.END_TURN
             if any(n['status'] == 'running' for n in nodes):
                 from .recovery import retry_lost
                 try:
                     for node in nodes:
-                        if node['status']=='running': retry_lost(runtime,task_id,node)
+                        if node['status']=='running' and not (node.get('wait') and node['wait']['status'] == 'open'):
+                            retry_lost(runtime,task_id,node)
                 except StoreError as error:
                     if _storage_contention(error):
                         raise
@@ -1568,7 +1595,7 @@ def _stop_turn(runtime, task_id, machine, emit_tool_call, emit_update=None, lang
 def _pause_turn(runtime,task_id,machine,emit_tool_call):
     from .policy import interrupt
     context=machine.context(task_id)
-    if context['state'] in {'COMPLETED','FAILED','CANCELLED'}: return
+    if context['state'] in {'COMPLETED','FAILED','CANCELLED','PAUSED'}: return
     interrupt(runtime._store, task_id)
     for node in context['nodes']:
         if node['assignment_ref'] and node['status']=='running':

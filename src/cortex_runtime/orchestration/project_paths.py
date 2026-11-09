@@ -8,7 +8,7 @@ protected by the engine jail (``sandbox.ENGINE_CONFIG``).
 """
 from pathlib import PurePosixPath
 
-PRIVATE = frozenset({'.cortex', '.git'})
+PRIVATE = frozenset({'.cortex', '.cortex-dev', '.cortex-dev-owner.json', '.cortex-workspace-dev.json', '.git'})
 
 
 def canonical_scope(value):

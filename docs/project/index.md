@@ -2,13 +2,14 @@
 
 Cortex is an ACP v1 stdio agent. The runtime owns lifecycle, scheduling, routes,
 permissions, independent review, verification and completion. Models propose plans,
-perform bounded assignments and submit reports. The one project-local `.cortex`
-store retains task metadata, immutable reports and newest-first pipeline editions.
+perform bounded assignments and submit reports. The one project-local store per channel (`.cortex` by default, `.cortex-dev` for Workspace Dev)
+retains task metadata, immutable reports and newest-first pipeline editions.
 
 Feature behavior is documented one page per feature in the [feature index](../features/index.md).
 
 ## Project pages
 
+- [Planned: Cortex Workspace](../cortex-workspace/index.md)
 - [Architecture overview](architecture.md)
 - [Conventions](conventions.md)
 - [Decisions](decisions.md)
@@ -19,6 +20,7 @@ Feature behavior is documented one page per feature in the [feature index](../fe
 - [Verification](verification.md)
 - [Automated test matrix and CI](test-matrix.md)
 - [Packaging, onboarding and diagnostics](packaging.md)
+- [Bundled engine licence inventory](bundled-engine-licenses.md)
 - [Paseo plugin dependency audit](paseo-dependency-audit.md)
 - [Isolated dev Paseo environment](dev-environment.md)
 - [Configuration reference](../configuration.md)

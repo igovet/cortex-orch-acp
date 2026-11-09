@@ -1,0 +1,5 @@
+<!doctype html>
+<html lang="en"><head><meta charset="UTF-8" /><meta name="viewport" content="width=device-width, initial-scale=1" /><meta name="color-scheme" content="dark light" /><title>Cortex Workspace mock prototype</title><link rel="icon" href="data:," />
+<script>/* Resolve the theme and text size before first paint: no flash of the wrong theme. */
+try { var p = localStorage.getItem("cw.theme"); var d = p === "dark" || ((!p || p === "system") && window.matchMedia && matchMedia("(prefers-color-scheme: dark)").matches); var r = document.documentElement; r.dataset.theme = d ? "dark" : "light"; r.style.colorScheme = d ? "dark" : "light"; var t = JSON.parse(localStorage.getItem("cw.textSize") || "100"); if ([100, 125, 150, 200].indexOf(t) >= 0) r.style.fontSize = (16 * t / 100) + "px"; } catch (e) { document.documentElement.dataset.theme = "dark"; }
+</script></head><body><div id="root"></div><script type="module" src="/src/index.tsx"></script></body></html>

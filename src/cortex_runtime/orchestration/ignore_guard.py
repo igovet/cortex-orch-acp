@@ -5,11 +5,13 @@ from ..contracts import StoreError
 def protected_content(content: str) -> str:
     # Last rule wins. Ignoring the directory itself prevents descendant
     # negations (including nested ignore files) from reopening its contents.
+    from ..project_storage import project_store_name
+    rule = '/' + project_store_name() + '/'
     last = content.removesuffix('\n').split('\n')[-1]
-    if last in {'/.cortex/', '/.cortex/\r'}:
+    if last in {rule, rule + '\r'}:
         return content
     newline = '\r\n' if '\r\n' in content else '\n'
-    return content + (newline if content and not content.endswith('\n') else '') + '/.cortex/' + newline
+    return content + (newline if content and not content.endswith('\n') else '') + rule + newline
 
 
 def snapshot(root):

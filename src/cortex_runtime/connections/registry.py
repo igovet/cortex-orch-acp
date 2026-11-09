@@ -82,7 +82,7 @@ def _fail_closed(code: str, remediation: str, *, field: str | None = None) -> Po
     )
 
 
-_PROJECT_MARKERS = (".git", ".cortex")
+_PROJECT_MARKERS = (".git", ".cortex", ".cortex-dev")
 
 
 def _require_absolute_env_path(value: str, var_name: str) -> Path:
@@ -128,7 +128,7 @@ def _assert_no_project_component(path: Path) -> None:
     Cortex-managed secret files are user-scoped and must never live inside a
     project's ``.cortex`` store (the only supported project runtime store).
     """
-    if ".cortex" in path.parts:
+    if {".cortex", ".cortex-dev"}.intersection(path.parts):
         raise _fail_closed(
             "connection_storage_under_project",
             "Connection storage must be user-scoped under XDG_CONFIG_HOME/"

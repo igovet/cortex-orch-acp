@@ -1,0 +1,3202 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cortex.local/workspace/wire-1.6.schema.json",
+  "title": "Cortex Workspace wire subset",
+  "x-wire-version": {
+    "major": 1,
+    "minor": 6
+  },
+  "x-mapping-version": "1",
+  "x-limits": {
+    "tasksPerPage": 50,
+    "eventsPerPage": 100,
+    "historyPerPage": 100,
+    "pageContentBytes": 65536,
+    "frameBytes": 1048576,
+    "textCharacters": 32000,
+    "requestIdCharacters": 128
+  },
+  "x-operations": [
+    "capabilities.get",
+    "project.snapshot",
+    "tasks.list",
+    "tasks.get",
+    "tasks.create",
+    "tasks.start",
+    "executions.get",
+    "decisions.list",
+    "decisions.get",
+    "decisions.answer",
+    "results.get",
+    "reports.read",
+    "history.page",
+    "events.page",
+    "requests.get"
+  ],
+  "x-service-operations": [
+    "projects.register",
+    "projects.list",
+    "projects.activate",
+    "service.status",
+    "sessions.options.get",
+    "sessions.options.set",
+    "permissions.list",
+    "permissions.resolve",
+    "executions.cancel"
+  ],
+  "$defs": {
+    "Identity": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "Decimal": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)$"
+    },
+    "PositiveDecimal": {
+      "type": "string",
+      "pattern": "^[1-9][0-9]*$"
+    },
+    "Text": {
+      "type": "string",
+      "maxLength": 32000
+    },
+    "Protocol": {
+      "type": "object",
+      "properties": {
+        "major": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 2147483647
+        },
+        "minor": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 2147483647
+        }
+      },
+      "required": [
+        "major",
+        "minor"
+      ],
+      "additionalProperties": true
+    },
+    "Limits": {
+      "type": "object",
+      "properties": {
+        "tasksPerPage": {
+          "const": 50
+        },
+        "eventsPerPage": {
+          "const": 100
+        },
+        "historyPerPage": {
+          "const": 100
+        },
+        "pageContentBytes": {
+          "const": 65536
+        },
+        "frameBytes": {
+          "const": 1048576
+        },
+        "textCharacters": {
+          "const": 32000
+        },
+        "requestIdCharacters": {
+          "const": 128
+        }
+      },
+      "required": [
+        "tasksPerPage",
+        "eventsPerPage",
+        "historyPerPage",
+        "pageContentBytes",
+        "frameBytes",
+        "textCharacters",
+        "requestIdCharacters"
+      ],
+      "additionalProperties": true
+    },
+    "Capabilities": {
+      "type": "object",
+      "properties": {
+        "protocol": {
+          "$ref": "#/$defs/Protocol"
+        },
+        "buildIdentity": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "schemaFingerprint": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "mappingVersion": {
+          "const": "1"
+        },
+        "operations": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "uniqueItems": true
+        },
+        "limits": {
+          "$ref": "#/$defs/Limits"
+        },
+        "generation": {
+          "$ref": "#/$defs/Decimal"
+        },
+        "acpCapabilities": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        }
+      },
+      "required": [
+        "protocol",
+        "buildIdentity",
+        "schemaFingerprint",
+        "mappingVersion",
+        "operations",
+        "limits",
+        "generation",
+        "acpCapabilities"
+      ],
+      "additionalProperties": true,
+      "x-page": true
+    },
+    "Phase": {
+      "type": "string",
+      "x-known-values": [
+        "not_started",
+        "planning",
+        "execution",
+        "review",
+        "verification",
+        "finalizing",
+        "waiting",
+        "recovery",
+        "paused",
+        "blocked",
+        "failed",
+        "stopped",
+        "result",
+        "unknown"
+      ]
+    },
+    "ExecutionState": {
+      "type": "string",
+      "x-known-values": [
+        "not_started",
+        "starting",
+        "running",
+        "waiting_user",
+        "recovering",
+        "paused",
+        "blocked",
+        "failed",
+        "stopped",
+        "result",
+        "unknown"
+      ]
+    },
+    "Outcome": {
+      "type": "string",
+      "x-known-values": [
+        "recorded",
+        "already_resolved",
+        "stale_version",
+        "stale_epoch",
+        "superseded",
+        "expired",
+        "unauthorized",
+        "unsupported",
+        "busy",
+        "invalid_request",
+        "payload_conflict",
+        "unknown_outcome",
+        "unknown"
+      ]
+    },
+    "Receipt": {
+      "type": "object",
+      "properties": {
+        "requestId": {
+          "$ref": "#/$defs/Identity"
+        },
+        "outcome": {
+          "$ref": "#/$defs/Outcome"
+        },
+        "target": {
+          "$ref": "#/$defs/Identity"
+        },
+        "entityVersion": {
+          "$ref": "#/$defs/Decimal"
+        },
+        "executionId": {
+          "$ref": "#/$defs/Identity"
+        },
+        "ownerEpoch": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Decimal"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "reason": {
+          "$ref": "#/$defs/Text"
+        },
+        "recordedAt": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        }
+      },
+      "required": [
+        "requestId",
+        "outcome",
+        "target",
+        "entityVersion",
+        "recordedAt"
+      ],
+      "additionalProperties": true,
+      "x-page": true
+    },
+    "Option": {
+      "type": "object",
+      "properties": {
+        "optionId": {
+          "$ref": "#/$defs/Identity"
+        },
+        "label": {
+          "$ref": "#/$defs/Text"
+        }
+      },
+      "required": [
+        "optionId",
+        "label"
+      ],
+      "additionalProperties": true
+    },
+    "Attachment": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255
+        },
+        "mimeType": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100
+        },
+        "data": {
+          "type": "string",
+          "maxLength": 699052
+        }
+      },
+      "required": [
+        "name",
+        "mimeType",
+        "data"
+      ],
+      "additionalProperties": false
+    },
+    "Attachments": {
+      "type": "array",
+      "maxItems": 8,
+      "items": {
+        "$ref": "#/$defs/Attachment"
+      }
+    },
+    "Answer": {
+      "type": "object",
+      "properties": {
+        "decisionId": {
+          "$ref": "#/$defs/Identity"
+        },
+        "expectedVersion": {
+          "$ref": "#/$defs/PositiveDecimal"
+        },
+        "questionId": {
+          "$ref": "#/$defs/Identity"
+        },
+        "optionId": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Identity"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "text": {
+          "$ref": "#/$defs/Text"
+        },
+        "attachments": {
+          "$ref": "#/$defs/Attachments"
+        }
+      },
+      "required": [
+        "decisionId",
+        "expectedVersion",
+        "questionId",
+        "optionId",
+        "text"
+      ],
+      "additionalProperties": false
+    },
+    "CreatePayload": {
+      "type": "object",
+      "properties": {
+        "attachments": {
+          "$ref": "#/$defs/Attachments"
+        },
+        "description": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 32000
+        },
+        "settings": {
+          "type": "object",
+          "properties": {
+            "model": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            },
+            "effort": {
+              "type": "string",
+              "maxLength": 80
+            },
+            "mode": {
+              "enum": [
+                "development",
+                "guarded",
+                "auto"
+              ]
+            },
+            "language": {
+              "enum": [
+                "auto",
+                "en",
+                "ru"
+              ]
+            }
+          },
+          "required": [
+            "model",
+            "effort",
+            "mode",
+            "language"
+          ],
+          "additionalProperties": false
+        },
+        "checkout": {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "enum": [
+                "main",
+                "worktree"
+              ]
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "description"
+      ],
+      "additionalProperties": false
+    },
+    "StartPayload": {
+      "type": "object",
+      "properties": {},
+      "required": [],
+      "additionalProperties": false
+    },
+    "AnswerPayload": {
+      "type": "object",
+      "properties": {
+        "executionId": {
+          "$ref": "#/$defs/Identity"
+        },
+        "acpSessionId": {
+          "$ref": "#/$defs/Identity"
+        },
+        "batchId": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Identity"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "answers": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 100,
+          "items": {
+            "$ref": "#/$defs/Answer"
+          }
+        }
+      },
+      "required": [
+        "executionId",
+        "acpSessionId",
+        "batchId",
+        "answers"
+      ],
+      "additionalProperties": false
+    },
+    "TaskCreateCommand": {
+      "type": "object",
+      "properties": {
+        "protocol": {
+          "$ref": "#/$defs/CommandProtocol"
+        },
+        "requestId": {
+          "$ref": "#/$defs/Identity"
+        },
+        "projectId": {
+          "$ref": "#/$defs/Identity"
+        },
+        "actorId": {
+          "$ref": "#/$defs/Identity"
+        },
+        "target": {
+          "$ref": "#/$defs/Identity"
+        },
+        "operation": {
+          "const": "tasks.create"
+        },
+        "expectedVersion": {
+          "const": "0"
+        },
+        "ownerEpoch": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PositiveDecimal"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "payload": {
+          "$ref": "#/$defs/CreatePayload"
+        }
+      },
+      "required": [
+        "protocol",
+        "requestId",
+        "projectId",
+        "actorId",
+        "target",
+        "operation",
+        "expectedVersion",
+        "ownerEpoch",
+        "payload"
+      ],
+      "additionalProperties": false
+    },
+    "TaskStartCommand": {
+      "type": "object",
+      "properties": {
+        "protocol": {
+          "$ref": "#/$defs/CommandProtocol"
+        },
+        "requestId": {
+          "$ref": "#/$defs/Identity"
+        },
+        "projectId": {
+          "$ref": "#/$defs/Identity"
+        },
+        "actorId": {
+          "$ref": "#/$defs/Identity"
+        },
+        "target": {
+          "$ref": "#/$defs/Identity"
+        },
+        "operation": {
+          "const": "tasks.start"
+        },
+        "expectedVersion": {
+          "$ref": "#/$defs/PositiveDecimal"
+        },
+        "ownerEpoch": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PositiveDecimal"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "payload": {
+          "$ref": "#/$defs/StartPayload"
+        }
+      },
+      "required": [
+        "protocol",
+        "requestId",
+        "projectId",
+        "actorId",
+        "target",
+        "operation",
+        "expectedVersion",
+        "ownerEpoch",
+        "payload"
+      ],
+      "additionalProperties": false
+    },
+    "DecisionAnswerCommand": {
+      "type": "object",
+      "properties": {
+        "protocol": {
+          "$ref": "#/$defs/CommandProtocol"
+        },
+        "requestId": {
+          "$ref": "#/$defs/Identity"
+        },
+        "projectId": {
+          "$ref": "#/$defs/Identity"
+        },
+        "actorId": {
+          "$ref": "#/$defs/Identity"
+        },
+        "target": {
+          "$ref": "#/$defs/Identity"
+        },
+        "operation": {
+          "const": "decisions.answer"
+        },
+        "expectedVersion": {
+          "$ref": "#/$defs/PositiveDecimal"
+        },
+        "ownerEpoch": {
+          "$ref": "#/$defs/PositiveDecimal"
+        },
+        "payload": {
+          "$ref": "#/$defs/AnswerPayload"
+        }
+      },
+      "required": [
+        "protocol",
+        "requestId",
+        "projectId",
+        "actorId",
+        "target",
+        "operation",
+        "expectedVersion",
+        "ownerEpoch",
+        "payload"
+      ],
+      "additionalProperties": false
+    },
+    "Command": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/TaskCreateCommand"
+        },
+        {
+          "$ref": "#/$defs/TaskStartCommand"
+        },
+        {
+          "$ref": "#/$defs/DecisionAnswerCommand"
+        }
+      ]
+    },
+    "Query": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/TaskListQuery"
+        },
+        {
+          "$ref": "#/$defs/ReadQuery"
+        },
+        {
+          "$ref": "#/$defs/ReportQuery"
+        }
+      ]
+    },
+    "ReportQuery": {
+      "type": "object",
+      "properties": {
+        "protocol": {
+          "$ref": "#/$defs/CommandProtocol"
+        },
+        "requestId": {
+          "$ref": "#/$defs/Identity"
+        },
+        "projectId": {
+          "$ref": "#/$defs/Identity"
+        },
+        "operation": {
+          "const": "reports.read"
+        },
+        "target": {
+          "$ref": "#/$defs/Identity"
+        },
+        "cursor": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Identity"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4000
+        }
+      },
+      "required": [
+        "protocol",
+        "requestId",
+        "projectId",
+        "operation",
+        "target"
+      ],
+      "additionalProperties": false
+    },
+    "ReportPage": {
+      "type": "object",
+      "properties": {
+        "reportId": {
+          "$ref": "#/$defs/Identity"
+        },
+        "title": {
+          "$ref": "#/$defs/Text"
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "markdown": {
+          "type": "string",
+          "maxLength": 4000
+        },
+        "totalCharacters": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "nextCursor": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Identity"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "partial": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "reportId",
+        "title",
+        "sha256",
+        "markdown",
+        "totalCharacters",
+        "nextCursor",
+        "partial"
+      ],
+      "additionalProperties": false
+    },
+    "ObservedRoute": {
+      "type": "object",
+      "properties": {
+        "model": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1000
+        },
+        "effort": {
+          "type": "string",
+          "maxLength": 200
+        }
+      },
+      "required": [
+        "model",
+        "effort"
+      ],
+      "additionalProperties": false
+    },
+    "Activity": {
+      "type": "object",
+      "properties": {
+        "sequence": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "note",
+            "tool",
+            "edit",
+            "command",
+            "message"
+          ]
+        },
+        "text": {
+          "$ref": "#/$defs/Text"
+        },
+        "at": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "error": {
+          "type": "boolean"
+        },
+        "args": {
+          "$ref": "#/$defs/Text"
+        },
+        "toolCallRef": {
+          "$ref": "#/$defs/Text"
+        },
+        "command": {
+          "type": "object",
+          "properties": {
+            "state": {
+              "type": "string"
+            },
+            "exit": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "took": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "tail": {
+              "$ref": "#/$defs/Text"
+            },
+            "reason": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "state",
+            "exit",
+            "took",
+            "tail",
+            "reason"
+          ],
+          "additionalProperties": false
+        },
+        "diff": {
+          "type": "object",
+          "properties": {
+            "add": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "del": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "lines": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "add",
+            "del",
+            "lines"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "sequence",
+        "kind",
+        "text",
+        "at"
+      ],
+      "additionalProperties": false
+    },
+    "Task": {
+      "type": "object",
+      "properties": {
+        "taskId": {
+          "$ref": "#/$defs/Identity"
+        },
+        "description": {
+          "$ref": "#/$defs/Text"
+        },
+        "title": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Text"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "titleAvailability": {
+          "type": "string",
+          "x-known-values": [
+            "available",
+            "not_connected",
+            "unavailable",
+            "unknown"
+          ]
+        },
+        "version": {
+          "$ref": "#/$defs/PositiveDecimal"
+        },
+        "executionId": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Identity"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "phase": {
+          "$ref": "#/$defs/Phase"
+        },
+        "runtimeState": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "coordinatorRoute": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ObservedRoute"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "executionState": {
+          "$ref": "#/$defs/ExecutionState"
+        },
+        "waitReason": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Text"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "lastConfirmedAt": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "warnings": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Text"
+          },
+          "maxItems": 100
+        }
+      },
+      "required": [
+        "taskId",
+        "description",
+        "title",
+        "titleAvailability",
+        "version",
+        "executionId",
+        "phase",
+        "runtimeState",
+        "executionState",
+        "waitReason",
+        "lastConfirmedAt",
+        "warnings"
+      ],
+      "additionalProperties": true,
+      "x-page": true
+    },
+    "Execution": {
+      "type": "object",
+      "properties": {
+        "executionId": {
+          "$ref": "#/$defs/Identity"
+        },
+        "taskId": {
+          "$ref": "#/$defs/Identity"
+        },
+        "version": {
+          "$ref": "#/$defs/PositiveDecimal"
+        },
+        "runtimeTaskId": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Identity"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "acpSessionId": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Identity"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "runtimePlanRevision": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Decimal"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "ownerEpoch": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PositiveDecimal"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "state": {
+          "$ref": "#/$defs/ExecutionState"
+        },
+        "warnings": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Text"
+          },
+          "maxItems": 100
+        }
+      },
+      "required": [
+        "executionId",
+        "taskId",
+        "version",
+        "runtimeTaskId",
+        "acpSessionId",
+        "runtimePlanRevision",
+        "ownerEpoch",
+        "state",
+        "warnings"
+      ],
+      "additionalProperties": true,
+      "x-page": true
+    },
+    "Decision": {
+      "type": "object",
+      "properties": {
+        "decisionId": {
+          "$ref": "#/$defs/Identity"
+        },
+        "kind": {
+          "type": "string",
+          "x-known-values": [
+            "question",
+            "question_batch",
+            "unknown"
+          ]
+        },
+        "questionId": {
+          "$ref": "#/$defs/Identity"
+        },
+        "batchId": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Identity"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "executionId": {
+          "$ref": "#/$defs/Identity"
+        },
+        "acpSessionId": {
+          "$ref": "#/$defs/Identity"
+        },
+        "scope": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "prompt": {
+          "$ref": "#/$defs/Text"
+        },
+        "options": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Option"
+          },
+          "maxItems": 100
+        },
+        "version": {
+          "$ref": "#/$defs/PositiveDecimal"
+        },
+        "ownerEpoch": {
+          "$ref": "#/$defs/PositiveDecimal"
+        },
+        "requirementRevision": {
+          "$ref": "#/$defs/Decimal"
+        },
+        "status": {
+          "type": "string",
+          "x-known-values": [
+            "pending",
+            "answered",
+            "expired",
+            "superseded",
+            "unknown"
+          ]
+        },
+        "allowedOperations": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "maxItems": 20
+        }
+      },
+      "required": [
+        "decisionId",
+        "kind",
+        "questionId",
+        "batchId",
+        "executionId",
+        "acpSessionId",
+        "scope",
+        "prompt",
+        "options",
+        "version",
+        "ownerEpoch",
+        "requirementRevision",
+        "status",
+        "allowedOperations"
+      ],
+      "additionalProperties": true,
+      "x-page": true
+    },
+    "Check": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/Text"
+        },
+        "outcome": {
+          "type": "string",
+          "x-known-values": [
+            "passed",
+            "failed",
+            "not_run",
+            "unverified",
+            "not_applicable",
+            "unknown"
+          ]
+        },
+        "evidenceRef": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Identity"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "name",
+        "outcome",
+        "evidenceRef"
+      ],
+      "additionalProperties": true
+    },
+    "Evidence": {
+      "type": "object",
+      "properties": {
+        "reference": {
+          "$ref": "#/$defs/Identity"
+        },
+        "digest": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      },
+      "required": [
+        "reference",
+        "digest"
+      ],
+      "additionalProperties": true
+    },
+    "Result": {
+      "type": "object",
+      "properties": {
+        "sequenceNumber": {
+          "$ref": "#/$defs/PositiveDecimal"
+        },
+        "resultId": {
+          "$ref": "#/$defs/Identity"
+        },
+        "version": {
+          "$ref": "#/$defs/PositiveDecimal"
+        },
+        "taskId": {
+          "$ref": "#/$defs/Identity"
+        },
+        "executionId": {
+          "$ref": "#/$defs/Identity"
+        },
+        "kind": {
+          "type": "string",
+          "x-known-values": [
+            "answer",
+            "work",
+            "unknown"
+          ]
+        },
+        "text": {
+          "$ref": "#/$defs/Text"
+        },
+        "evidence": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Evidence"
+          },
+          "maxItems": 100
+        },
+        "checks": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Check"
+          },
+          "maxItems": 100
+        },
+        "observedWorkspaceDigest": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "resultId",
+        "version",
+        "taskId",
+        "executionId",
+        "kind",
+        "text",
+        "evidence",
+        "checks",
+        "observedWorkspaceDigest"
+      ],
+      "additionalProperties": true,
+      "x-page": true
+    },
+    "Event": {
+      "type": "object",
+      "properties": {
+        "eventId": {
+          "$ref": "#/$defs/Identity"
+        },
+        "sequence": {
+          "$ref": "#/$defs/PositiveDecimal"
+        },
+        "entityId": {
+          "$ref": "#/$defs/Identity"
+        },
+        "entityVersion": {
+          "$ref": "#/$defs/PositiveDecimal"
+        },
+        "kind": {
+          "type": "string",
+          "x-known-values": [
+            "task",
+            "execution",
+            "decision",
+            "result",
+            "unknown"
+          ]
+        },
+        "recordedAt": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        }
+      },
+      "required": [
+        "eventId",
+        "sequence",
+        "entityId",
+        "entityVersion",
+        "kind",
+        "recordedAt"
+      ],
+      "additionalProperties": true
+    },
+    "HistoryRow": {
+      "type": "object",
+      "properties": {
+        "recordedAt": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "activity": {
+          "$ref": "#/$defs/Activity"
+        },
+        "historyId": {
+          "$ref": "#/$defs/Identity"
+        },
+        "sequence": {
+          "$ref": "#/$defs/PositiveDecimal"
+        },
+        "revision": {
+          "$ref": "#/$defs/Decimal"
+        },
+        "kind": {
+          "type": "string",
+          "x-known-values": [
+            "user",
+            "assistant",
+            "tool",
+            "system",
+            "unknown"
+          ]
+        },
+        "text": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Text"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "toolStatus": {
+          "anyOf": [
+            {
+              "type": "string",
+              "x-known-values": [
+                "pending",
+                "in_progress",
+                "completed",
+                "failed",
+                "unknown"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "availability": {
+          "type": "string",
+          "x-known-values": [
+            "available",
+            "unavailable",
+            "unknown"
+          ]
+        }
+      },
+      "required": [
+        "historyId",
+        "sequence",
+        "revision",
+        "kind",
+        "text",
+        "toolStatus",
+        "availability"
+      ],
+      "additionalProperties": true
+    },
+    "TaskPage": {
+      "type": "object",
+      "properties": {
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Task"
+          },
+          "maxItems": 50
+        },
+        "nextCursor": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Identity"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "highWatermark": {
+          "$ref": "#/$defs/Decimal"
+        }
+      },
+      "required": [
+        "items",
+        "nextCursor",
+        "highWatermark"
+      ],
+      "additionalProperties": true,
+      "x-page": true
+    },
+    "EventPage": {
+      "type": "object",
+      "properties": {
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Event"
+          },
+          "maxItems": 100
+        },
+        "nextCursor": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Identity"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "highWatermark": {
+          "$ref": "#/$defs/Decimal"
+        }
+      },
+      "required": [
+        "items",
+        "nextCursor",
+        "highWatermark"
+      ],
+      "additionalProperties": true,
+      "x-page": true
+    },
+    "HistoryPage": {
+      "type": "object",
+      "properties": {
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/HistoryRow"
+          },
+          "maxItems": 100
+        },
+        "nextCursor": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Identity"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "highWatermark": {
+          "$ref": "#/$defs/Decimal"
+        }
+      },
+      "required": [
+        "items",
+        "nextCursor",
+        "highWatermark"
+      ],
+      "additionalProperties": true,
+      "x-page": true
+    },
+    "DecisionPage": {
+      "type": "object",
+      "properties": {
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Decision"
+          },
+          "maxItems": 100
+        },
+        "nextCursor": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Identity"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "highWatermark": {
+          "$ref": "#/$defs/Decimal"
+        }
+      },
+      "required": [
+        "items",
+        "nextCursor",
+        "highWatermark"
+      ],
+      "additionalProperties": true,
+      "x-page": true
+    },
+    "ProjectSnapshot": {
+      "type": "object",
+      "properties": {
+        "projectId": {
+          "$ref": "#/$defs/Identity"
+        },
+        "version": {
+          "$ref": "#/$defs/Decimal"
+        },
+        "highWatermark": {
+          "$ref": "#/$defs/Decimal"
+        },
+        "tasks": {
+          "$ref": "#/$defs/TaskPage"
+        }
+      },
+      "required": [
+        "projectId",
+        "version",
+        "highWatermark",
+        "tasks"
+      ],
+      "additionalProperties": true,
+      "x-page": true
+    },
+    "CommandProtocol": {
+      "type": "object",
+      "properties": {
+        "major": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 2147483647
+        },
+        "minor": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 2147483647
+        }
+      },
+      "required": [
+        "major",
+        "minor"
+      ],
+      "additionalProperties": false
+    },
+    "TaskListQuery": {
+      "type": "object",
+      "properties": {
+        "protocol": {
+          "$ref": "#/$defs/CommandProtocol"
+        },
+        "requestId": {
+          "$ref": "#/$defs/Identity"
+        },
+        "projectId": {
+          "$ref": "#/$defs/Identity"
+        },
+        "operation": {
+          "const": "tasks.list"
+        },
+        "target": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Identity"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "cursor": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Identity"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 50
+        }
+      },
+      "required": [
+        "protocol",
+        "requestId",
+        "projectId",
+        "operation"
+      ],
+      "additionalProperties": false
+    },
+    "ReadQuery": {
+      "type": "object",
+      "properties": {
+        "protocol": {
+          "$ref": "#/$defs/CommandProtocol"
+        },
+        "requestId": {
+          "$ref": "#/$defs/Identity"
+        },
+        "projectId": {
+          "$ref": "#/$defs/Identity"
+        },
+        "operation": {
+          "enum": [
+            "capabilities.get",
+            "project.snapshot",
+            "tasks.get",
+            "executions.get",
+            "decisions.list",
+            "decisions.get",
+            "results.get",
+            "history.page",
+            "events.page",
+            "requests.get"
+          ]
+        },
+        "target": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Identity"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "cursor": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Identity"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100
+        }
+      },
+      "required": [
+        "protocol",
+        "requestId",
+        "projectId",
+        "operation"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "x-fixtures": [
+    {
+      "name": "create",
+      "type": "Command",
+      "value": {
+        "protocol": {
+          "major": 1,
+          "minor": 0
+        },
+        "requestId": "req-1",
+        "projectId": "project-1",
+        "actorId": "local-peer",
+        "operation": "tasks.create",
+        "target": "task-1",
+        "expectedVersion": "0",
+        "ownerEpoch": null,
+        "payload": {
+          "description": "Build a thing\nKeep multiline 😀"
+        }
+      },
+      "valid": true
+    },
+    {
+      "name": "start",
+      "type": "Command",
+      "value": {
+        "protocol": {
+          "major": 1,
+          "minor": 0
+        },
+        "requestId": "req-2",
+        "projectId": "project-1",
+        "actorId": "local-peer",
+        "operation": "tasks.start",
+        "target": "task-1",
+        "expectedVersion": "1",
+        "ownerEpoch": null,
+        "payload": {}
+      },
+      "valid": true
+    },
+    {
+      "name": "answer",
+      "type": "Command",
+      "value": {
+        "protocol": {
+          "major": 1,
+          "minor": 0
+        },
+        "requestId": "req-1",
+        "projectId": "project-1",
+        "actorId": "local-peer",
+        "operation": "decisions.answer",
+        "target": "task-1",
+        "expectedVersion": "2",
+        "ownerEpoch": "3",
+        "payload": {
+          "executionId": "exec",
+          "acpSessionId": "session",
+          "batchId": null,
+          "answers": [
+            {
+              "decisionId": "decision",
+              "expectedVersion": "2",
+              "questionId": "question",
+              "optionId": null,
+              "text": "Other\nanswer"
+            }
+          ]
+        }
+      },
+      "valid": true
+    },
+    {
+      "name": "receipt",
+      "type": "Receipt",
+      "value": {
+        "requestId": "req-1",
+        "outcome": "recorded",
+        "target": "task-1",
+        "entityVersion": "9007199254740993",
+        "recordedAt": "2026-11-05T00:00:00Z",
+        "additive": true
+      },
+      "valid": true
+    },
+    {
+      "name": "capabilities",
+      "type": "Capabilities",
+      "value": {
+        "protocol": {
+          "major": 1,
+          "minor": 0
+        },
+        "buildIdentity": "1.0.6+test",
+        "schemaFingerprint": "$fingerprint",
+        "mappingVersion": "1",
+        "operations": [
+          "capabilities.get",
+          "project.snapshot",
+          "tasks.list",
+          "tasks.get",
+          "tasks.create",
+          "tasks.start",
+          "executions.get",
+          "decisions.list",
+          "decisions.get",
+          "decisions.answer",
+          "results.get",
+          "history.page",
+          "events.page",
+          "requests.get"
+        ],
+        "limits": {
+          "tasksPerPage": 50,
+          "eventsPerPage": 100,
+          "historyPerPage": 100,
+          "pageContentBytes": 65536,
+          "frameBytes": 1048576,
+          "textCharacters": 32000,
+          "requestIdCharacters": 128
+        },
+        "generation": "9007199254740993",
+        "acpCapabilities": {}
+      },
+      "valid": true
+    },
+    {
+      "name": "query",
+      "type": "Query",
+      "value": {
+        "protocol": {
+          "major": 1,
+          "minor": 0
+        },
+        "requestId": "r",
+        "projectId": "p",
+        "operation": "tasks.list",
+        "limit": 50
+      },
+      "valid": true
+    },
+    {
+      "name": "task",
+      "type": "Task",
+      "value": {
+        "taskId": "t",
+        "description": "task",
+        "title": null,
+        "titleAvailability": "not_connected",
+        "version": "1",
+        "executionId": null,
+        "phase": "not_started",
+        "runtimeState": null,
+        "executionState": "not_started",
+        "waitReason": null,
+        "lastConfirmedAt": null,
+        "warnings": []
+      },
+      "valid": true
+    },
+    {
+      "name": "execution",
+      "type": "Execution",
+      "value": {
+        "executionId": "e",
+        "taskId": "t",
+        "version": "1",
+        "runtimeTaskId": null,
+        "acpSessionId": null,
+        "runtimePlanRevision": null,
+        "ownerEpoch": null,
+        "state": "starting",
+        "warnings": []
+      },
+      "valid": true
+    },
+    {
+      "name": "decision",
+      "type": "Decision",
+      "value": {
+        "decisionId": "d",
+        "kind": "question",
+        "questionId": "q",
+        "batchId": null,
+        "executionId": "e",
+        "acpSessionId": "s",
+        "scope": "worker",
+        "prompt": "Which?",
+        "options": [
+          {
+            "optionId": "o",
+            "label": "A"
+          }
+        ],
+        "version": "1",
+        "ownerEpoch": "1",
+        "requirementRevision": "2",
+        "status": "pending",
+        "allowedOperations": [
+          "decisions.answer"
+        ]
+      },
+      "valid": true
+    },
+    {
+      "name": "result",
+      "type": "Result",
+      "value": {
+        "resultId": "r",
+        "version": "1",
+        "taskId": "t",
+        "executionId": "e",
+        "kind": "work",
+        "text": "result",
+        "evidence": [
+          {
+            "reference": "report",
+            "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          }
+        ],
+        "checks": [
+          {
+            "name": "unrun",
+            "outcome": "not_run",
+            "evidenceRef": null
+          }
+        ],
+        "observedWorkspaceDigest": null
+      },
+      "valid": true
+    },
+    {
+      "name": "event",
+      "type": "Event",
+      "value": {
+        "eventId": "ev",
+        "sequence": "9007199254740993",
+        "entityId": "t",
+        "entityVersion": "2",
+        "kind": "task",
+        "recordedAt": "now"
+      },
+      "valid": true
+    },
+    {
+      "name": "history",
+      "type": "HistoryRow",
+      "value": {
+        "historyId": "h",
+        "sequence": "1",
+        "revision": "0",
+        "kind": "tool",
+        "text": "safe content",
+        "toolStatus": "completed",
+        "availability": "available"
+      },
+      "valid": true
+    },
+    {
+      "name": "TaskPage",
+      "type": "TaskPage",
+      "value": {
+        "items": [
+          {
+            "taskId": "t",
+            "description": "task",
+            "title": null,
+            "titleAvailability": "not_connected",
+            "version": "1",
+            "executionId": null,
+            "phase": "not_started",
+            "runtimeState": null,
+            "executionState": "not_started",
+            "waitReason": null,
+            "lastConfirmedAt": null,
+            "warnings": []
+          }
+        ],
+        "nextCursor": null,
+        "highWatermark": "9007199254740993"
+      },
+      "valid": true
+    },
+    {
+      "name": "EventPage",
+      "type": "EventPage",
+      "value": {
+        "items": [
+          {
+            "eventId": "ev",
+            "sequence": "9007199254740993",
+            "entityId": "t",
+            "entityVersion": "2",
+            "kind": "task",
+            "recordedAt": "now"
+          }
+        ],
+        "nextCursor": null,
+        "highWatermark": "9007199254740993"
+      },
+      "valid": true
+    },
+    {
+      "name": "HistoryPage",
+      "type": "HistoryPage",
+      "value": {
+        "items": [
+          {
+            "historyId": "h",
+            "sequence": "1",
+            "revision": "0",
+            "kind": "tool",
+            "text": "safe content",
+            "toolStatus": "completed",
+            "availability": "available"
+          }
+        ],
+        "nextCursor": null,
+        "highWatermark": "9007199254740993"
+      },
+      "valid": true
+    },
+    {
+      "name": "DecisionPage",
+      "type": "DecisionPage",
+      "value": {
+        "items": [
+          {
+            "decisionId": "d",
+            "kind": "question",
+            "questionId": "q",
+            "batchId": null,
+            "executionId": "e",
+            "acpSessionId": "s",
+            "scope": "worker",
+            "prompt": "Which?",
+            "options": [
+              {
+                "optionId": "o",
+                "label": "A"
+              }
+            ],
+            "version": "1",
+            "ownerEpoch": "1",
+            "requirementRevision": "2",
+            "status": "pending",
+            "allowedOperations": [
+              "decisions.answer"
+            ]
+          }
+        ],
+        "nextCursor": null,
+        "highWatermark": "9007199254740993"
+      },
+      "valid": true
+    },
+    {
+      "name": "snapshot",
+      "type": "ProjectSnapshot",
+      "value": {
+        "projectId": "p",
+        "version": "1",
+        "highWatermark": "1",
+        "tasks": {
+          "items": [
+            {
+              "taskId": "t",
+              "description": "task",
+              "title": null,
+              "titleAvailability": "not_connected",
+              "version": "1",
+              "executionId": null,
+              "phase": "not_started",
+              "runtimeState": null,
+              "executionState": "not_started",
+              "waitReason": null,
+              "lastConfirmedAt": null,
+              "warnings": []
+            }
+          ],
+          "nextCursor": null,
+          "highWatermark": "1"
+        }
+      },
+      "valid": true
+    },
+    {
+      "name": "extra-command",
+      "type": "Command",
+      "value": {
+        "protocol": {
+          "major": 1,
+          "minor": 0
+        },
+        "requestId": "req-1",
+        "projectId": "project-1",
+        "actorId": "local-peer",
+        "operation": "tasks.create",
+        "target": "task-1",
+        "expectedVersion": "0",
+        "ownerEpoch": null,
+        "payload": {
+          "description": "Build a thing\nKeep multiline 😀"
+        },
+        "extra": 1
+      },
+      "valid": false
+    },
+    {
+      "name": "extra-payload",
+      "type": "Command",
+      "value": {
+        "protocol": {
+          "major": 1,
+          "minor": 0
+        },
+        "requestId": "req-1",
+        "projectId": "project-1",
+        "actorId": "local-peer",
+        "operation": "tasks.create",
+        "target": "task-1",
+        "expectedVersion": "0",
+        "ownerEpoch": null,
+        "payload": {
+          "description": "hi",
+          "title": "forbidden"
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "numeric-version",
+      "type": "Command",
+      "value": {
+        "protocol": {
+          "major": 1,
+          "minor": 0
+        },
+        "requestId": "req-1",
+        "projectId": "project-1",
+        "actorId": "local-peer",
+        "operation": "tasks.create",
+        "target": "task-1",
+        "expectedVersion": 9007199254740992,
+        "ownerEpoch": null,
+        "payload": {
+          "description": "Build a thing\nKeep multiline 😀"
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "leading-zero",
+      "type": "Command",
+      "value": {
+        "protocol": {
+          "major": 1,
+          "minor": 0
+        },
+        "requestId": "req-1",
+        "projectId": "project-1",
+        "actorId": "local-peer",
+        "operation": "tasks.create",
+        "target": "task-1",
+        "expectedVersion": "00",
+        "ownerEpoch": null,
+        "payload": {
+          "description": "Build a thing\nKeep multiline 😀"
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "oversize-request",
+      "type": "Command",
+      "value": {
+        "protocol": {
+          "major": 1,
+          "minor": 0
+        },
+        "requestId": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+        "projectId": "project-1",
+        "actorId": "local-peer",
+        "operation": "tasks.create",
+        "target": "task-1",
+        "expectedVersion": "0",
+        "ownerEpoch": null,
+        "payload": {
+          "description": "Build a thing\nKeep multiline 😀"
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "missing-field",
+      "type": "Command",
+      "value": {
+        "protocol": {
+          "major": 1,
+          "minor": 0
+        },
+        "requestId": "req-1",
+        "projectId": "project-1",
+        "operation": "tasks.create",
+        "target": "task-1",
+        "expectedVersion": "0",
+        "ownerEpoch": null,
+        "payload": {
+          "description": "Build a thing\nKeep multiline 😀"
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "unsupported-operation",
+      "type": "Command",
+      "value": {
+        "protocol": {
+          "major": 1,
+          "minor": 0
+        },
+        "requestId": "req-1",
+        "projectId": "project-1",
+        "actorId": "local-peer",
+        "operation": "shell.run",
+        "target": "task-1",
+        "expectedVersion": "0",
+        "ownerEpoch": null,
+        "payload": {
+          "description": "Build a thing\nKeep multiline 😀"
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "create-version",
+      "type": "Command",
+      "value": {
+        "protocol": {
+          "major": 1,
+          "minor": 0
+        },
+        "requestId": "req-1",
+        "projectId": "project-1",
+        "actorId": "local-peer",
+        "operation": "tasks.create",
+        "target": "task-1",
+        "expectedVersion": "1",
+        "ownerEpoch": null,
+        "payload": {
+          "description": "Build a thing\nKeep multiline 😀"
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "empty-description",
+      "type": "Command",
+      "value": {
+        "protocol": {
+          "major": 1,
+          "minor": 0
+        },
+        "requestId": "req-1",
+        "projectId": "project-1",
+        "actorId": "local-peer",
+        "operation": "tasks.create",
+        "target": "task-1",
+        "expectedVersion": "0",
+        "ownerEpoch": null,
+        "payload": {
+          "description": ""
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "numeric-sequence",
+      "type": "Event",
+      "value": {
+        "eventId": "ev",
+        "sequence": 9007199254740992,
+        "entityId": "t",
+        "entityVersion": "2",
+        "kind": "task",
+        "recordedAt": "now"
+      },
+      "valid": false
+    },
+    {
+      "name": "null-answer-epoch",
+      "type": "Command",
+      "value": {
+        "protocol": {
+          "major": 1,
+          "minor": 0
+        },
+        "requestId": "req-1",
+        "projectId": "project-1",
+        "actorId": "local-peer",
+        "operation": "decisions.answer",
+        "target": "task-1",
+        "expectedVersion": "2",
+        "ownerEpoch": null,
+        "payload": {
+          "executionId": "exec",
+          "acpSessionId": "session",
+          "batchId": null,
+          "answers": [
+            {
+              "decisionId": "decision",
+              "expectedVersion": "2",
+              "questionId": "question",
+              "optionId": null,
+              "text": "Other\nanswer"
+            }
+          ]
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "too-many-tasks",
+      "type": "TaskPage",
+      "value": {
+        "items": [
+          {
+            "taskId": "t",
+            "description": "task",
+            "title": null,
+            "titleAvailability": "not_connected",
+            "version": "1",
+            "executionId": null,
+            "phase": "not_started",
+            "runtimeState": null,
+            "executionState": "not_started",
+            "waitReason": null,
+            "lastConfirmedAt": null,
+            "warnings": []
+          },
+          {
+            "taskId": "t",
+            "description": "task",
+            "title": null,
+            "titleAvailability": "not_connected",
+            "version": "1",
+            "executionId": null,
+            "phase": "not_started",
+            "runtimeState": null,
+            "executionState": "not_started",
+            "waitReason": null,
+            "lastConfirmedAt": null,
+            "warnings": []
+          },
+          {
+            "taskId": "t",
+            "description": "task",
+            "title": null,
+            "titleAvailability": "not_connected",
+            "version": "1",
+            "executionId": null,
+            "phase": "not_started",
+            "runtimeState": null,
+            "executionState": "not_started",
+            "waitReason": null,
+            "lastConfirmedAt": null,
+            "warnings": []
+          },
+          {
+            "taskId": "t",
+            "description": "task",
+            "title": null,
+            "titleAvailability": "not_connected",
+            "version": "1",
+            "executionId": null,
+            "phase": "not_started",
+            "runtimeState": null,
+            "executionState": "not_started",
+            "waitReason": null,
+            "lastConfirmedAt": null,
+            "warnings": []
+          },
+          {
+            "taskId": "t",
+            "description": "task",
+            "title": null,
+            "titleAvailability": "not_connected",
+            "version": "1",
+            "executionId": null,
+            "phase": "not_started",
+            "runtimeState": null,
+            "executionState": "not_started",
+            "waitReason": null,
+            "lastConfirmedAt": null,
+            "warnings": []
+          },
+          {
+            "taskId": "t",
+            "description": "task",
+            "title": null,
+            "titleAvailability": "not_connected",
+            "version": "1",
+            "executionId": null,
+            "phase": "not_started",
+            "runtimeState": null,
+            "executionState": "not_started",
+            "waitReason": null,
+            "lastConfirmedAt": null,
+            "warnings": []
+          },
+          {
+            "taskId": "t",
+            "description": "task",
+            "title": null,
+            "titleAvailability": "not_connected",
+            "version": "1",
+            "executionId": null,
+            "phase": "not_started",
+            "runtimeState": null,
+            "executionState": "not_started",
+            "waitReason": null,
+            "lastConfirmedAt": null,
+            "warnings": []
+          },
+          {
+            "taskId": "t",
+            "description": "task",
+            "title": null,
+            "titleAvailability": "not_connected",
+            "version": "1",
+            "executionId": null,
+            "phase": "not_started",
+            "runtimeState": null,
+            "executionState": "not_started",
+            "waitReason": null,
+            "lastConfirmedAt": null,
+            "warnings": []
+          },
+          {
+            "taskId": "t",
+            "description": "task",
+            "title": null,
+            "titleAvailability": "not_connected",
+            "version": "1",
+            "executionId": null,
+            "phase": "not_started",
+            "runtimeState": null,
+            "executionState": "not_started",
+            "waitReason": null,
+            "lastConfirmedAt": null,
+            "warnings": []
+          },
+          {
+            "taskId": "t",
+            "description": "task",
+            "title": null,
+            "titleAvailability": "not_connected",
+            "version": "1",
+            "executionId": null,
+            "phase": "not_started",
+            "runtimeState": null,
+            "executionState": "not_started",
+            "waitReason": null,
+            "lastConfirmedAt": null,
+            "warnings": []
+          },
+          {
+            "taskId": "t",
+            "description": "task",
+            "title": null,
+            "titleAvailability": "not_connected",
+            "version": "1",
+            "executionId": null,
+            "phase": "not_started",
+            "runtimeState": null,
+            "executionState": "not_started",
+            "waitReason": null,
+            "lastConfirmedAt": null,
+            "warnings": []
+          },
+          {
+            "taskId": "t",
+            "description": "task",
+            "title": null,
+            "titleAvailability": "not_connected",
+            "version": "1",
+            "executionId": null,
+            "phase": "not_started",
+            "runtimeState": null,
+            "executionState": "not_started",
+            "waitReason": null,
+            "lastConfirmedAt": null,
+            "warnings": []
+          },
+          {
+            "taskId": "t",
+            "description": "task",
+            "title": null,
+            "titleAvailability": "not_connected",
+            "version": "1",
+            "executionId": null,
+            "phase": "not_started",
+            "runtimeState": null,
+            "executionState": "not_started",
+            "waitReason": null,
+            "lastConfirmedAt": null,
+            "warnings": []
+          },
+          {
+            "taskId": "t",
+            "description": "task",
+            "title": null,
+            "titleAvailability": "not_connected",
+            "version": "1",
+            "executionId": null,
+            "phase": "not_started",
+            "runtimeState": null,
+            "executionState": "not_started",
+            "waitReason": null,
+            "lastConfirmedAt": null,
+            "warnings": []
+          },
+          {
+            "taskId": "t",
+            "description": "task",
+            "title": null,
+            "titleAvailability": "not_connected",
+            "version": "1",
+            "executionId": null,
+            "phase": "not_started",
+            "runtimeState": null,
+            "executionState": "not_started",
+            "waitReason": null,
+            "lastConfirmedAt": null,
+            "warnings": []
+          },
+          {
+            "taskId": "t",
+            "description": "task",
+            "title": null,
+            "titleAvailability": "not_connected",
+            "version": "1",
+            "executionId": null,
+            "phase": "not_started",
+            "runtimeState": null,
+            "executionState": "not_started",
+            "waitReason": null,
+            "lastConfirmedAt": null,
+            "warnings": []
+          },
+          {
+            "taskId": "t",
+            "description": "task",
+            "title": null,
+            "titleAvailability": "not_connected",
+            "version": "1",
+            "executionId": null,
+            "phase": "not_started",
+            "runtimeState": null,
+            "executionState": "not_started",
+            "waitReason": null,
+            "lastConfirmedAt": null,
+            "warnings": []
+          },
+          {
+            "taskId": "t",
+            "description": "task",
+            "title": null,
+            "titleAvailability": "not_connected",
+            "version": "1",
+            "executionId": null,
+            "phase": "not_started",
+            "runtimeState": null,
+            "executionState": "not_started",
+            "waitReason": null,
+            "lastConfirmedAt": null,
+            "warnings": []
+          },
+          {
+            "taskId": "t",
+            "description": "task",
+            "title": null,
+            "titleAvailability": "not_connected",
+            "version": "1",
+            "executionId": null,
+            "phase": "not_started",
+            "runtimeState": null,
+            "executionState": "not_started",
+            "waitReason": null,
+            "lastConfirmedAt": null,
+            "warnings": []
+          },
+          {
+            "taskId": "t",
+            "description": "task",
+            "title": null,
+            "titleAvailability": "not_connected",
+            "version": "1",
+            "executionId": null,
+            "phase": "not_started",
+            "runtimeState": null,
+            "executionState": "not_started",
+            "waitReason": null,
+            "lastConfirmedAt": null,
+            "warnings": []
+          },
+          {
+            "taskId": "t",
+            "description": "task",
+            "title": null,
+            "titleAvailability": "not_connected",
+            "version": "1",
+            "executionId": null,
+            "phase": "not_started",
+            "runtimeState": null,
+            "executionState": "not_started",
+            "waitReason": null,
+            "lastConfirmedAt": null,
+            "warnings": []
+          },
+          {
+            "taskId": "t",
+            "description": "task",
+            "title": null,
+            "titleAvailability": "not_connected",
+            "version": "1",
+            "executionId": null,
+            "phase": "not_started",
+            "runtimeState": null,
+            "executionState": "not_started",
+            "waitReason": null,
+            "lastConfirmedAt": null,
+            "warnings": []
+          },
+          {
+            "taskId": "t",
+            "description": "task",
+            "title": null,
+            "titleAvailability": "not_connected",
+            "version": "1",
+            "executionId": null,
+            "phase": "not_started",
+            "runtimeState": null,
+            "executionState": "not_started",
+            "waitReason": null,
+            "lastConfirmedAt": null,
+            "warnings": []
+          },
+          {
+            "taskId": "t",
+            "description": "task",
+            "title": null,
+            "titleAvailability": "not_connected",
+            "version": "1",
+            "executionId": null,
+            "phase": "not_started",
+            "runtimeState": null,
+            "executionState": "not_started",
+            "waitReason": null,
+            "lastConfirmedAt": null,
+            "warnings": []
+          },
+          {
+            "taskId": "t",
+            "description": "task",
+            "title": null,
+            "titleAvailability": "not_connected",
+            "version": "1",
+            "executionId": null,
+            "phase": "not_started",
+            "runtimeState": null,
+            "executionState": "not_started",
+            "waitReason": null,
+            "lastConfirmedAt": null,
+            "warnings": []
+          },
+          {
+            "taskId": "t",
+            "description": "task",
+            "title": null,
+            "titleAvailability": "not_connected",
+            "version": "1",
+            "executionId": null,
+            "phase": "not_started",
+            "runtimeState": null,
+            "executionState": "not_started",
+            "waitReason": null,
+            "lastConfirmedAt": null,
+            "warnings": []
+          },
+          {
+            "taskId": "t",
+            "description": "task",
+            "title": null,
+            "titleAvailability": "not_connected",
+            "version": "1",
+            "executionId": null,
+            "phase": "not_started",
+            "runtimeState": null,
+            "executionState": "not_started",
+            "waitReason": null,
+            "lastConfirmedAt": null,
+            "warnings": []
+          },
+          {
+            "taskId": "t",
+            "description": "task",
+            "title": null,
+            "titleAvailability": "not_connected",
+            "version": "1",
+            "executionId": null,
+            "phase": "not_started",
+            "runtimeState": null,
+            "executionState": "not_started",
+            "waitReason": null,
+            "lastConfirmedAt": null,
+            "warnings": []
+          },
+          {
+            "taskId": "t",
+            "description": "task",
+            "title": null,
+            "titleAvailability": "not_connected",
+            "version": "1",
+            "executionId": null,
+            "phase": "not_started",
+            "runtimeState": null,
+            "executionState": "not_started",
+            "waitReason": null,
+            "lastConfirmedAt": null,
+            "warnings": []
+          },
+          {
+            "taskId": "t",
+            "description": "task",
+            "title": null,
+            "titleAvailability": "not_connected",
+            "version": "1",
+            "executionId": null,
+            "phase": "not_started",
+            "runtimeState": null,
+            "executionState": "not_started",
+            "waitReason": null,
+            "lastConfirmedAt": null,
+            "warnings": []
+          },
+          {
+            "taskId": "t",
+            "description": "task",
+            "title": null,
+            "titleAvailability": "not_connected",
+            "version": "1",
+            "executionId": null,
+            "phase": "not_started",
+            "runtimeState": null,
+            "executionState": "not_started",
+            "waitReason": null,
+            "lastConfirmedAt": null,
+            "warnings": []
+          },
+          {
+            "taskId": "t",
+            "description": "task",
+            "title": null,
+            "titleAvailability": "not_connected",
+            "version": "1",
+            "executionId": null,
+            "phase": "not_started",
+            "runtimeState": null,
+            "executionState": "not_started",
+            "waitReason": null,
+            "lastConfirmedAt": null,
+            "warnings": []
+          },
+          {
+            "taskId": "t",
+            "description": "task",
+            "title": null,
+            "titleAvailability": "not_connected",
+            "version": "1",
+            "executionId": null,
+            "phase": "not_started",
+            "runtimeState": null,
+            "executionState": "not_started",
+            "waitReason": null,
+            "lastConfirmedAt": null,
+            "warnings": []
+          },
+          {
+            "taskId": "t",
+            "description": "task",
+            "title": null,
+            "titleAvailability": "not_connected",
+            "version": "1",
+            "executionId": null,
+            "phase": "not_started",
+            "runtimeState": null,
+            "executionState": "not_started",
+            "waitReason": null,
+            "lastConfirmedAt": null,
+            "warnings": []
+          },
+          {
+            "taskId": "t",
+            "description": "task",
+            "title": null,
+            "titleAvailability": "not_connected",
+            "version": "1",
+            "executionId": null,
+            "phase": "not_started",
+            "runtimeState": null,
+            "executionState": "not_started",
+            "waitReason": null,
+            "lastConfirmedAt": null,
+            "warnings": []
+          },
+          {
+            "taskId": "t",
+            "description": "task",
+            "title": null,
+            "titleAvailability": "not_connected",
+            "version": "1",
+            "executionId": null,
+            "phase": "not_started",
+            "runtimeState": null,
+            "executionState": "not_started",
+            "waitReason": null,
+            "lastConfirmedAt": null,
+            "warnings": []
+          },
+          {
+            "taskId": "t",
+            "description": "task",
+            "title": null,
+            "titleAvailability": "not_connected",
+            "version": "1",
+            "executionId": null,
+            "phase": "not_started",
+            "runtimeState": null,
+            "executionState": "not_started",
+            "waitReason": null,
+            "lastConfirmedAt": null,
+            "warnings": []
+          },
+          {
+            "taskId": "t",
+            "description": "task",
+            "title": null,
+            "titleAvailability": "not_connected",
+            "version": "1",
+            "executionId": null,
+            "phase": "not_started",
+            "runtimeState": null,
+            "executionState": "not_started",
+            "waitReason": null,
+            "lastConfirmedAt": null,
+            "warnings": []
+          },
+          {
+            "taskId": "t",
+            "description": "task",
+            "title": null,
+            "titleAvailability": "not_connected",
+            "version": "1",
+            "executionId": null,
+            "phase": "not_started",
+            "runtimeState": null,
+            "executionState": "not_started",
+            "waitReason": null,
+            "lastConfirmedAt": null,
+            "warnings": []
+          },
+          {
+            "taskId": "t",
+            "description": "task",
+            "title": null,
+            "titleAvailability": "not_connected",
+            "version": "1",
+            "executionId": null,
+            "phase": "not_started",
+            "runtimeState": null,
+            "executionState": "not_started",
+            "waitReason": null,
+            "lastConfirmedAt": null,
+            "warnings": []
+          },
+          {
+            "taskId": "t",
+            "description": "task",
+            "title": null,
+            "titleAvailability": "not_connected",
+            "version": "1",
+            "executionId": null,
+            "phase": "not_started",
+            "runtimeState": null,
+            "executionState": "not_started",
+            "waitReason": null,
+            "lastConfirmedAt": null,
+            "warnings": []
+          },
+          {
+            "taskId": "t",
+            "description": "task",
+            "title": null,
+            "titleAvailability": "not_connected",
+            "version": "1",
+            "executionId": null,
+            "phase": "not_started",
+            "runtimeState": null,
+            "executionState": "not_started",
+            "waitReason": null,
+            "lastConfirmedAt": null,
+            "warnings": []
+          },
+          {
+            "taskId": "t",
+            "description": "task",
+            "title": null,
+            "titleAvailability": "not_connected",
+            "version": "1",
+            "executionId": null,
+            "phase": "not_started",
+            "runtimeState": null,
+            "executionState": "not_started",
+            "waitReason": null,
+            "lastConfirmedAt": null,
+            "warnings": []
+          },
+          {
+            "taskId": "t",
+            "description": "task",
+            "title": null,
+            "titleAvailability": "not_connected",
+            "version": "1",
+            "executionId": null,
+            "phase": "not_started",
+            "runtimeState": null,
+            "executionState": "not_started",
+            "waitReason": null,
+            "lastConfirmedAt": null,
+            "warnings": []
+          },
+          {
+            "taskId": "t",
+            "description": "task",
+            "title": null,
+            "titleAvailability": "not_connected",
+            "version": "1",
+            "executionId": null,
+            "phase": "not_started",
+            "runtimeState": null,
+            "executionState": "not_started",
+            "waitReason": null,
+            "lastConfirmedAt": null,
+            "warnings": []
+          },
+          {
+            "taskId": "t",
+            "description": "task",
+            "title": null,
+            "titleAvailability": "not_connected",
+            "version": "1",
+            "executionId": null,
+            "phase": "not_started",
+            "runtimeState": null,
+            "executionState": "not_started",
+            "waitReason": null,
+            "lastConfirmedAt": null,
+            "warnings": []
+          },
+          {
+            "taskId": "t",
+            "description": "task",
+            "title": null,
+            "titleAvailability": "not_connected",
+            "version": "1",
+            "executionId": null,
+            "phase": "not_started",
+            "runtimeState": null,
+            "executionState": "not_started",
+            "waitReason": null,
+            "lastConfirmedAt": null,
+            "warnings": []
+          },
+          {
+            "taskId": "t",
+            "description": "task",
+            "title": null,
+            "titleAvailability": "not_connected",
+            "version": "1",
+            "executionId": null,
+            "phase": "not_started",
+            "runtimeState": null,
+            "executionState": "not_started",
+            "waitReason": null,
+            "lastConfirmedAt": null,
+            "warnings": []
+          },
+          {
+            "taskId": "t",
+            "description": "task",
+            "title": null,
+            "titleAvailability": "not_connected",
+            "version": "1",
+            "executionId": null,
+            "phase": "not_started",
+            "runtimeState": null,
+            "executionState": "not_started",
+            "waitReason": null,
+            "lastConfirmedAt": null,
+            "warnings": []
+          },
+          {
+            "taskId": "t",
+            "description": "task",
+            "title": null,
+            "titleAvailability": "not_connected",
+            "version": "1",
+            "executionId": null,
+            "phase": "not_started",
+            "runtimeState": null,
+            "executionState": "not_started",
+            "waitReason": null,
+            "lastConfirmedAt": null,
+            "warnings": []
+          },
+          {
+            "taskId": "t",
+            "description": "task",
+            "title": null,
+            "titleAvailability": "not_connected",
+            "version": "1",
+            "executionId": null,
+            "phase": "not_started",
+            "runtimeState": null,
+            "executionState": "not_started",
+            "waitReason": null,
+            "lastConfirmedAt": null,
+            "warnings": []
+          }
+        ],
+        "nextCursor": null,
+        "highWatermark": "1"
+      },
+      "valid": false
+    },
+    {
+      "name": "unknown-outcome",
+      "type": "Receipt",
+      "value": {
+        "requestId": "req-1",
+        "outcome": "future_success",
+        "target": "task-1",
+        "entityVersion": "9007199254740993",
+        "recordedAt": "2026-11-05T00:00:00Z",
+        "additive": true
+      },
+      "valid": true
+    },
+    {
+      "name": "additive-protocol",
+      "type": "Capabilities",
+      "valid": true,
+      "value": {
+        "protocol": {
+          "major": 1,
+          "minor": 12,
+          "futureField": true
+        },
+        "buildIdentity": "1.0.6+test",
+        "schemaFingerprint": "$fingerprint",
+        "mappingVersion": "1",
+        "operations": [
+          "capabilities.get",
+          "project.snapshot",
+          "tasks.list",
+          "tasks.get",
+          "tasks.create",
+          "tasks.start",
+          "executions.get",
+          "decisions.list",
+          "decisions.get",
+          "decisions.answer",
+          "results.get",
+          "history.page",
+          "events.page",
+          "requests.get"
+        ],
+        "limits": {
+          "tasksPerPage": 50,
+          "eventsPerPage": 100,
+          "historyPerPage": 100,
+          "pageContentBytes": 65536,
+          "frameBytes": 1048576,
+          "textCharacters": 32000,
+          "requestIdCharacters": 128
+        },
+        "generation": "9007199254740993",
+        "acpCapabilities": {}
+      }
+    },
+    {
+      "name": "too-large-task-query",
+      "type": "Query",
+      "valid": false,
+      "value": {
+        "protocol": {
+          "major": 1,
+          "minor": 0
+        },
+        "requestId": "r",
+        "projectId": "p",
+        "operation": "tasks.list",
+        "limit": 51
+      }
+    },
+    {
+      "name": "newline-sequence",
+      "type": "Event",
+      "valid": false,
+      "value": {
+        "eventId": "ev",
+        "sequence": "1\n",
+        "entityId": "t",
+        "entityVersion": "2",
+        "kind": "task",
+        "recordedAt": "now"
+      }
+    },
+    {
+      "name": "boolean-version",
+      "type": "Command",
+      "valid": false,
+      "value": {
+        "protocol": {
+          "major": 1,
+          "minor": 0
+        },
+        "requestId": "req-1",
+        "projectId": "project-1",
+        "actorId": "local-peer",
+        "operation": "tasks.create",
+        "target": "task-1",
+        "expectedVersion": true,
+        "ownerEpoch": null,
+        "payload": {
+          "description": "Build a thing\nKeep multiline 😀"
+        }
+      }
+    },
+    {
+      "name": "boolean-protocol",
+      "type": "Command",
+      "valid": false,
+      "value": {
+        "protocol": {
+          "major": true,
+          "minor": 0
+        },
+        "requestId": "req-1",
+        "projectId": "project-1",
+        "actorId": "local-peer",
+        "operation": "tasks.create",
+        "target": "task-1",
+        "expectedVersion": "0",
+        "ownerEpoch": null,
+        "payload": {
+          "description": "Build a thing\nKeep multiline 😀"
+        }
+      }
+    },
+    {
+      "name": "nested-extra-command",
+      "type": "Command",
+      "valid": false,
+      "value": {
+        "protocol": {
+          "major": 1,
+          "minor": 0,
+          "extra": true
+        },
+        "requestId": "req-1",
+        "projectId": "project-1",
+        "actorId": "local-peer",
+        "operation": "tasks.create",
+        "target": "task-1",
+        "expectedVersion": "0",
+        "ownerEpoch": null,
+        "payload": {
+          "description": "Build a thing\nKeep multiline 😀"
+        }
+      }
+    },
+    {
+      "name": "empty-answer-batch",
+      "type": "Command",
+      "valid": false,
+      "value": {
+        "protocol": {
+          "major": 1,
+          "minor": 0
+        },
+        "requestId": "req-1",
+        "projectId": "project-1",
+        "actorId": "local-peer",
+        "operation": "decisions.answer",
+        "target": "task-1",
+        "expectedVersion": "2",
+        "ownerEpoch": "3",
+        "payload": {
+          "executionId": "exec",
+          "acpSessionId": "session",
+          "batchId": null,
+          "answers": []
+        }
+      }
+    }
+  ]
+}

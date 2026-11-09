@@ -45,7 +45,7 @@ CREATE INDEX IF NOT EXISTS candidate_staging_by_task
  ON candidate_staging(task_id, created_at);
 """
 
-_EXCLUDED = {".git", ".cortex"}
+_EXCLUDED = {".git", ".cortex", ".cortex-dev", ".cortex-dev-owner.json", ".cortex-workspace-dev.json"}
 _ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 
 

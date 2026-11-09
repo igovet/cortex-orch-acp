@@ -267,6 +267,8 @@ def reconcile(store, task_id):
     """Bounded persisted backoff; legacy access cards are retired, not relayed."""
     from . import worker_waits
     with store.connection() as db:
+        if worker_waits.paused_tx(db, task_id):
+            return
         candidates = [w for w in worker_waits.projection(db, task_id)
                       if w.get('kind') == 'access' and w['status'] == 'open'
                       and (not worker_waits.valid(db, w) or not w.get('retry_at')
@@ -275,6 +277,8 @@ def reconcile(store, task_id):
         return
     with store.connection() as db:
         db.execute('BEGIN IMMEDIATE')
+        if worker_waits.paused_tx(db, task_id):
+            return
         for wait in worker_waits.projection(db, task_id):
             if wait.get('kind') != 'access' or wait['status'] != 'open':
                 continue

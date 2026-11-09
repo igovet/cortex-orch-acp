@@ -935,16 +935,18 @@ def _project_routing_path(project_root) -> Path:
     if not isinstance(project_root, str) or not project_root.startswith("/"):
         raise _error("invalid_project", "The project target needs the absolute project root.", field="project_root")
     root = Path(project_root)
+    from ..project_storage import project_store_directory
+    directory = project_store_directory(root)
     try:
         if str(root.resolve(strict=True)) != project_root:
             raise ValueError
-        info = (root / ".cortex").lstat()
+        info = directory.lstat()
     except (OSError, RuntimeError, ValueError):
         raise _error("project_store_missing", f"{project_root} has no Cortex project store (.cortex); open a task "
                                               "there first.", field="project_root") from None
     if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
-        raise _error("unsafe_storage", f"{root / '.cortex'} is not the owner's real directory.", field="project_root")
-    return root / ".cortex" / "routing.json"
+        raise _error("unsafe_storage", f"{directory} is not the owner's real directory.", field="project_root")
+    return directory / "routing.json"
 
 
 def update_routing(target: str, expected_revision, rules, *, project_root: str | None = None,
@@ -1417,7 +1419,9 @@ def follow_approved_adapters(*, environ: Mapping[str, str] | None = None) -> lis
             continue
         if not has_exact_registration(record.engine, info.version):
             continue
-        if not Path(info.launch_command[1]).is_relative_to(discovery.owned_root(env).resolve()):
+        bundled_root = discovery.bundled_root()
+        bundled = bundled_root is not None and Path(info.launch_command[1]).is_relative_to(bundled_root.resolve())
+        if not bundled and not Path(info.launch_command[1]).is_relative_to(discovery.owned_root(env).resolve()):
             continue
         # Read the recorded package identity, never execute an old adapter.
         command = record.launch_command
@@ -1433,9 +1437,12 @@ def follow_approved_adapters(*, environ: Mapping[str, str] | None = None) -> lis
                 break
         if old is None or not discovery.version_key(old):
             continue
-        if discovery.version_key(info.version) <= discovery.version_key(old):
+        if discovery.version_key(info.version) < discovery.version_key(old):
             continue
         launch = tuple(info.launch_command)
+        if discovery.version_key(info.version) == discovery.version_key(old) and (
+                not bundled or launch == tuple(command)):
+            continue
         changes[record.id] = replace(
             record, launch_command=launch,
             approved_fingerprint=trust.fingerprint(record.engine, record.provider, record.endpoint, launch),

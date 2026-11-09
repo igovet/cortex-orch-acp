@@ -228,6 +228,7 @@ def create_connection(
     keyring_service: str | None = None,
     keyring_account: str | None = None,
     reuse: bool = False,
+    expected_revision: str | None = None,
     environ: dict[str, str] | None = None,
 ) -> ConnectionRecord:
     """Register a new connection, or return the existing one iff reuse=True.
@@ -249,6 +250,12 @@ def create_connection(
     fingerprint = trust.fingerprint(engine, provider, endpoint, launch_command)
     now = _now_iso()
     with registry.transaction(environ) as state:
+        if expected_revision is not None:
+            data = registry.read_owner_file(registry.registry_path(environ))
+            current = "absent" if data is None else "sha256:" + hashlib.sha256(data).hexdigest()
+            if current != expected_revision:
+                raise _validation_error("revision_conflict", "Connections changed; reload before retrying.",
+                                        field="expected_revision")
         candidate = None
         for _attempt in range(_MAX_ID_ATTEMPTS):
             candidate_id = new_id("cn_")

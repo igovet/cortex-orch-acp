@@ -1,0 +1,9 @@
+# Local service transport and public Workspace adapter
+
+**Status: decided for the local desktop slice and implemented with no-paid checks passing. The different-OS-user check is unverified.**
+
+Decision: The desktop reaches the machine service only through the native bridge and a Unix domain socket owned by the same OS user. The socket is private (directory 0700, socket 0600), authenticated by peer credentials at both ends, and guarded by an exclusive service lock. The service opens no TCP or loopback listener. Cortex exposes a single negotiated, nonstandard extension method, `_cortex/workspace`, dispatched to a new `workspace_api` adapter. That adapter is the only component that translates private runtime state into public records. The extension offers a closed operation set, stable product and execution identities, a non-replayed explicit start, a transactional invalidation journal and explicit unknown outcomes. Generic ACP capabilities stay separate from these Cortex extensions.
+
+Relation to existing decisions: This refines [ADR 0002](0002-independent-machine-service.md), under which the service owns the child process and closing a client is not cancellation, and [ADR 0005](0005-public-contract.md), which requires a versioned typed adapter. It does not change either decision. The bounded-context and DDD-lite decisions reserved for CW-DM02 keep the numbers 0012 and 0013.
+
+Consequences: The local slice ([CW-S01](../backlog/CW-S01.md) to [CW-S12](../backlog/CW-S12.md)) proves the trust boundary, the atomic journal and the idempotent start with no-paid tests before the operations are advertised. Those tests pass. The peer check between two different OS users remains unverified. The same-user boundary is local trust, not isolation from hostile same-user code. Remote transport is a separate decision ([ADR 0004](0004-embedded-remote.md)) and is not implied here.

@@ -184,6 +184,8 @@ def transition(db, task_id, target, *, blocker=None):
     if row is None:
         raise StoreError('runtime_task_missing')
     source = row['state']
+    if source == 'PAUSED' and target != 'CANCELLED':
+        raise StoreError('task_paused')
     allowed = TRANSITIONS.get(source, set()) | ({'BLOCKED', 'FAILED', 'CANCELLED', 'RECOVERING'} if source not in TERMINAL else set())
     if target not in allowed or (source == 'EXECUTING' and target == 'VERIFYING'
                                  and not current_review_waiver(db, task_id)):
@@ -1431,6 +1433,9 @@ class TaskMachine:
             task = db.execute('SELECT * FROM runtime_tasks WHERE task_id=?', (channel.task_id,)).fetchone()
             if task is None or task['state'] != 'PLANNING':
                 raise StoreError('plan_not_expected')
+            from .check_preflight import require_executable
+            from ..task_workspace import task_root
+            require_executable(task_root(db, channel.task_id), plan['verification'])
             # Preserve the submitted request identity, including retries of
             # older accepted spellings; persist only canonical reservations.
             plan = dict(plan, tasks=[dict(node, scope=validate_scope(node['scope'])) for node in plan['tasks']])
@@ -2221,6 +2226,9 @@ class TaskMachine:
             previous = plan.get('verification') or []
             dropped = ([argv for argv in failed_argv if argv and argv not in verification]
                        if len(verification) < len(previous) else [])
+            from .check_preflight import require_executable
+            from ..task_workspace import task_root
+            require_executable(task_root(db, channel.task_id), verification)
             plan['verification'] = verification
             db.execute('UPDATE runtime_tasks SET plan_json=? WHERE task_id=?', (encoded(plan), channel.task_id))
             event(db, channel.task_id, 'VERIFICATION_REVISED', dict(verification=verification, dropped_failed=dropped),

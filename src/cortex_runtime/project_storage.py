@@ -22,9 +22,17 @@ def canonical_project(value):
         raise StoreError("invalid_project") from None
 
 
+def project_store_name():
+    """The host selects a channel, never an arbitrary storage path."""
+    channel = os.environ.get("CORTEX_WORKSPACE_CHANNEL", "release")
+    if channel not in ("dev", "release"):
+        raise StoreError("project_storage_channel_invalid")
+    return ".cortex-dev" if channel == "dev" else ".cortex"
+
+
 def project_store_directory(project_root):
-    """Compute the only supported location; neither create nor search directories."""
-    return Path(canonical_project(project_root)) / ".cortex"
+    """Compute the one store for this project and channel without touching it."""
+    return Path(canonical_project(project_root)) / project_store_name()
 
 
 def _read_short_file(path, limit=4096):
@@ -296,6 +304,8 @@ def _private_tree(path):
 
 def migrate_legacy_project_storage(project_root):
     """Move recognized legacy project storage once; never read it as a fallback."""
+    if project_store_name() == ".cortex-dev":
+        return False  # Legacy storage belongs to release; never inspect or import it.
     project = Path(canonical_project(project_root))
     source = project / ".codex" / "cortex"
     if _private_existing_directory(source) is None:
@@ -311,7 +321,7 @@ def migrate_legacy_project_storage(project_root):
                           if re.fullmatch(r"t_[0-9a-f]{12}", path.name))
     if not source_database and not source_tasks:
         return False
-    destination = private_directory(project / ".cortex")
+    destination = private_directory(project_store_directory(project))
     source_lock_path = source / ".access.lock"
     destination_lock_path = destination / ".access.lock"
     source_lock = os.open(source_lock_path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)

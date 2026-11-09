@@ -232,8 +232,10 @@ class StdioTransport:
         self._writer_closed_event = threading.Event()
         self._reader_eof_event = threading.Event()
         # Set by a termination signal (see `agent.main`): the host stopping
-        # its provider process sends SIGTERM rather than closing stdin.
-        self._shutdown_requested = threading.Event()
+        # its provider process sends SIGTERM rather than closing stdin. A
+        # plain attribute, not an Event: the handler can be re-entered (see
+        # request_shutdown) and must never take a lock.
+        self._shutdown_requested = False
         self._reader_thread = threading.Thread(target=self._read_loop, name="acp-reader", daemon=True)
         self._writer_thread = threading.Thread(target=self._write_loop, name="acp-writer", daemon=True)
 
@@ -275,8 +277,15 @@ class StdioTransport:
         return self._writer_closed_event.is_set()
 
     def request_shutdown(self):
-        """Async-signal-safe: only sets an event the main thread polls."""
-        self._shutdown_requested.set()
+        """Safe in a signal handler: only assigns a flag the main thread polls.
+
+        The handler runs between any two lines of the main thread, including
+        lines of an earlier run of itself: Linux re-sends the parent-death
+        signal each time a killed multi-threaded parent hands this process to
+        another of its exiting threads. ``Event.set`` takes a non-reentrant
+        lock, so a second SIGTERM inside the first deadlocked the process.
+        """
+        self._shutdown_requested = True
 
     def wait_for_shutdown_signal(self, timeout=None):
         """Block until the reader hits EOF, the writer stops because a
@@ -297,7 +306,7 @@ class StdioTransport:
                 return "reader_eof"
             if self._writer_closed_event.is_set():
                 return "writer_closed"
-            if self._shutdown_requested.is_set():
+            if self._shutdown_requested:
                 return "signal"
             if deadline is not None:
                 remaining = deadline - time.monotonic()

@@ -50,6 +50,10 @@ def finish_deletions(store,db,task):
         def _delete_if_present(table,where,params):
             if table in existing_tables:
                 db.execute(f"DELETE FROM {table} WHERE {where}",params)
+        if "workspace_executions" in existing_tables:
+            from .workspace_api.purge import remove_adapter_task
+            for linked in db.execute("SELECT e.task_id,t.project_id FROM workspace_executions e JOIN workspace_tasks t USING(task_id) WHERE e.runtime_task_id=?", (task,)).fetchall():
+                remove_adapter_task(db, linked["project_id"], linked["task_id"])
         # attempt_revisions (T019) has no declared FK (attempt_id, not
         # task_id) but is logically scoped to this task's own delegation
         # attempts -- must be removed before delegation_provisioning

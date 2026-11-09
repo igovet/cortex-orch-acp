@@ -87,7 +87,16 @@ def completed_tx(db, batch):
 
 
 def answer(store, task_id, batch_id, answers, request_key, *, session_id, owner_epoch):
-    """All-or-none exact submission; identical acknowledged deliveries replay."""
+    """All-or-none exact answer over the existing transaction-sharing helper."""
+    with store.connection() as db:
+        db.execute('BEGIN IMMEDIATE')
+        result = answer_batch_tx(db, task_id, batch_id, answers, request_key, session_id=session_id, owner_epoch=owner_epoch)
+        db.commit()
+        return result
+
+
+def answer_batch_tx(db, task_id, batch_id, answers, request_key, *, session_id, owner_epoch):
+    """Caller owns the answer transaction; no commit or connection side effect."""
     from .worker_waits import answer_tx
     from ..ownership import current_owner_epoch
     if not isinstance(request_key, str) or not request_key.strip() or len(request_key) > 128:
@@ -99,65 +108,71 @@ def answer(store, task_id, batch_id, answers, request_key, *, session_id, owner_
         raise StoreError('question_batch_answers_invalid')
     digest = hashlib.sha256(encoded(dict(batch_id=batch_id, answers=answers)).encode()).hexdigest()
     actor = 'question-session:' + session_id
-    with store.connection() as db:
-        db.execute('BEGIN IMMEDIATE')
-        session = db.execute('SELECT task_id,closed_at FROM acp_host_sessions WHERE session_id=?', (session_id,)).fetchone()
-        if not session or session['task_id'] != task_id or session['closed_at']:
-            raise StoreError('question_answer_session_mismatch')
-        if current_owner_epoch(db, task_id) != owner_epoch:
+    session = db.execute('SELECT task_id,closed_at FROM acp_host_sessions WHERE session_id=?', (session_id,)).fetchone()
+    if not session or session['task_id'] != task_id or session['closed_at']:
+        raise StoreError('question_answer_session_mismatch')
+    if current_owner_epoch(db, task_id) != owner_epoch:
+        raise StoreError('question_batch_stale')
+    previous = db.execute('SELECT * FROM runtime_requests WHERE task_id=? AND actor=? AND request_key=?',
+                          (task_id, actor, request_key)).fetchone()
+    if previous:
+        if previous['operation'] != 'question_batch_answer' or previous['digest'] != digest:
+            raise StoreError('request_key_conflict')
+        return dict(json.loads(previous['result_json']), replayed=True)
+    batch = find_tx(db, task_id, batch_id=batch_id)
+    if not batch:
+        raise StoreError('question_batch_unknown')
+    expected = {q['question_id'] for q in batch['questions']}
+    if len({a['questionId'] for a in answers}) != len(answers) or {a['questionId'] for a in answers} != expected:
+        raise StoreError('question_batch_members_mismatch')
+    task = db.execute('SELECT state,revision FROM runtime_tasks WHERE task_id=?', (task_id,)).fetchone()
+    channel = db.execute('SELECT revoked_at,expires_at FROM trusted_channels WHERE channel_id=?',
+                         (batch['channel_id'],)).fetchone()
+    if (not task or task['revision'] != batch['revision'] or task['state'] not in {'WAITING_USER','EXECUTING','REVIEWING'}
+            or db.execute('SELECT 1 FROM task_stopped WHERE task_id=?', (task_id,)).fetchone()):
+        raise StoreError('question_batch_stale')
+    if batch['assignment_ref']:
+        if (batch['owner_epoch'] != owner_epoch or not channel or channel['revoked_at']
+                or (channel['expires_at'] and channel['expires_at'] <= now())):
             raise StoreError('question_batch_stale')
-        previous = db.execute('SELECT * FROM runtime_requests WHERE task_id=? AND actor=? AND request_key=?',
-                              (task_id, actor, request_key)).fetchone()
-        if previous:
-            if previous['operation'] != 'question_batch_answer' or previous['digest'] != digest:
-                raise StoreError('request_key_conflict')
-            return dict(json.loads(previous['result_json']), replayed=True)
-        batch = find_tx(db, task_id, batch_id=batch_id)
-        if not batch:
-            raise StoreError('question_batch_unknown')
-        expected = {q['question_id'] for q in batch['questions']}
-        if len({a['questionId'] for a in answers}) != len(answers) or {a['questionId'] for a in answers} != expected:
-            raise StoreError('question_batch_members_mismatch')
-        task = db.execute('SELECT state,revision FROM runtime_tasks WHERE task_id=?', (task_id,)).fetchone()
-        channel = db.execute('SELECT revoked_at,expires_at FROM trusted_channels WHERE channel_id=?',
-                             (batch['channel_id'],)).fetchone()
-        if (not task or task['revision'] != batch['revision'] or task['state'] not in {'WAITING_USER','EXECUTING','REVIEWING'}
-                or db.execute('SELECT 1 FROM task_stopped WHERE task_id=?', (task_id,)).fetchone()):
+    else:
+        # A recovered coordinator has a new channel/owner epoch. The
+        # session's current owner may answer only the exact still-current
+        # persisted WAITING_USER batch, not revive a superseded one.
+        latest = db.execute("SELECT payload_json FROM runtime_events WHERE task_id=? AND type='USER_QUESTION_REQUESTED' "
+                            "ORDER BY id DESC LIMIT 1", (task_id,)).fetchone()
+        if task['state'] != 'WAITING_USER' or not latest or json.loads(latest[0]).get('batch_id') != batch_id:
             raise StoreError('question_batch_stale')
-        if batch['assignment_ref']:
-            if (batch['owner_epoch'] != owner_epoch or not channel or channel['revoked_at']
-                    or (channel['expires_at'] and channel['expires_at'] <= now())):
-                raise StoreError('question_batch_stale')
-        else:
-            # A recovered coordinator has a new channel/owner epoch. The
-            # session's current owner may answer only the exact still-current
-            # persisted WAITING_USER batch, not revive a superseded one.
-            latest = db.execute("SELECT payload_json FROM runtime_events WHERE task_id=? AND type='USER_QUESTION_REQUESTED' "
-                                "ORDER BY id DESC LIMIT 1", (task_id,)).fetchone()
-            if task['state'] != 'WAITING_USER' or not latest or json.loads(latest[0]).get('batch_id') != batch_id:
-                raise StoreError('question_batch_stale')
-        if completed_tx(db, batch):
-            raise StoreError('question_batch_already_answered')
-        for item in answers:
-            row = db.execute('SELECT status,answer_text FROM pending_questions WHERE task_id=? AND id=?',
-                             (task_id, item['questionId'])).fetchone()
-            if not row or row['status'] not in {'open','answered'}:
-                raise StoreError('question_batch_stale')
-            if row['status'] == 'answered':
-                if row['answer_text'] != item['answer']:
-                    raise StoreError('question_answer_conflict')
-            elif not answer_tx(db, item['questionId'], item['answer'], 'elicitation', session_id=session_id):
-                raise StoreError('question_batch_stale')
-        receipt = dict(batch_id=batch_id, question_ids=[q['question_id'] for q in batch['questions']], complete=True)
-        db.execute('INSERT INTO runtime_requests VALUES(?,?,?,?,?,?)',
-                   (task_id, request_key, actor, 'question_batch_answer', digest, encoded(receipt)))
-        event(db, task_id, 'QUESTION_BATCH_ANSWERED', dict(**receipt, session_id=session_id))
-        db.commit()
+    if completed_tx(db, batch):
+        raise StoreError('question_batch_already_answered')
+    for item in answers:
+        row = db.execute('SELECT status,answer_text FROM pending_questions WHERE task_id=? AND id=?',
+                         (task_id, item['questionId'])).fetchone()
+        if not row or row['status'] not in {'open','answered'}:
+            raise StoreError('question_batch_stale')
+        if row['status'] == 'answered':
+            if row['answer_text'] != item['answer']:
+                raise StoreError('question_answer_conflict')
+        elif not answer_tx(db, item['questionId'], item['answer'], 'elicitation', session_id=session_id):
+            raise StoreError('question_batch_stale')
+    receipt = dict(batch_id=batch_id, question_ids=[q['question_id'] for q in batch['questions']], complete=True)
+    db.execute('INSERT INTO runtime_requests VALUES(?,?,?,?,?,?)',
+               (task_id, request_key, actor, 'question_batch_answer', digest, encoded(receipt)))
+    event(db, task_id, 'QUESTION_BATCH_ANSWERED', dict(**receipt, session_id=session_id))
     return dict(receipt, replayed=False)
 
 
 def answer_single(store, task_id, question_id, text, request_key, *, session_id, owner_epoch):
-    """Single-card compatibility with a durable exact answer receipt."""
+    """All-or-none exact answer over the existing transaction-sharing helper."""
+    with store.connection() as db:
+        db.execute('BEGIN IMMEDIATE')
+        result = answer_single_tx(db, task_id, question_id, text, request_key, session_id=session_id, owner_epoch=owner_epoch)
+        db.commit()
+        return result
+
+
+def answer_single_tx(db, task_id, question_id, text, request_key, *, session_id, owner_epoch):
+    """Caller owns the answer transaction; no commit or connection side effect."""
     from .worker_waits import answer_tx
     from ..ownership import current_owner_epoch
     if (not isinstance(text, str) or not text.strip() or len(text) > 32000
@@ -165,28 +180,25 @@ def answer_single(store, task_id, question_id, text, request_key, *, session_id,
         raise StoreError('question_answer_invalid')
     digest = hashlib.sha256(encoded(dict(question_id=question_id, answer=text)).encode()).hexdigest()
     actor = 'question-session:' + session_id
-    with store.connection() as db:
-        db.execute('BEGIN IMMEDIATE')
-        session = db.execute('SELECT task_id,closed_at FROM acp_host_sessions WHERE session_id=?', (session_id,)).fetchone()
-        if not session or session['task_id'] != task_id or session['closed_at']:
-            raise StoreError('question_answer_session_mismatch')
-        if current_owner_epoch(db, task_id) != owner_epoch:
-            raise StoreError('question_answer_stale')
-        previous = db.execute('SELECT * FROM runtime_requests WHERE task_id=? AND actor=? AND request_key=?',
-                              (task_id, actor, request_key)).fetchone()
-        if previous:
-            if previous['operation'] != 'question_card_answer' or previous['digest'] != digest:
-                raise StoreError('request_key_conflict')
-            return dict(json.loads(previous['result_json']), replayed=True)
-        row = db.execute('SELECT task_id FROM pending_questions WHERE id=?', (question_id,)).fetchone()
-        if not row or row['task_id'] != task_id or find_tx(db, task_id, question_id=question_id):
-            raise StoreError('question_answer_mismatch')
-        if db.execute('SELECT 1 FROM task_stopped WHERE task_id=?', (task_id,)).fetchone():
-            raise StoreError('question_answer_stale')
-        if not answer_tx(db, question_id, text, 'elicitation', session_id=session_id):
-            raise StoreError('question_answer_stale')
-        receipt = dict(question_id=question_id, complete=True)
-        db.execute('INSERT INTO runtime_requests VALUES(?,?,?,?,?,?)',
-                   (task_id, request_key, actor, 'question_card_answer', digest, encoded(receipt)))
-        db.commit()
+    session = db.execute('SELECT task_id,closed_at FROM acp_host_sessions WHERE session_id=?', (session_id,)).fetchone()
+    if not session or session['task_id'] != task_id or session['closed_at']:
+        raise StoreError('question_answer_session_mismatch')
+    if current_owner_epoch(db, task_id) != owner_epoch:
+        raise StoreError('question_answer_stale')
+    previous = db.execute('SELECT * FROM runtime_requests WHERE task_id=? AND actor=? AND request_key=?',
+                          (task_id, actor, request_key)).fetchone()
+    if previous:
+        if previous['operation'] != 'question_card_answer' or previous['digest'] != digest:
+            raise StoreError('request_key_conflict')
+        return dict(json.loads(previous['result_json']), replayed=True)
+    row = db.execute('SELECT task_id FROM pending_questions WHERE id=?', (question_id,)).fetchone()
+    if not row or row['task_id'] != task_id or find_tx(db, task_id, question_id=question_id):
+        raise StoreError('question_answer_mismatch')
+    if db.execute('SELECT 1 FROM task_stopped WHERE task_id=?', (task_id,)).fetchone():
+        raise StoreError('question_answer_stale')
+    if not answer_tx(db, question_id, text, 'elicitation', session_id=session_id):
+        raise StoreError('question_answer_stale')
+    receipt = dict(question_id=question_id, complete=True)
+    db.execute('INSERT INTO runtime_requests VALUES(?,?,?,?,?,?)',
+               (task_id, request_key, actor, 'question_card_answer', digest, encoded(receipt)))
     return dict(receipt, replayed=False)

@@ -5,7 +5,7 @@ belong in the advertised MCP schemas and descriptions, not in skills or
 profiles. Model proposals enter through channel-verified dispatch; runtime transitions
 commit state and events transactionally.
 
-Each project has one `.cortex/cortex.sqlite3` store. Published task documents,
+Each logical project has one store per channel: `.cortex/cortex.sqlite3` for default/release, or `.cortex-dev/cortex.sqlite3` for Workspace Dev. Linked worktrees share their channel store; channels never fall back to each other. Published task documents,
 reports and the current `pipeline.md` are project-local. Reports are immutable;
 the pipeline is newest edition first. SQLite is the durable index and in-memory
 state is only a cache.

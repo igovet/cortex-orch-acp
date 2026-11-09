@@ -207,6 +207,13 @@ def _write_recovery_failure_if_still_lost(
             if result_row is not None:
                 db.commit()
                 return "already_published_late"
+            from ..orchestration import worker_waits
+            wait = worker_waits.current(db, task_id, assignment_ref)
+            if wait and worker_waits.preserved_tx(db, wait):
+                from ..ownership import current_owner_epoch
+                worker_waits._change(db, wait, wait['status'], owner_epoch=current_owner_epoch(db, task_id))
+                db.commit()
+                return "preserved_owner_wait"
             from ..orchestration.worker_waits import cancel_tx
             cancel_tx(db, task_id, 'recovery_worker_lost', assignment_ref=assignment_ref, status='orphaned')
             _mark_graph_attempt_failed_tx(db, task_id, assignment_ref, "recovery_worker_lost")

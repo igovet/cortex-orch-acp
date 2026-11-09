@@ -1,0 +1,26 @@
+{
+  "dev": {
+    "name": "dev",
+    "package": "cortex-workspace-dev",
+    "identifier": "dev.cortex.workspace.development",
+    "title": "Cortex Workspace Dev",
+    "desktop_binary": "cortex-workspace-dev",
+    "service_binary": "cortex-workspace-service-dev",
+    "unit": "cortex-workspace-dev.service",
+    "runtime_namespace": "cortex-workspace-dev",
+    "config_namespace": "cortex-workspace-dev",
+    "state_namespace": "cortex-workspace-dev"
+  },
+  "release": {
+    "name": "release",
+    "package": "cortex-workspace",
+    "identifier": "dev.cortex.workspace",
+    "title": "Cortex Workspace",
+    "desktop_binary": "cortex-workspace",
+    "service_binary": "cortex-workspace-service",
+    "unit": "cortex-workspace.service",
+    "runtime_namespace": "cortex-workspace",
+    "config_namespace": "cortex-workspace",
+    "state_namespace": "cortex-workspace"
+  }
+}

@@ -58,6 +58,9 @@ def _install_engine(engine: str, *, version: str, background: bool, timeout: int
     An existing install is a no-op: the explicit action reports its version,
     the background update reports nothing new.
     """
+    bundled = discovery.discover_bundled(engine, environ=environ)
+    if bundled is not None and bundled.version == version:
+        return None if background else version
     package = discovery._PACKAGE_NAME[engine]
     npm = _npm(environ)
     node = discovery._node_binary(environ)

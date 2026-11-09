@@ -138,7 +138,8 @@ def _outside_store(root: Path) -> Path | None:
         project = Path(logical_project_root(str(root)))
     except StoreError:
         return None
-    store = project / '.cortex'
+    from ..project_storage import project_store_directory
+    store = project_store_directory(project)
     if project == root or store.is_symlink() or not store.is_dir():
         return None
     return store
@@ -978,7 +979,8 @@ def control_plane_paths(root, environ):
     if installed != root and root not in installed.parents:
         paths.add(installed)
     from ..project_storage import logical_project_root
-    paths.add(Path(logical_project_root(str(root))) / '.cortex')
+    project = Path(logical_project_root(str(root)))
+    paths.update(project / name for name in ('.cortex', '.cortex-dev'))
     hooks = _configured_hooks_dir(root, include_external=True)
     if hooks is not None:
         paths.add(hooks)
@@ -1038,7 +1040,7 @@ def development_command(root, scratch, argv, scopes, *, environ, readonly=(), gi
         overlays = []
         for path in protected_host_paths(root, environ):
             overlays += (['--tmpfs', str(path), '--remount-ro', str(path)]
-                         if path.name == '.cortex' and path.is_dir()
+                         if path.name in {'.cortex', '.cortex-dev'} and path.is_dir()
                          else ['--ro-bind', str(path), str(path)])
         # Parent protection precedes task grants, so a host-created worktree
         # beneath a protected installation remains its own writable task tree.
@@ -1056,7 +1058,7 @@ def development_command(root, scratch, argv, scopes, *, environ, readonly=(), gi
                 continue
             if Path(root).resolve() in path.parents:
                 overlays += (['--tmpfs', str(path), '--remount-ro', str(path)]
-                             if path.name == '.cortex' and path.is_dir()
+                             if path.name in {'.cortex', '.cortex-dev'} and path.is_dir()
                              else ['--ro-bind', str(path), str(path)])
         from .gateway import PRIVATE
         for current, dirs, files in os.walk(str(root), followlinks=False):
@@ -1243,7 +1245,7 @@ def readonly_command(root, scratch, argv, *, environ, scopes=(), readonly=(), gi
         overlays = []
         for path in protected:
             overlays += (['--tmpfs', str(path), '--remount-ro', str(path)]
-                         if path.name == '.cortex' and path.is_dir()
+                         if path.name in {'.cortex', '.cortex-dev'} and path.is_dir()
                          else ['--ro-bind', str(path), str(path)])
         # After HOME and its caches, before the project (a task tree below a
         # protected parent stays visible).
@@ -1312,7 +1314,7 @@ def engine_jail(root, scratch, argv, scopes, *, env, state_dirs=None, writable=(
     empty mount point itself is created there.
     """
     from .gateway import PRIVATE
-    with gateway_command(root, scratch, argv, scopes, reveal=frozenset(PRIVATE) - {'.cortex'},
+    with gateway_command(root, scratch, argv, scopes, reveal=frozenset(PRIVATE) - {'.cortex', '.cortex-dev', '.cortex-dev-owner.json', '.cortex-workspace-dev.json'},
                          system_root=True, readonly=readonly, git_writable=True) as (command, fds):
         as_owner(command, {'HOME': env.get('HOME', '')})
         extra = [arg for name, value in env.items() if name != 'PATH' for arg in ('--setenv', name, value)]

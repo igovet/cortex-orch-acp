@@ -1,7 +1,8 @@
 """Both engine protocols through the actual production composition.
 
 The incoming ACP Agent, ProductionOrchestratingRuntime, stores, configuration,
-channel broker, MCP subprocesses and Linux verification sandbox are real.
+channel broker and MCP subprocesses are real. The verification OS launch uses
+the ordinary test seam in both parent and MCP child, not namespace qualification.
 Only model reasoning is scripted by fake_engine_process.py, which calls the
 actual broker tools for plan, report, result and synthesis. This proves the
 complete deterministic cycle without paid engines; it does not prove GUI
@@ -229,6 +230,14 @@ def test_composed_production_chain(tmp_path, monkeypatch,engine):
     def _no_claude_cli(argv, env, cwd, timeout):
         raise FileNotFoundError("no real claude CLI in this test")
     monkeypatch.setattr(quota, "_run_claude_usage_subprocess", _no_claude_cli)
+    # The broker starts a separate MCP process: pytest's parent-only
+    # verification fixture cannot patch its availability preflight.
+    from cortex_runtime.engine import process as engine_process
+    broker_type = engine_process.McpBroker
+    def fixture_broker(*args, **kwargs):
+        kwargs["server_script"] = str(ROOT / "tests/workspace_support/mcp_fixture_entry.py")
+        return broker_type(*args, **kwargs)
+    monkeypatch.setattr(engine_process, "McpBroker", fixture_broker)
     environ=_isolate(tmp_path,monkeypatch)
     project=tmp_path/'project';project.mkdir()
     engine_dir=tmp_path/'engine';engine_dir.mkdir()

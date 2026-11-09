@@ -1,0 +1,17 @@
+#!/bin/sh
+# Upgrades are restarted by postinst after replacement; removal stops only this unit.
+case "$1" in remove|deconfigure) ;; *) exit 0;; esac
+for directory in /run/user/[0-9]*; do
+    [ -S "$directory/bus" ] || continue
+    uid="${directory##*/}"
+    case "$uid" in *[!0-9]*|'') continue;; esac
+    user="$(getent passwd "$uid" | cut -d: -f1)"
+    [ -n "$user" ] || continue
+    userctl() {
+        /usr/bin/timeout 10 /usr/sbin/runuser -u "$user" -- \
+            /usr/bin/env XDG_RUNTIME_DIR="$directory" DBUS_SESSION_BUS_ADDRESS="unix:path=$directory/bus" \
+            /usr/bin/systemctl --user "$@" >/dev/null 2>&1 || :
+    }
+    userctl stop @UNIT@
+done
+exit 0

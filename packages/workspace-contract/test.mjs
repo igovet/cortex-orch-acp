@@ -1,0 +1,32 @@
+import assert from "node:assert/strict";
+import fixtures from "./fixtures.json" with { type: "json" };
+import { validate, decodeResponse, capabilities, negotiate, encodeFrame, decodeFrame } from "./index.js";
+for (const fixture of fixtures) {
+  if (fixture.valid) assert.doesNotThrow(() => validate(fixture.type, fixture.value), fixture.name);
+  else assert.throws(() => validate(fixture.type, fixture.value), undefined, fixture.name);
+}
+const receipt = fixtures.find(v => v.name === "unknown-outcome").value;
+const decoded = decodeResponse("Receipt", receipt);
+assert.equal(decoded.value.outcome, "unknown");
+assert.deepEqual(decoded.warnings, ["$.outcome:unknown_enum"]);
+const a = capabilities("build", "1", ["tasks.get", "capabilities.get"]);
+const b = capabilities("peer", "2", ["tasks.get", "events.page"]);
+b.protocol.minor = 99;
+assert.deepEqual(negotiate(a, b).operations, ["tasks.get"]);
+b.protocol.major = 2;
+assert.throws(() => negotiate(a, b), /version_mismatch/);
+const message = { text: "hello\n😀" };
+assert.deepEqual(decodeFrame(encodeFrame(message)), message);
+assert.throws(() => decodeFrame(new Uint8Array([0, 16, 0, 1])));
+const create = structuredClone(fixtures.find(v => v.name === "create").value);
+create.payload.description = "😀".repeat(32000);
+assert.doesNotThrow(() => validate("Command", create));
+create.payload.description += "x";
+assert.throws(() => validate("Command", create));
+const page = { items: [], nextCursor: null, highWatermark: "0", future: "é".repeat(33000) };
+assert.throws(() => validate("TaskPage", page), /page_too_large/);
+assert.throws(() => encodeFrame({ invalid: Infinity }), /invalid_json/);
+let nested = null;
+for (let n = 0; n < 65; n++) nested = [nested];
+assert.throws(() => encodeFrame(nested), /nesting_limit/);
+console.log("Workspace JS conformance: " + fixtures.length + " vectors passed");

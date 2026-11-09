@@ -580,6 +580,54 @@ def test_sigterm_from_the_host_runs_the_disconnect_teardown(tmp_path):
     assert (out / "shutdown").read_text() == "done"
 
 
+# A Python signal handler runs between any two lines of the main thread, including
+# lines of an earlier invocation of the same handler. The trace hook calls the
+# handler body again at every line of the first call, as a second SIGTERM would.
+_REENTRANT_SHUTDOWN_CHILD = '''
+import io, sys
+from cortex_runtime.acp.transport import StdioTransport
+
+transport = StdioTransport(lambda *args: None, io.BytesIO(), raw_stdin=io.BytesIO())
+nested = 0
+
+def interrupt(frame, event, arg):
+    global nested
+    if event == "line" and not nested:
+        nested += 1
+        try:
+            transport.request_shutdown()
+        finally:
+            nested -= 1
+    return interrupt
+
+sys.settrace(lambda frame, event, arg: None if nested else interrupt)
+transport.request_shutdown()
+sys.settrace(None)
+assert transport.wait_for_shutdown_signal(timeout=1) == "signal"
+'''
+
+
+def test_repeated_sigterm_during_the_handler_cannot_deadlock_shutdown():
+    """Linux re-sends the parent-death signal each time a killed multi-threaded
+    service hands its child to another exiting thread, so the SIGTERM handler is
+    re-entered. Taking any lock there wedged the child for ever after a crash."""
+    import os
+    import subprocess
+    import sys
+
+    env = dict(os.environ, PYTHONPATH=str(Path(__file__).resolve().parents[1] / "src"),
+               PYTHONDONTWRITEBYTECODE="1")
+    child = subprocess.Popen([sys.executable, "-B", "-c", _REENTRANT_SHUTDOWN_CHILD], env=env,
+                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    try:
+        _, stderr = child.communicate(timeout=20)
+    except subprocess.TimeoutExpired:
+        child.kill()
+        child.communicate()
+        raise AssertionError("the re-entered SIGTERM handler deadlocked the process")
+    assert child.returncode == 0, stderr.decode(errors="replace")[-2000:]
+
+
 _TRIGGER_CHILD = '''
 import pathlib, sys
 from cortex_runtime.acp.agent import main

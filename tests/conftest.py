@@ -83,15 +83,24 @@ else:
 os.environ["CORTEX_ENGINE_UPDATE"] = "off"
 
 
-def _remove_test_tmp_root():
+def remove_tree(root):
     def writable_then_retry(function, failed, _error):
         try:
             os.chmod(os.path.dirname(failed) or failed, 0o700)
             os.chmod(failed, 0o700)
-            function(failed)
+            # A directory rmtree could not enter (an overlay's mode-000 work
+            # directory) is reported as os.open, which also needs flags.
+            if function in (os.open, os.scandir):
+                shutil.rmtree(failed, onerror=writable_then_retry)
+            else:
+                function(failed)
         except OSError:
             pass
-    shutil.rmtree(_TEST_TMP_ROOT, onerror=writable_then_retry)
+    shutil.rmtree(root, onerror=writable_then_retry)
+
+
+def _remove_test_tmp_root():
+    remove_tree(_TEST_TMP_ROOT)
 
 
 def pytest_unconfigure(config):

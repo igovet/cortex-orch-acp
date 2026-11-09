@@ -1,9 +1,9 @@
 """Engine discovery: find Cortex's own engine installs (kept current by
 ``connections.engine_update``); a client's (e.g. Zed's) copy is never used.
 
-This module reads Cortex-owned npm installs for ``codex-acp`` and
-``claude-agent-acp``; engine_update downloads them separately, either in the
-background or on explicit request. Discovery never downloads or changes
+This module prefers the channel-local, read-only Debian engine bundle for
+``codex-acp`` and ``claude-agent-acp``. Checkout installs may use Cortex-owned
+npm trees; engine_update is an optional download path. Discovery never downloads or changes
 owner configuration. Optional OpenCode discovery probes a trusted binary
 in a disposable, network-less sandbox and requires explicit onboarding.
 A launch command is only ever built from a package's
@@ -134,6 +134,40 @@ def _node_binary(environ: dict[str, str] | None) -> str | None:
         return found
 
 
+def bundled_root() -> Path | None:
+    """Only the install containing this runtime, never another channel or a PATH copy."""
+    runtime = Path(__file__).resolve().parents[3]
+    package = runtime.parent
+    if runtime.name == "runtime" and package.name in {"cortex-workspace", "cortex-workspace-dev"}:
+        root = package / "engines"
+        if root.is_dir():
+            return root
+    return None
+
+
+def discover_bundled(engine: str, *, environ=None) -> EngineDiscovery | None:
+    root = bundled_root()
+    package = _PACKAGE_NAME.get(engine)
+    if root is None or package is None:
+        return None
+    node = root / "node/bin/node"
+    if not node.is_file() or not os.access(node, os.X_OK):
+        return None
+    found = _discover_in([root], engine, package, str(node.resolve()), environ)
+    if found is None or not is_qualified(engine, found.version):
+        return None
+    # Reuse the real canonical-path, bin/version and digest verification.
+    from types import SimpleNamespace
+    from ..engine.install_resolution import resolve_verified_install, InstallUnresolvable
+    from ..portable.errors import PortableError
+
+    try:
+        resolve_verified_install(SimpleNamespace(engine=engine, launch_command=found.launch_command), environ)
+    except (PortableError, InstallUnresolvable, OSError):
+        return None
+    return found
+
+
 def owned_root(environ: dict[str, str] | None = None) -> Path:
     """Cortex's own engine installs: ``<root>/<engine>/<version>/node_modules/...``,
     kept current by ``connections.engine_update``."""
@@ -192,6 +226,10 @@ def discover_engine(
     package_name = _PACKAGE_NAME.get(engine)
     if package_name is None:
         return None
+    if registry_root is None:
+        bundled = discover_bundled(engine, environ=environ)
+        if bundled is not None:
+            return bundled
     node = node_binary if node_binary is not None else _node_binary(environ)
     if not node:
         return None

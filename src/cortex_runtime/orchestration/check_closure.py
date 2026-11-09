@@ -25,7 +25,8 @@ def _retained_output_complete(db, task_id, output):
         directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
         directory = os.open(root.anchor, directory_flags)
         descriptors.append(directory)
-        for index, part in enumerate(root.parts[1:] + ('.cortex', task_id, 'large_outputs')):
+        from ..project_storage import project_store_name
+        for index, part in enumerate(root.parts[1:] + (project_store_name(), task_id, 'large_outputs')):
             directory = os.open(part, directory_flags, dir_fd=directory)
             descriptors.append(directory)
             if index >= len(root.parts) - 1:
@@ -214,6 +215,8 @@ def retain_runtime_closures(db, task_id, plan_revision):
     """Persist the derived references transactionally; immutable reports stay intact."""
     from .state import encoded
     closures = runtime_gap_closures(db, task_id, plan_revision)
+    from .worker_checks import reconcile_closures
+    closures = reconcile_closures(db, task_id, plan_revision, closures)
     for node in db.execute(
             'SELECT node_id,assignment_ref,result_json FROM runtime_nodes '
             'WHERE task_id=? AND revision=? AND result_json IS NOT NULL', (task_id, plan_revision)).fetchall():

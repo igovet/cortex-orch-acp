@@ -67,7 +67,9 @@ def _call(project, channel_id, secret, messages, tmp_path):
         CORTEX_CHANNEL_PROJECT_ROOT=str(project),
     )
     result = subprocess.run(
-        [sys.executable, "-B", str(CORTEX_PY)],
+        # Parent pytest launch fixtures do not reach this MCP process.
+        # Keep real wire dispatch, with the same verification-only launch seam.
+        [sys.executable, "-B", str(ROOT / "tests/workspace_support/mcp_fixture_entry.py")],
         input="\n".join(json.dumps(m) for m in messages) + "\n",
         text=True, capture_output=True, env=env, timeout=30,
     )

@@ -1,0 +1,435 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<title>Result v2 review - Cortex Workspace mockup</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script>(function(){var r=document.documentElement,t=new URLSearchParams(location.search).get('theme');try{t=t||localStorage.getItem('cw-theme')}catch(e){}t=t||'system';r.dataset.themeChoice=t;r.dataset.theme=t==='system'?(matchMedia('(prefers-color-scheme: light)').matches?'light':'dark'):t})()</script>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body class="term-auto" data-tab="conversation" data-sub="result" data-diff="unified">
+<input class="pt" type="checkbox" id="pt-sidebar" aria-label="Toggle sidebar">
+<input class="pt" type="checkbox" id="pt-inspector" aria-label="Toggle inspector">
+<input class="pt" type="checkbox" id="pt-terminal" aria-label="Toggle terminal">
+<input class="pt" type="checkbox" id="pt-detail" aria-label="Toggle detail">
+
+<header class="titlebar">
+  <label class="ib tb-toggle" for="pt-sidebar" title="Sidebar (Ctrl+B)"><i class="i i-panel-left"></i></label>
+  <div class="tb-side">
+    <button class="machine" popovertarget="m-machine" title="Switch machine">
+      <i class="i i-laptop"></i><span class="trunc">This machine</span>
+      <span class="st st-ok" style="margin-left:auto">Connected</span><i class="i s12 i-chevrons-v faint"></i>
+    </button>
+  </div>
+  <div class="tb-main">
+    <a class="ib" href="board.html" title="Back (Alt+Left)"><i class="i i-arrow-left"></i></a>
+    <button class="ib" title="Forward (Alt+Right)" aria-disabled="true"><i class="i i-arrow-right"></i></button>
+    <div class="crumbs"><a href="board.html">atlas-api</a><span class="sep">/</span><span class="cur trunc" title="Click to rename">Rate-limit the export endpoint</span></div>
+    <button class="chip branch-chip" title="Worktree details"><i class="i s12 i-branch"></i><span class="w-wide">Worktree</span><span class="mono trunc" style="max-width:170px">cw/export-rate-limit</span></button>
+    <span class="grow"></span>
+    <div class="tb-actions"><span class="chip" title="Current state and the next step"><i class="i s12 i-eye st-idle"></i><span style="color:var(--fg)">Review</span><i class="i s12 i-chevron-right faint w-wide"></i><span class="w-wide">Ready to merge</span></span>
+      <button class="btn btn-primary" data-show="changes" data-group="tab">Review changes</button>
+      <button class="ib" title="Task actions"><i class="i i-more"></i></button></div>
+    <div class="tb-fixed">
+      <a class="mock-chip" href="index.html" title="Static mockup. Back to the screen list">Mock</a>
+      <label class="ib detail-toggle" for="pt-detail" title="Worker pane (Ctrl+\\)"><i class="i i-columns"></i></label>
+      <label class="ib" for="pt-terminal" title="Terminal (Ctrl+J)"><i class="i i-panel-bottom"></i></label>
+      <label class="ib" for="pt-inspector" title="Inspector (Ctrl+Alt+B)"><i class="i i-panel-right"></i></label>
+    </div>
+    <div class="win" aria-hidden="true">
+      <button tabindex="-1"><i class="i s14 i-minus"></i></button>
+      <button tabindex="-1"><i class="i s12 i-square"></i></button>
+      <button tabindex="-1"><i class="i s14 i-x"></i></button>
+    </div>
+  </div>
+</header>
+
+<div class="workspace">
+  <nav class="sidebar" aria-label="Workspace">
+    <div class="sb-top">
+      <a class="nav" href="new-task.html"><i class="i i-plus"></i>New task<span class="kbd">Ctrl+N</span></a>
+      <a class="nav" href="#"><i class="i i-inbox"></i>Inbox<span class="count">4</span></a>
+      <a class="nav" href="#"><i class="i i-search"></i>Search<span class="kbd">Ctrl+K</span></a>
+      <a class="nav" href="home.html"><i class="i i-home"></i>Home</a>
+      <a class="nav" href="archive.html"><i class="i i-archive"></i>Archive<span class="count">18</span></a>
+    </div>
+    <div class="sb-scroll">
+      <div class="sb-h"><span>Pinned</span></div>
+      <a class="task-row" style="padding-left:8px" href="task.html"><i class="i s14 i-pin faint"></i><span class="trunc">Fix token refresh race</span></a>
+      <div class="sb-h"><span>Projects</span><button class="ib" style="width:22px;height:22px" title="Sort projects"><i class="i s14 i-chevrons-v"></i></button></div>
+      <a class="proj" href="board.html"><span class="mono-tile t1">A</span><span class="trunc">atlas-api</span><span class="sig st-bad">Conflict</span></a>
+      <div class="tasks">
+        <a class="task-row" href="task.html"><i class="i s14 i-question st-warn"></i><span class="trunc">Fix token refresh race</span><span class="sig">Question</span></a>
+        <a class="task-row" href="board.html?scope=sprint"><i class="i s14 i-layers faint"></i><span class="trunc">Sprint: Usage billing</span><span class="sig tnum">2/5</span></a>
+        <a class="task-row" href="board.html"><i class="i s14 i-loader st-run"></i><span class="trunc">Meter API calls per workspace</span><span class="sig">Working</span></a>
+        <a class="task-row" href="result.html" aria-current="page"><i class="i s14 i-eye faint"></i><span class="trunc">Rate-limit the export endpoint</span><span class="sig">Review</span></a>
+        
+        <a class="task-row all" href="board.html">All 15</a>
+      </div>
+      <a class="proj" href="#"><span class="mono-tile t2">B</span><span class="trunc">billing-service</span><span class="sig st-warn">Needs you 1</span></a>
+      <a class="proj" href="#"><span class="mono-tile t3">N</span><span class="trunc">northwind-web</span><span class="sig st-warn">Needs you 1</span></a>
+      <a class="proj" href="#"><span class="mono-tile t4">M</span><span class="trunc">mobile-app</span><span class="sig muted">In review 1</span></a>
+      <a class="proj" href="#"><span class="mono-tile t5">I</span><span class="trunc">infra-terraform</span></a>
+      <a class="proj" href="#"><span class="mono-tile t6">D</span><span class="trunc">docs-site</span></a>
+    </div>
+    <button class="sb-usage" popovertarget="m-usage" title="Engine limits used this week. Snapshot 13:41" aria-label="Engine limits: Claude 62%, Codex 18% used this week">
+      <span class="um"><span>Claude</span><span class="bar"><i style="width:62%"></i></span><span class="tnum">62%</span></span>
+      <span class="um"><span>Codex</span><span class="bar"><i style="width:18%"></i></span><span class="tnum">18%</span></span>
+    </button>
+    <div class="sb-foot">
+      <button class="btn btn-sm" title="Add project"><i class="i s14 i-folder-plus"></i>Add project</button>
+      <span class="grow"></span>
+      <a class="ib" href="settings.html" title="Settings (Ctrl+,)"><i class="i i-settings"></i></a>
+      <button class="ib" title="Help and shortcuts (?)"><i class="i i-help"></i></button>
+    </div>
+  </nav>
+
+  <main class="main">
+    <div class="planbar">
+      <a class="rev" href="#">Plan r1</a>
+      <div class="phases" aria-label="Task phase">
+        <span class="phase done">Planned</span><i class="i s12 i-chevron-right"></i>
+        <span class="phase done">Executed</span><i class="i s12 i-chevron-right"></i>
+        <span class="phase done">Reviewed</span><i class="i s12 i-chevron-right"></i>
+        <span class="phase done">Verification ran</span><i class="i s12 i-chevron-right"></i>
+        <span class="phase now">Result v2</span>
+      </div>
+      <span class="grow"></span>
+      <span class="meter" title="Coordinator context: latest actual window fill, not a token sum"><span class="faint">Context</span><span class="track"><span class="fill" style="width:59%"></span></span><span class="tnum" style="color:var(--fg)">59%</span><span class="tnum faint">118k of 200k</span></span>
+      <span><span class="faint">Usage</span> <span class="tnum" style="color:var(--fg)">241k</span></span>
+    </div>
+    <div class="tabs" role="tablist" aria-label="Task views">
+      <button class="tab" role="tab" data-show="conversation" data-group="tab" aria-selected="true">Conversation</button>
+      <button class="tab" role="tab" data-show="workers" data-group="tab" aria-selected="false">Workers <span class="n">4 finished, 1 cancelled</span></button>
+      <button class="tab" role="tab" data-show="changes" data-group="tab" aria-selected="false">Changes <span class="tnum n"><span class="add">+120</span> <span class="del">&minus;14</span></span></button>
+      <a class="tab" role="tab" href="code.html" aria-selected="false">Code</a>
+      <a class="tab" role="tab" href="task.html?tab=terminal" aria-selected="false">Terminal</a>
+    </div>
+    <div class="main-body">
+      <div class="task-body">
+        <section class="task-panel" data-panel="conversation" data-group="tab" aria-label="Conversation">
+          <div class="timeline"><div class="tl-in">
+            <div class="brief"><div>Limit the data export endpoint to 60 requests per minute per workspace, and return a clear 429 with Retry-After when a client goes over.</div>
+              <div class="meta"><span>Created 13:02</span><span>Base <span class="mono">main</span> at <span class="mono">a03be17</span></span><span>Title generated <a href="#">Edit</a></span></div></div>
+            <button class="fold"><i class="i s14 i-chevron-right"></i>Worked 41m, 96 steps, 6 files</button>
+            <div class="answered"><i class="i s14 i-question"></i>You answered: count per workspace, not per user<span class="faint">13:11</span></div>
+            <div class="ai">Plan r1 ran to the end. Backend Dev added the Redis limiter, Test Author covered it, and Security Reviewer approved it. Runtime verification then ran the planned checks.</div>
+            <div class="answered"><i class="i s14 i-users"></i>4 workers finished, 1 cancelled<a class="lnk" href="result.html?tab=workers" style="margin-left:4px">View workers</a></div>
+            <div class="rcard">
+                <div class="rcard-h"><i class="i s14 i-eye faint"></i>Result v2<span class="r">14:22, reviewed and checked by Cortex</span></div>
+                <div class="rcard-b">The export endpoint now allows 60 requests per minute per workspace and answers 429 with <code>Retry-After</code> beyond that. Counters live in Redis. One load check is over its limit.</div>
+                <div class="outc">
+                  <div><span class="v st-ok"><i class="i i-check-circle"></i>5</span><span class="l">Passed</span></div>
+                  <div><span class="v st-bad"><i class="i i-x-circle"></i>1</span><span class="l">Failed</span></div>
+                  <div><span class="v st-idle"><i class="i i-circle"></i>2</span><span class="l">Not run</span></div>
+                  <div><span class="v st-idle"><i class="i i-help"></i>1</span><span class="l">Unverified</span></div>
+                </div>
+                <div><div class="nv"><i class="i s14 i-x-circle st-bad"></i><span><code>pytest tests/load/test_export_burst.py</code><span class="why">p95 was 410 ms, the limit is 300 ms</span></span><span class="src">Recorded by runtime</span></div>
+                <div class="nv"><i class="i s14 i-circle faint"></i><span>Full integration suite<span class="why">Not run: test database was busy</span></span><span class="src">Reported by worker</span></div><div class="nv"><i class="i s14 i-circle faint"></i><span>OpenAPI contract check<span class="why">Not run: no schema tool on this machine</span></span><span class="src">Recorded by runtime</span></div>
+                <div class="nv"><i class="i s14 i-help faint"></i><span>Redis failover keeps the counters<span class="why">Unverified: worker says it passed, no command receipt</span></span><span class="src">Reported by worker</span></div></div>
+                <div class="rcard-f"><span class="cap muted tnum">6 files, <span class="add">+120</span> <span class="del">&minus;14</span></span><span class="grow"></span>
+                  <button class="btn btn-sm" title="Sends a message and reopens the task">Request changes&hellip;</button>
+                  <a class="btn btn-line btn-sm" href="result.html?tab=changes">Review changes</a>
+                  <button class="btn btn-primary btn-sm" title="Accepts exactly this version">Accept v2</button></div>
+              </div>
+          </div></div>
+          <div class="dock"><div class="composer">
+            <textarea aria-label="Message Cortex" placeholder="Ask about this result, or describe what to change&hellip;"></textarea>
+            <div class="c-bar">
+              <button class="ib" title="Attach files"><i class="i i-plus"></i></button>
+              <div class="c-route">
+                <button class="sel" popovertarget="m-model" title="Coordinator model (Ctrl+Shift+M)"><i class="i s14 i-cpu"></i><span class="sel-t">Opus</span><i class="i s12 i-chevron-down"></i></button>
+                  <button class="sel" popovertarget="m-effort" title="Reasoning effort"><i class="i s14 i-gauge"></i><span class="sel-t">High</span><i class="i s12 i-chevron-down"></i></button>
+                  <button class="sel" popovertarget="m-mode" title="Access mode"><i class="i s14 i-shield"></i><span class="sel-t">Development</span><i class="i s12 i-chevron-down"></i></button>
+                  <button class="sel" popovertarget="m-lang" title="Cortex message language"><i class="i s14 i-globe"></i><span class="sel-t">Auto</span><i class="i s12 i-chevron-down"></i></button>
+              </div>
+              <div class="c-end">
+                <span class="ctx" title="Context: 118k of 200k"><span class="ring" style="--p:59%"></span><span class="ctx-t">59%</span></span>
+                <button class="ib" title="Voice input. Text lands in this draft and is never sent on its own."><i class="i i-mic"></i></button>
+                <button class="btn btn-primary btn-sm c-send" aria-disabled="true" title="Type a message first" style="width:28px;height:28px;padding:0;border-radius:50%"><i class="i s14 i-arrow-up"></i></button>
+              </div>
+            </div>
+          </div></div>
+        </section>
+        <section class="task-panel" data-panel="workers" data-group="tab" aria-label="Finished workers" hidden>
+          <div class="wlist">
+            <div class="wg">Coordinator</div>
+            <button class="wcard" data-show="cortex" data-group="worker" aria-selected="false">
+              <span class="l1"><span class="ic"><i class="i s14 i-check-circle st-ok"></i></span>Cortex<span class="st st-ok">Finished</span></span>
+              <span class="l2 trunc" style="display:block">Coordinated 5 workers</span>
+              <span class="l3"><span>Opus, High</span><span>41m</span><span>Usage 88k</span></span>
+            </button>
+            <div class="wg">Execution<span class="n">4</span></div>
+            <button class="wcard" data-show="explorer" data-group="worker" aria-selected="false">
+              <span class="l1"><span class="ic"><i class="i s14 i-check-circle st-ok"></i></span>Code Explorer<span class="st st-ok">Finished</span></span>
+              <span class="l2 trunc" style="display:block">Found the export entry points</span>
+              <span class="l3"><span>Sonnet, Low</span><span>3m 02s</span><span>Usage 14k</span></span>
+            </button>
+            <button class="wcard" data-show="backend" data-group="worker" aria-selected="false">
+              <span class="l1"><span class="ic"><i class="i s14 i-check-circle st-ok"></i></span>Backend Dev<span class="st st-ok">Finished</span></span>
+              <span class="l2 trunc" style="display:block">Added the Redis limiter</span>
+              <span class="l3"><span>Opus, High</span><span>18m</span><span>2 attempts</span><span>Usage 71k</span></span>
+            </button>
+            <button class="wcard" data-show="author" data-group="worker" aria-selected="true">
+              <span class="l1"><span class="ic"><i class="i s14 i-x-circle st-bad"></i></span>Test Author<span class="st st-bad">1 check failed</span></span>
+              <span class="l2 trunc" style="display:block">Burst test is over its limit</span>
+              <span class="l3"><span>Sonnet, Medium</span><span>9m 44s</span><span>Usage 33k</span></span>
+            </button>
+            <button class="wcard" data-show="docs" data-group="worker" aria-selected="false">
+              <span class="l1"><span class="ic"><i class="i s14 i-x faint"></i></span>Docs Writer<span class="st st-idle">Cancelled</span></span>
+              <span class="l2 trunc" style="display:block">Plan no longer needed it</span>
+              <span class="l3"><span>Sonnet, Low</span><span>41s</span><span>Usage 2k</span></span>
+            </button>
+            <div class="wg">Review<span class="n">1</span></div>
+            <button class="wcard" data-show="reviewer" data-group="worker" aria-selected="false">
+              <span class="l1"><span class="ic"><i class="i s14 i-check-circle st-ok"></i></span>Security Reviewer<span class="st st-ok">Approved</span></span>
+              <span class="l2 trunc" style="display:block">No blocking findings, 1 remark</span>
+              <span class="l3"><span>Opus, High</span><span>6m 20s</span><span>Usage 29k</span></span>
+            </button>
+            <div class="wg">Verification</div>
+            <button class="wcard lane" data-show="verify" data-group="worker" aria-selected="false"><span class="l1"><span class="ic"><i class="i s14 i-alert st-warn"></i></span>Runtime verification<span class="st st-warn">Not clean</span></span><span class="l2 trunc" style="display:block">Run by Cortex, not by a worker</span></button>
+          </div>
+        </section>
+        <section class="task-panel" data-panel="changes" data-group="tab" aria-label="Changes" hidden>
+          <div class="chg-tools">
+            <button class="pick" style="height:28px" popovertarget="m-diff-scope" title="Which changes to show"><span class="faint">Show</span>Result v2<i class="i s12 i-chevron-down"></i></button>
+            <div class="seg" role="group" aria-label="Diff layout"><button data-show="unified" data-group="diff" aria-current="true">Unified</button><button data-show="split" data-group="diff" aria-current="false">Split</button></div>
+            <label class="sw-l"><span class="sw"><input type="checkbox" aria-label="Hide whitespace changes"><i></i></span>Hide whitespace</label>
+            <span class="grow"></span>
+            <span class="tnum">6 files, <span class="add">+120</span> <span class="del">&minus;14</span></span>
+            <span class="faint" title="This version is pinned by its digest">Pinned <span class="mono">sha 7c1e0b2</span></span>
+          </div>
+          <details class="evid" open>
+            <summary><i class="i s12 i-chevron-right faint"></i><span class="w500">Evidence</span>
+              <span class="st st-ok"><i class="i s12 i-check-circle"></i>5 passed</span><span class="st st-bad"><i class="i s12 i-x-circle"></i>1 failed</span><span class="st st-idle"><i class="i s12 i-circle"></i>2 not run</span><span class="st st-idle"><i class="i s12 i-help"></i>1 unverified</span></summary>
+            <div class="evid-b">
+              <div class="chk"><i class="i s14 i-x-circle st-bad"></i><span><code>pytest tests/load/test_export_burst.py</code></span><span class="src"><button class="btn btn-line btn-sm" style="height:20px">Ask Cortex to fix</button></span></div>
+              <div class="chk"><i class="i s14 i-circle faint"></i><span>Full integration suite</span><span class="src">Not run, reported by worker</span></div>
+              <div class="chk"><i class="i s14 i-help faint"></i><span>Redis failover keeps the counters</span><span class="src">Unverified, no receipt</span></div>
+              <div class="chk"><i class="i s14 i-circle faint"></i><span>OpenAPI contract check</span><span class="src">Not run, recorded by runtime</span></div>
+            </div>
+          </details>
+          <div class="chg-body">
+            <div class="flist">
+              <button class="fitem" aria-current="true"><span class="gs gs-m" title="Modified">M</span><span class="trunc">atlas/export/api.py</span><span class="r"><span class="add">+7</span> <span class="del">&minus;1</span></span></button>
+              <button class="fitem"><span class="gs gs-a" title="Added">A</span><span class="trunc">atlas/export/limits.py</span><span class="r"><span class="add">+8</span></span></button>
+              <button class="fitem"><span class="gs gs-m" title="Modified">M</span><span class="trunc">atlas/settings.py</span><span class="r"><span class="add">+6</span> <span class="del">&minus;2</span></span></button>
+              <button class="fitem"><span class="gs gs-a" title="Added">A</span><span class="trunc">tests/export/test_rate_limit.py</span><span class="r"><span class="add">+77</span></span></button>
+              <button class="fitem"><span class="gs gs-a" title="Added">A</span><span class="trunc">tests/load/test_export_burst.py</span><span class="r"><span class="add">+22</span></span></button>
+              <button class="fitem"><span class="gs gs-m" title="Modified">M</span><span class="trunc">docs/api/export.md</span><span class="r"><span class="del">&minus;11</span></span></button>
+            </div>
+            <div class="dview">
+              <div class="fhead"><i class="i s14 i-file faint"></i><code>atlas/export/api.py</code><span class="tnum"><span class="add">+7</span> <span class="del">&minus;1</span></span><span class="r"><button class="btn btn-sm">Stage</button><button class="btn btn-sm">Revert</button><button class="btn btn-sm">Open in editor</button></span></div>
+              <div data-panel="unified" data-group="diff"><div class="code"><div class="dl hunk"><span>@@ -18,5 +18,11 @@ async def export_workspace(request, workspace_id):</span><span class="hact"><button class="btn btn-sm">Stage hunk</button><button class="btn btn-sm">Revert hunk</button></span></div><div class="dl"><span class="n">18</span><span class="n">18</span><span class="m"></span><span class="c">    workspace = <span class="tok-k">await</span> <span class="tok-f">load_workspace</span>(workspace_id)</span></div><div class="dl"><span class="n">19</span><span class="n">19</span><span class="m"></span><span class="c">    <span class="tok-k">await</span> <span class="tok-f">require_export_scope</span>(request, workspace)</span></div><div class="dl add"><span class="n"></span><span class="n">20</span><span class="m">+</span><span class="c">    decision = <span class="tok-k">await</span> limiter.<span class="tok-f">check</span>(workspace.id, limit=<span class="tok-n">60</span>, window=<span class="tok-n">60</span>)</span></div><div class="dl add"><span class="n"></span><span class="n">21</span><span class="m">+</span><span class="c">    <span class="tok-k">if</span> <span class="tok-k">not</span> decision.allowed:</span></div><div class="dl add"><span class="n"></span><span class="n">22</span><span class="m">+</span><span class="c">        <span class="tok-k">return</span> <span class="tok-t">Response</span>(</span></div><div class="dl add"><span class="n"></span><span class="n">23</span><span class="m">+</span><span class="c">            status=<span class="tok-n">429</span>,</span></div><div class="dl add"><span class="n"></span><span class="n">24</span><span class="m">+</span><span class="c">            headers={<span class="tok-s">"Retry-After"</span>: <span class="tok-f">str</span>(decision.retry_after)},</span></div><div class="dl add"><span class="n"></span><span class="n">25</span><span class="m">+</span><span class="c">        )</span></div><div class="dl del"><span class="n">20</span><span class="n"></span><span class="m">&minus;</span><span class="c">    <span class="tok-k">return</span> <span class="tok-k">await</span> <span class="tok-f">stream_export</span>(workspace)</span></div><div class="dl add"><span class="n"></span><span class="n">26</span><span class="m">+</span><span class="c">    <span class="tok-k">return</span> <span class="tok-k">await</span> <span class="tok-f">stream_export</span>(workspace, chunk_size=<span class="tok-t">CHUNK</span>)</span></div></div>
+                <div class="cmt"><div class="cmt-b">Should a blocked export also write an audit event?</div><div class="cmt-f">Your draft comment on line 26<span class="grow"></span><button class="btn btn-sm">Edit</button><button class="btn btn-sm">Delete</button></div></div>
+                <div class="code"><div class="dl"><span class="n">21</span><span class="n">27</span><span class="m"></span><span class="c"></span></div><div class="dl"><span class="n">22</span><span class="n">28</span><span class="m"></span><span class="c"><span class="tok-k">async</span> <span class="tok-k">def</span> <span class="tok-f">export_status</span>(request, job_id):</span></div></div></div>
+              <div data-panel="split" data-group="diff" hidden><div class="sbs"><div class="side"><div class="sl gap"><span class="n"></span><span class="m"></span><span class="c faint">@@ -18,5 +18,11 @@ async def export_workspace(request, workspace_id):</span></div><div class="sl"><span class="n">18</span><span class="m"></span><span class="c">    workspace = <span class="tok-k">await</span> <span class="tok-f">load_workspace</span>(workspace_id)</span></div><div class="sl"><span class="n">19</span><span class="m"></span><span class="c">    <span class="tok-k">await</span> <span class="tok-f">require_export_scope</span>(request, workspace)</span></div><div class="sl del"><span class="n">20</span><span class="m">&minus;</span><span class="c">    <span class="tok-k">return</span> <span class="tok-k">await</span> <span class="tok-f">stream_export</span>(workspace)</span></div><div class="sl gap"><span class="n"></span><span class="m"></span><span class="c"></span></div><div class="sl gap"><span class="n"></span><span class="m"></span><span class="c"></span></div><div class="sl gap"><span class="n"></span><span class="m"></span><span class="c"></span></div><div class="sl gap"><span class="n"></span><span class="m"></span><span class="c"></span></div><div class="sl gap"><span class="n"></span><span class="m"></span><span class="c"></span></div><div class="sl gap"><span class="n"></span><span class="m"></span><span class="c"></span></div><div class="sl"><span class="n">21</span><span class="m"></span><span class="c"></span></div><div class="sl"><span class="n">22</span><span class="m"></span><span class="c"><span class="tok-k">async</span> <span class="tok-k">def</span> <span class="tok-f">export_status</span>(request, job_id):</span></div></div><div class="side"><div class="sl gap"><span class="n"></span><span class="m"></span><span class="c faint"></span></div><div class="sl"><span class="n">18</span><span class="m"></span><span class="c">    workspace = <span class="tok-k">await</span> <span class="tok-f">load_workspace</span>(workspace_id)</span></div><div class="sl"><span class="n">19</span><span class="m"></span><span class="c">    <span class="tok-k">await</span> <span class="tok-f">require_export_scope</span>(request, workspace)</span></div><div class="sl add"><span class="n">20</span><span class="m">+</span><span class="c">    decision = <span class="tok-k">await</span> limiter.<span class="tok-f">check</span>(workspace.id, limit=<span class="tok-n">60</span>, window=<span class="tok-n">60</span>)</span></div><div class="sl add"><span class="n">21</span><span class="m">+</span><span class="c">    <span class="tok-k">if</span> <span class="tok-k">not</span> decision.allowed:</span></div><div class="sl add"><span class="n">22</span><span class="m">+</span><span class="c">        <span class="tok-k">return</span> <span class="tok-t">Response</span>(</span></div><div class="sl add"><span class="n">23</span><span class="m">+</span><span class="c">            status=<span class="tok-n">429</span>,</span></div><div class="sl add"><span class="n">24</span><span class="m">+</span><span class="c">            headers={<span class="tok-s">"Retry-After"</span>: <span class="tok-f">str</span>(decision.retry_after)},</span></div><div class="sl add"><span class="n">25</span><span class="m">+</span><span class="c">        )</span></div><div class="sl add"><span class="n">26</span><span class="m">+</span><span class="c">    <span class="tok-k">return</span> <span class="tok-k">await</span> <span class="tok-f">stream_export</span>(workspace, chunk_size=<span class="tok-t">CHUNK</span>)</span></div><div class="sl"><span class="n">27</span><span class="m"></span><span class="c"></span></div><div class="sl"><span class="n">28</span><span class="m"></span><span class="c"><span class="tok-k">async</span> <span class="tok-k">def</span> <span class="tok-f">export_status</span>(request, job_id):</span></div></div></div></div>
+              <div class="fhead"><i class="i s14 i-file faint"></i><code>atlas/export/limits.py</code><span class="tnum"><span class="add">+8</span></span><span class="r"><button class="btn btn-sm">Stage</button><button class="btn btn-sm">Revert</button><button class="btn btn-sm">Open in editor</button></span></div>
+              <div data-panel="unified" data-group="diff"><div class="code"><div class="dl hunk"><span>@@ -0,0 +1,8 @@</span><span class="hact"><button class="btn btn-sm">Stage hunk</button><button class="btn btn-sm">Revert hunk</button></span></div><div class="dl add"><span class="n"></span><span class="n">1</span><span class="m">+</span><span class="c"><span class="tok-k">class</span> <span class="tok-t">SlidingWindowLimiter</span>:</span></div><div class="dl add"><span class="n"></span><span class="n">2</span><span class="m">+</span><span class="c">    <span class="tok-s">""</span><span class="tok-s">"Counts requests per workspace in a Redis sorted set."</span><span class="tok-s">""</span></span></div><div class="dl add"><span class="n"></span><span class="n">3</span><span class="m">+</span><span class="c"></span></div><div class="dl add"><span class="n"></span><span class="n">4</span><span class="m">+</span><span class="c">    <span class="tok-k">async</span> <span class="tok-k">def</span> <span class="tok-f">check</span>(self, key, limit, window):</span></div><div class="dl add"><span class="n"></span><span class="n">5</span><span class="m">+</span><span class="c">        now = time.<span class="tok-f">time</span>()</span></div><div class="dl add"><span class="n"></span><span class="n">6</span><span class="m">+</span><span class="c">        <span class="tok-k">await</span> self.redis.<span class="tok-f">zremrangebyscore</span>(key, <span class="tok-n">0</span>, now - window)</span></div><div class="dl add"><span class="n"></span><span class="n">7</span><span class="m">+</span><span class="c">        count = <span class="tok-k">await</span> self.redis.<span class="tok-f">zcard</span>(key)</span></div><div class="dl add"><span class="n"></span><span class="n">8</span><span class="m">+</span><span class="c">        <span class="tok-k">return</span> <span class="tok-t">Decision</span>(allowed=count &lt; limit, retry_after=window)</span></div></div></div>
+              <div data-panel="split" data-group="diff" hidden><div class="sbs"><div class="side"><div class="sl gap"><span class="n"></span><span class="m"></span><span class="c faint">@@ -0,0 +1,8 @@</span></div><div class="sl gap"><span class="n"></span><span class="m"></span><span class="c"></span></div><div class="sl gap"><span class="n"></span><span class="m"></span><span class="c"></span></div><div class="sl gap"><span class="n"></span><span class="m"></span><span class="c"></span></div><div class="sl gap"><span class="n"></span><span class="m"></span><span class="c"></span></div><div class="sl gap"><span class="n"></span><span class="m"></span><span class="c"></span></div><div class="sl gap"><span class="n"></span><span class="m"></span><span class="c"></span></div><div class="sl gap"><span class="n"></span><span class="m"></span><span class="c"></span></div><div class="sl gap"><span class="n"></span><span class="m"></span><span class="c"></span></div></div><div class="side"><div class="sl gap"><span class="n"></span><span class="m"></span><span class="c faint"></span></div><div class="sl add"><span class="n">1</span><span class="m">+</span><span class="c"><span class="tok-k">class</span> <span class="tok-t">SlidingWindowLimiter</span>:</span></div><div class="sl add"><span class="n">2</span><span class="m">+</span><span class="c">    <span class="tok-s">""</span><span class="tok-s">"Counts requests per workspace in a Redis sorted set."</span><span class="tok-s">""</span></span></div><div class="sl add"><span class="n">3</span><span class="m">+</span><span class="c"></span></div><div class="sl add"><span class="n">4</span><span class="m">+</span><span class="c">    <span class="tok-k">async</span> <span class="tok-k">def</span> <span class="tok-f">check</span>(self, key, limit, window):</span></div><div class="sl add"><span class="n">5</span><span class="m">+</span><span class="c">        now = time.<span class="tok-f">time</span>()</span></div><div class="sl add"><span class="n">6</span><span class="m">+</span><span class="c">        <span class="tok-k">await</span> self.redis.<span class="tok-f">zremrangebyscore</span>(key, <span class="tok-n">0</span>, now - window)</span></div><div class="sl add"><span class="n">7</span><span class="m">+</span><span class="c">        count = <span class="tok-k">await</span> self.redis.<span class="tok-f">zcard</span>(key)</span></div><div class="sl add"><span class="n">8</span><span class="m">+</span><span class="c">        <span class="tok-k">return</span> <span class="tok-t">Decision</span>(allowed=count &lt; limit, retry_after=window)</span></div></div></div></div>
+            </div>
+          </div>
+          <div class="chg-foot">
+            <span class="cap muted">1 comment</span><button class="btn btn-line btn-sm">Send to Cortex<span class="key">Ctrl+Enter</span></button>
+            <span class="grow"></span>
+            <div class="grp"><button class="btn btn-primary" title="Accepts exactly this version">Accept v2</button></div>
+            <span class="vr"></span>
+            <div class="grp"><button class="btn btn-line">Commit&hellip;</button></div>
+            <span class="vr"></span>
+            <div class="grp"><button class="btn btn-line" aria-disabled="true" title="Accept v2 first. Accepting is your decision, merging is a Git action.">Merge&hellip;</button></div>
+          </div>
+        </section>
+        <section class="detail" aria-label="Worker record">
+          <div class="d-panel" data-panel="author" data-group="worker">
+            <div class="d-h">
+              <div class="d-title">Test Author<span class="st st-bad"><i class="i s12 i-x-circle"></i>1 check failed</span>
+                <span class="act"><button class="btn btn-line btn-sm" title="Sends a message about this failed check">Ask Cortex to fix</button></span></div>
+              <div class="d-goal">Cover the limiter with contract and burst tests.</div>
+              <div class="d-grid"><span><span class="l">Route</span>Sonnet, Medium</span><span><span class="l">Attempts</span>1</span><span><span class="l">Elapsed</span>9m 44s</span><span><span class="l">Finished</span>14:02</span><span><span class="l">Usage</span>33k</span></div>
+            </div>
+            <div class="subtabs" role="tablist" aria-label="Worker record"><button class="subtab" role="tab" data-show="result" data-group="sub" aria-selected="true">Result</button><button class="subtab" role="tab" data-show="checks" data-group="sub" aria-selected="false">Checks 4</button><button class="subtab" role="tab" data-show="report" data-group="sub" aria-selected="false">Report</button><button class="subtab" role="tab" data-show="edits" data-group="sub" aria-selected="false">Edits 2</button><button class="subtab" role="tab" data-show="attempts" data-group="sub" aria-selected="false">Attempts 1</button><button class="subtab" role="tab" data-show="activity" data-group="sub" aria-selected="false">Activity 58</button></div>
+            <div class="d-scroll" data-panel="result" data-group="sub">
+              <div class="res-sec"><div class="res-h">Result</div>Added contract tests for the 429 response and a burst test. Contract tests pass. The burst test exceeds the p95 limit under 200 parallel clients.</div>
+              <div class="res-sec"><div class="res-h">Checks</div>
+                <div class="chk"><i class="i s14 i-check-circle st-ok"></i><span>Limit returns 429 after 60 requests</span><span class="src">Recorded by runtime</span></div>
+                <div class="chk"><i class="i s14 i-check-circle st-ok"></i><span><code>ruff check tests/export</code></span><span class="src">Recorded by runtime</span></div>
+                <div class="chk"><i class="i s14 i-x-circle st-bad"></i><span><code>pytest tests/load/test_export_burst.py</code> <span class="faint">p95 410 ms</span></span><span class="src">Recorded by runtime</span></div>
+                <div class="chk"><i class="i s14 i-circle faint"></i><span>Full integration suite <span class="faint">not run: test database was busy</span></span><span class="src">Reported by worker</span></div>
+              </div>
+              <div class="res-sec"><div class="res-h">Recorded edits</div>
+                <div class="chk"><i class="i s14 i-pencil faint"></i><code>tests/export/test_rate_limit.py</code><span class="src tnum"><span class="add">+77</span> <span class="del">&minus;0</span></span></div>
+                <div class="chk"><i class="i s14 i-pencil faint"></i><code>tests/load/test_export_burst.py</code><span class="src tnum"><span class="add">+22</span> <span class="del">&minus;0</span></span></div>
+                <div class="cap faint" style="margin-top:4px">Edits this worker recorded. Side effects of its commands may not appear. The whole task diff is in Changes.</div>
+              </div>
+            </div>
+            <div class="d-scroll" data-panel="report" data-group="sub" hidden>
+              <div class="md selectable">
+                <h3>Test Author report</h3>
+                <p><b style="font-weight:500">Conclusion.</b> The limiter is correct under normal load. It misses its latency budget in the burst scenario.</p>
+                <h3>Evidence</h3>
+                <ul><li><code>test_rate_limit.py</code> passes all 9 cases, including the Retry-After value.</li><li><code>test_export_burst.py</code> failed in 3 of 3 runs, p95 between 396 and 410 ms.</li></ul>
+                <h3>Limits</h3>
+                <p>The full integration suite did not run because the shared test database was busy. It was not retried.</p>
+                <h3>Next action</h3>
+                <p>Decide whether to batch the Redis calls or raise the budget. I did not change the budget.</p>
+              </div>
+            </div>
+            <div class="d-scroll" data-panel="checks" data-group="sub" hidden>
+              <div class="nv"><i class="i s14 i-check-circle st-ok"></i><span>Limit returns 429 after 60 requests<span class="why">Passed: 9 of 9 cases</span></span><span class="src">Recorded by runtime</span></div>
+              <div class="nv"><i class="i s14 i-check-circle st-ok"></i><span><code>ruff check tests/export</code><span class="why">Passed: no findings</span></span><span class="src">Recorded by runtime</span></div>
+              <div class="nv"><i class="i s14 i-x-circle st-bad"></i><span><code>pytest tests/load/test_export_burst.py</code><span class="why">Failed: p95 was 410 ms, the limit is 300 ms, 3 of 3 runs</span></span><span class="src">Recorded by runtime</span></div>
+              <div class="nv"><i class="i s14 i-circle faint"></i><span>Full integration suite<span class="why">Not run: test database was busy</span></span><span class="src">Reported by worker</span></div>
+            </div>
+            <div class="d-scroll" data-panel="edits" data-group="sub" hidden>
+              <div class="res-sec"><div class="card2"><div class="card2-h"><i class="i s12 i-pencil"></i><code>tests/load/test_export_burst.py</code><span class="r tnum"><span class="add">+22</span> <span class="del">&minus;0</span></span></div><div class="diff" style="padding:0"><div class="code" style="min-width:0"><div class="dl hunk"><span>@@ -0,0 +1,22 @@</span></div><div class="dl add"><span class="n"></span><span class="n">1</span><span class="m">+</span><span class="c"><span class="tok-k">async</span> <span class="tok-k">def</span> <span class="tok-f">test_burst_stays_under_budget</span>(client):</span></div><div class="dl add"><span class="n"></span><span class="n">2</span><span class="m">+</span><span class="c">    results = <span class="tok-k">await</span> <span class="tok-f">run_clients</span>(client, count=<span class="tok-n">200</span>)</span></div><div class="dl add"><span class="n"></span><span class="n">3</span><span class="m">+</span><span class="c">    assert <span class="tok-f">p95</span>(results) &lt; <span class="tok-n">0.300</span></span></div></div></div><div class="card2-f">Recorded edit, first 3 of 22 lines<span class="r"><button class="btn btn-sm">Show all</button></span></div></div></div>
+              <div class="res-sec"><div class="card2"><div class="card2-h"><i class="i s12 i-pencil"></i><code>tests/export/test_rate_limit.py</code><span class="r tnum"><span class="add">+77</span> <span class="del">&minus;0</span></span></div><div class="card2-f">Recorded edit<span class="r"><button class="btn btn-sm">Show diff</button></span></div></div>
+                <div class="cap faint" style="margin-top:6px">Edits this worker recorded. Side effects of its commands may not appear. The whole task diff is in Changes.</div></div>
+            </div>
+            <div class="d-scroll" data-panel="attempts" data-group="sub" hidden>
+              <div class="res-sec"><div class="res-h">Attempts</div><div class="chk"><i class="i s14 i-check-circle st-ok"></i><span>Attempt 1 <span class="faint">Sonnet, Medium, 9m 44s, finished</span></span><span class="src">14:02</span></div><div class="cap faint" style="margin-top:4px">Replacement attempts and route changes appear here.</div></div>
+            </div>
+            <div class="d-scroll" data-panel="activity" data-group="sub" hidden>
+              <div class="res-sec">
+                <div class="ev"><span class="tm">13:53</span><span class="ic"><i class="i s14 i-file"></i></span><span class="tx dim">Read <code>atlas/export/limits.py</code></span><span class="rt"></span></div>
+                <div class="ev"><span class="tm">13:55</span><span class="ic"><i class="i s14 i-pencil"></i></span><span class="tx">Edited <code>tests/export/test_rate_limit.py</code></span><span class="rt tnum"><span class="add">+77</span> <span class="del">&minus;0</span></span></div>
+                <div class="ev"><span class="tm">13:57</span><span class="ic"><i class="i s14 i-terminal"></i></span><span class="tx"><code>pytest tests/export -q</code></span><span class="rt"><span class="st st-ok"><i class="i s12 i-check-circle"></i>Passed, 8s</span></span></div>
+                <div class="ev"><span class="tm">13:59</span><span class="ic"><i class="i s14 i-pencil"></i></span><span class="tx">Edited <code>tests/load/test_export_burst.py</code></span><span class="rt tnum"><span class="add">+22</span> <span class="del">&minus;0</span></span></div>
+                <div class="ev"><span class="tm">14:01</span><span class="ic"><i class="i s14 i-alert st-bad"></i></span><span class="tx"><code>pytest tests/load/test_export_burst.py</code></span><span class="rt"><span class="st st-bad"><i class="i s12 i-x-circle"></i>Failed, 41s</span></span></div>
+                <div class="ev"><span class="tm">14:02</span><span class="ic"><i class="i s14 i-check-circle st-ok"></i></span><span class="tx">Submitted its result and report.</span><span class="rt"></span></div>
+                <div style="margin-top:8px"><a class="lnk cap" href="#">Show all 58 events</a></div>
+              </div>
+            </div>
+            <div class="d-dock"><button class="btn btn-line" style="width:100%" title="Finished workers cannot be messaged directly"><i class="i s14 i-message"></i>Ask Cortex about this worker</button></div>
+          </div>
+          <div class="d-panel" data-panel="cortex" data-group="worker" hidden>
+            <div class="d-h"><div class="d-title">Cortex<span class="st st-ok"><i class="i s12 i-check-circle"></i>Finished</span><span class="act"><button class="btn btn-line btn-sm">Open report</button></span></div><div class="d-goal">Coordinator for this task.</div><div class="d-grid"><span><span class="l">Route</span>Opus, High</span><span><span class="l">Elapsed</span>41m</span><span><span class="l">Usage</span>88k</span></div></div>
+            <div class="d-scroll"><div class="res-sec"><div class="res-h">Result</div>Ran plan r1 to the end and published Result v2.</div></div>
+            <div class="d-dock"><button class="btn btn-line" style="width:100%" title="Finished workers cannot be messaged directly"><i class="i s14 i-message"></i>Ask Cortex about this worker</button></div>
+          </div>
+          <div class="d-panel" data-panel="explorer" data-group="worker" hidden>
+            <div class="d-h"><div class="d-title">Code Explorer<span class="st st-ok"><i class="i s12 i-check-circle"></i>Finished</span><span class="act"><button class="btn btn-line btn-sm">Open report</button></span></div><div class="d-goal">Find the export entry points.</div><div class="d-grid"><span><span class="l">Route</span>Sonnet, Low</span><span><span class="l">Elapsed</span>3m 02s</span><span><span class="l">Usage</span>14k</span></div></div>
+            <div class="d-scroll"><div class="res-sec"><div class="res-h">Result</div>Export traffic enters through one handler in <code>atlas/export/api.py</code>.</div><div class="res-sec"><div class="res-h">Checks</div><div class="cap muted">No checks were run. This worker only read code.</div></div></div>
+            <div class="d-dock"><button class="btn btn-line" style="width:100%" title="Finished workers cannot be messaged directly"><i class="i s14 i-message"></i>Ask Cortex about this worker</button></div>
+          </div>
+          <div class="d-panel" data-panel="backend" data-group="worker" hidden>
+            <div class="d-h"><div class="d-title">Backend Dev<span class="st st-ok"><i class="i s12 i-check-circle"></i>Finished</span><span class="act"><button class="btn btn-line btn-sm">Open report</button></span></div><div class="d-goal">Add the Redis limiter.</div><div class="d-grid"><span><span class="l">Route</span>Opus, High</span><span><span class="l">Attempts</span>2</span><span><span class="l">Elapsed</span>18m</span><span><span class="l">Usage</span>71k</span></div></div>
+            <div class="d-scroll"><div class="res-sec"><div class="res-h">Result</div>Added a sliding window limiter in Redis and wired it into the export handler.</div><div class="res-sec"><div class="res-h">Attempts</div><div class="chk"><i class="i s14 i-x-circle st-bad"></i><span>Attempt 1 <span class="faint">interrupted: route unavailable</span></span><span class="src">13:14</span></div><div class="chk"><i class="i s14 i-check-circle st-ok"></i><span>Attempt 2 <span class="faint">finished</span></span><span class="src">13:33</span></div></div></div>
+            <div class="d-dock"><button class="btn btn-line" style="width:100%" title="Finished workers cannot be messaged directly"><i class="i s14 i-message"></i>Ask Cortex about this worker</button></div>
+          </div>
+          <div class="d-panel" data-panel="docs" data-group="worker" hidden>
+            <div class="d-h"><div class="d-title">Docs Writer<span class="st st-idle"><i class="i s12 i-x"></i>Cancelled</span><span class="act"><button class="btn btn-line btn-sm">Open report</button></span></div><div class="d-goal">Update the API reference.</div><div class="d-grid"><span><span class="l">Route</span>Sonnet, Low</span><span><span class="l">Elapsed</span>41s</span><span><span class="l">Usage</span>2k</span></div></div>
+            <div class="d-scroll"><div class="res-sec"><div class="res-h">Why it stopped</div>Cancelled by Cortex. The reference is generated, so no edit was needed.</div></div>
+            <div class="d-dock"><button class="btn btn-line" style="width:100%" title="Finished workers cannot be messaged directly"><i class="i s14 i-message"></i>Ask Cortex about this worker</button></div>
+          </div>
+          <div class="d-panel" data-panel="reviewer" data-group="worker" hidden>
+            <div class="d-h"><div class="d-title">Security Reviewer<span class="st st-ok"><i class="i s12 i-check-circle"></i>Approved</span><span class="act"><button class="btn btn-line btn-sm">Open report</button></span></div><div class="d-goal">Independent review of the finished change.</div><div class="d-grid"><span><span class="l">Route</span>Opus, High</span><span><span class="l">Elapsed</span>6m 20s</span><span><span class="l">Usage</span>29k</span></div></div>
+            <div class="d-scroll"><div class="res-sec"><div class="res-h">Verdict</div>No blocking findings. One remark: the limit key should not include the raw API token.</div></div>
+            <div class="d-dock"><button class="btn btn-line" style="width:100%" title="Finished workers cannot be messaged directly"><i class="i s14 i-message"></i>Ask Cortex about this worker</button></div>
+          </div>
+          <div class="d-panel" data-panel="verify" data-group="worker" hidden>
+            <div class="d-h"><div class="d-title">Runtime verification<span class="st st-warn"><i class="i s12 i-alert"></i>Not clean</span></div><div class="d-goal">Checks run by Cortex itself after review. This is not a worker, so it cannot be messaged.</div></div>
+            <div class="d-scroll"><div class="res-sec"><div class="res-h">Checks</div><div class="chk"><i class="i s14 i-check-circle st-ok"></i><span><code>pytest tests/export -q</code></span><span class="src">Recorded by runtime</span></div><div class="chk"><i class="i s14 i-check-circle st-ok"></i><span><code>ruff check .</code></span><span class="src">Recorded by runtime</span></div><div class="chk"><i class="i s14 i-check-circle st-ok"></i><span><code>mypy atlas</code></span><span class="src">Recorded by runtime</span></div><div class="chk"><i class="i s14 i-check-circle st-ok"></i><span>Limit returns 429 after 60 requests</span><span class="src">Recorded by runtime</span></div><div class="chk"><i class="i s14 i-check-circle st-ok"></i><span>Independent review</span><span class="src">Recorded by runtime</span></div><div class="chk"><i class="i s14 i-x-circle st-bad"></i><span><code>pytest tests/load/test_export_burst.py</code></span><span class="src">Recorded by runtime</span></div><div class="chk"><i class="i s14 i-circle faint"></i><span>Full integration suite</span><span class="src">Not run</span></div><div class="chk"><i class="i s14 i-circle faint"></i><span>OpenAPI contract check</span><span class="src">Not run</span></div><div class="chk"><i class="i s14 i-help faint"></i><span>Redis failover keeps the counters</span><span class="src">Unverified</span></div></div></div>
+          </div>
+        </section>
+      </div>
+    </div>
+    <section class="terminal" aria-label="Terminal">
+      <div class="term-h">
+        <span class="term-tab" aria-selected="true"><i class="i s12 i-terminal"></i>bash</span>
+        <button class="ib" style="width:24px;height:24px" title="New shell in this checkout"><i class="i s14 i-plus"></i></button>
+        <span class="mono faint" style="margin-left:6px">~/work/atlas-api/.worktrees/export-rate-limit</span>
+      </div>
+      <div class="term-body"><b>cw/export-rate-limit</b> $ git log --oneline -2
+7c1e0b2 Add sliding window limiter to export
+a03be17 Add session cleanup job
+<b>cw/export-rate-limit</b> $ </div>
+    </section>
+  </main>
+<aside class="inspector" aria-label="Inspector">
+    <div class="ins-sec">
+      <div class="ins-h"><span>State</span></div>
+      <div class="st st-idle" style="margin-bottom:6px"><i class="i s14 i-eye"></i>Review, Result v2</div><div class="cap muted">Cortex finished. Accepting v2 is your decision.</div>
+    </div>
+    <div class="ins-sec">
+      <div class="ins-h"><span>Worktree</span><button class="btn btn-sm">Open</button></div>
+      <dl class="kv"><dt>Path</dt><dd class="mono">.worktrees/export-rate-limit</dd><dt>Branch</dt><dd class="mono">cw/export-rate-limit</dd><dt>Base</dt><dd class="mono">main, 1 behind</dd><dt>Merge into</dt><dd class="mono">main</dd><dt>Uncommitted</dt><dd>None</dd></dl>
+    </div>
+    <div class="ins-sec">
+      <div class="ins-h"><span>Checks</span></div>
+      <div class="chk-sum"><span class="st st-ok"><i class="i s12 i-check-circle"></i>5 passed</span><span class="st st-bad"><i class="i s12 i-x-circle"></i>1 failed</span><span class="st st-idle"><i class="i s12 i-circle"></i>2 not run</span><span class="st st-idle"><i class="i s12 i-help"></i>1 unverified</span></div>
+    </div>
+    <div class="ins-sec">
+      <div class="ins-h"><span>Workers</span><span>4 finished, 1 cancelled</span></div>
+      <div class="wins"><i class="i s14 i-check-circle st-ok"></i><span class="trunc">Code Explorer</span><span class="st st-ok">Finished</span></div><div class="wins"><i class="i s14 i-check-circle st-ok"></i><span class="trunc">Backend Dev</span><span class="st st-ok">Finished</span></div><div class="wins"><i class="i s14 i-x-circle st-bad"></i><span class="trunc">Test Author</span><span class="st st-bad">1 check failed</span></div><div class="wins"><i class="i s14 i-x faint"></i><span class="trunc">Docs Writer</span><span class="st st-idle">Cancelled</span></div><div class="wins"><i class="i s14 i-check-circle st-ok"></i><span class="trunc">Security Reviewer</span><span class="st st-ok">Approved</span></div>
+    </div>
+    <div class="ins-sec">
+      <div class="ins-h"><span>Usage</span></div>
+      <dl class="kv"><dt>Context</dt><dd>59%, 118k of 200k</dd><dt>Task tokens</dt><dd>241k</dd><dt>Plan</dt><dd>Unavailable</dd></dl>
+    </div>
+  </aside>
+</div>
+
+<div popover id="m-usage" class="pop-usage">
+  <div class="mi-h">Engine limits on This machine</div>
+  <div class="u-eng">
+    <div class="u-h"><span class="w500">Claude</span><span class="st st-ok"><i class="i s12 i-check-circle"></i>Connected</span></div>
+    <div class="u-win"><span>This week</span><span class="bar"><i style="width:62%"></i></span><span class="v">62% used</span><span class="rs">Resets Mon 09:00</span></div>
+    <div class="u-src">Observed 13:41, reported by the provider</div>
+  </div>
+  <div class="mi-sep"></div>
+  <div class="u-eng">
+    <div class="u-h"><span class="w500">Codex</span><span class="st st-ok"><i class="i s12 i-check-circle"></i>Connected</span></div>
+    <div class="u-win"><span>This week</span><span class="bar"><i style="width:18%"></i></span><span class="v">18% used</span><span class="rs">Resets Thu 02:00</span></div>
+    <div class="u-src">Observed 13:41, reported by the provider</div>
+  </div>
+  <div class="mi-sep"></div>
+  <a class="mi" href="settings.html?section=connections"><i class="i i-gauge"></i><span class="grow">All limits and windows</span></a>
+</div>
+<div popover id="m-machine" class="pop-tl">
+  <div class="mi-h">Machines</div>
+  <a class="mi" href="home.html"><i class="i i-laptop"></i><span class="grow">This machine<span class="sub">Local, connected</span></span><i class="i s14 i-check"></i></a>
+  <a class="mi" href="settings.html?section=machines"><i class="i i-server"></i><span class="grow">GPU box<span class="sub">Remote, connected through the server connector</span></span></a>
+  <a class="mi" href="settings.html?section=machines"><i class="i i-server"></i><span class="grow">Build server<span class="sub">Remote, offline, last seen 13:47</span></span></a>
+  <div class="mi-sep"></div>
+  <a class="mi" href="settings.html?section=machines&amp;dialog=add-machine"><i class="i i-plus"></i>Add remote machine&hellip;</a>
+  <a class="mi" href="settings.html?section=overview"><i class="i i-settings"></i>Machine settings</a>
+</div>
+<div popover id="m-new" class="pop-right">
+  <a class="mi" href="new-task.html"><i class="i i-plus"></i><span class="grow">New task</span><span class="kbd">Ctrl+N</span></a>
+  <a class="mi" href="new-task.html?kind=sprint"><i class="i i-layers"></i><span class="grow">New sprint</span><span class="kbd">Ctrl+Shift+N</span></a>
+</div>
+<div popover id="m-diff-scope" class="pop-anchor" style="width:240px">
+  <button class="mi">Last turn</button><button class="mi">Uncommitted</button><button class="mi">Branch against base</button>
+  <button class="mi"><span class="grow">Result v2<span class="sub">The exact version you accept</span></span><i class="i s14 i-check"></i></button>
+  <button class="mi">Commit&hellip;</button>
+</div>
+<div popover id="m-model" class="pop-up" style="width:280px">
+  <div class="mi-h">Coordinator model for this task</div>
+  <button class="mi"><span class="grow">Opus<span class="sub">claude-agent-acp</span></span><i class="i s14 i-check"></i></button>
+  <button class="mi"><span class="grow">Sonnet<span class="sub">claude-agent-acp</span></span></button>
+  <button class="mi"><span class="grow">GPT Codex<span class="sub">codex-acp</span></span></button>
+  <div class="mi" aria-disabled="true"><span class="grow">Local model<span class="sub">Unavailable: no engine on this machine</span></span></div>
+</div>
+<div popover id="m-effort" class="pop-up">
+  <div class="mi-h">Effort</div>
+  <button class="mi"><span class="grow">Low</span></button>
+  <button class="mi"><span class="grow">Medium</span></button>
+  <button class="mi"><span class="grow">High</span><i class="i s14 i-check"></i></button>
+  <div class="mi" aria-disabled="true"><span class="grow">Max<span class="sub">Unavailable on this route</span></span></div>
+</div>
+<div popover id="m-mode" class="pop-up" style="width:300px">
+  <div class="mi-h">Access mode</div>
+  <button class="mi"><span class="grow">Development<span class="sub">Writes in the project without asking</span></span><i class="i s14 i-check"></i></button>
+  <button class="mi"><span class="grow">Guarded<span class="sub">Asks before anything outside the scope</span></span></button>
+  <button class="mi"><span class="grow">Auto<span class="sub">Cortex answers routine permission cards</span></span></button>
+</div>
+<div popover id="m-lang" class="pop-up">
+  <div class="mi-h">Cortex message language</div>
+  <button class="mi"><span class="grow">Auto</span><i class="i s14 i-check"></i></button>
+  <button class="mi"><span class="grow">English</span></button>
+  <button class="mi"><span class="grow">Russian</span></button>
+</div>
+
+<script>(function(){var r=document.documentElement,q=new URLSearchParams(location.search);function m(){document.querySelectorAll('[data-set-theme]').forEach(function(b){var on=b.dataset.setTheme===r.dataset.themeChoice;b.setAttribute('aria-pressed',on);b.setAttribute('aria-current',on)})}function show(g,v){document.querySelectorAll('[data-show][data-group="'+g+'"]').forEach(function(x){if(x.hasAttribute('aria-selected'))x.setAttribute('aria-selected',x.dataset.show===v);if(x.hasAttribute('aria-current'))x.setAttribute('aria-current',x.dataset.show===v);if(x.type==='radio')x.checked=x.dataset.show===v});document.querySelectorAll('[data-panel][data-group="'+g+'"]').forEach(function(p){p.hidden=p.dataset.panel.split(' ').indexOf(v)<0});document.body.dataset[g]=v}function openD(id){var d=document.getElementById(id);if(d&&!d.open)d.showModal()}document.addEventListener('click',function(e){var b=e.target.closest('[data-set-theme]');if(b){var t=b.dataset.setTheme;r.dataset.themeChoice=t;r.dataset.theme=t==='system'?(matchMedia('(prefers-color-scheme: light)').matches?'light':'dark'):t;try{localStorage.setItem('cw-theme',t)}catch(x){}m();return}var o=e.target.closest('[data-dialog]');if(o){e.preventDefault();openD(o.dataset.dialog);if(o.dataset.show)show(o.dataset.group,o.dataset.show);return}var c=e.target.closest('[data-close]');if(c){c.closest('dialog').close();return}var s=e.target.closest('[data-show]');if(s){show(s.dataset.group,s.dataset.show);return}var a=e.target.closest('a[href$=".html"],a[href*=".html?"]');if(a){e.preventDefault();var u=new URL(a.href);u.searchParams.set('theme',r.dataset.themeChoice);location.href=u.href}});document.addEventListener('change',function(e){var f=e.target.closest('[data-follow-toggle]');if(f)document.body.dataset.follow=f.checked?'on':'off'});var gs={};document.querySelectorAll('[data-group]').forEach(function(x){gs[x.dataset.group]=1});Object.keys(gs).forEach(function(g){if(q.get(g))show(g,q.get(g))});if(q.get('follow')==='off'){document.body.dataset.follow='off';var f=document.querySelector('[data-follow-toggle]');if(f)f.checked=false}if(q.get('dialog')){openD('dlg-'+q.get('dialog'));if(document.activeElement)document.activeElement.blur()}m()})()</script>
+</body>
+</html>

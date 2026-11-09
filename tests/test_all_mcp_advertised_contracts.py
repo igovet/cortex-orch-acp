@@ -98,6 +98,11 @@ def test_every_advertised_tool_uses_its_current_validator_and_read_classificatio
             validator(bad)
         if name in READ_NAMES - {"project_git"}:
             assert "request_key" not in schema["properties"], name
+        elif name == "check_preflight":
+            # Process-backed availability observation: it enforces authority,
+            # but publishes no result or mutation needing delivery-key replay.
+            assert set(schema["properties"]) == {"argv"}
+            assert schema["required"] == ["argv"]
         elif name != "synthesis_submit":
             assert "request_key" in schema["properties"], name
 

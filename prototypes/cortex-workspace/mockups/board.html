@@ -1,0 +1,523 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<title>atlas-api board - Cortex Workspace mockup</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script>(function(){var r=document.documentElement,t=new URLSearchParams(location.search).get('theme');try{t=t||localStorage.getItem('cw-theme')}catch(e){}t=t||'system';r.dataset.themeChoice=t;r.dataset.theme=t==='system'?(matchMedia('(prefers-color-scheme: light)').matches?'light':'dark'):t})()</script>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<input class="pt" type="checkbox" id="pt-sidebar" aria-label="Hide sidebar">
+<input class="pt" type="checkbox" id="pt-inspector" aria-label="Toggle inspector">
+<input class="pt" type="checkbox" id="pt-terminal" aria-label="Toggle terminal">
+
+<header class="titlebar">
+  <label class="ib tb-toggle" for="pt-sidebar" title="Sidebar (Ctrl+B)"><i class="i i-panel-left"></i></label>
+  <div class="tb-side">
+    <button class="machine" popovertarget="m-machine" title="Switch machine">
+      <i class="i i-laptop"></i><span class="trunc">This machine</span>
+      <span class="st st-ok" style="margin-left:auto">Connected</span><i class="i s12 i-chevrons-v faint"></i>
+    </button>
+  </div>
+  <div class="tb-main">
+    <a class="ib" href="home.html" title="Back (Alt+Left)"><i class="i i-arrow-left"></i></a>
+    <button class="ib" title="Forward (Alt+Right)" aria-disabled="true"><i class="i i-arrow-right"></i></button>
+    <div class="crumbs"><span class="cur">atlas-api</span></div>
+    <span class="mono faint trunc" style="margin-left:4px">~/work/atlas-api</span>
+    <button class="chip" title="Default branch of this repository"><i class="i s12 i-branch"></i><span class="mono">main</span></button>
+    <span class="grow"></span>
+    <div class="tb-actions">
+      <span class="split">
+        <a class="btn btn-primary" href="new-task.html" title="New task (Ctrl+N)"><i class="i s14 i-plus"></i>New task</a>
+        <button class="btn btn-primary" popovertarget="m-new" title="New task or sprint"><i class="i s14 i-chevron-down"></i></button>
+      </span>
+      <button class="ib" popovertarget="m-project" title="Project actions"><i class="i i-more"></i></button>
+    </div>
+    <div class="tb-fixed">
+      <a class="mock-chip" href="index.html" title="Static mockup. Back to the screen list">Mock</a>
+      <label class="ib" for="pt-terminal" title="Terminal (Ctrl+J)"><i class="i i-panel-bottom"></i></label>
+      <label class="ib" for="pt-inspector" title="Inspector (Ctrl+Alt+B)"><i class="i i-panel-right"></i></label>
+    </div>
+    <div class="win" aria-hidden="true">
+      <button tabindex="-1"><i class="i s14 i-minus"></i></button>
+      <button tabindex="-1"><i class="i s12 i-square"></i></button>
+      <button tabindex="-1"><i class="i s14 i-x"></i></button>
+    </div>
+  </div>
+</header>
+
+<div class="workspace">
+  <nav class="sidebar" aria-label="Workspace">
+    <div class="sb-top">
+      <a class="nav" href="new-task.html"><i class="i i-plus"></i>New task<span class="kbd">Ctrl+N</span></a>
+      <a class="nav" href="#"><i class="i i-inbox"></i>Inbox<span class="count">4</span></a>
+      <a class="nav" href="#"><i class="i i-search"></i>Search<span class="kbd">Ctrl+K</span></a>
+      <a class="nav" href="home.html"><i class="i i-home"></i>Home</a>
+      <a class="nav" href="archive.html"><i class="i i-archive"></i>Archive<span class="count">18</span></a>
+    </div>
+    <div class="sb-scroll">
+      <div class="sb-h"><span>Pinned</span></div>
+      <a class="task-row" style="padding-left:8px" href="task.html"><i class="i s14 i-pin faint"></i><span class="trunc">Fix token refresh race</span></a>
+      <div class="sb-h"><span>Projects</span><button class="ib" style="width:22px;height:22px" title="Sort projects"><i class="i s14 i-chevrons-v"></i></button></div>
+      <a class="proj" href="board.html" aria-current="page"><span class="mono-tile t1">A</span><span class="trunc">atlas-api</span><span class="sig st-bad">Conflict</span></a>
+      <div class="tasks">
+        <a class="task-row" href="task.html"><i class="i s14 i-question st-warn"></i><span class="trunc">Fix token refresh race</span><span class="sig">Question</span></a>
+        <a class="task-row" href="board.html?scope=sprint"><i class="i s14 i-layers faint"></i><span class="trunc">Sprint: Usage billing</span><span class="sig tnum">2/5</span></a>
+        <a class="task-row" href="board.html"><i class="i s14 i-loader st-run"></i><span class="trunc">Meter API calls per workspace</span><span class="sig">Working</span></a>
+        <a class="task-row" href="result.html"><i class="i s14 i-eye faint"></i><span class="trunc">Rate-limit the export endpoint</span><span class="sig">Review</span></a>
+        <a class="task-row all" href="board.html">All 15</a>
+      </div>
+      <a class="proj" href="#"><span class="mono-tile t2">B</span><span class="trunc">billing-service</span><span class="sig st-warn">Needs you 1</span></a>
+      <a class="proj" href="#"><span class="mono-tile t3">N</span><span class="trunc">northwind-web</span><span class="sig st-warn">Needs you 1</span></a>
+      <a class="proj" href="#"><span class="mono-tile t4">M</span><span class="trunc">mobile-app</span><span class="sig muted">In review 1</span></a>
+      <a class="proj" href="#"><span class="mono-tile t5">I</span><span class="trunc">infra-terraform</span></a>
+      <a class="proj" href="#"><span class="mono-tile t6">D</span><span class="trunc">docs-site</span></a>
+    </div>
+    <button class="sb-usage" popovertarget="m-usage" title="Engine limits used this week. Snapshot 13:41" aria-label="Engine limits: Claude 62%, Codex 18% used this week">
+      <span class="um"><span>Claude</span><span class="bar"><i style="width:62%"></i></span><span class="tnum">62%</span></span>
+      <span class="um"><span>Codex</span><span class="bar"><i style="width:18%"></i></span><span class="tnum">18%</span></span>
+    </button>
+    <div class="sb-foot">
+      <button class="btn btn-sm" title="Add project"><i class="i s14 i-folder-plus"></i>Add project</button>
+      <span class="grow"></span>
+      <a class="ib" href="settings.html" title="Settings (Ctrl+,)"><i class="i i-settings"></i></a>
+      <button class="ib" title="Help and shortcuts (?)"><i class="i i-help"></i></button>
+    </div>
+  </nav>
+
+  <main class="main">
+    <div class="pstrip">
+      <button class="scope-btn" popovertarget="m-scope" title="Choose which work the board shows">
+        <i class="i s14 i-layers faint"></i>
+        <span data-panel="all" data-group="scope">All work</span>
+        <span data-panel="standalone" data-group="scope" hidden>Standalone</span>
+        <span data-panel="sprint" data-group="scope" hidden>Sprint: Usage billing</span>
+        <i class="i s14 i-chevron-down"></i>
+      </button>
+      <div class="seg" role="tablist" aria-label="View">
+        <button role="tab" data-show="board" data-group="view" aria-selected="true"><i class="i s14 i-board"></i>Board</button>
+        <button role="tab" data-show="list" data-group="view" aria-selected="false"><i class="i s14 i-list"></i>List</button>
+      </div>
+      <div class="ptabs" role="tablist" aria-label="Project areas">
+        <a class="ptab" role="tab" href="code.html" aria-selected="false">Code</a>
+        <a class="ptab" role="tab" href="git.html" aria-selected="false">Git</a>
+        <a class="ptab" role="tab" href="git.html?right=branches" aria-selected="false">Worktrees</a>
+        <button class="ptab" role="tab" data-show="knowledge" data-group="view" aria-selected="false">Knowledge and skills</button>
+        <button class="ptab" role="tab" data-show="settings" data-group="view" aria-selected="false">Settings</button>
+      </div>
+      <span class="grow"></span>
+      <button class="ib" title="Filter (/)"><i class="i i-search"></i></button>
+    </div>
+
+    <div class="main-body" data-panel="board" data-group="view">
+
+      <!-- All work -->
+      <div class="board-wrap" data-panel="all" data-group="scope">
+        <section class="col" aria-label="Needs you">
+          <div class="col-h st-warn"><i class="i s14 i-question"></i>Needs you<span class="n">2</span></div>
+          <div class="col-b">
+            <article class="card need-you" aria-current="true">
+              <a class="card-link" href="task.html">
+                <div class="card-m"><div class="card-t"><span>Fix token refresh race</span><span class="eng" title="Claude engine">Cl</span></div>
+                  <div class="card-b"><i class="i s12 i-branch"></i><span class="mono trunc">cw/fix-token-refresh</span><span class="type">Worktree</span></div>
+                <div class="card-s"><span class="st st-warn"><span>Asks: concurrency level?</span></span></div></div>
+              </a>
+              <div class="card-f"><span class="age">3m</span><span class="card-a"><a class="btn btn-primary btn-sm" href="task.html">Answer</a><button class="ib" title="Task actions"><i class="i s14 i-more"></i></button></span></div>
+            </article>
+            <article class="card bad">
+              <a class="card-link" href="conflict.html">
+                <div class="card-m"><div class="card-t"><span>Rebase usage rollups onto main</span><span class="eng" title="Codex engine">Cx</span></div>
+                  <div class="card-b"><i class="i s12 i-branch"></i><span class="mono trunc">cw/usage-rollups</span><span class="type">Worktree</span></div>
+                <div class="card-s"><span class="st st-bad"><i class="i s12 i-alert"></i><span>Conflict with main</span></span></div></div>
+              </a>
+              <div class="card-f"><span class="age">24m</span><span class="card-a"><a class="btn btn-primary btn-sm" href="conflict.html">Resolve</a><button class="ib" title="Task actions"><i class="i s14 i-more"></i></button></span></div>
+            </article>
+          </div>
+        </section>
+
+        <section class="col" aria-label="Not started">
+          <div class="col-h"><i class="i s14 i-circle faint"></i>Not started<span class="n">4</span></div>
+          <div class="col-b">
+            <button class="quick"><i class="i s14 i-plus"></i>Describe the task&hellip;</button>
+            <article class="card">
+              <a class="card-link" href="#">
+                <div class="card-m"><div class="card-t"><span>Add idempotency keys to webhooks</span></div>
+                  <div class="card-b"><i class="i s12 i-branch"></i><span class="mono trunc">cw/webhook-idempotency</span><span class="type">Worktree</span></div>
+                <div class="card-s"><span class="st st-idle"><span>Draft, ready to start</span></span></div></div>
+              </a>
+              <div class="card-f"><span class="age">2h</span><span class="card-a"><button class="btn btn-primary btn-sm">Start</button><button class="ib" title="Task actions"><i class="i s14 i-more"></i></button></span></div>
+            </article>
+            <article class="card">
+              <a class="card-link" href="board.html?scope=sprint">
+                <div class="card-m"><div class="card-t"><span>Email a monthly invoice</span></div>
+                  <div class="card-b"><i class="i s12 i-branch"></i><span class="mono trunc">cw/invoice-email</span><span class="type">Worktree</span></div>
+                <div class="card-s"><span class="st st-idle"><i class="i s12 i-layers"></i><span>Next in Usage billing</span></span></div></div>
+              </a>
+              <div class="card-f"><span class="age">1h</span><span class="card-a"><button class="ib" title="Task actions"><i class="i s14 i-more"></i></button></span></div>
+            </article>
+            <article class="card">
+              <a class="card-link" href="board.html?scope=sprint">
+                <div class="card-m"><div class="card-t"><span>Chart usage on the billing page</span></div>
+                  <div class="card-b"><i class="i s12 i-folder"></i><span class="mono trunc">main</span><span class="type">Main checkout</span></div>
+                <div class="card-s"><span class="st st-idle"><i class="i s12 i-hourglass"></i><span>Waits for Meter API calls</span></span></div></div>
+              </a>
+              <div class="card-f"><span class="age">1h</span><span class="card-a"><button class="ib" title="Task actions"><i class="i s14 i-more"></i></button></span></div>
+            </article>
+            <article class="card">
+              <a class="card-link" href="board.html?scope=sprint">
+                <div class="card-m"><div class="card-t"><span>Add usage limits to plan settings</span></div>
+                  <div class="card-b"><i class="i s12 i-branch"></i><span class="mono trunc">cw/plan-limits</span><span class="type">Worktree</span></div>
+                <div class="card-s"><span class="st st-idle"><i class="i s12 i-layers"></i><span>Queued in Usage billing</span></span></div></div>
+              </a>
+              <div class="card-f"><span class="age">1h</span><span class="card-a"><button class="ib" title="Task actions"><i class="i s14 i-more"></i></button></span></div>
+            </article>
+          </div>
+        </section>
+
+        <section class="col" aria-label="Working">
+          <div class="col-h st-run"><i class="i s14 i-loader"></i>Working<span class="n">3</span></div>
+          <div class="col-b">
+            <article class="card">
+              <a class="card-link" href="task.html">
+                <div class="card-m"><div class="card-t"><span>Meter API calls per workspace</span><span class="eng" title="Claude engine">Cl</span></div>
+                  <div class="card-b"><i class="i s12 i-branch"></i><span class="mono trunc">cw/meter-api-calls</span><span class="type">Worktree</span></div>
+                <div class="card-s"><span class="st st-run"><i class="i s12 i-loader spin"></i><span>Executing, 2 workers</span></span></div></div>
+              </a>
+              <div class="card-f"><span class="age">6m</span><span class="card-a"><a class="btn btn-line btn-sm" href="stop.html?stop=stopping">Stop</a><button class="ib" title="Task actions"><i class="i s14 i-more"></i></button></span></div>
+            </article>
+            <article class="card">
+              <a class="card-link" href="#">
+                <div class="card-m"><div class="card-t"><span>Bump the OpenAPI schema to 3.1</span><span class="eng" title="Codex engine">Cx</span></div>
+                  <div class="card-b"><i class="i s12 i-folder"></i><span class="mono trunc">main</span><span class="type">Main checkout</span></div>
+                <div class="card-s"><span class="st st-run"><i class="i s12 i-loader spin"></i><span>Independent review</span></span></div></div>
+              </a>
+              <div class="card-f"><span class="age">2m</span><span class="card-a"><button class="ib" title="Task actions"><i class="i s14 i-more"></i></button></span></div>
+            </article>
+            <article class="card">
+              <a class="card-link" href="stop.html">
+                <div class="card-m"><div class="card-t"><span>Clean up stale feature flags</span><span class="eng" title="Claude engine">Cl</span></div>
+                  <div class="card-b"><i class="i s12 i-branch"></i><span class="mono trunc">cw/flag-cleanup</span><span class="type">Worktree</span></div>
+                <div class="card-s"><span class="st st-idle"><i class="i s12 i-pause"></i><span>Paused by you, 14:12</span></span></div></div>
+              </a>
+              <div class="card-f"><span class="age">48m</span><span class="card-a"><a class="btn btn-primary btn-sm" href="stop.html">Resume</a><button class="ib" title="Task actions"><i class="i s14 i-more"></i></button></span></div>
+            </article>
+          </div>
+        </section>
+
+        <section class="col" aria-label="Review">
+          <div class="col-h"><i class="i s14 i-eye faint"></i>Review<span class="n">2</span></div>
+          <div class="col-b">
+            <article class="card">
+              <a class="card-link" href="result.html">
+                <div class="card-m"><div class="card-t"><span>Rate-limit the export endpoint</span><span class="eng" title="Claude engine">Cl</span></div>
+                  <div class="card-b"><i class="i s12 i-branch"></i><span class="mono trunc">cw/export-rate-limit</span><span class="type">Worktree</span></div>
+                <div class="card-s"><span class="st st-idle"><span>Checks 5/9</span><span class="tnum"><span class="add">+120</span> <span class="del">&minus;14</span></span></span></div></div>
+              </a>
+              <div class="card-f"><span class="age">14m</span><span class="card-a"><a class="btn btn-primary btn-sm" href="result.html">Review</a><button class="ib" title="Task actions"><i class="i s14 i-more"></i></button></span></div>
+            </article>
+            <article class="card">
+              <a class="card-link" href="#">
+                <div class="card-m"><div class="card-t"><span>Cache tenant lookups</span><span class="eng" title="Codex engine">Cx</span></div>
+                  <div class="card-b"><i class="i s12 i-folder"></i><span class="mono trunc">main</span><span class="type">Main checkout</span></div>
+                <div class="card-s"><span class="st st-idle"><span>Checks 3/3</span><span class="tnum"><span class="add">+36</span> <span class="del">&minus;8</span></span></span></div></div>
+              </a>
+              <div class="card-f"><span class="age">1h</span><span class="card-a"><button class="btn btn-primary btn-sm">Review</button><button class="ib" title="Task actions"><i class="i s14 i-more"></i></button></span></div>
+            </article>
+          </div>
+        </section>
+
+        <section class="col" aria-label="Ready to merge">
+          <div class="col-h st-ok"><i class="i s14 i-merge"></i>Ready to merge<span class="n">1</span></div>
+          <div class="col-b">
+            <article class="card">
+              <a class="card-link" href="merge.html">
+                <div class="card-m"><div class="card-t"><span>Add the usage events table</span><span class="eng" title="Codex engine">Cx</span></div>
+                  <div class="card-b"><i class="i s12 i-branch"></i><span class="mono trunc">cw/usage-events</span><span class="type">Worktree</span></div>
+                <div class="card-s"><span class="st st-ok"><span>Accepted v1, 3 behind</span></span></div></div>
+              </a>
+              <div class="card-f"><span class="age">8m</span><span class="card-a"><a class="btn btn-primary btn-sm" href="merge.html?dialog=merge">Merge&hellip;</a><button class="ib" title="Task actions"><i class="i s14 i-more"></i></button></span></div>
+            </article>
+          </div>
+        </section>
+
+        <section class="col" aria-label="Done">
+          <div class="col-h"><i class="i s14 i-check-circle faint"></i>Done<span class="n">3</span></div>
+          <div class="col-b">
+            <article class="card">
+              <a class="card-link" href="#">
+                <div class="card-m"><div class="card-t"><span>Retry failed webhooks</span></div>
+                  <div class="card-b"><i class="i s12 i-branch"></i><span class="mono trunc">cw/webhook-retry</span><span class="type">Worktree</span></div>
+                <div class="card-s"><span class="st st-merge"><i class="i s12 i-merge"></i><span>Merged, 14:30</span></span></div></div>
+              </a>
+              <div class="card-f"><span class="age">Today</span><span class="card-a"><button class="ib" title="Task actions"><i class="i s14 i-more"></i></button></span></div>
+            </article>
+            <article class="card">
+              <a class="card-link" href="#">
+                <div class="card-m"><div class="card-t"><span>Spike: queue backpressure</span></div>
+                  <div class="card-b"><i class="i s12 i-branch"></i><span class="mono trunc">cw/backpressure-spike</span><span class="type">Worktree</span></div>
+                <div class="card-s"><span class="st st-idle"><i class="i s12 i-circle"></i><span>Closed as is, not verified</span></span></div></div>
+              </a>
+              <div class="card-f"><span class="age">2d</span><span class="card-a"><button class="ib" title="Task actions"><i class="i s14 i-more"></i></button></span></div>
+            </article>
+            <article class="card">
+              <a class="card-link" href="#">
+                <div class="card-m"><div class="card-t"><span>Migrate the session store</span></div>
+                  <div class="card-b"><i class="i s12 i-folder"></i><span class="mono trunc">main</span><span class="type">Main checkout</span></div>
+                <div class="card-s"><span class="st st-bad"><i class="i s12 i-x-circle"></i><span>Failed: answer not certified</span></span></div></div>
+              </a>
+              <div class="card-f"><span class="age">3d</span><span class="card-a"><button class="ib" title="Task actions"><i class="i s14 i-more"></i></button></span></div>
+            </article>
+          </div>
+        </section>
+
+        <a class="col archive" href="archive.html" title="Open Archive"><i class="i s14 i-archive"></i><span class="v">Archive 18</span></a>
+      </div>
+
+      <!-- Standalone scope -->
+      <div class="note-panel" data-panel="standalone" data-group="scope" hidden>
+        <span class="w500">Standalone tasks</span>
+        <span>The same board without sprint tasks.</span>
+      </div>
+
+      <!-- Sprint scope -->
+      <div class="main-body" data-panel="sprint" data-group="scope" hidden>
+        <div class="sprint-bar">
+          <div class="seg" role="group" aria-label="Sprint run mode">
+            <button aria-current="false" title="You start each task">Manual</button>
+            <button aria-current="true" title="One task at a time in dependency order">Automatic</button>
+          </div>
+          <span><span class="lab">Now running</span><b>Meter API calls per workspace</b></span>
+          <span><span class="lab">Next</span><b>Email a monthly invoice</b></span>
+          <span><span class="lab">Blocked</span><b>1</b></span>
+          <span class="grow"></span>
+          <button class="chip" title="Target branch for this sprint"><span class="faint">Merge into</span><span class="mono">main</span><i class="i s12 i-chevron-down"></i></button>
+          <a class="ib" href="sprint-summary.html" title="Sprint summary"><i class="i s14 i-list"></i></a><button class="btn btn-line btn-sm" title="No new starts. The active task keeps running.">Pause queue</button>
+        </div>
+        <div class="board-wrap">
+          <div class="col strip" title="Needs you: empty"><i class="i s14 i-question faint"></i><span class="v">Needs you</span><span class="n"></span></div>
+          <section class="col" aria-label="Not started">
+            <div class="col-h"><i class="i s14 i-circle faint"></i>Not started<span class="n">3</span></div>
+            <div class="col-b">
+              <article class="card">
+                <a class="card-link" href="#">
+                  <div class="card-m"><div class="card-t"><span>Email a monthly invoice</span></div>
+                    <div class="card-b"><i class="i s12 i-branch"></i><span class="mono trunc">cw/invoice-email</span><span class="type">Worktree</span></div>
+                  <div class="card-s"><span class="st st-idle"><span>Next in queue</span></span></div></div>
+                </a>
+                <div class="card-f"><span class="age">1h</span><span class="card-a"><button class="ib" title="Task actions"><i class="i s14 i-more"></i></button></span></div>
+              </article>
+              <article class="card">
+                <a class="card-link" href="#">
+                  <div class="card-m"><div class="card-t"><span>Chart usage on the billing page</span></div>
+                    <div class="card-b"><i class="i s12 i-folder"></i><span class="mono trunc">main</span><span class="type">Main checkout</span></div>
+                  <div class="card-s"><span class="st st-idle"><i class="i s12 i-hourglass"></i><span>Waits for Meter API calls</span></span></div></div>
+                </a>
+                <div class="card-f"><span class="age">1h</span><span class="card-a"><button class="ib" title="Task actions"><i class="i s14 i-more"></i></button></span></div>
+              </article>
+              <article class="card">
+                <a class="card-link" href="#">
+                  <div class="card-m"><div class="card-t"><span>Add usage limits to plan settings</span></div>
+                    <div class="card-b"><i class="i s12 i-branch"></i><span class="mono trunc">cw/plan-limits</span><span class="type">Worktree</span></div>
+                  <div class="card-s"><span class="st st-idle"><span>Queued after the invoice email</span></span></div></div>
+                </a>
+                <div class="card-f"><span class="age">1h</span><span class="card-a"><button class="ib" title="Task actions"><i class="i s14 i-more"></i></button></span></div>
+              </article>
+            </div>
+          </section>
+          <section class="col" aria-label="Working">
+            <div class="col-h st-run"><i class="i s14 i-loader"></i>Working<span class="n">1</span></div>
+            <div class="col-b">
+              <article class="card">
+                <a class="card-link" href="task.html">
+                  <div class="card-m"><div class="card-t"><span>Meter API calls per workspace</span><span class="eng" title="Claude engine">Cl</span></div>
+                    <div class="card-b"><i class="i s12 i-branch"></i><span class="mono trunc">cw/meter-api-calls</span><span class="type">Worktree</span></div>
+                  <div class="card-s"><span class="st st-run"><i class="i s12 i-loader spin"></i><span>Executing, 2 workers</span></span></div></div>
+                </a>
+                <div class="card-f"><span class="age">6m</span><span class="card-a"><button class="ib" title="Task actions"><i class="i s14 i-more"></i></button></span></div>
+              </article>
+            </div>
+          </section>
+          <div class="col strip" title="Review: empty"><i class="i s14 i-eye faint"></i><span class="v">Review</span><span class="n"></span></div>
+          <section class="col" aria-label="Ready to merge">
+            <div class="col-h st-ok"><i class="i s14 i-merge"></i>Ready to merge<span class="n">1</span></div>
+            <div class="col-b">
+              <article class="card">
+                <a class="card-link" href="result.html">
+                  <div class="card-m"><div class="card-t"><span>Add the usage events table</span><span class="eng" title="Codex engine">Cx</span></div>
+                    <div class="card-b"><i class="i s12 i-branch"></i><span class="mono trunc">cw/usage-events</span><span class="type">Worktree</span></div>
+                  <div class="card-s"><span class="st st-ok"><span>Accepted v1, 3 behind</span></span></div></div>
+                </a>
+                <div class="card-f"><span class="age">8m</span><span class="card-a"><a class="btn btn-primary btn-sm" href="merge.html?dialog=merge">Merge&hellip;</a><button class="ib" title="Task actions"><i class="i s14 i-more"></i></button></span></div>
+              </article>
+            </div>
+          </section>
+          <div class="col strip" title="Done: empty"><i class="i s14 i-check-circle faint"></i><span class="v">Done</span><span class="n"></span></div>
+          <a class="col archive" href="archive.html" title="Open Archive"><i class="i s14 i-archive"></i><span class="v">Archive 18</span></a>
+        </div>
+      </div>
+    </div>
+
+    <!-- List view -->
+    <div class="main-body" style="overflow-y:auto" data-panel="list" data-group="view" hidden>
+      <div class="lgroup">
+        <h2 class="sec-h st-warn"><i class="i s14 i-question"></i>Needs you <span class="n">2</span></h2>
+        <a class="lrow" href="task.html"><i class="i s14 i-question st-warn"></i><span class="trunc w500">Fix token refresh race</span><span class="cap faint">Standalone</span><span class="mono trunc faint">cw/fix-token-refresh</span><span class="st st-warn trunc">Asking: which concurrency level?</span><span class="cap faint">3m</span></a>
+        <a class="lrow" href="#"><i class="i s14 i-alert st-bad"></i><span class="trunc w500">Rebase usage rollups onto main</span><span class="cap faint">Standalone</span><span class="mono trunc faint">cw/usage-rollups</span><span class="st st-bad">Conflict with main</span><span class="cap faint">24m</span></a>
+      </div>
+      <div class="lgroup">
+        <h2 class="sec-h"><i class="i s14 i-circle faint"></i>Not started <span class="n">4</span></h2>
+        <a class="lrow" href="#"><i class="i s14 i-circle faint"></i><span class="trunc w500">Add idempotency keys to webhooks</span><span class="cap faint">Standalone</span><span class="mono trunc faint">cw/webhook-idempotency</span><span class="st st-idle">Draft, ready to start</span><span class="cap faint">2h</span></a>
+        <a class="lrow" href="#"><i class="i s14 i-circle faint"></i><span class="trunc w500">Email a monthly invoice</span><span class="cap faint trunc">Usage billing</span><span class="mono trunc faint">cw/invoice-email</span><span class="st st-idle">Next in Usage billing</span><span class="cap faint">1h</span></a>
+        <a class="lrow" href="#"><i class="i s14 i-hourglass faint"></i><span class="trunc w500">Chart usage on the billing page</span><span class="cap faint trunc">Usage billing</span><span class="mono trunc faint">main (main checkout)</span><span class="st st-idle">Waits for Meter API calls</span><span class="cap faint">1h</span></a>
+        <a class="lrow" href="#"><i class="i s14 i-circle faint"></i><span class="trunc w500">Add usage limits to plan settings</span><span class="cap faint trunc">Usage billing</span><span class="mono trunc faint">cw/plan-limits</span><span class="st st-idle">Queued in Usage billing</span><span class="cap faint">1h</span></a>
+      </div>
+      <div class="lgroup">
+        <h2 class="sec-h st-run"><i class="i s14 i-loader"></i>Working <span class="n">3</span></h2>
+        <a class="lrow" href="task.html"><i class="i s14 i-loader st-run"></i><span class="trunc w500">Meter API calls per workspace</span><span class="cap faint trunc">Usage billing</span><span class="mono trunc faint">cw/meter-api-calls</span><span class="st st-run">Executing, 2 workers</span><span class="cap faint">6m</span></a>
+        <a class="lrow" href="#"><i class="i s14 i-loader st-run"></i><span class="trunc w500">Bump the OpenAPI schema to 3.1</span><span class="cap faint">Standalone</span><span class="mono trunc faint">main (main checkout)</span><span class="st st-run">Independent review</span><span class="cap faint">2m</span></a>
+        <a class="lrow" href="#"><i class="i s14 i-pause faint"></i><span class="trunc w500">Clean up stale feature flags</span><span class="cap faint">Standalone</span><span class="mono trunc faint">cw/flag-cleanup</span><span class="st st-idle">Paused by you, 14:12</span><span class="cap faint">48m</span></a>
+      </div>
+      <div class="lgroup">
+        <h2 class="sec-h"><i class="i s14 i-eye faint"></i>Review <span class="n">2</span></h2>
+        <a class="lrow" href="result.html"><i class="i s14 i-eye faint"></i><span class="trunc w500">Rate-limit the export endpoint</span><span class="cap faint">Standalone</span><span class="mono trunc faint">cw/export-rate-limit</span><span class="st st-idle">Checks 5/9</span><span class="cap faint">14m</span></a>
+        <a class="lrow" href="#"><i class="i s14 i-eye faint"></i><span class="trunc w500">Cache tenant lookups</span><span class="cap faint">Standalone</span><span class="mono trunc faint">main (main checkout)</span><span class="st st-idle">Checks 3/3</span><span class="cap faint">1h</span></a>
+      </div>
+      <div class="lgroup">
+        <h2 class="sec-h st-ok"><i class="i s14 i-merge"></i>Ready to merge <span class="n">1</span></h2>
+        <a class="lrow" href="#"><i class="i s14 i-merge st-ok"></i><span class="trunc w500">Add the usage events table</span><span class="cap faint trunc">Usage billing</span><span class="mono trunc faint">cw/usage-events</span><span class="st st-ok">Accepted v1, 3 behind main</span><span class="cap faint">8m</span></a>
+      </div>
+      <div class="lgroup">
+        <h2 class="sec-h"><i class="i s14 i-check-circle faint"></i>Done <span class="n">3</span></h2>
+        <a class="lrow" href="#"><i class="i s14 i-merge st-merge"></i><span class="trunc w500">Retry failed webhooks</span><span class="cap faint">Standalone</span><span class="mono trunc faint">cw/webhook-retry</span><span class="st st-merge">Merged, 14:30</span><span class="cap faint">Today</span></a>
+        <a class="lrow" href="#"><i class="i s14 i-circle faint"></i><span class="trunc w500">Spike: queue backpressure</span><span class="cap faint">Standalone</span><span class="mono trunc faint">cw/backpressure-spike</span><span class="st st-idle">Closed as is, not verified</span><span class="cap faint">2d</span></a>
+        <a class="lrow" href="#"><i class="i s14 i-x-circle st-bad"></i><span class="trunc w500">Migrate the session store</span><span class="cap faint">Standalone</span><span class="mono trunc faint">main (main checkout)</span><span class="st st-bad">Failed: answer not certified</span><span class="cap faint">3d</span></a>
+      </div>
+    </div>
+
+    <div class="note-panel" data-panel="knowledge settings" data-group="view" hidden>
+      <span class="w500">Not designed yet</span>
+      <span>Knowledge and skills and the project settings are not part of these mockups.</span>
+    </div>
+
+    <section class="terminal" aria-label="Terminal">
+      <div class="term-h">
+        <span class="term-tab" aria-selected="true"><i class="i s12 i-terminal"></i>bash</span>
+        <button class="ib" style="width:24px;height:24px" title="New shell in this checkout"><i class="i s14 i-plus"></i></button>
+        <span class="mono faint" style="margin-left:6px">~/work/atlas-api (main checkout, main)</span>
+      </div>
+      <div class="term-body"><b>~/work/atlas-api</b> $ git status --short
+ M docs/openapi.yaml
+<b>~/work/atlas-api</b> $ </div>
+    </section>
+  </main>
+
+  <aside class="inspector" aria-label="Inspector">
+    <div data-panel="sprint" data-group="scope" hidden>
+      <div class="ins-sec">
+        <div class="ins-h"><span>Sprint</span></div>
+        <div class="w500 selectable" style="font-size:14px;line-height:20px">Usage billing</div>
+        <div class="st st-run" style="margin-top:6px"><i class="i s14 i-loader spin"></i>Queue running, 2 of 5 started</div>
+      </div>
+      <div class="ins-sec">
+        <div class="ins-h"><span>Run</span></div>
+        <dl class="kv">
+          <dt>Mode</dt><dd>Automatic, one task at a time</dd>
+          <dt>Merge into</dt><dd class="mono">main</dd>
+          <dt>Merging</dt><dd>Each task stops at Ready to merge and waits for you</dd>
+        </dl>
+      </div>
+      <div class="ins-sec">
+        <div class="ins-h"><span>Tasks</span></div>
+        <div class="wins"><i class="i s14 i-loader spin st-run"></i><span class="trunc">Meter API calls per workspace</span><span class="st st-run">Working</span></div>
+        <div class="wins"><i class="i s14 i-merge st-ok"></i><span class="trunc">Add the usage events table</span><span class="st st-ok">Ready</span></div>
+        <div class="wins"><i class="i s14 i-circle faint"></i><span class="trunc">Email a monthly invoice</span><span class="st st-idle">Next</span></div>
+        <div class="wins"><i class="i s14 i-hourglass faint"></i><span class="trunc">Chart usage on the billing page</span><span class="st st-idle">Blocked</span></div>
+        <div class="wins"><i class="i s14 i-circle faint"></i><span class="trunc">Add usage limits to plan settings</span><span class="st st-idle">Queued</span></div>
+      </div>
+    </div>
+    <div data-panel="all standalone" data-group="scope">
+    <div class="ins-sec">
+      <div class="ins-h"><span>Selected task</span></div>
+      <div class="w500 selectable" style="font-size:14px;line-height:20px">Fix token refresh race</div>
+      <div class="st st-warn" style="margin-top:6px"><i class="i s14 i-question"></i>Needs you: question from QA Engineer</div>
+    </div>
+    <div class="ins-sec">
+      <div class="ins-h"><span>Checkout</span></div>
+      <dl class="kv">
+        <dt>Type</dt><dd>Worktree</dd>
+        <dt>Branch</dt><dd class="mono">cw/fix-token-refresh</dd>
+        <dt>Base</dt><dd class="mono">main</dd>
+        <dt>Merge into</dt><dd class="mono">main</dd>
+      </dl>
+    </div>
+    <div class="ins-sec">
+      <div class="ins-h"><span>Workers</span><span>2 of 6 running</span></div>
+      <div class="wins"><i class="i s14 i-loader st-run"></i><span class="trunc">Backend Dev</span><span class="st st-run">Working</span></div>
+      <div class="wins"><i class="i s14 i-question st-warn"></i><span class="trunc">QA Engineer</span><span class="st st-warn">Waiting for you</span></div>
+    </div>
+    <div class="ins-sec">
+      <div class="ins-h"><span>Checks</span></div>
+      <div class="chk-sum">
+        <span class="st st-ok"><i class="i s12 i-check-circle"></i>3 passed</span>
+        <span class="st st-bad"><i class="i s12 i-x-circle"></i>1 failed</span>
+        <span class="st st-idle"><i class="i s12 i-circle"></i>2 not run</span>
+        <span class="st st-idle"><i class="i s12 i-help"></i>1 unverified</span>
+      </div>
+    </div>
+    <div class="ins-sec">
+      <a class="btn btn-line" style="width:100%" href="task.html">Open task<i class="i s14 i-arrow-right"></i></a>
+    </div>
+    </div>
+  </aside>
+</div>
+
+<div popover id="m-usage" class="pop-usage">
+  <div class="mi-h">Engine limits on This machine</div>
+  <div class="u-eng">
+    <div class="u-h"><span class="w500">Claude</span><span class="st st-ok"><i class="i s12 i-check-circle"></i>Connected</span></div>
+    <div class="u-win"><span>This week</span><span class="bar"><i style="width:62%"></i></span><span class="v">62% used</span><span class="rs">Resets Mon 09:00</span></div>
+    <div class="u-src">Observed 13:41, reported by the provider</div>
+  </div>
+  <div class="mi-sep"></div>
+  <div class="u-eng">
+    <div class="u-h"><span class="w500">Codex</span><span class="st st-ok"><i class="i s12 i-check-circle"></i>Connected</span></div>
+    <div class="u-win"><span>This week</span><span class="bar"><i style="width:18%"></i></span><span class="v">18% used</span><span class="rs">Resets Thu 02:00</span></div>
+    <div class="u-src">Observed 13:41, reported by the provider</div>
+  </div>
+  <div class="mi-sep"></div>
+  <a class="mi" href="settings.html?section=connections"><i class="i i-gauge"></i><span class="grow">All limits and windows</span></a>
+</div>
+<div popover id="m-machine" class="pop-tl">
+  <div class="mi-h">Machines</div>
+  <a class="mi" href="home.html"><i class="i i-laptop"></i><span class="grow">This machine<span class="sub">Local, connected</span></span><i class="i s14 i-check"></i></a>
+  <a class="mi" href="settings.html?section=machines"><i class="i i-server"></i><span class="grow">GPU box<span class="sub">Remote, connected through the server connector</span></span></a>
+  <a class="mi" href="settings.html?section=machines"><i class="i i-server"></i><span class="grow">Build server<span class="sub">Remote, offline, last seen 13:47</span></span></a>
+  <div class="mi-sep"></div>
+  <a class="mi" href="settings.html?section=machines&amp;dialog=add-machine"><i class="i i-plus"></i>Add remote machine&hellip;</a>
+  <a class="mi" href="settings.html?section=overview"><i class="i i-settings"></i>Machine settings</a>
+</div>
+<div popover id="m-new" class="pop-right">
+  <a class="mi" href="new-task.html"><i class="i i-plus"></i><span class="grow">New task</span><span class="kbd">Ctrl+N</span></a>
+  <a class="mi" href="new-task.html?kind=sprint"><i class="i i-layers"></i><span class="grow">New sprint</span><span class="kbd">Ctrl+Shift+N</span></a>
+</div>
+<div popover id="m-project" class="pop-right">
+  <button class="mi"><i class="i i-terminal"></i>Open in terminal</button>
+  <button class="mi"><i class="i i-external"></i>Open in VS Code</button>
+  <button class="mi"><i class="i i-settings"></i>Project settings</button>
+  <div class="mi-sep"></div>
+  <button class="mi mi-danger"><i class="i i-x"></i>Remove project&hellip;</button>
+</div>
+<div popover id="m-scope" class="pop-anchor">
+  <button class="mi" popovertarget="m-scope" popovertargetaction="hide" data-show="all" data-group="scope"><i class="i i-board"></i><span class="grow">All work</span><span class="kbd">15</span></button>
+  <button class="mi" popovertarget="m-scope" popovertargetaction="hide" data-show="standalone" data-group="scope"><i class="i i-list"></i><span class="grow">Standalone</span><span class="kbd">10</span></button>
+  <div class="mi-h">Sprints</div>
+  <button class="mi" popovertarget="m-scope" popovertargetaction="hide" data-show="sprint" data-group="scope"><i class="i i-layers"></i><span class="grow">Usage billing<span class="sub">Automatic, queue running, 2 of 5 started</span></span></button>
+  <div class="mi" aria-disabled="true"><i class="i i-layers"></i><span class="grow">Push hardening<span class="sub">Planning, no tasks yet</span></span></div>
+  <div class="mi-sep"></div>
+  <button class="mi"><i class="i i-plus"></i>New sprint&hellip;</button>
+</div>
+
+<script>(function(){var r=document.documentElement,q=new URLSearchParams(location.search);function m(){document.querySelectorAll('[data-set-theme]').forEach(function(b){b.setAttribute('aria-pressed',b.dataset.setTheme===r.dataset.themeChoice)})}function show(g,v){document.querySelectorAll('[data-show][data-group="'+g+'"]').forEach(function(x){if(x.hasAttribute('aria-selected'))x.setAttribute('aria-selected',x.dataset.show===v)});document.querySelectorAll('[data-panel][data-group="'+g+'"]').forEach(function(p){p.hidden=p.dataset.panel.split(' ').indexOf(v)<0})}document.addEventListener('click',function(e){var b=e.target.closest('[data-set-theme]');if(b){var t=b.dataset.setTheme;r.dataset.themeChoice=t;r.dataset.theme=t==='system'?(matchMedia('(prefers-color-scheme: light)').matches?'light':'dark'):t;try{localStorage.setItem('cw-theme',t)}catch(x){}m();return}var s=e.target.closest('[data-show]');if(s){show(s.dataset.group,s.dataset.show);return}var a=e.target.closest('a[href$=".html"],a[href*=".html?"]');if(a){e.preventDefault();var u=new URL(a.href);u.searchParams.set('theme',r.dataset.themeChoice);location.href=u.href}});['scope','view'].forEach(function(g){if(q.get(g))show(g,q.get(g))});m()})()</script>
+</body>
+</html>

@@ -1,0 +1,4 @@
+/* The demo entry only. The banner takes its own row, so nothing it adds covers the frame below it. */
+body { grid-template-rows: auto var(--titlebar-h) minmax(0, 1fr); }
+.ws-demo-banner { height: 24px; line-height: 24px; padding: 0 12px; text-align: center; font-size: 12px; color: var(--fg-2); background: var(--bg-canvas); border-bottom: 1px solid var(--line); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pop-tl { top: 62px; }

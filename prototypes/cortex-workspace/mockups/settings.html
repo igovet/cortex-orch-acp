@@ -1,0 +1,486 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<title>Settings - Cortex Workspace mockup</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script>(function(){var r=document.documentElement,t=new URLSearchParams(location.search).get('theme');try{t=t||localStorage.getItem('cw-theme')}catch(e){}t=t||'system';r.dataset.themeChoice=t;r.dataset.theme=t==='system'?(matchMedia('(prefers-color-scheme: light)').matches?'light':'dark'):t})()</script>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body data-section="machines" data-step="1">
+<input class="pt" type="checkbox" id="pt-sidebar" aria-label="Toggle sidebar">
+<input class="pt" type="checkbox" id="pt-inspector" aria-label="Toggle inspector">
+
+<header class="titlebar">
+  <label class="ib tb-toggle" for="pt-sidebar" title="Sidebar (Ctrl+B)"><i class="i i-panel-left"></i></label>
+  <div class="tb-side">
+    <button class="machine" popovertarget="m-machine" title="Switch machine">
+      <i class="i i-laptop"></i><span class="trunc">This machine</span>
+      <span class="st st-ok" style="margin-left:auto">Connected</span><i class="i s12 i-chevrons-v faint"></i>
+    </button>
+  </div>
+  <div class="tb-main">
+    <a class="ib" href="home.html" title="Back (Alt+Left)"><i class="i i-arrow-left"></i></a>
+    <button class="ib" title="Forward (Alt+Right)" aria-disabled="true"><i class="i i-arrow-right"></i></button>
+    <div class="crumbs"><span class="cur">Settings</span></div>
+    
+    <span class="grow"></span>
+    <div class="tb-actions"></div>
+    <div class="tb-fixed">
+      <a class="mock-chip" href="index.html" title="Static mockup. Back to the screen list">Mock</a>
+      
+      <button class="ib" aria-disabled="true" title="Terminal (Ctrl+J). Open a project or task to use a terminal"><i class="i i-panel-bottom"></i></button>
+      <button class="ib" aria-disabled="true" title="This screen has no inspector"><i class="i i-panel-right"></i></button>
+    </div>
+    <div class="win" aria-hidden="true">
+      <button tabindex="-1"><i class="i s14 i-minus"></i></button>
+      <button tabindex="-1"><i class="i s12 i-square"></i></button>
+      <button tabindex="-1"><i class="i s14 i-x"></i></button>
+    </div>
+  </div>
+</header>
+
+<div class="workspace">
+  <nav class="sidebar" aria-label="Settings">
+    <div class="sb-top" style="padding-bottom:4px">
+      <a class="nav" href="home.html"><i class="i i-arrow-left"></i>Back to workspace</a>
+    </div>
+    <div class="sb-scroll">
+      <div class="snav-h">App</div>
+      <button class="snav" role="tab" data-show="appearance" data-group="section" aria-selected="false"><i class="i i-palette"></i><span class="trunc">Appearance</span></button>
+      <button class="snav" role="tab" data-show="voice" data-group="section" aria-selected="false"><i class="i i-mic"></i><span class="trunc">Voice input</span></button>
+      <button class="snav" role="tab" data-show="shortcuts" data-group="section" aria-selected="false"><i class="i i-keyboard"></i><span class="trunc">Shortcuts</span></button>
+      <div class="snav-h">Machines</div>
+      <button class="snav" role="tab" data-show="machines" data-group="section" aria-selected="false"><i class="i i-server"></i><span class="trunc">All machines</span><span class="r">3</span></button>
+      <button class="snav-h" popovertarget="m-set-machine" title="Choose which machine these settings belong to" style="display:flex;align-items:center;gap:6px;width:100%;color:var(--fg);font-weight:500"><i class="i s14 i-laptop"></i>This machine<i class="i s12 i-chevrons-v faint"></i><span class="st st-ok" style="margin-left:auto;font-weight:400">Connected</span></button>
+      <button class="snav" role="tab" data-show="overview" data-group="section" aria-selected="false"><i class="i i-laptop"></i><span class="trunc">Overview</span></button>
+      <button class="snav" role="tab" data-show="o-profiles" data-group="section" aria-selected="false"><i class="i i-sliders"></i><span class="trunc">Orchestration</span></button>
+      <button class="snav sub" role="tab" data-show="o-defaults" data-group="section" aria-selected="false"><span class="trunc">Coordinator defaults</span></button>
+      <button class="snav sub" role="tab" data-show="o-models" data-group="section" aria-selected="false"><span class="trunc">Engines and models</span></button>
+      <button class="snav sub" role="tab" data-show="o-routing" data-group="section" aria-selected="false"><span class="trunc">Routing and effort</span></button>
+      <button class="snav sub" role="tab" data-show="o-policy" data-group="section" aria-selected="false"><span class="trunc">Policy and fallback</span></button>
+      <button class="snav sub" role="tab" data-show="o-tools" data-group="section" aria-selected="false"><span class="trunc">Tools and MCP</span></button>
+      <button class="snav sub" role="tab" data-show="o-effective" data-group="section" aria-selected="false"><span class="trunc">Effective configuration</span></button>
+      <button class="snav" role="tab" data-show="connections" data-group="section" aria-selected="false"><i class="i i-plug"></i><span class="trunc">Engine connections</span></button>
+      <button class="snav" role="tab" data-show="storage" data-group="section" aria-selected="false"><i class="i i-database"></i><span class="trunc">Storage and archive</span></button>
+      <button class="snav" role="tab" data-show="diagnostics" data-group="section" aria-selected="false"><i class="i i-activity"></i><span class="trunc">Diagnostics</span></button>
+      <button class="snav" role="tab" data-show="remote" data-group="section" aria-selected="false"><i class="i i-cloud"></i><span class="trunc">Remote access</span></button>
+    </div>
+    <button class="sb-usage" popovertarget="m-usage" title="Engine limits used this week. Snapshot 13:41" aria-label="Engine limits: Claude 62%, Codex 18% used this week">
+      <span class="um"><span>Claude</span><span class="bar"><i style="width:62%"></i></span><span class="tnum">62%</span></span>
+      <span class="um"><span>Codex</span><span class="bar"><i style="width:18%"></i></span><span class="tnum">18%</span></span>
+    </button>
+    <div class="sb-foot">
+      <button class="btn btn-sm" title="Add project"><i class="i s14 i-folder-plus"></i>Add project</button>
+      <span class="grow"></span>
+      <a class="ib" href="settings.html" aria-current="page" title="Settings (Ctrl+,)"><i class="i i-settings"></i></a>
+      <button class="ib" title="Help and shortcuts (?)"><i class="i i-help"></i></button>
+    </div>
+  </nav>
+
+  <main class="main">
+    <div class="set-wrap">
+    <div data-panel="appearance" data-group="section" hidden style="display:contents">
+      
+      <div class="set-main"><div class="set-in">
+        <div><h1 class="set-title">Appearance</h1><p class="set-lead">How Cortex Workspace looks on this computer.</p></div>
+        <div class="surface">
+        <div class="srow"><span><span class="t">Theme</span><span class="d">System follows your desktop setting, and it is the default.</span></span><span class="ctl"><div class="seg tall" role="group" aria-label="Theme"><button data-set-theme="system" aria-current="false"><i class="i s14 i-monitor"></i>System</button><button data-set-theme="light" aria-current="false"><i class="i s14 i-sun"></i>Light</button><button data-set-theme="dark" aria-current="false"><i class="i s14 i-moon"></i>Dark</button></div></span></div>
+        <div class="srow"><span><span class="t">Conversation detail</span><span class="d">How much step detail a task shows by default.</span></span><span class="ctl"><button class="pick" style="min-width:120px">Normal<i class="i s12 i-chevron-down"></i></button></span></div>
+        <div class="srow"><span><span class="t">Notifications</span><span class="d">Desktop alerts when a task needs you. Off by default.</span></span><span class="ctl"><span class="sw"><input type="checkbox" aria-label="Desktop notifications"><i></i></span></span></div>
+      </div>
+      </div></div>
+      
+    </div>
+<div data-panel="voice" data-group="section" hidden style="display:contents">
+      
+      <div class="set-main"><div class="set-in">
+        <div><h1 class="set-title">Voice input</h1><p class="set-lead">Dictation in task, worker and planning composers. Text always lands in an editable draft.</p></div>
+        <div class="surface">
+        <div class="srow"><span><span class="t">Provider</span><span class="d">Where speech is turned into text. The choice is still open for this product.</span></span><span class="ctl"><button class="pick" style="min-width:160px">Not chosen<i class="i s12 i-chevron-down"></i></button></span></div>
+        <div class="srow"><span><span class="t">Language</span><span class="d">Recognition language.</span></span><span class="ctl"><button class="pick" style="min-width:200px">Same as Cortex language<i class="i s12 i-chevron-down"></i></button></span></div>
+        <div class="srow"><span><span class="t">Microphone</span><span class="d">Input device for dictation.</span></span><span class="ctl"><button class="pick" style="min-width:160px">System default<i class="i s12 i-chevron-down"></i></button></span></div>
+      </div>
+      <div class="note-box plain"><i class="i s14 i-mic"></i><span>Audio and text are never sent on their own. Insert and send needs its own click.</span></div>
+      </div></div>
+      
+    </div>
+<div data-panel="shortcuts" data-group="section" hidden style="display:contents">
+      
+      <div class="set-main"><div class="set-in">
+        <div><h1 class="set-title">Shortcuts</h1><p class="set-lead">Close, Cancel, Delete and Merge have no shortcut on purpose.</p></div>
+        <div class="surface">
+        <div class="srow" style="min-height:36px"><span class="t" style="font-weight:400">New task</span><span class="kbd" style="font-size:12px">Ctrl+N</span></div><div class="srow" style="min-height:36px"><span class="t" style="font-weight:400">New sprint</span><span class="kbd" style="font-size:12px">Ctrl+Shift+N</span></div><div class="srow" style="min-height:36px"><span class="t" style="font-weight:400">Search and actions</span><span class="kbd" style="font-size:12px">Ctrl+K</span></div><div class="srow" style="min-height:36px"><span class="t" style="font-weight:400">Sidebar</span><span class="kbd" style="font-size:12px">Ctrl+B</span></div><div class="srow" style="min-height:36px"><span class="t" style="font-weight:400">Inspector</span><span class="kbd" style="font-size:12px">Ctrl+Alt+B</span></div><div class="srow" style="min-height:36px"><span class="t" style="font-weight:400">Terminal</span><span class="kbd" style="font-size:12px">Ctrl+J</span></div><div class="srow" style="min-height:36px"><span class="t" style="font-weight:400">Stop task</span><span class="kbd" style="font-size:12px">Ctrl+.</span></div><div class="srow" style="min-height:36px"><span class="t" style="font-weight:400">Queue message</span><span class="kbd" style="font-size:12px">Ctrl+Enter</span></div>
+      </div>
+      </div></div>
+      
+    </div>
+<div data-panel="machines" data-group="section" hidden style="display:contents">
+      
+      <div class="set-main"><div class="set-in">
+        <div><h1 class="set-title">Machines</h1><p class="set-lead">A machine is a running Cortex Workspace process. Projects live on a machine. You work on one at a time, while Inbox and Archive cover them all.</p></div>
+        <div class="set-h">3 machines<span class="r"><button class="btn btn-primary" data-dialog="dlg-add-machine"><i class="i s14 i-plus"></i>Add remote machine&hellip;</button></span></div>
+      <div class="surface">
+        <div class="mcard"><span class="mi2"><i class="i i-laptop"></i></span><span style="min-width:0"><span class="tt">This machine</span><span class="ds"><span>Local</span><span>6 projects</span><span>Runtime 1.0.6</span></span></span><span class="row"><span class="st st-ok"><i class="i s12 i-check-circle"></i>Connected</span><button class="btn btn-line btn-sm" data-show="overview" data-group="section">Settings</button></span></div>
+        <div class="mcard"><span class="mi2"><i class="i i-server"></i></span><span style="min-width:0"><span class="tt">GPU box</span><span class="ds"><span>Remote, through the server connector</span><span>2 projects</span><span>Runtime 1.0.6</span><span>38 ms observed</span></span></span><span class="row"><span class="st st-ok"><i class="i s12 i-check-circle"></i>Connected</span><button class="btn btn-line btn-sm">Switch</button></span></div>
+        <div class="mcard"><span class="mi2"><i class="i i-server"></i></span><span style="min-width:0"><span class="tt">Build server</span><span class="ds"><span>Remote, through the server connector</span><span>4 projects, last known</span><span>Runtime 1.0.5</span></span></span><span class="row"><span class="st st-idle"><i class="i s12 i-wifi-off"></i>Offline, last seen 13:47</span><button class="btn btn-line btn-sm">Retry now</button></span></div>
+      </div>
+      <div class="cap faint">While a machine is offline its projects stay visible with their last known state, and anything that needs the machine is turned off with the reason.</div>
+      </div></div>
+      
+    </div>
+<div data-panel="overview" data-group="section" hidden style="display:contents">
+      
+      <div class="set-main"><div class="set-in">
+        <div><h1 class="set-title">This machine</h1><p class="set-lead">The Cortex Workspace process you started on this computer.</p></div>
+        <div class="surface">
+        <div class="srow"><span><span class="t">Name</span><span class="d">Shown in the machine switcher.</span></span><span class="ctl"><input class="inp" style="width:220px" value="This machine" aria-label="Machine name"></span></div>
+        <div class="srow"><span><span class="t">Connection</span><span class="d">Local process, no connector involved.</span></span><span class="ctl"><span class="st st-ok"><i class="i s12 i-check-circle"></i>Connected</span></span></div>
+        <div class="srow"><span><span class="t">Last confirmed</span><span class="d">Latest answer from the process.</span></span><span class="ctl"><span class="tnum">14:02:11</span></span></div>
+        <div class="srow"><span><span class="t">Projects</span><span class="d">Repositories added to this machine.</span></span><span class="ctl"><a class="lnk" href="home.html">6 projects</a></span></div>
+        <div class="srow"><span><span class="t">Runtime version</span><span class="d">Installed Cortex runtime.</span></span><span class="ctl"><span class="mono">1.0.6</span></span></div>
+        <div class="srow"><span><span class="t">Disk used by Cortex</span><span class="d">Database and saved reports.</span></span><span class="ctl"><a class="lnk" href="settings.html?section=storage">1.8 GB</a></span></div>
+        <div class="srow"><span><span class="t">Engine limits</span><span class="d">Used this week, observed 13:41.</span></span><span class="ctl"><a class="lnk" href="settings.html?section=connections">Claude 62%, Codex 18%</a></span></div>
+      </div>
+      <div class="set-h">Open machine settings</div>
+      <div class="two">
+        <button class="rc" data-show="o-defaults" data-group="section" style="text-align:left"><span><span class="t">Orchestration</span><span class="d">Models, effort, access and routing for new tasks</span></span></button>
+        <button class="rc" data-show="storage" data-group="section" style="text-align:left"><span><span class="t">Storage and archive</span><span class="d">30 days retention, 7 days before auto archive</span></span></button>
+      </div>
+      </div></div>
+      
+    </div>
+<div data-panel="o-profiles" data-group="section" hidden style="display:contents">
+      <div class="set-ctx">
+        <span><b>This machine</b></span><span class="st st-ok"><i class="i s12 i-check-circle"></i>Connected</span><span>Runtime 1.0.6</span><span class="faint">Confirmed 14:02</span>
+        <span class="r"><div class="seg" role="group" aria-label="Scope"><button aria-current="true">Machine defaults</button><button aria-current="false">Project override</button></div>
+        <button class="chip" title="Effective source, read-only"><span class="faint">Source</span>Profile Balanced</button></span>
+      </div>
+      <div class="set-main"><div class="set-in">
+        <div><h1 class="set-title">Orchestration</h1><p class="set-lead">Everything Cortex needs to run tasks on this machine. Pick a profile, then adjust a section and save it.</p></div>
+        <div class="set-h">Profiles<span class="r"><button class="btn btn-line btn-sm">Save as new&hellip;</button></span></div>
+      <div class="surface">
+        <div class="srow"><span><span class="t">Balanced</span><span class="d">Active. 1 section differs from the saved profile: Routing and effort.</span></span><span class="ctl"><span class="st st-ok"><i class="i s12 i-check-circle"></i>Active</span><button class="btn btn-line btn-sm">Save to profile</button></span></div>
+        <div class="srow"><span><span class="t">Fast and cheap</span><span class="d">Sonnet by default, Low to Medium effort.</span></span><span class="ctl"><button class="btn btn-line btn-sm">Activate&hellip;</button><button class="ib" title="Rename, delete or detach"><i class="i i-more"></i></button></span></div>
+        <div class="srow"><span><span class="t">Deep review</span><span class="d">Opus for review and planning, High effort floor.</span></span><span class="ctl"><button class="btn btn-line btn-sm">Activate&hellip;</button><button class="ib" title="Rename, delete or detach"><i class="i i-more"></i></button></span></div>
+      </div>
+      <div class="set-h">Sections</div>
+      <div class="surface">
+        <button class="srow" data-show="o-defaults" data-group="section" style="width:100%;text-align:left"><span><span class="t">Coordinator defaults</span><span class="d">Opus, High, Development, Auto language</span></span><span class="ctl"><i class="i s14 i-chevron-right faint"></i></span></button><button class="srow" data-show="o-models" data-group="section" style="width:100%;text-align:left"><span><span class="t">Engines and models</span><span class="d">2 engines on, 4 of 5 models enabled</span></span><span class="ctl"><i class="i s14 i-chevron-right faint"></i></span></button><button class="srow" data-show="o-routing" data-group="section" style="width:100%;text-align:left"><span><span class="t">Routing and effort</span><span class="d">7 work kinds, effort Low to High, changed</span></span><span class="ctl"><i class="i s14 i-chevron-right faint"></i></span></button><button class="srow" data-show="o-policy" data-group="section" style="width:100%;text-align:left"><span><span class="t">Policy and fallback</span><span class="d">4 routes allowed, 2 routing attempts</span></span><span class="ctl"><i class="i s14 i-chevron-right faint"></i></span></button><button class="srow" data-show="o-tools" data-group="section" style="width:100%;text-align:left"><span><span class="t">Tools and MCP</span><span class="d">3 servers on</span></span><span class="ctl"><i class="i s14 i-chevron-right faint"></i></span></button><button class="srow" data-show="o-effective" data-group="section" style="width:100%;text-align:left"><span><span class="t">Effective configuration</span><span class="d">Read-only result, no denials</span></span><span class="ctl"><i class="i s14 i-chevron-right faint"></i></span></button>
+      </div>
+      </div></div>
+      
+    </div>
+<div data-panel="o-defaults" data-group="section" hidden style="display:contents">
+      <div class="set-ctx">
+        <span><b>This machine</b></span><span class="st st-ok"><i class="i s12 i-check-circle"></i>Connected</span><span>Runtime 1.0.6</span><span class="faint">Confirmed 14:02</span>
+        <span class="r"><div class="seg" role="group" aria-label="Scope"><button aria-current="true">Machine defaults</button><button aria-current="false">Project override</button></div>
+        <button class="chip" title="Effective source, read-only"><span class="faint">Source</span>Profile Balanced</button></span>
+      </div>
+      <div class="set-main"><div class="set-in">
+        <div><h1 class="set-title">Coordinator defaults</h1><p class="set-lead">What a new task on this machine starts with. You can still change each one in the composer for a single task.</p></div>
+        <div class="surface">
+        <div class="srow"><span><span class="t">Main model</span><span class="d">Route for the Cortex coordinator. Only observed models are listed.</span></span><span class="ctl"><button class="pick" style="min-width:260px"><i class="i s14 i-cpu faint"></i>Opus <span class="faint">claude-agent-acp</span><i class="i s12 i-chevron-down"></i></button></span></div>
+        <div class="srow"><span><span class="t">Effort</span><span class="d">Reasoning effort for the coordinator.</span></span><span class="ctl"><div class="seg tall" role="group" aria-label="Effort"><button aria-current="false">Low</button><button aria-current="false">Medium</button><button aria-current="true">High</button><button aria-disabled="true" title="Unavailable on this route" style="opacity:.5">Max</button></div></span></div>
+        <div class="srow"><span><span class="t">Access mode</span><span class="d">How much a task may do without asking.</span></span><span class="ctl"><div class="seg tall" role="group" aria-label="Access mode"><button aria-current="true">Development</button><button aria-current="false">Guarded</button><button aria-current="false">Auto</button></div></span></div>
+        <div class="srow"><span><span class="t">Cortex language</span><span class="d">Language of Cortex messages. It does not guarantee the language of model replies.</span></span><span class="ctl"><div class="seg tall" role="group" aria-label="Language"><button aria-current="true">Auto</button><button aria-current="false">English</button><button aria-current="false">Russian</button></div></span></div>
+        <div class="srow"><span><span class="t">Checkout for new tasks</span><span class="d">Preselected in New task. You choose each time.</span></span><span class="ctl"><div class="seg tall" role="group" aria-label="Default checkout"><button aria-current="true">Worktree</button><button aria-current="false">Main checkout</button></div></span></div>
+      </div>
+      <div class="note-box plain"><i class="i s14 i-cpu"></i><span>New tasks start as Opus at High effort, in Development mode, on a separate worktree.</span></div>
+      </div></div>
+      <div class="savebar"><i class="i s14 i-pencil faint"></i><span>1 unsaved change in Coordinator defaults</span><span class="cap faint">Running tasks keep the configuration they started with.</span><span class="r"><button class="btn btn-line">Discard</button><button class="btn btn-primary">Save Coordinator defaults on This machine</button></span></div>
+    </div>
+<div data-panel="o-models" data-group="section" hidden style="display:contents">
+      <div class="set-ctx">
+        <span><b>This machine</b></span><span class="st st-ok"><i class="i s12 i-check-circle"></i>Connected</span><span>Runtime 1.0.6</span><span class="faint">Confirmed 14:02</span>
+        <span class="r"><div class="seg" role="group" aria-label="Scope"><button aria-current="true">Machine defaults</button><button aria-current="false">Project override</button></div>
+        <button class="chip" title="Effective source, read-only"><span class="faint">Source</span>Profile Balanced</button></span>
+      </div>
+      <div class="set-main"><div class="set-in">
+        <div><h1 class="set-title">Engines and models</h1><p class="set-lead">Turn on what Cortex may use. Auto means routing may pick it without you asking.</p></div>
+        <div class="set-h">Claude<span class="r"><button class="btn btn-line btn-sm"><i class="i s12 i-refresh"></i>Refresh model lists</button></span></div>
+      <div class="surface"><div class="srow"><span><span class="t">claude-agent-acp</span><span class="d">Signed in with your account, up to 4 sessions at once</span></span><span class="ctl"><span class="cap muted">Engine on</span><span class="sw"><input type="checkbox" checked aria-label="claude-agent-acp engine"><i></i></span></span></div>
+        <div class="srow"><span><span class="t">Limit used this week</span><span class="d">Observed 13:41. Resets Mon 09:00.</span></span><span class="ctl"><span class="bar"><i style="width:62%"></i></span><span class="tnum" style="width:64px;text-align:right">62% used</span></span></div>
+        <div class="gt" style="border-top:1px solid var(--line)"><div class="gr mrow th"><span>Model</span><span>State</span><span>Catalogue</span><span>Enabled</span><span>Auto</span></div>
+        <div class="gr mrow"><span class="trunc"><span class="w500">Opus</span><span class="sub mono trunc">opus[1m]</span></span><span><span class="st st-ok"><i class="i s12 i-check-circle"></i>Auto</span></span><span class="cap muted">Observed 13:41</span><span><span class="sw"><input type="checkbox" checked aria-label="Opus enabled"><i></i></span></span><span><span class="sw"><input type="checkbox" checked aria-label="Opus in automatic routing"><i></i></span></span></div>
+        <div class="gr mrow"><span class="trunc"><span class="w500">Sonnet</span><span class="sub mono trunc">sonnet</span></span><span><span class="st st-ok"><i class="i s12 i-check-circle"></i>Auto</span></span><span class="cap muted">Observed 13:41</span><span><span class="sw"><input type="checkbox" checked aria-label="Sonnet enabled"><i></i></span></span><span><span class="sw"><input type="checkbox" checked aria-label="Sonnet in automatic routing"><i></i></span></span></div>
+        <div class="gr mrow"><span class="trunc"><span class="w500">Haiku</span><span class="sub mono trunc">haiku</span></span><span><span class="st st-idle"><i class="i s12 i-circle"></i>Discovered</span></span><span class="cap muted">Observed 13:41</span><span><span class="sw"><input type="checkbox" aria-label="Haiku enabled"><i></i></span></span><span><span class="sw"><input type="checkbox" aria-label="Haiku in automatic routing"><i></i></span></span></div>
+        </div></div>
+      <div class="set-h">Codex</div>
+      <div class="surface"><div class="srow"><span><span class="t">codex-acp</span><span class="d">Signed in with your account, up to 2 sessions at once</span></span><span class="ctl"><span class="cap muted">Engine on</span><span class="sw"><input type="checkbox" checked aria-label="codex-acp engine"><i></i></span></span></div>
+        <div class="srow"><span><span class="t">Limit used this week</span><span class="d">Observed 13:41. Resets Thu 02:00.</span></span><span class="ctl"><span class="bar"><i style="width:18%"></i></span><span class="tnum" style="width:64px;text-align:right">18% used</span></span></div>
+        <div class="gt" style="border-top:1px solid var(--line)"><div class="gr mrow th"><span>Model</span><span>State</span><span>Catalogue</span><span>Enabled</span><span>Auto</span></div>
+        <div class="gr mrow"><span class="trunc"><span class="w500">GPT Codex</span><span class="sub mono trunc">gpt-codex</span></span><span><span class="st st-ok"><i class="i s12 i-check-circle"></i>Auto</span></span><span class="cap muted">Observed 13:41</span><span><span class="sw"><input type="checkbox" checked aria-label="GPT Codex enabled"><i></i></span></span><span><span class="sw"><input type="checkbox" checked aria-label="GPT Codex in automatic routing"><i></i></span></span></div>
+        <div class="gr mrow"><span class="trunc"><span class="w500">GPT Codex Mini</span><span class="sub mono trunc">gpt-codex-mini</span></span><span><span class="st st-idle"><i class="i s12 i-check"></i>Enabled</span></span><span class="cap muted">Observed 13:41</span><span><span class="sw"><input type="checkbox" checked aria-label="GPT Codex Mini enabled"><i></i></span></span><span><span class="sw"><input type="checkbox" aria-label="GPT Codex Mini in automatic routing"><i></i></span></span></div>
+        </div></div>
+      <div class="set-h">OpenCode</div>
+      <div class="surface"><div class="srow"><span><span class="t">opencode</span><span class="d">Connected, models come from several providers</span></span><span class="ctl"><span class="cap muted">Engine on</span><span class="sw"><input type="checkbox" aria-label="opencode engine"><i></i></span></span></div>
+        <div class="srow"><span><span class="t">Limit used</span><span class="d">OpenCode spans several providers, so Cortex cannot track one limit for it.</span></span><span class="ctl"><span class="cap muted">Usage not tracked</span></span></div></div>
+      </div></div>
+      <div class="savebar"><i class="i s14 i-pencil faint"></i><span>2 unsaved changes in Engines and models</span><span class="cap faint">Running tasks keep the configuration they started with.</span><span class="r"><button class="btn btn-line">Discard</button><button class="btn btn-primary">Save Engines and models on This machine</button></span></div>
+    </div>
+<div data-panel="o-routing" data-group="section" hidden style="display:contents">
+      <div class="set-ctx">
+        <span><b>This machine</b></span><span class="st st-ok"><i class="i s12 i-check-circle"></i>Connected</span><span>Runtime 1.0.6</span><span class="faint">Confirmed 14:02</span>
+        <span class="r"><div class="seg" role="group" aria-label="Scope"><button aria-current="true">Machine defaults</button><button aria-current="false">Project override</button></div>
+        <button class="chip" title="Effective source, read-only"><span class="faint">Source</span>Profile Balanced</button></span>
+      </div>
+      <div class="set-main"><div class="set-in">
+        <div><h1 class="set-title">Routing and effort</h1><p class="set-lead">Which route each kind of work prefers, and how far effort may move.</p></div>
+        <div class="set-h">Effort range</div>
+      <div class="surface">
+        <div class="srow"><span><span class="t">Floor and ceiling</span><span class="d">Cortex never goes below or above this range on this machine.</span></span><span class="ctl"><span class="ladder" role="img" aria-label="Effort range Low to High"><span class="in">Low</span><span class="in">Medium</span><span class="in">High</span><span>Max</span></span></span></div>
+        <div class="srow"><span><span class="t">Raise effort on retry</span><span class="d">Climb one step after a failed attempt, within the range.</span></span><span class="ctl"><span class="sw"><input type="checkbox" checked aria-label="Raise effort on retry"><i></i></span></span></div>
+      </div>
+      <div class="set-h">Work kinds<span class="r"><span class="cap faint">Changed from profile Balanced: Tests</span></span></div>
+      <div class="surface"><div class="gt">
+        <div class="gr rrow th"><span>Work</span><span>Preferred route</span><span>Effort</span><span>From</span></div>
+        <div class="gr rrow"><span class="trunc"><span class="w500">Planning</span><span class="sub trunc">Plans and replans</span></span><span><button class="pick" style="min-width:180px">Opus<i class="i s12 i-chevron-down"></i></button></span><span><button class="pick" style="min-width:100px">High<i class="i s12 i-chevron-down"></i></button></span><span class="cap muted">Profile</span></div>
+        <div class="gr rrow"><span class="trunc"><span class="w500">Backend code</span><span class="sub trunc">Server and data work</span></span><span><button class="pick" style="min-width:180px">Opus<i class="i s12 i-chevron-down"></i></button></span><span><button class="pick" style="min-width:100px">High<i class="i s12 i-chevron-down"></i></button></span><span class="cap muted">Profile</span></div>
+        <div class="gr rrow"><span class="trunc"><span class="w500">Frontend code</span><span class="sub trunc">Interface work</span></span><span><button class="pick" style="min-width:180px">Sonnet<i class="i s12 i-chevron-down"></i></button></span><span><button class="pick" style="min-width:100px">Medium<i class="i s12 i-chevron-down"></i></button></span><span class="cap muted">Profile</span></div>
+        <div class="gr rrow"><span class="trunc"><span class="w500">Tests</span><span class="sub trunc">Writing and running tests</span></span><span><button class="pick" style="min-width:180px">GPT Codex<i class="i s12 i-chevron-down"></i></button></span><span><button class="pick" style="min-width:100px">Medium<i class="i s12 i-chevron-down"></i></button></span><span class="cap muted">This machine</span></div>
+        <div class="gr rrow"><span class="trunc"><span class="w500">Review</span><span class="sub trunc">Independent review</span></span><span><button class="pick" style="min-width:180px">Opus<i class="i s12 i-chevron-down"></i></button></span><span><button class="pick" style="min-width:100px">High<i class="i s12 i-chevron-down"></i></button></span><span class="cap muted">Role pin</span></div>
+        <div class="gr rrow"><span class="trunc"><span class="w500">Docs</span><span class="sub trunc">Documentation</span></span><span><button class="pick" style="min-width:180px">Sonnet<i class="i s12 i-chevron-down"></i></button></span><span><button class="pick" style="min-width:100px">Low<i class="i s12 i-chevron-down"></i></button></span><span class="cap muted">Profile</span></div>
+        <div class="gr rrow"><span class="trunc"><span class="w500">Research</span><span class="sub trunc">Reading and tracing code</span></span><span><button class="pick" style="min-width:180px">Sonnet<i class="i s12 i-chevron-down"></i></button></span><span><button class="pick" style="min-width:100px">Low<i class="i s12 i-chevron-down"></i></button></span><span class="cap muted">Profile</span></div>
+      </div></div>
+      <div class="set-h">Role pins<span class="r"><button class="btn btn-line btn-sm"><i class="i s12 i-plus"></i>Pin a role</button></span></div>
+      <div class="surface">
+        <div class="srow"><span><span class="t">Security Reviewer</span><span class="d">Always uses this route, whatever the work kind says.</span></span><span class="ctl"><button class="pick" style="min-width:150px">Opus, High<i class="i s12 i-chevron-down"></i></button><button class="ib" title="Remove pin"><i class="i i-x"></i></button></span></div>
+      </div>
+      <div class="set-h">Quota windows</div>
+      <div class="surface">
+        <div class="srow"><span><span class="t">Claude plan</span><span class="d">Move work away when the window is nearly used. Snapshot 13:41, not a live quota.</span></span><span class="ctl"><span class="cap muted">Above</span><button class="pick" style="min-width:80px">90%<i class="i s12 i-chevron-down"></i></button></span></div>
+        <div class="srow"><span><span class="t">Codex plan</span><span class="d">Move work away when the window is nearly used. Snapshot 13:41, not a live quota.</span></span><span class="ctl"><span class="cap muted">Above</span><button class="pick" style="min-width:80px">90%<i class="i s12 i-chevron-down"></i></button></span></div>
+      </div>
+      </div></div>
+      <div class="savebar"><i class="i s14 i-pencil faint"></i><span>1 unsaved change in Routing and effort</span><span class="cap faint">Running tasks keep the configuration they started with.</span><span class="r"><button class="btn btn-line">Discard</button><button class="btn btn-primary">Save Routing and effort on This machine</button></span></div>
+    </div>
+<div data-panel="o-policy" data-group="section" hidden style="display:contents">
+      <div class="set-ctx">
+        <span><b>This machine</b></span><span class="st st-ok"><i class="i s12 i-check-circle"></i>Connected</span><span>Runtime 1.0.6</span><span class="faint">Confirmed 14:02</span>
+        <span class="r"><div class="seg" role="group" aria-label="Scope"><button aria-current="true">Machine defaults</button><button aria-current="false">Project override</button></div>
+        <button class="chip" title="Effective source, read-only"><span class="faint">Source</span>Profile Balanced</button></span>
+      </div>
+      <div class="set-main"><div class="set-in">
+        <div><h1 class="set-title">Policy and fallback</h1><p class="set-lead">The ceiling for this machine. A project can narrow it, never widen it.</p></div>
+        <div class="set-h">Allowed routes</div>
+      <div class="surface">
+        <div class="srow"><span><span class="t">Opus on claude-agent-acp</span><span class="d">Your account.</span></span><span class="ctl"><span class="sw"><input type="checkbox" checked aria-label="Allow Opus"><i></i></span></span></div>
+        <div class="srow"><span><span class="t">Sonnet on claude-agent-acp</span><span class="d">Your account.</span></span><span class="ctl"><span class="sw"><input type="checkbox" checked aria-label="Allow Sonnet"><i></i></span></span></div>
+        <div class="srow"><span><span class="t">GPT Codex on codex-acp</span><span class="d">Your account.</span></span><span class="ctl"><span class="sw"><input type="checkbox" checked aria-label="Allow GPT Codex"><i></i></span></span></div>
+        <div class="srow"><span><span class="t">GPT Codex Mini on codex-acp</span><span class="d">Your account.</span></span><span class="ctl"><span class="sw"><input type="checkbox" checked aria-label="Allow GPT Codex Mini"><i></i></span></span></div>
+      </div>
+      <div class="set-h">Fallback</div>
+      <div class="surface">
+        <div class="srow"><span><span class="t">Routing attempts</span><span class="d">How many routes Cortex may try for one assignment.</span></span><span class="ctl"><span class="stepper"><button title="Fewer"><i class="i s14 i-minus"></i></button><span class="v">2</span><button title="More"><i class="i s14 i-plus"></i></button></span></span></div>
+        <div class="srow"><span><span class="t">When a route is unavailable</span><span class="d">Fallback stays inside the same class.</span></span><span class="ctl"><button class="pick" style="min-width:180px">Same engine first<i class="i s12 i-chevron-down"></i></button></span></div>
+        <div class="srow"><span><span class="t">Recipient consent</span><span class="d">Ask before work moves to a different provider.</span></span><span class="ctl"><span class="sw"><input type="checkbox" checked aria-label="Recipient consent"><i></i></span></span></div>
+      </div>
+      <div class="set-h">Stored, not applied</div>
+      <div class="surface">
+        <div class="srow"><span><span class="t">Daily token limit</span><span class="d">Saved in the configuration. Cortex does not enforce it yet.</span></span><span class="ctl"><span class="st st-idle"><i class="i s12 i-lock"></i>Read-only</span></span></div>
+      </div>
+      </div></div>
+      
+    </div>
+<div data-panel="o-tools" data-group="section" hidden style="display:contents">
+      <div class="set-ctx">
+        <span><b>This machine</b></span><span class="st st-ok"><i class="i s12 i-check-circle"></i>Connected</span><span>Runtime 1.0.6</span><span class="faint">Confirmed 14:02</span>
+        <span class="r"><div class="seg" role="group" aria-label="Scope"><button aria-current="true">Machine defaults</button><button aria-current="false">Project override</button></div>
+        <button class="chip" title="Effective source, read-only"><span class="faint">Source</span>Profile Balanced</button></span>
+      </div>
+      <div class="set-main"><div class="set-in">
+        <div><h1 class="set-title">Tools and MCP</h1><p class="set-lead">External tools Cortex may hand to workers on this machine.</p></div>
+        <div class="set-h">Servers<span class="r"><button class="btn btn-line btn-sm"><i class="i s12 i-plus"></i>Add server&hellip;</button></span></div>
+      <div class="surface"><div class="gt">
+        <div class="gr trow th"><span>Server</span><span>Tools</span><span>Roles</span><span>Paths</span><span>Network</span><span></span></div>
+        <div class="gr trow"><span class="trunc"><span class="w500">codebase-memory</span></span><span class="cap muted tnum">15 tools</span><span class="cap muted trunc">All roles</span><span class="cap muted mono trunc">project, read</span><span class="cap muted">Off</span><span><span class="sw"><input type="checkbox" checked aria-label="codebase-memory enabled"><i></i></span></span></div>
+        <div class="gr trow"><span class="trunc"><span class="w500">playwright</span></span><span class="cap muted tnum">24 tools</span><span class="cap muted trunc">Frontend, QA</span><span class="cap muted mono trunc">project, write</span><span class="cap muted">On</span><span><span class="sw"><input type="checkbox" checked aria-label="playwright enabled"><i></i></span></span></div>
+        <div class="gr trow"><span class="trunc"><span class="w500">figma</span></span><span class="cap muted tnum">8 tools</span><span class="cap muted trunc">Designers</span><span class="cap muted mono trunc">none</span><span class="cap muted">On</span><span><span class="sw"><input type="checkbox" checked aria-label="figma enabled"><i></i></span></span></div>
+        <div class="gr trow"><span class="trunc"><span class="w500">google-drive</span></span><span class="cap muted tnum">6 tools</span><span class="cap muted trunc">None yet</span><span class="cap muted mono trunc">none</span><span class="cap muted">On</span><span><span class="sw"><input type="checkbox" aria-label="google-drive enabled"><i></i></span></span></div>
+      </div></div>
+      <div class="set-h">figma secret</div>
+      <div class="surface">
+        <div class="srow"><span><span class="t">FIGMA_TOKEN</span><span class="d">Stored on this machine. The value is never shown.</span></span><span class="ctl"><div class="seg tall" role="group" aria-label="Secret action"><button aria-current="true">Keep</button><button aria-current="false">Replace</button><button aria-current="false">Remove</button></div></span></div>
+      </div>
+      </div></div>
+      
+    </div>
+<div data-panel="o-effective" data-group="section" hidden style="display:contents">
+      <div class="set-ctx">
+        <span><b>This machine</b></span><span class="st st-ok"><i class="i s12 i-check-circle"></i>Connected</span><span>Runtime 1.0.6</span><span class="faint">Confirmed 14:02</span>
+        <span class="r"><div class="seg" role="group" aria-label="Scope"><button aria-current="true">Machine defaults</button><button aria-current="false">Project override</button></div>
+        <button class="chip" title="Effective source, read-only"><span class="faint">Source</span>Profile Balanced</button></span>
+      </div>
+      <div class="set-main"><div class="set-in">
+        <div><h1 class="set-title">Effective configuration</h1><p class="set-lead">What Cortex will actually use for a new task here, after profile, machine and project rules. Read-only.</p></div>
+        <div class="surface"><div class="gt">
+        <div class="gr erow th"><span>Role</span><span>Route</span><span>Effort</span><span>Why</span></div>
+        <div class="gr erow"><span class="w500 trunc">Coordinator</span><span class="trunc">Opus, claude-agent-acp</span><span>High</span><span class="cap muted trunc">Machine default</span></div>
+        <div class="gr erow"><span class="w500 trunc">Backend Dev</span><span class="trunc">Opus, claude-agent-acp</span><span>High</span><span class="cap muted trunc">Work kind Backend code</span></div>
+        <div class="gr erow"><span class="w500 trunc">Frontend Dev</span><span class="trunc">Sonnet, claude-agent-acp</span><span>Medium</span><span class="cap muted trunc">Work kind Frontend code</span></div>
+        <div class="gr erow"><span class="w500 trunc">QA Engineer</span><span class="trunc">GPT Codex, codex-acp</span><span>Medium</span><span class="cap muted trunc">Work kind Tests, set on this machine</span></div>
+        <div class="gr erow"><span class="w500 trunc">Security Reviewer</span><span class="trunc">Opus, claude-agent-acp</span><span>High</span><span class="cap muted trunc">Role pin</span></div>
+        <div class="gr erow"><span class="w500 trunc">Docs Writer</span><span class="trunc">Sonnet, claude-agent-acp</span><span>Low</span><span class="cap muted trunc">Work kind Docs</span></div>
+      </div></div>
+      <div class="set-h">Limits in force</div>
+      <div class="surface">
+        <div class="srow"><span><span class="t">Owner ceiling</span><span class="d">4 routes, 2 routing attempts.</span></span><span class="ctl"><span class="st st-ok"><i class="i s12 i-check-circle"></i>No denials</span></span></div>
+        <div class="srow"><span><span class="t">Project overrides</span><span class="d">docs-site narrows Access mode to Guarded.</span></span><span class="ctl"><span class="cap muted">1 project</span></span></div>
+        <div class="srow"><span><span class="t">Model catalogue age</span><span class="d">Observed from the engines at 13:41.</span></span><span class="ctl"><span class="cap muted">21 minutes</span></span></div>
+        <div class="srow"><span><span class="t">Older model policy</span><span class="d">Moves a saved policy to the current format, with a preview first.</span></span><span class="ctl"><button class="btn btn-line btn-sm">Migrate model policy&hellip;</button></span></div>
+      </div>
+      </div></div>
+      
+    </div>
+<div data-panel="connections" data-group="section" hidden style="display:contents">
+      
+      <div class="set-main"><div class="set-in">
+        <div><h1 class="set-title">Engine connections</h1><p class="set-lead">How this machine reaches each engine and how much of their limits is used. Secrets are never shown.</p></div>
+        <div class="set-h">Connections<span class="r"><button class="btn btn-line btn-sm"><i class="i s12 i-plus"></i>Add connection&hellip;</button></span></div>
+      <div class="surface"><div class="gt">
+        <div class="gr crow th"><span>Connection</span><span>State</span><span></span><span></span></div>
+        <div class="gr crow"><span class="trunc"><span class="w500">claude-agent-acp</span><span class="sub">Your account, 4 sessions max</span></span><span><span class="st st-ok"><i class="i s12 i-check-circle"></i>Connected</span></span><span class="row" style="gap:4px"><button class="btn btn-line btn-sm">Check</button><button class="btn btn-sm">Refresh models</button></span><button class="ib" style="width:24px;height:24px" title="More"><i class="i s14 i-more"></i></button></div>
+        <div class="gr crow"><span class="trunc"><span class="w500">codex-acp</span><span class="sub">Your account, 2 sessions max</span></span><span><span class="st st-ok"><i class="i s12 i-check-circle"></i>Connected</span></span><span class="row" style="gap:4px"><button class="btn btn-line btn-sm">Check</button><button class="btn btn-sm">Refresh models</button></span><button class="ib" style="width:24px;height:24px" title="More"><i class="i s14 i-more"></i></button></div>
+        <div class="gr crow"><span class="trunc"><span class="w500">opencode</span><span class="sub">Several providers</span></span><span><span class="st st-ok"><i class="i s12 i-check-circle"></i>Connected</span></span><span class="row" style="gap:4px"><button class="btn btn-line btn-sm">Check</button><button class="btn btn-sm">Refresh models</button></span><button class="ib" style="width:24px;height:24px" title="More"><i class="i s14 i-more"></i></button></div>
+      </div></div>
+      <div class="set-h">Limits<span class="r"><button class="btn btn-line btn-sm"><i class="i s12 i-refresh"></i>Check now</button></span></div>
+      <div class="surface"><div class="gt">
+        <div class="gr urow th"><span>Engine</span><span>Window</span><span>Used</span><span>Resets</span><span>Basis</span></div>
+        <div class="gr urow"><span class="w500">Claude</span><span>This week</span><span class="u-used"><span class="bar"><i style="width:62%"></i></span><span class="tnum">62% used</span></span><span class="tnum">Mon 09:00</span><span class="cap muted">Observed 13:41</span></div>
+        <div class="gr urow"><span class="w500">Claude</span><span>This week, Opus</span><span class="u-used"><span class="bar"><i style="width:71%"></i></span><span class="tnum">71% used</span></span><span class="tnum">Mon 09:00</span><span class="cap muted">Observed 13:41</span></div>
+        <div class="gr urow"><span class="w500">Codex</span><span>This week</span><span class="u-used"><span class="bar"><i style="width:18%"></i></span><span class="tnum">18% used</span></span><span class="tnum">Thu 02:00</span><span class="cap muted">Observed 13:41</span></div>
+        <div class="gr urow"><span class="w500">OpenCode</span><span class="faint"></span><span class="faint">Usage not tracked</span><span class="faint"></span><span class="cap muted">Several providers</span></div>
+      </div></div>
+      <p class="hint">Percentages come from each provider and are a snapshot, not a live meter. An unknown value is never counted as zero.</p>
+      </div></div>
+      
+    </div>
+<div data-panel="storage" data-group="section" hidden style="display:contents">
+      
+      <div class="set-main"><div class="set-in">
+        <div><h1 class="set-title">Storage and archive</h1><p class="set-lead">How long this machine keeps finished work, and what it uses.</p></div>
+        <div class="set-h">Archive rules</div>
+      <div class="surface">
+        <div class="srow"><span><span class="t">Auto archive</span><span class="d">Tasks move from Done to Archive after this many days. Unmerged work asks you first.</span></span><span class="ctl"><span class="stepper"><button title="Fewer days"><i class="i s14 i-minus"></i></button><span class="v">7 days</span><button title="More days"><i class="i s14 i-plus"></i></button></span></span></div>
+        <div class="srow"><span><span class="t">Retention</span><span class="d">Archived tasks are cleaned up after this many days. 30 by default, set per machine.</span></span><span class="ctl"><span class="stepper"><button title="Fewer days"><i class="i s14 i-minus"></i></button><span class="v">30 days</span><button title="More days"><i class="i s14 i-plus"></i></button></span></span></div>
+        <div class="srow"><span><span class="t">Last cleanup</span><span class="d">Today 03:00: removed 4 tasks, 2 skipped and waiting for you.</span></span><span class="ctl"><button class="btn btn-line btn-sm">Run cleanup now</button></span></div>
+      </div>
+      <div class="set-h">Space used<span class="r"><span class="cap muted tnum">1.8 GB in total</span></span></div>
+      <div class="surface" style="padding:8px 12px">
+        <div class="dbar"><span class="trunc">atlas-api</span><span class="bar"><i style="width:62%"></i></span><span class="tnum muted" style="text-align:right">1.1 GB</span></div><div class="dbar"><span class="trunc">billing-service</span><span class="bar"><i style="width:22%"></i></span><span class="tnum muted" style="text-align:right">410 MB</span></div><div class="dbar"><span class="trunc">northwind-web</span><span class="bar"><i style="width:10%"></i></span><span class="tnum muted" style="text-align:right">180 MB</span></div><div class="dbar"><span class="trunc">Other 3 projects</span><span class="bar"><i style="width:6%"></i></span><span class="tnum muted" style="text-align:right">110 MB</span></div>
+      </div>
+      <div class="set-h">Old tasks outside the Archive</div>
+      <div class="surface">
+        <div class="srow"><span><span class="t">Clear old tasks</span><span class="d">Pick a date, preview what would go, then confirm. Never runs by itself.</span></span><span class="ctl"><button class="btn btn-line btn-sm">Clear old tasks&hellip;</button></span></div>
+      </div>
+      </div></div>
+      <div class="savebar"><i class="i s14 i-pencil faint"></i><span>1 unsaved change in Storage and archive</span><span class="cap faint">Running tasks keep the configuration they started with.</span><span class="r"><button class="btn btn-line">Discard</button><button class="btn btn-primary">Save Storage and archive on This machine</button></span></div>
+    </div>
+<div data-panel="diagnostics" data-group="section" hidden style="display:contents">
+      
+      <div class="set-main"><div class="set-in">
+        <div><h1 class="set-title">Diagnostics</h1><p class="set-lead">Check that this machine can run tasks.</p></div>
+        <div class="surface">
+        <div class="srow"><span><span class="t">Run diagnostics</span><span class="d">Last run 09:12: ok, 14 checks.</span></span><span class="ctl"><span class="st st-ok"><i class="i s12 i-check-circle"></i>Ok</span><button class="btn btn-line btn-sm">Run</button></span></div>
+        <div class="srow"><span><span class="t">Report</span><span class="d">Copies a report with no secrets in it.</span></span><span class="ctl"><button class="btn btn-line btn-sm"><i class="i s12 i-copy"></i>Copy report</button></span></div>
+        <div class="srow"><span><span class="t">Logs</span><span class="d">Opens the log folder.</span></span><span class="ctl"><button class="btn btn-line btn-sm">Open logs</button></span></div>
+      </div>
+      </div></div>
+      
+    </div>
+<div data-panel="remote" data-group="section" hidden style="display:contents">
+      
+      <div class="set-main"><div class="set-in">
+        <div><h1 class="set-title">Remote access</h1><p class="set-lead">Let your other Cortex Workspace apps connect to this machine through the server connector.</p></div>
+        <div class="surface">
+        <div class="srow"><span><span class="t">Allow remote access</span><span class="d">Off by default. Nothing connects until both sides confirm.</span></span><span class="ctl"><span class="sw"><input type="checkbox" checked aria-label="Allow remote access"><i></i></span></span></div>
+        <div class="srow"><span><span class="t">Server connector</span><span class="d">Relays the connection. It cannot read task content on its own.</span></span><span class="ctl"><span class="st st-ok"><i class="i s12 i-check-circle"></i>Reachable</span></span></div>
+      </div>
+      <div class="set-h">Pairing code</div>
+      <div class="pair">7KQ2-M9XD</div>
+      <div class="cap faint">Expires in 4:12. Enter it on the other machine, then compare the fingerprints on both sides.</div>
+      <div class="set-h">Paired devices<span class="r"><button class="btn btn-line btn-sm">Revoke all&hellip;</button></span></div>
+      <div class="surface">
+        <div class="srow"><span><span class="t">Work laptop</span><span class="d">Paired 28 Oct, last seen 09:40.</span></span><span class="ctl"><button class="btn btn-line btn-sm">Revoke&hellip;</button></span></div>
+      </div>
+      </div></div>
+      
+    </div>
+    </div>
+  </main>
+
+</div>
+
+<div popover id="m-usage" class="pop-usage">
+  <div class="mi-h">Engine limits on This machine</div>
+  <div class="u-eng">
+    <div class="u-h"><span class="w500">Claude</span><span class="st st-ok"><i class="i s12 i-check-circle"></i>Connected</span></div>
+    <div class="u-win"><span>This week</span><span class="bar"><i style="width:62%"></i></span><span class="v">62% used</span><span class="rs">Resets Mon 09:00</span></div>
+    <div class="u-src">Observed 13:41, reported by the provider</div>
+  </div>
+  <div class="mi-sep"></div>
+  <div class="u-eng">
+    <div class="u-h"><span class="w500">Codex</span><span class="st st-ok"><i class="i s12 i-check-circle"></i>Connected</span></div>
+    <div class="u-win"><span>This week</span><span class="bar"><i style="width:18%"></i></span><span class="v">18% used</span><span class="rs">Resets Thu 02:00</span></div>
+    <div class="u-src">Observed 13:41, reported by the provider</div>
+  </div>
+  <div class="mi-sep"></div>
+  <a class="mi" href="settings.html?section=connections"><i class="i i-gauge"></i><span class="grow">All limits and windows</span></a>
+</div>
+<div popover id="m-machine" class="pop-tl">
+  <div class="mi-h">Machines</div>
+  <a class="mi" href="home.html"><i class="i i-laptop"></i><span class="grow">This machine<span class="sub">Local, connected</span></span><i class="i s14 i-check"></i></a>
+  <a class="mi" href="settings.html?section=machines"><i class="i i-server"></i><span class="grow">GPU box<span class="sub">Remote, connected through the server connector</span></span></a>
+  <a class="mi" href="settings.html?section=machines"><i class="i i-server"></i><span class="grow">Build server<span class="sub">Remote, offline, last seen 13:47</span></span></a>
+  <div class="mi-sep"></div>
+  <a class="mi" href="settings.html?section=machines&amp;dialog=add-machine"><i class="i i-plus"></i>Add remote machine&hellip;</a>
+  <a class="mi" href="settings.html?section=overview"><i class="i i-settings"></i>Machine settings</a>
+</div>
+<div popover id="m-new" class="pop-right">
+  <a class="mi" href="new-task.html"><i class="i i-plus"></i><span class="grow">New task</span><span class="kbd">Ctrl+N</span></a>
+  <a class="mi" href="new-task.html?kind=sprint"><i class="i i-layers"></i><span class="grow">New sprint</span><span class="kbd">Ctrl+Shift+N</span></a>
+</div>
+<dialog class="dlg" id="dlg-add-machine" aria-labelledby="dlg-am-h">
+  <div class="dlg-h"><h2 id="dlg-am-h">Add a remote machine</h2><button class="ib" data-close title="Cancel"><i class="i i-x"></i></button></div>
+  <div class="dlg-b">
+    <div class="row" style="gap:6px">
+      <span class="step-n on" data-panel="1" data-group="step">1</span><span class="step-n done" data-panel="2 3" data-group="step" hidden><i class="i s12 i-check"></i></span>
+      <span class="cap muted">Get a code</span><span class="vr" style="width:18px;height:1px"></span>
+      <span class="step-n" data-panel="1" data-group="step">2</span><span class="step-n on" data-panel="2" data-group="step" hidden>2</span><span class="step-n done" data-panel="3" data-group="step" hidden><i class="i s12 i-check"></i></span>
+      <span class="cap muted">Enter it</span><span class="vr" style="width:18px;height:1px"></span>
+      <span class="step-n" data-panel="1 2" data-group="step">3</span><span class="step-n on" data-panel="3" data-group="step" hidden>3</span>
+      <span class="cap muted">Compare</span>
+    </div>
+    <div data-panel="1" data-group="step" style="display:grid;gap:10px">
+      <div>On the other machine, start Cortex Workspace and open Settings, Remote access, then turn on Allow remote access. It shows a pairing code, a QR code and a link.</div>
+      <div class="note-box plain"><i class="i s14 i-cloud"></i><span>Remote machines connect through the server connector. No port needs opening. Nothing is sent before you confirm in step 3.</span></div>
+    </div>
+    <div data-panel="2" data-group="step" hidden style="display:grid;gap:10px">
+      <div class="fld"><span class="lab">Pairing code or link</span><input class="inp mono" value="7KQ2-M9XD" aria-label="Pairing code or link"></div>
+      <div class="fld"><span class="lab">Name for this machine</span><input class="inp" value="GPU box" aria-label="Machine name"></div>
+      <div class="err" data-panel="expired" data-group="code" hidden>This code expired. Make a new one on the other machine.</div>
+    </div>
+    <div data-panel="3" data-group="step" hidden style="display:grid;gap:10px">
+      <div>Both sides now show a fingerprint. Confirm only if they are exactly the same.</div>
+      <div class="fpr"><div><span class="lab">This machine sees</span><code>4F2A 91C7 D03E</code></div><div><span class="lab">GPU box should show</span><code>4F2A 91C7 D03E</code></div></div>
+      <div class="note-box plain"><i class="i s14 i-loader"></i><span>Connecting through the server connector. If the fingerprints differ, stop here: no project data has been sent.</span></div>
+    </div>
+  </div>
+  <div class="dlg-f">
+    <button class="btn btn-line btn-lg" data-close autofocus>Cancel</button>
+    <button class="btn btn-primary btn-lg" data-panel="1" data-group="step" data-show="2">I have a code</button>
+    <button class="btn btn-primary btn-lg" data-panel="2" data-group="step" data-show="3" hidden>Connect</button>
+    <button class="btn btn-primary btn-lg" data-panel="3" data-group="step" hidden data-close>Fingerprints match, confirm</button>
+  </div>
+</dialog>
+<div popover id="m-set-machine" class="pop-anchor" style="width:250px">
+  <div class="mi-h">Settings for</div>
+  <button class="mi"><i class="i i-laptop"></i><span class="grow">This machine<span class="sub">Local, connected</span></span><i class="i s14 i-check"></i></button>
+  <button class="mi"><i class="i i-server"></i><span class="grow">GPU box<span class="sub">Remote, connected</span></span></button>
+  <button class="mi"><i class="i i-server"></i><span class="grow">Build server<span class="sub">Offline, read-only, last seen 13:47</span></span></button>
+</div>
+
+<script>(function(){var r=document.documentElement,q=new URLSearchParams(location.search);function m(){document.querySelectorAll('[data-set-theme]').forEach(function(b){var on=b.dataset.setTheme===r.dataset.themeChoice;b.setAttribute('aria-pressed',on);b.setAttribute('aria-current',on)})}function show(g,v){document.querySelectorAll('[data-show][data-group="'+g+'"]').forEach(function(x){if(x.hasAttribute('aria-selected'))x.setAttribute('aria-selected',x.dataset.show===v);if(x.hasAttribute('aria-current'))x.setAttribute('aria-current',x.dataset.show===v);if(x.type==='radio')x.checked=x.dataset.show===v});document.querySelectorAll('[data-panel][data-group="'+g+'"]').forEach(function(p){p.hidden=p.dataset.panel.split(' ').indexOf(v)<0});document.body.dataset[g]=v}function openD(id){var d=document.getElementById(id);if(d&&!d.open)d.showModal()}document.addEventListener('click',function(e){var b=e.target.closest('[data-set-theme]');if(b){var t=b.dataset.setTheme;r.dataset.themeChoice=t;r.dataset.theme=t==='system'?(matchMedia('(prefers-color-scheme: light)').matches?'light':'dark'):t;try{localStorage.setItem('cw-theme',t)}catch(x){}m();return}var o=e.target.closest('[data-dialog]');if(o){e.preventDefault();openD(o.dataset.dialog);if(o.dataset.show)show(o.dataset.group,o.dataset.show);return}var c=e.target.closest('[data-close]');if(c){c.closest('dialog').close();return}var s=e.target.closest('[data-show]');if(s){show(s.dataset.group,s.dataset.show);return}var a=e.target.closest('a[href$=".html"],a[href*=".html?"]');if(a){e.preventDefault();var u=new URL(a.href);u.searchParams.set('theme',r.dataset.themeChoice);location.href=u.href}});document.addEventListener('change',function(e){var f=e.target.closest('[data-follow-toggle]');if(f)document.body.dataset.follow=f.checked?'on':'off'});var gs={};document.querySelectorAll('[data-group]').forEach(function(x){gs[x.dataset.group]=1});Object.keys(gs).forEach(function(g){if(q.get(g))show(g,q.get(g))});if(q.get('follow')==='off'){document.body.dataset.follow='off';var f=document.querySelector('[data-follow-toggle]');if(f)f.checked=false}if(q.get('dialog')){openD('dlg-'+q.get('dialog'));if(document.activeElement)document.activeElement.blur()}m()})()</script>
+</body>
+</html>

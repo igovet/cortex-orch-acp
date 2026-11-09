@@ -46,7 +46,8 @@ class _SnapshotStore:
 @contextmanager
 def _snapshot(project):
     root = Path(canonical_project(project))
-    directory = root / '.cortex'
+    from ..project_storage import project_store_directory
+    directory = project_store_directory(root)
     info = directory.lstat()
     if (not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid()
             or stat.S_IMODE(info.st_mode) & 0o077):

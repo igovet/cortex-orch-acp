@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 from cortex_runtime.contracts import StoreError
+from cortex_runtime.store import Store
 from cortex_runtime.delegation import contracts, mcp_tools
 from cortex_runtime.delegation.session_skills import MAX_SKILL_BYTES, read_session_skill, record_session_skills
 from cortex_runtime.delegation.live_adapters import _session_new_meta_for
@@ -15,6 +16,9 @@ from cortex_runtime.engine.unified_system_prompt import project_skills_section
 
 
 class _Store:
+    # Exercise the same transaction boundary used by post-dispatch guidance.
+    immediate_write = Store.immediate_write
+
     def __init__(self, role="worker"):
         self.db = sqlite3.connect(":memory:")
         self.db.row_factory = sqlite3.Row
@@ -23,6 +27,12 @@ class _Store:
         self.db.execute("INSERT INTO context_generations VALUES ('cg_two', 'session-two', 'task-one', ?, 1)", (role,))
         self.db.execute("CREATE TABLE trusted_channels (channel_id TEXT, task_id TEXT, attempt_id TEXT, role TEXT, context_generation_id TEXT, revoked_at TEXT, expires_at TEXT)")
         self.db.execute("INSERT INTO trusted_channels VALUES ('channel-one', 'task-one', 'attempt-one', ?, 'cg_one', NULL, NULL)", (role,))
+        self.db.execute("CREATE TABLE task_owners (task_id TEXT, epoch INTEGER)")
+        self.db.execute("INSERT INTO task_owners VALUES ('task-one', 1)")
+        self.db.execute("CREATE TABLE runtime_events (id INTEGER, task_id TEXT, type TEXT, payload_json TEXT)")
+        # Every dispatch first refuses a paused task.
+        self.db.execute("CREATE TABLE runtime_tasks (task_id TEXT, state TEXT)")
+        self.db.execute("INSERT INTO runtime_tasks VALUES ('task-one', 'EXECUTING')")
 
     def _now(self):
         return "2026-10-02T00:00:00+00:00"
@@ -51,7 +61,7 @@ def _setup(tmp_path, role):
                           project_root=str(project), environ=environ,
                           sent_meta={"systemPrompt": "# Cortex session\n\n" + section})
     channel = SimpleNamespace(role=role, task_id="task-one", attempt_id="attempt-one",
-                              context_generation_id="cg_one", channel_id="channel-one")
+                              context_generation_id="cg_one", channel_id="channel-one", owner_epoch=1)
     return store, channel, project_skill, user_skill, project, home
 
 
@@ -145,7 +155,7 @@ def test_actual_engine_session_metadata_binds_the_skill_list(tmp_path, engine, v
     record_session_skills(store, task_id="task-one", attempt_id="attempt-one", session_ref="session-one",
                           project_root=str(project), environ=environ, sent_meta=meta)
     channel = SimpleNamespace(role="worker", task_id="task-one", attempt_id="attempt-one",
-                              context_generation_id="cg_one", channel_id="channel-one")
+                              context_generation_id="cg_one", channel_id="channel-one", owner_epoch=1)
     assert read_session_skill(store, channel, ".agents/skills/demo/SKILL.md")["body"] == skill.read_text()
 
 

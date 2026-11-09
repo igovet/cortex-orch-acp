@@ -295,7 +295,9 @@ def test_device_upload_never_read(upload, monkeypatch):
 
     def device(fd):
         info = original(fd)
-        return SimpleNamespace(st_mode=stat.S_IFCHR, st_uid=info.st_uid, st_nlink=1)
+        values = {name: getattr(info, name) for name in dir(info) if name.startswith("st_")}
+        values.update(st_mode=stat.S_IFCHR, st_nlink=1)
+        return SimpleNamespace(**values)
 
     def forbidden(*args):
         pytest.fail("A device descriptor must never be read")

@@ -1475,6 +1475,7 @@ class OrchestratingRuntime:
         host_fs_requester: Callable[[str, Mapping[str, Any]], Mapping[str, Any]] | None = None,
         prompt_blocks: list[Mapping[str, Any]] | None = None,
         client_surface: str | None = None,
+        resume_recorded: bool = False,
     ) -> StopReason:
         """T018: ``source_origin``/``source_event_id`` (when supplied by the
         caller -- see ``acp.agent.Agent``'s signature detection, mirroring
@@ -1564,7 +1565,7 @@ class OrchestratingRuntime:
                                 source_origin=source_origin, source_event_id=source_event_id, host_elicitor=elicitor,
                                 emit_tool_call=emit_tool_call,
                                 emit_display_update=emit_display_update,
-                                prompt_blocks=prompt_blocks)
+                                prompt_blocks=prompt_blocks, resume_recorded=resume_recorded)
             return outcome
         except Exception:
             # A failed turn is recoverable, not a certified task failure.
@@ -2786,6 +2787,7 @@ class OrchestratingRuntime:
         emit_tool_call: Callable[[Mapping[str, Any]], bool] | None = None,
         emit_display_update: Callable[[Mapping[str, Any]], bool] | None = None,
         prompt_blocks: list[Mapping[str, Any]] | None = None,
+        resume_recorded: bool = False,
     ) -> StopReason:
         # T020: an urgent /cortex-stop takes precedence over everything --
         # a stopped task never resumes through an ordinary prompt/steering/
@@ -2835,6 +2837,18 @@ class OrchestratingRuntime:
                 # Same task, same chat: the coordinator was rebuilt from the
                 # recorded task state. Keep that on the record, not in the chat.
                 self._record_progress(task_id, "coordinator_recovery_new_session")
+        if resume_recorded:
+            # Owner Resume has already committed its transition. It is NOT a
+            # user message, answer, new requirement or model lifecycle proposal.
+            with self._store.connection() as db:
+                resumed = db.execute("SELECT 1 FROM runtime_events WHERE task_id=? AND type='OWNER_TASK_RESUMED'",
+                                     (task_id,)).fetchone()
+            if not pre_existing or not resumed:
+                raise StoreError('owner_resume_not_recorded')
+            return self._continuation_loop(
+                task_id, session_id, channel, session_ref, "", emit_update, cancel_event,
+                self._resolve_language(task_id), host_elicitor, emit_tool_call=emit_tool_call,
+                emit_display_update=emit_display_update)
         # T020: route this prompt against any still-open coordinator
         # question *before* recording it as an ordinary user_message/
         # steering turn -- see docs/features/steering-and-questions/index.md's
@@ -5180,9 +5194,14 @@ class OrchestratingRuntime:
                 "ORDER BY e.id",
                 (task_id,),
             ).fetchall()
+            from ..orchestration import worker_waits
+            retained = {w["assignment_ref"] for w in worker_waits.projection(db, task_id)
+                        if w["status"] in {"open", "ready"} and worker_waits.preserved_tx(db, w)}
         to_delegate = []
         with self._lock:
             for row in requests:
+                if row["assignment_ref"] in retained:
+                    continue
                 assignment_ref = row["assignment_ref"]
                 if assignment_ref in self._dispatched_delegations:
                     continue
@@ -5838,6 +5857,8 @@ class OrchestratingRuntime:
         _title_value = payload.get('title') or ''
         _title_block = f"{_title_value}\n\n" if _title_value and _title_value not in payload['brief'] else ''
         brief = f"{_title_block}{payload['brief']}\n\nAcceptance: {payload['acceptance']}"
+        from ..orchestration.worker_waits import replacement_prompt
+        brief += replacement_prompt(self._store, task_id, assignment_ref, result.attempt_id)
         generation_delivery_id = None
         # A clean worker END_TURN with no durable Cortex outcome gets one
         # procedural chance to finish the existing report/publication
@@ -5993,10 +6014,9 @@ class OrchestratingRuntime:
                     # the last tool can become the terminal final message.
                     with self._lock:
                         feed = self._worker_card_emitter(task_id, _ref)
-                    # Interim worker prose is not part of the public card.
-                    # Discard it at every tool boundary, including hidden
-                    # tools, while retaining the engine's underlying events.
-                    worker_stream_redactor.flush()
+                    # Keep completed prose in durable worker history without
+                    # changing the host card's interim-commentary policy.
+                    _flush_worker_message_block(feed=None, final_response=False)
                     boundary_ref = str(ref) if ref else f"anonymous:{worker_message_segment + 1}"
                     if boundary_ref not in worker_message_boundary_refs:
                         worker_message_boundary_refs.add(boundary_ref)
@@ -6749,6 +6769,8 @@ class OrchestratingRuntime:
             reconcile(self._store, task_id)
             with self._store.connection() as db:
                 wait = worker_waits.current(db, task_id, assignment_ref)
+            if wait and wait.get('continuation_required'):
+                return None
             lookup = getattr(self._engine, 'lookup_owned', None)
             if wait and (lookup is None or lookup(wait['attempt_id']) != 'alive'):
                 raise EngineTurnFailed('worker_wait_session_unavailable')
@@ -7141,7 +7163,19 @@ class OrchestratingRuntime:
                 release_observed(self,task_id,row['attempt_id'])
             except Exception:
                 pass
-        from ..orchestration.worker_waits import cancel_tx
+        from ..orchestration.worker_waits import cancel_tx, current, preserved_tx
+
+        def preserve_wait(db):
+            wait = current(db, task_id, assignment_ref)
+            if reason != 'owner_paused' or not wait or not preserved_tx(db, wait):
+                return False
+            # Stop never leaves the old worker authorized after its decision
+            # moves to a recorded continuation.
+            db.execute("UPDATE trusted_channels SET revoked_at=? WHERE channel_id=? AND revoked_at IS NULL",
+                       (self._store._now(), wait['channel_id']))
+            return True
+        if self._store.immediate_write(preserve_wait):
+            return
 
         def record_cancellation(db):
             delegation_events.append_event_tx(

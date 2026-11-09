@@ -42,6 +42,132 @@ serialization format does not.
 | `CORTEX_OBSERVATION_DIR` | `cortex_runtime.observability`/diagnostics logging sink | ACP path, stays |
 | `CODEX_HOME` | Native codex-acp/codex CLI isolation directory | ACP path (isolation) |
 
+## Local desktop Debian builds
+
+Run either script from any working directory (Python 3.11+ and Docker, or Podman,
+must be available; the container downloads its locked build dependencies).
+The desktop shares Paseo presentation types, so the builder also installs Paseo’s
+locked development dependencies, without lifecycle scripts, before typechecking.
+These build-time dependencies are not copied from the host:
+
+
+```sh
+./scripts/build-dev-deb.sh
+./scripts/build-prod-deb.sh --jobs 4
+# Optional container engine:
+./scripts/build-dev-deb.sh --engine podman
+```
+
+Both wrap `scripts/build_workspace_desktop.py` and print the final absolute
+archive paths. Copies and their build manifest land in the git-ignored
+`.workspace-build/local-dev/build-*/` or `.workspace-build/local-prod/build-*/`.
+Original inputs, caches and artifacts remain under `.workspace-build/build-*/`.
+Each invocation uses a fresh build directory; channel flags and `--resume` are
+reserved by the wrappers. Other builder arguments pass through unchanged.
+
+Dev uses the ordinary local dev channel. Prod explicitly selects
+`--local-release`: a **non-official release-channel build for owner manual
+testing only**, refused in GitHub Actions. Its manifest records
+`local_release: true` and `owner_handoff_eligible: false`. Rust compilation and
+Debian packaging accept exactly `local-owner-test` or `github-main-clean` for
+release builds; missing or other authorization values fail. Local production
+archive versions end in `.local`, which the unchanged GitHub publisher rejects.
+The owner runs the prod wrapper explicitly; it neither publishes
+nor installs anything. It uses production package/service/state identities:
+installing it can replace an existing production package, so test only in a
+disposable environment. The official `--release` clean-main GitHub gate is
+unchanged. These scripts do not perform or replace the installed desktop
+handoff gate below; release-channel installed acceptance remains unsupported.
+
+## Manual Workspace releases
+
+Once `.github/workflows/workspace-desktop-release.yml` is present on the default
+branch `main`, GitHub Actions shows its **Run workflow** button. Pushes never
+publish automatically.
+
+1. Open Actions → Workspace desktop release → Run workflow.
+2. Choose branch `main` for production or `dev` for development, then start.
+   Other branches and tags are refused; there is no independent channel input.
+3. Download the package and its SHA-256 sidecar from the resulting release.
+   Main publishes `cortex-workspace_<version>_<arch>.deb` under `v<debian-version>`,
+   explicitly Latest. Dev publishes `cortex-workspace-dev_<version>_<arch>.deb`
+   under `dev-v<debian-version>`, marked prerelease and never Latest.
+4. Install dev manually with `sudo apt install ./cortex-workspace-dev_<version>_<arch>.deb`
+   after replacing the placeholders with the downloaded filename. Dev has no
+   in-app updates. Its separate package, launcher, service and state can coexist
+   with production; native engine accounts remain shared in the owner's HOME.
+
+GitHub shows both channels in one repository release list. The production
+updater reads only `/releases/latest`; dev prereleases do not replace it.
+Existing tags are not overwritten; lookup failures other than HTTP 404 stop
+publication. Runs of the same branch are serialized without cancellation.
+Publication grants contents-write only to the publish job through GitHub's token.
+The workflow has not yet been exercised on GitHub.
+
+## Installed desktop handoff gate
+
+A successful build or extracted-binary check is **not** permission to hand the
+archive to an owner. First run the [installed real-input gate](verification.md#installed-desktop-real-input-gate).
+Use its `--close-cycles 3` option when changing native rendering or shutdown:
+every clean/upgrade phase must close and reopen repeatedly, while the independent
+service stays available and native allocator/crash diagnostics remain fatal.
+The Linux view keeps compositing available and terminates its own WebKit web
+process only after guarded, acknowledged closure. Software-display success is
+not real-GPU performance evidence.
+The exact archive must pass on both X11 and Wayland after clean installation and
+ordinary `apt install` upgrade from the previous owner archive. Run sequentially:
+
+```sh
+python3 -B scripts/build_workspace_desktop.py --check-installed --prior-archive /absolute/path/to/previous-owner.deb
+# Or check an already-built, unchanged archive:
+python3 -B packaging/container/check_installed.py --archive /absolute/path/to/candidate.deb --prior-archive /absolute/path/to/previous-owner.deb --evidence .workspace-build/installed-new
+```
+
+The evidence path must not exist. Keep its complete output and `result.json`;
+`accepted: true` must bind to the SHA-256 of the actual archive handed over.
+The builder records `owner_handoff_eligible: false` without this gate.
+A failed, incomplete or single-display run never qualifies. The current harness
+supports the dev Debian channel and Docker only; release-channel handoff remains
+blocked until it has the equivalent installed check. No workflow publication or
+host installation is performed by this gate.
+
+## Offline Workspace engines
+
+The ACP content identity includes every shipped Workspace Python helper, including
+maintenance, engine onboarding and owner workflows. Changing those helpers requires
+restamping before packaging; the generated Python module inventory must match `src/`.
+
+Both Debian channels bundle the qualified adapters, their dependency tree and Node
+under `/usr/lib/<package>/engines`. The container installs using the committed
+`packaging/engines/package-lock.json`, verifies each required native component,
+and checks Node's committed archive checksum and equality with the builder's Node.
+The package build fails if any inventoried file is missing or modified, or the
+lock differs from `pinned-dependencies.json`. Nodejs/npm are not Debian dependencies.
+
+Discovery uses only the bundle belonging to this runtime's channel, prefers it to
+user npm installs, and retains canonical-path/verify_install and exact instruction
+registration checks. The Codex patch is already prepared in private connection
+state and links read-only dependencies; nothing writes under `/usr/lib`.
+Same-version connections may relocate to the bundle, but never downgrade.
+A working bundle makes the optional npm updater a no-op. Checkout installs retain
+the existing bounded optional npm download; absent npm stays idle.
+Native accounts remain in `~/.codex` and `~/.claude`, never copied; OpenCode
+remains optional. Installation without network does not make model use offline.
+
+[Licence inventory and owner distribution-risk decision](bundled-engine-licenses.md).
+The no-paid real launch check is:
+
+```sh
+python3 -B packaging/container/check_bundled_engines.py --archive /absolute/path/to/package.deb
+```
+
+It prepares apt libraries in a clean Ubuntu 26.04 image, then installs the archive
+in a new `--network none` container with no system Node/npm. As a normal user it
+uses real discovery, registration, install resolution, EngineProcess and ACP
+initialize, checks native binaries' versions, and verifies the root-owned bundle
+remains unchanged. No login, session/new, model prompt or paid call is made.
+This does not qualify sandbox policy, systemd startup or rendered desktop behavior.
+
 ## Pinned dependencies
 
 `./pinned-dependencies.json` is the single manifest for:
