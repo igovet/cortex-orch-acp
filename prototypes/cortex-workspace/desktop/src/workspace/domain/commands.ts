@@ -33,7 +33,10 @@ export function applyCommand(state: WorkspaceState, command: WorkspaceCommand): 
       const project = entity(state.projects, command.projectId);
       requireFact(entity(state.machines, project.machineId).connection === "connected", "Machine offline");
       const task = createTask(state, command);
-      if (task.sprintId) entity(state.sprints, task.sprintId).taskIds.push(task.id);
+      if (task.sprintId) {
+        const sprint = entity(state.sprints, task.sprintId); sprint.taskIds.push(task.id);
+        if (sprint.queueState === "complete") { sprint.queueState = "paused"; sprint.pauseReason = "New task added. Continue the queue when ready."; }
+      }
       return task.id;
     }
     case "create_sprint": {
@@ -41,7 +44,7 @@ export function applyCommand(state: WorkspaceState, command: WorkspaceCommand): 
       requireFact(entity(state.machines, project.machineId).connection === "connected", "Machine offline");
       const id = nextId(state, "sprint");
       state.sprints.push({
-        id, projectId: project.id, description: nonempty(command.description, "Description"), runMode: command.runMode,
+        id, projectId: project.id, description: nonempty(command.description, "Description"), runMode: command.runMode, checkout: command.checkout,
         targetBranch: null, planning: "planning", conversation: [], plan: null, history: [], materializedVersion: null,
         taskIds: [], queueState: "idle", pauseReason: null, mock: true,
       }); return id;

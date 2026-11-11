@@ -306,21 +306,21 @@ describe("stop, continue and close", () => {
     await click(named("#m-mock .mi", "Next stop stays unconfirmed"));
     await click(named(".tb-actions .btn", "Stop"));
     expect(titleActions()).toContain("Stopping");
-    expect($(".strip.warn").textContent).toContain("1 worker is not confirmed as stopped");
+    expect($(":is(.strip.warn, .l-strip[data-tone=warn])").textContent).toContain("1 worker is not confirmed as stopped");
     const close = named(".tb-actions .btn", "Close task");
     expect(close.getAttribute("aria-disabled")).toBe("true");
     await click(close);
     expect(document.querySelector("dialog[open]")).toBeNull();
     expect(named(".composer .c-send", "Resume").getAttribute("aria-disabled")).toBe("true");
-    await click(named(".strip.warn .btn", "Retry"));
+    await click(named(":is(.strip.warn, .l-strip[data-tone=warn]) .btn", "Retry"));
     expect(titleActions()).toContain("Paused");
-    expect(document.querySelector(".strip.warn")).toBeNull();
+    expect(document.querySelector(":is(.strip.warn, .l-strip[data-tone=warn])")).toBeNull();
   });
 
   it("shows the fixture's unconfirmed stop as unconfirmed", async () => {
     await mount(`/m/${LOCAL}/t/${WORKSPACE_CASES.stopping}`);
     expect(titleActions()).toContain("Stopping");
-    expect($(".strip.warn").textContent).toContain("not confirmed");
+    expect($(":is(.strip.warn, .l-strip[data-tone=warn])").textContent).toContain("not confirmed");
   });
 
   it("states what closing does in numbers, and Close as is keeps the work with a lasting warning", async () => {
@@ -337,7 +337,7 @@ describe("stop, continue and close", () => {
     expect(document.querySelector("dialog[open]")).toBeNull();
     expect(titleActions()).toContain("Closed as is, not verified");
     expect(all(".ws-rule").at(-1)!.textContent).toContain("You closed the task as is, not verified");
-    expect($(".strip.warn").textContent).toContain("Not verified");
+    expect($(":is(.strip.warn, .l-strip[data-tone=warn])").textContent).toContain("Not verified");
     expect(composer().disabled).toBe(true);
     expect($(".queue")).toBeNull();
   });
@@ -346,17 +346,17 @@ describe("stop, continue and close", () => {
     await mount(SESSION);
     await menu("Close task");
     await click(all<HTMLInputElement>('dialog[open] input[type="radio"]')[1]);
-    const cancel = named("dialog[open] .dlg-f .btn", "Cancel task");
+    const cancel = named("dialog[open] [data-bar=dialog] .btn", "Cancel task");
     expect(cancel.classList.contains("btn-danger")).toBe(true);
-    await click(named("dialog[open] .dlg-f .btn", "Keep working"));
+    await click(named("dialog[open] [data-bar=dialog] .btn", "Keep working"));
     expect(document.querySelector("dialog[open]")).toBeNull();
     expect(titleActions()).toContain("Working");
     await menu("Close task");
     await click(all<HTMLInputElement>('dialog[open] input[type="radio"]')[1]);
-    await click(named("dialog[open] .dlg-f .btn", "Cancel task"));
+    await click(named("dialog[open] [data-bar=dialog] .btn", "Cancel task"));
     expect(titleActions()).toContain("Cancelled");
     expect(all(".ws-rule").at(-1)!.textContent).toContain("You cancelled the task");
-    expect(document.querySelector(".strip.warn")).toBeNull();
+    expect(document.querySelector(":is(.strip.warn, .l-strip[data-tone=warn])")).toBeNull();
   });
 
   it("does not offer to open the task the owner is already in", async () => {
@@ -399,7 +399,7 @@ describe("stop, continue and close", () => {
     const card = () => $(`[data-task="${WORKSPACE_CASES.working}"]`);
     await click(card().querySelector('[aria-label^="Actions for"]')!);
     await click(named("#m-task .mi", "Close task"));
-    await click(named("dialog[open] .dlg-f .btn", "Close task"));
+    await click(named("dialog[open] [data-bar=dialog] .btn", "Close task"));
     expect(card()?.closest("section")?.getAttribute("aria-label")).not.toBe("Working");
   });
 });
@@ -487,9 +487,9 @@ describe("live worker", () => {
     const dialog = $("dialog[open]");
     expect(dialog.textContent).toContain("pytest tests/auth/test_race.py -q");
     expect(dialog.textContent).toContain("will not repeat this command");
-    expect(named("dialog[open] .dlg-f .btn", "Stop command").getAttribute("aria-disabled")).toBe("true");
+    expect(named("dialog[open] [data-bar=dialog] .btn", "Stop command").getAttribute("aria-disabled")).toBe("true");
     await type($<HTMLTextAreaElement>("dialog[open] textarea"), "Hangs on the shared test database.");
-    await click(named("dialog[open] .dlg-f .btn", "Stop command"));
+    await click(named("dialog[open] [data-bar=dialog] .btn", "Stop command"));
     expect(document.querySelector("dialog[open]")).toBeNull();
     expect($(".stream").textContent).toContain("Stop requested");
     for (let i = 0; i < 6 && !$(".stream").textContent!.includes("Stopped: Hangs"); i++) await sim();
@@ -503,14 +503,14 @@ describe("live worker", () => {
     await click(named(".wexp .btn", "Stop"));
     expect($("dialog[open]").textContent).toContain("will not repeat this command");
     await type($<HTMLTextAreaElement>("dialog[open] textarea"), "Hangs.");
-    await click(named("dialog[open] .dlg-f .btn", "Stop command"));
+    await click(named("dialog[open] [data-bar=dialog] .btn", "Stop command"));
     expect(document.querySelector(".wexp")).toBeNull();
   });
 
   it("stops one worker while the task keeps running", async () => {
     await mount(LIVE);
     await click(named(".d-title .btn", "Stop worker"));
-    await click(named("dialog[open] .dlg-f .btn", "Stop worker"));
+    await click(named("dialog[open] [data-bar=dialog] .btn", "Stop worker"));
     expect($(".d-title").textContent).toContain("Cancelled");
     expect(box()).toBeNull();
     expect(titleActions()).toContain("Needs you");
@@ -607,7 +607,7 @@ describe("task states the composer must respect", () => {
 
   it("reads as last known and offers nothing on an offline machine", async () => {
     await mount(`/m/${REMOTE}/t/${WORKSPACE_CASES.offline}`);
-    expect($(".strip.info").textContent).toContain("Last known: Working");
+    expect($(":is(.strip.info, .l-strip[data-tone=info])").textContent).toContain("Last known: Working");
     expect(composer().disabled).toBe(true);
     expect(titleActions()).not.toContain("Stop");
     expect(named('[aria-label="Coordinator model: Opus"]', "Coordinator").getAttribute("aria-disabled")).toBe("true");
@@ -616,7 +616,7 @@ describe("task states the composer must respect", () => {
   it("keeps a closed task read-only", async () => {
     await mount(`/m/${LOCAL}/t/${WORKSPACE_CASES.closedAsIs}`);
     expect(composer().disabled).toBe(true);
-    expect($(".strip.warn").textContent).toContain("Not verified");
+    expect($(":is(.strip.warn, .l-strip[data-tone=warn])").textContent).toContain("Not verified");
     await click(named('[aria-label="Task actions"]', "Task actions"));
     expect(named("#m-task .mi", "Close task").getAttribute("aria-disabled")).toBe("true");
   });

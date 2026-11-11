@@ -131,27 +131,6 @@ class WorkspaceAPI:
                 outcome = "busy"
             elif blocked:
                 outcome = "unsupported"
-            else:
-                for execution in db.execute("SELECT e.* FROM workspace_executions e "
-                                            "JOIN workspace_tasks t USING(task_id) WHERE t.project_id=?",
-                                            (self.project_id,)):
-                    _, mapping, _ = projections._facts(db, execution, self.store.project_root)
-                    if mapping.state not in ("result", "failed", "stopped"):
-                        outcome = "busy"
-                        break
-                if db.execute("SELECT 1 FROM workspace_starts s LEFT JOIN workspace_executions e USING(execution_id) "
-                              "WHERE s.project_id=? AND (e.execution_id IS NULL OR s.state='unknown')",
-                              (self.project_id,)).fetchone():
-                    outcome = "busy"
-                # Ordinary ACP tasks share this checkout too. Missing lifecycle
-                # evidence is not a terminal execution, unless the task was stopped
-                # before its runtime row existed: a stopped task never opens an engine.
-                if db.execute("SELECT 1 FROM tasks t LEFT JOIN runtime_tasks r ON r.task_id=t.id "
-                              "WHERE t.project_root=? AND (r.state IS NULL OR r.state NOT IN "
-                              "('COMPLETED','FAILED','CANCELLED')) AND NOT (r.state IS NULL AND EXISTS "
-                              "(SELECT 1 FROM task_stopped s WHERE s.task_id=t.id)) LIMIT 1",
-                              (self.store.project_root,)).fetchone():
-                    outcome = "busy"
             if outcome:
                 result = receipt(command["requestId"], outcome, command["target"],
                                  str(task["version"]) if task else "0",
@@ -241,6 +220,42 @@ class WorkspaceAPI:
                 raise WorkspaceError("answer_continuation_unconfirmed") from error
         return result
 
+    def edit_draft(self, task_id, *, expected_version, payload):
+        """Host-only draft edit; the same write transaction arbitrates edit versus Start."""
+        from . import task_options
+        from .attachments import checked
+        validate("Identity", task_id)
+        validate("Decimal", expected_version)
+        title = payload.get("title")
+        if not isinstance(title, str) or not 0 < len(title.strip()) <= 200:
+            raise WorkspaceError("title_required")
+        choices = {k: v for k, v in payload.items() if k != "title"}
+        validate("CreatePayload", choices)
+        if not choices["description"].strip():
+            raise WorkspaceError("description_required")
+        checked(choices.get("attachments", []))
+        def write(db):
+            self._project(db)
+            row = db.execute("SELECT * FROM workspace_tasks WHERE task_id=? AND project_id=?",
+                             (task_id, self.project_id)).fetchone()
+            if row is None:
+                raise WorkspaceError("unknown_task")
+            if row["execution_id"] is not None:
+                raise WorkspaceError("task_started")
+            if str(row["version"]) != expected_version:
+                raise WorkspaceError("stale_version")
+            options = task_options.read(db, task_id)
+            options.update({k: v for k, v in choices.items() if k != "description"})
+            options["draftTitle"] = title.strip()
+            task_options.save(db, task_id, options)
+            db.execute("UPDATE workspace_tasks SET description=?,version=version+1 WHERE task_id=?",
+                       (choices["description"], task_id))
+            db.execute("UPDATE workspace_projects SET version=version+1 WHERE project_id=?", (self.project_id,))
+            version = str(row["version"] + 1)
+            storage.append_public_tx(db, project_id=self.project_id, entity_id=task_id, kind="task", version=int(version))
+            return version
+        return self.store.immediate_write(write)
+
     def _command(self, db, command):
         self._project(db)
         command_digest = digest(command)
@@ -277,6 +292,9 @@ class WorkspaceAPI:
             result = capabilities(build_identity=self.build_identity, generation=self.generation,
                                   operations=OPERATIONS + (("tasks.start",) if self.dispatch_start is not None else ())
                                   + (("decisions.answer",) if self.dispatch_answer is not None else ()))
+            # Older clients validate frameBytes against their original fixed bound.
+            if request["protocol"]["minor"] <= 6:
+                result["limits"]["frameBytes"] = 1024 * 1024
             result["attachments"] = self.dispatch_answer is not None
             return result
         if operation in ("tasks.list", "project.snapshot"):

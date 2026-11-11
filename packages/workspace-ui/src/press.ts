@@ -26,7 +26,7 @@ export function createPress(): Press {
   const visible = (el: HTMLElement) => {
     const menu = el.closest<HTMLElement>("[popover]");
     if (!menu) return el;
-    return invokers.get(menu) ?? document.querySelector<HTMLElement>(`[popovertarget="${menu.id}"]`) ?? el;
+    return invokers.get(menu) ?? (menu.closest(".ws-pane") ?? document).querySelector<HTMLElement>(`[popovertarget="${menu.id}"]`) ?? el;
   };
   const remember = (el: HTMLElement | null) => {
     pressed = el && visible(el);

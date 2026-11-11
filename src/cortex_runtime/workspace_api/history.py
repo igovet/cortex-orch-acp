@@ -12,9 +12,9 @@ HIDDEN_STEPS = frozenset({
     "agent_thought_chunk", "thought", "thinking", "reasoning", "wait", "wait_agent",
     "task_notification", "usage_update", "current_mode_update", "config_option_update",
     "available_commands_update", "session_info_update", "turn_started", "turn_complete",
-    "result_submit", "create_draft", "draft_write", "write_report", "read_skill",
-    "tools_discover", "read_capsule", "task_get_context", "toolsearch",
 })
+# These calls are shown like any other, but what they carry is a private report body.
+REPORT_BODIES = frozenset({"create_draft", "draft_write", "write_report", "result_submit"})
 
 
 def hidden_step(title):
@@ -101,9 +101,12 @@ def tool_detail(update):
     if "command" not in detail and isinstance(raw.get("argv"), list) and all(isinstance(a, str) for a in raw["argv"]):
         detail["command"] = shlex.join(raw["argv"])
     put("query", "query", "pattern", "q")
+    put("ref", "report_id", "report_ref", "draft_id", "source_ref", "skill")
     operation = detail["title"].rsplit("__", 1)[-1].rsplit(".", 1)[-1].lower()
-    is_edit = detail.get("kind") == "edit" or operation in {
-        "project_edit", "project_write", "outside_write", "edit", "write", "multiedit", "apply_patch"}
+    if operation in REPORT_BODIES and detail.get("kind") == "edit":
+        detail["kind"] = "other"
+    is_edit = operation not in REPORT_BODIES and (detail.get("kind") == "edit" or operation in {
+        "project_edit", "project_write", "outside_write", "edit", "write", "multiedit", "apply_patch"})
     if is_edit:
         put("oldText", "old_string", "oldString", "oldText")
         put("newText", "new_string", "newString", "newText", "content")
@@ -195,6 +198,10 @@ def page_tx(db, project_id, task_id, *, limit=100, cursor=None, byte_budget=6553
     rows = db.execute("SELECT * FROM (" + sql + ") WHERE seq>? AND seq<=? ORDER BY seq LIMIT ?",
                       (session, session, after, high, limit + 1)).fetchall()
     items, consumed = [], after
+    # JSON arrays add only each new row and a separator. Never validate/serialize
+    # every growing prefix: a full page otherwise visits the same rows O(n²) times.
+    page_bytes = len(json.dumps(dict(items=[], nextCursor=None, highWatermark=str(high + 1)),
+                                ensure_ascii=False).encode())
     for row in rows[:limit]:
         detail = None
         kind, text, status = ("user" if row["kind"] == "user_message" else "assistant"), row["text"], None
@@ -232,10 +239,11 @@ def page_tx(db, project_id, task_id, *, limit=100, cursor=None, byte_budget=6553
             item.update(text=None, availability="unavailable", reason="content_exceeds_wire_limit")
         if item["availability"] == "available":
             item["activity"] = activity_item(kind, text, row["seq"] + 1, row["created_at"], detail, status)
-        candidate = dict(items=items + [item], nextCursor=None, highWatermark=str(high + 1))
+        candidate = dict(items=[item], nextCursor=None, highWatermark=str(high + 1))
+        item_bytes = len(json.dumps(item, ensure_ascii=False).encode())
         try:
             validate("HistoryPage", candidate)
-            if len(json.dumps(candidate, ensure_ascii=False).encode()) > byte_budget - 256:
+            if page_bytes + item_bytes + (2 if items else 0) > byte_budget - 256:
                 raise ContractError("page_too_large")
         except ContractError as error:
             if str(error) != "page_too_large":
@@ -252,6 +260,7 @@ def page_tx(db, project_id, task_id, *, limit=100, cursor=None, byte_budget=6553
                     raise ContractError("page_too_large")
             except ContractError:
                 item.update(text=None, availability="unavailable", reason="content_exceeds_page_limit")
+        page_bytes += len(json.dumps(item, ensure_ascii=False).encode()) + (2 if items else 0)
         items.append(item)
         consumed = row["seq"]
     last = consumed

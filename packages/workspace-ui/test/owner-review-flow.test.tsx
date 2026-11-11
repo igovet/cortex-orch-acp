@@ -39,7 +39,7 @@ it("review shows the result, checks in plain words and a working way forward whe
   const p = await mount(inReview([{ name: "Focused tests", detail: "Exit 1", outcome: "failed", command: ["pytest"], rerunnable: true }, { name: "Lint", detail: "", outcome: "passed" }]), taskPath + "/changes");
   const bar = document.querySelector(".rv-bar")!;
   expect(bar).not.toBeNull();
-  expect(bar.textContent).toContain("Created the landing page docs");
+  expect(document.querySelector(".rv-sum")?.textContent).toContain("Created the landing page docs");
   expect(bar.textContent).toContain("1 passed, 1 failed");
   expect(bar.textContent).toMatch(/Run the unpassed checks first/);
   expect(bar.textContent).toContain("Request changes…");
@@ -74,9 +74,13 @@ it("policy checks remain explicitly not run without a misleading rerun", async (
 it("review offers Accept as the primary action that moves the task to Ready to merge", async () => {
   const p = await mount(inReview([{ name: "Focused tests", detail: "", outcome: "passed" }]), taskPath + "/changes");
   const bar = document.querySelector(".rv-bar")!;
-  expect(bar.textContent).toContain("Moves the task to Ready to merge");
+  expect(bar.textContent).toContain("Accept moves the task to Ready to merge");
   const accept = [...bar.querySelectorAll<HTMLButtonElement>("button.btn-primary")].find(b => b.textContent?.includes("Accept v1"))!;
   expect(accept.getAttribute("aria-disabled")).toBeNull();
+  // Request changes and Accept are one row of one bar, and the explanation sits in that bar's slot, not under Accept.
+  expect([...bar.querySelectorAll("[data-bar] .l-bar-actions > .btn")].map(b => b.textContent?.trim())).toEqual(["Request changes…", "Accept v1"]);
+  expect(bar.querySelector("[data-bar] .l-reason")?.textContent).toContain("Accept moves the task to Ready to merge");
+  expect(document.querySelector('[aria-label="Review comments"]')).not.toBeNull();
   accept.click(); await settle();
   expect(p.commands.map(c => c.operation)).toContain("accept_result");
 });
@@ -110,6 +114,28 @@ it("review in a project without Git says the changes are in the folder and offer
   expect(text()).toContain("Changes were applied in the project folder");
   expect(button("Commit…")).toBeUndefined();
   expect(button("Merge…")).toBeUndefined();
+  // Comments need a line of a diff: no comment bar, no empty panel, and the folder note once.
+  const panel = document.querySelector('[aria-label="Changes"]')!;
+  expect(document.querySelector('[aria-label="Review comments"]')).toBeNull();
+  expect(button("Send")).toBeUndefined();
+  expect(panel.querySelectorAll(".note-panel")).toHaveLength(0);
+  expect(panel.textContent!.match(/Changes were applied in the project folder/g)).toHaveLength(1);
+});
+
+it("Request changes keeps Send and reopen a real button, with its reason in the composer's reason slot", async () => {
+  await mount(inReview([{ name: "Focused tests", detail: "", outcome: "passed" }]), taskPath + "/changes");
+  button("Request changes…")!.click(); await settle();
+  // The shared composer's paper plane, named for what it does; its reason stays outside the button, in the bar's slot.
+  const send = document.querySelector<HTMLButtonElement>('dialog[open] button[aria-label="Send and reopen"]')!;
+  const slot = document.querySelector("dialog[open] .c-bar .l-reason")!;
+  expect(send.tagName).toBe("BUTTON");
+  expect(send.getAttribute("aria-disabled")).toBe("true");
+  expect(slot.textContent).toBe("Say what should change");
+  expect(send.getAttribute("aria-describedby")).toBe(slot.id);
+  const field = document.querySelector<HTMLTextAreaElement>("dialog[open] textarea")!;
+  field.value = "Keep the old menu order"; field.dispatchEvent(new Event("input", { bubbles: true })); await settle();
+  expect(send.getAttribute("aria-disabled")).toBeNull();
+  expect(slot.textContent).toBe("");
 });
 
 it("a refused action's message never stays on screen", async () => {
@@ -166,7 +192,7 @@ it("worker activity hides internal steps, names tools plainly and expands to inp
   expect(stream.textContent).not.toContain("Native, no receipt");
   (stream.querySelector("button.fold") as HTMLButtonElement).click(); await settle();
   expect(stream.textContent).toContain("Read");
-  expect(stream.textContent).not.toContain("Read skill");
+  expect(stream.textContent).toContain("Read skill");
   const edit = [...stream.querySelectorAll<HTMLButtonElement>("button.ev-toggle")].find(b => b.textContent?.includes("Edit"))!;
   expect(edit.getAttribute("aria-expanded")).toBe("false");
   edit.click(); await settle();
@@ -187,6 +213,6 @@ it("the conversation shows workers once: worker launches stay in the Workers car
 });
 
 it("a busy button keeps its fill and size and shows a spinner inside", async () => {
-  const css = (await import("node:fs")).readFileSync(`${process.cwd()}/src/workspace.css`, "utf8");
+  const css = (await import("node:fs")).readFileSync(`${process.cwd()}/${(await import("node:fs")).existsSync("src/workspace.css") ? "" : "packages/workspace-ui/"}src/workspace.css`, "utf8");
   expect(css).toMatch(/\.btn-primary\[data-busy\]\[disabled\][^{]*\{[^}]*background: var\(--primary\)/);
 });

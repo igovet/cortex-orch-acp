@@ -74,7 +74,7 @@ function statusFact(task: Task, ctx: { target: string; running: number; title: (
     case "cancelled": return { text: "Run cancelled", tone: "st-idle", icon: "x-circle" };
     case "paused": return { text: "Paused by you", tone: "st-idle", icon: "pause" };
     case "stopping": return { text: "Stopping", tone: "st-warn", icon: "hourglass" };
-    case "needs_you": return { text: task.issue ? `Asks: ${task.issue}` : "Waiting for you", tone: "st-warn" };
+    case "needs_you": return { text: task.issue ? `Asks: ${task.issue.replace(/^question:\s*/i, "") || task.issue}` : "Waiting for you", tone: "st-warn" };
     case "review": {
       if (task.result && task.workspaceDigest !== task.result.digest) return { text: "Stale result, workspace changed", tone: "st-warn", icon: "alert" };
       const checks = task.result?.checks ?? [];
@@ -103,7 +103,7 @@ export const plainVersion = (version: string) => version.split("+")[0];
 export function buildIndex(state: WorkspaceState, now: number): WorkspaceIndex {
   const projects = new Map(state.projects.map(p => [p.id, p]));
   const machines = new Map(state.machines.map(m => [m.id, m]));
-  const sprints = new Map(state.sprints.map(s => [s.id, s]));
+  const sprints = new Map(state.sprints.filter(s => !s.archivedAt).map(s => [s.id, s]));
   const tasks = new Map(state.tasks.map(t => [t.id, t]));
   const last = new Map<string, string>();
   for (const event of state.events) if (event.occurredAt) last.set(event.taskId, event.occurredAt);
@@ -113,7 +113,7 @@ export function buildIndex(state: WorkspaceState, now: number): WorkspaceIndex {
   const title = (id: string) => tasks.get(id)?.title ?? "another task";
   // A sprint comes from the project's plan and its tasks from the project's runtime, so a sprint can name tasks that are
   // not loaded yet (the runtime is starting, stopped or refused). The index is read by every screen: it must not throw.
-  const nextInSprint = new Set(state.sprints.flatMap(s => {
+  const nextInSprint = new Set(state.sprints.filter(s => !s.archivedAt).flatMap(s => {
     const next = s.taskIds.map(id => tasks.get(id)).find(t => t?.status === "draft" && t.dependencies.every(ready));
     return next ? [next.id] : [];
   }));
@@ -121,7 +121,7 @@ export function buildIndex(state: WorkspaceState, now: number): WorkspaceIndex {
   const views = state.tasks.map((task): TaskView => {
     const project = projects.get(task.projectId)!, machine = machines.get(project.machineId)!;
     // The sprint editor's ordered membership is authoritative, including older task projections without a reverse link.
-    const sprint = state.sprints.find(s => s.projectId === task.projectId && s.taskIds.includes(task.id))
+    const sprint = state.sprints.find(s => !s.archivedAt && s.projectId === task.projectId && s.taskIds.includes(task.id))
       ?? (task.sprintId ? sprints.get(task.sprintId) ?? null : null);
     const phase = boardPhase(state, task.id), own = workers.get(task.id) ?? [];
     const running = own.filter(w => w.status === "working").length, target = targetBranch(state, task);
@@ -149,7 +149,7 @@ export function buildIndex(state: WorkspaceState, now: number): WorkspaceIndex {
     const at = own.reduce<number | null>((max, v) => v.at !== null && (max === null || v.at > max) ? v.at : max, null);
     return [project.id, {
       project, machine, offline, views: active, counts, archived: own.length - active.length, conflicts, worktrees,
-      sprints: state.sprints.filter(s => s.projectId === project.id), at, signal,
+      sprints: state.sprints.filter(s => !s.archivedAt && s.projectId === project.id), at, signal,
     }];
   }));
   return { now, state, views, byId: new Map(views.map(v => [v.id, v])), summaries, archive: views.filter(v => v.column === "archive") };
@@ -163,11 +163,16 @@ export const decisionRoute = (view: TaskView) => {
 };
 export const projectsOn = (index: WorkspaceIndex, machineId: string) => [...index.summaries.values()].filter(s => s.machine.id === machineId);
 
-/** "Needs you" everywhere means the board's Needs you column: Home, the projects table and the column always add up. */
+/**
+ * The board's columns add up to the projects table. `attention` is Home's one Needs you list: every task waiting on the owner,
+ * each once, in the order its decision matters (a question, permission or conflict, then a result to review, then accepted
+ * work to finish), and the title band counts the same list.
+ */
 export function homeView(index: WorkspaceIndex, machineId: string) {
   const projects = projectsOn(index, machineId), views = projects.flatMap(p => p.views);
   const of = (column: ColumnId) => views.filter(v => v.column === column);
-  return { projects, needs: of("needs"), working: of("work"), review: of("review"), merge: of("merge") };
+  const needs = of("needs"), review = of("review"), merge = of("merge");
+  return { projects, needs, working: of("work"), review, merge, attention: [...needs.filter(v => !v.unknown), ...review.filter(v => !v.unknown), ...merge.filter(v => !v.unknown)] };
 }
 
 /** The owner is what this task is waiting for, so it must read differently from the work that runs by itself. */
@@ -182,14 +187,51 @@ export function decisionOf(view: TaskView): Decision {
   if (task.conflict !== "none") return { ...base, kind: "Conflict", icon: "alert", tone: "st-bad", ask: `Merge conflict with ${view.target}` };
   // The domain keeps the waiting reason as text, so the row label follows it rather than a separate kind.
   if (/permission/i.test(issue)) return { ...base, kind: "Permission", icon: "shield", tone: "st-warn", ask: issue };
-  if (/question/i.test(issue)) return { ...base, kind: "Question", icon: "question", tone: "st-warn", ask: issue };
+  if (/question/i.test(issue)) return { ...base, kind: "Question", icon: "question", tone: "st-warn", ask: issue.replace(/^question:\s*/i, "") || issue };
   return { ...base, kind: "Decision", icon: "pause", tone: "st-bad", ask: issue || "Waiting for you" };
 }
-/** Inbox spans every connected machine and also carries sprint planning questions and unmerged-work questions. */
+/** A task's one line in Needs you: the decision it waits on, its result to review, or its accepted work to finish. */
+export function attentionOf(view: TaskView): Decision {
+  if (view.column === "needs") return decisionOf(view);
+  const { task } = view;
+  const base = { key: `task:${view.id}`, where: placed(view.machine, `${view.project.name} / ${task.title}`), view, project: view.project, sprintId: null, at: view.at };
+  if (view.column === "review") {
+    if (task.result && task.workspaceDigest !== task.result.digest) return { ...base, kind: "Review", icon: "alert", tone: "st-warn", ask: "The result is stale: the workspace changed after it" };
+    const c = checkCounts(task.result?.checks ?? []);
+    const parts = [c.passed && `${c.passed} passed`, c.failed && `${c.failed} failed`, c.not_run && `${c.not_run} not run`, c.unverified && `${c.unverified} unverified`].filter(Boolean);
+    return { ...base, kind: "Review", icon: "eye", tone: "st-warn", ask: `Result v${task.result?.version ?? 1} is ready${parts.length ? `: ${parts.join(", ")}` : ", no checks reported"}` };
+  }
+  const into = sameBranch(task, view.target) || !task.checkout.branch ? "" : `: ${task.checkout.branch} into ${view.target}`;
+  return { ...base, kind: "Finish", icon: "merge", tone: "st-ok", ask: `${view.fact.text}${into}` };
+}
+/**
+ * A board card's or list row's one concise fact: the decision a waiting task asks for (the question itself, the result's check
+ * counts, what is accepted and where it goes), "Working" without a worker count for running work, otherwise the status fact.
+ * A runtime notice (an engine that would not start, an observed phase) keeps its own words.
+ */
+export function cardFact(view: TaskView): Fact {
+  const notice = !!view.task.warnings?.length || (!!view.task.observedPhase && view.task.observedPhase !== "not_started");
+  if (view.unknown || notice) return view.fact;
+  // A run that failed or was cancelled waits on the owner too, but its own outcome is the fact to read.
+  const waiting = view.column === "needs" && (view.task.status === "needs_you" || view.task.conflict !== "none");
+  if (waiting || view.column === "review" || view.column === "merge") {
+    const d = attentionOf(view);
+    return { text: d.ask, tone: d.tone, icon: d.icon };
+  }
+  if (view.task.status === "working" && view.task.conflict === "none") return { ...view.fact, text: "Working" };
+  return view.fact;
+}
+
+/**
+ * Inbox is Home's Needs you list for every connected machine, in the same order (attentionOf): what waits on an answer, a
+ * permission or a conflict, with each sprint planning question beside them, then results to review, then accepted work to
+ * finish, then unmerged work holding a task out of the Archive. Each task appears once; each row opens where that is decided.
+ */
 export function inboxItems(index: WorkspaceIndex): Decision[] {
   const connected = (m: Machine) => m.connection === "connected";
-  const tasks = index.views.filter(v => v.column === "needs" && !v.unknown && connected(v.machine)).map(decisionOf);
-  const planning = index.state.sprints.flatMap((sprint): Decision[] => {
+  const live = index.views.filter(v => !v.unknown && connected(v.machine));
+  const of = (column: ColumnId) => live.filter(v => v.column === column).map(attentionOf);
+  const planning = index.state.sprints.filter(s => !s.archivedAt).flatMap((sprint): Decision[] => {
     const summary = index.summaries.get(sprint.projectId)!;
     if (sprint.planning !== "question" || !connected(summary.machine)) return [];
     const open = index.state.sessions.find(s => s.taskId === sprint.planningTaskId)?.decisions.filter(d => d.kind === "question" && isOpen(d)) ?? [];
@@ -201,7 +243,8 @@ export function inboxItems(index: WorkspaceIndex): Decision[] {
     key: `archive:${view.id}`, kind: "Unmerged work", icon: "archive", tone: "st-warn", ask: "Unmerged work is holding this task out of the Archive",
     where: placed(view.machine, `${view.project.name} / ${view.task.title}`), view, project: view.project, sprintId: null, at: view.at,
   }));
-  return [...tasks, ...planning, ...archive];
+  const listed = new Set(live.filter(v => v.column === "needs" || v.column === "review" || v.column === "merge").map(v => v.id));
+  return [...of("needs"), ...planning, ...of("review"), ...of("merge"), ...archive.filter(d => !listed.has(d.view!.id))];
 }
 
 export const inScope = (summary: ProjectSummary, scope: Scope) =>

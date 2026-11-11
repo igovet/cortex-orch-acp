@@ -1,4 +1,4 @@
-import { dependencyReady, isOpen, openPlanningQuestion, runBlockerOf, runOrder, type PlanItem, type Sprint, type Task, type TaskSession } from "@cortex/workspace-domain";
+import { dependencyReady, isOpen, openPlanningQuestion, runBlockerOf, runOrder, type AttachmentInput, type PlanItem, type Sprint, type Task, type TaskSession } from "@cortex/workspace-domain";
 import type { Ask } from "./questions";
 import { checksLine } from "./review-model";
 import { readyLabel, type TaskView, type WorkspaceIndex } from "./selectors";
@@ -14,7 +14,7 @@ export function planningAsks(sprint: Sprint, session: TaskSession | undefined): 
   return asked ? [{ id: "planning", text: asked.text, from: "", at: asked.at ?? null, options: (asked.options ?? []).map(label => ({ label })), answer: null }] : [];
 }
 
-export type ThreadEntry = { key: string; kind: "qa" | "note" | "message" | "event"; text: string; question?: string; at: number | null };
+export type ThreadEntry = { key: string; kind: "qa" | "note" | "message" | "event"; text: string; question?: string; at: number | null; attachments?: AttachmentInput[] };
 /** The planning conversation in order. A settled question reads with its answer, however each side was recorded. */
 export function planningThread(sprint: Sprint, session: TaskSession | undefined): ThreadEntry[] {
   const asked = (session?.decisions ?? []).filter(d => d.kind === "question");
@@ -24,11 +24,11 @@ export function planningThread(sprint: Sprint, session: TaskSession | undefined)
   sprint.conversation.forEach((entry, i) => {
     if (entry === open) return;
     if (entry.kind === "question") { flush(String(i)); question = entry.text; return; }
-    if (entry.kind !== "answer") { flush(String(i)); out.push({ key: `${entry.kind}:${i}`, kind: entry.kind, text: entry.text, at: entry.at ?? null }); return; }
+    if (entry.kind !== "answer") { flush(String(i)); out.push({ key: `${entry.kind}:${i}`, kind: entry.kind, text: entry.text, at: entry.at ?? null, attachments: entry.attachments }); return; }
     // An answer still waiting for the rest of its batch stays on its tab.
     if (asked.some(d => d.held && d.answer?.text === entry.text)) return;
     const at = settled.findIndex(d => d.answer!.text === entry.text), decision = at < 0 ? null : settled.splice(at, 1)[0];
-    out.push({ key: `qa:${decision?.id ?? i}`, kind: "qa", question: decision?.text ?? question ?? "", text: entry.text, at: decision?.answer?.at ?? entry.at ?? null });
+    out.push({ key: `qa:${decision?.id ?? i}`, kind: "qa", question: decision?.text ?? question ?? "", text: entry.text, at: decision?.answer?.at ?? entry.at ?? null, attachments: entry.attachments });
     question = null;
   });
   flush("end");
@@ -60,29 +60,65 @@ function wordOf(view: TaskView, next: boolean, index: WorkspaceIndex): Word {
   }
 }
 
-export type PlanRow = { item: PlanItem; no: number; deps: number[]; view: TaskView | null; word: Word | null; waits: number[] };
-/** The plan as a table. Once tasks exist each row also carries its task, in plan order. */
-export function planRows(index: WorkspaceIndex, sprint: Sprint, items: PlanItem[]): PlanRow[] {
-  const created = sprint.materializedVersion !== null && sprint.taskIds.length === items.length;
-  const views = created ? sprint.taskIds.map(id => index.byId.get(id) ?? null) : [];
-  const nextId = views.find(v => v?.task.status === "draft" && !v.task.dependencies.some(id => { const d = index.byId.get(id); return !d || !dependencyReady(d.task); }))?.id;
-  const no = (key: string) => items.findIndex(i => i.key === key) + 1;
+/**
+ * `backed` says the rows belong to the version the sprint's tasks were created from. A backed row without a view is a
+ * task that could not be loaded, which reads as Unknown; rows that are not backed (history, drafts, plans before tasks
+ * exist) carry no state at all.
+ */
+export type PlanRow = { item: PlanItem; no: number; deps: number[]; view: TaskView | null; word: Word | null; waits: number[]; backed: boolean };
+const planVersionOf = (sprint: Sprint, items: PlanItem[]) =>
+  sprint.plan?.items === items ? sprint.plan.version : sprint.history?.find(h => h.items === items)?.version ?? null;
+/**
+ * The plan as a table. Once tasks exist each row also carries its task. `version` names the plan version `items`
+ * come from; task states belong only to the version the tasks were created from, so a past version or a draft never
+ * takes the current tasks' states, whatever its length. Omitted, it is found by identity among the sprint's plan and
+ * history, so a copy such as a draft has none. `"tasks"` marks items built from the sprint's own tasks, keyed by task id.
+ * Tasks were created in run order, so that order, not plan position, pairs each item with its task.
+ */
+export function planRows(index: WorkspaceIndex, sprint: Sprint, items: PlanItem[], version?: number | "tasks" | null): PlanRow[] {
+  const source = version === undefined ? planVersionOf(sprint, items) : version;
+  let views: Map<string, TaskView | null> | null = null, order: (TaskView | null)[] = [];
+  if (source === "tasks") {
+    views = new Map(items.map(i => [i.key, index.byId.get(i.key) ?? null]));
+    order = [...views.values()];
+  } else if (source !== null && source === sprint.materializedVersion && sprint.taskIds.length === items.length) {
+    const run = runOrder(items);
+    if (run.length === items.length) {
+      views = new Map(run.map((key, i) => [key, index.byId.get(sprint.taskIds[i]) ?? null]));
+      order = sprint.taskIds.map(id => index.byId.get(id) ?? null);
+    }
+  }
+  const nextId = order.find(v => v?.task.status === "draft" && !v.task.dependencies.some(id => { const d = index.byId.get(id); return !d || !dependencyReady(d.task); }))?.id;
+  const numbers = new Map<string, number>();
+  items.forEach((i, n) => { if (!numbers.has(i.key)) numbers.set(i.key, n + 1); });
+  const no = (key: string) => numbers.get(key) ?? 0;
+  const unready = (key: string) => { const d = views?.get(key); return !d || !dependencyReady(d.task); };
   return items.map((item, i) => {
-    const view = views[i] ?? null;
-    const unready = (key: string) => { const d = views[no(key) - 1]; return !d || !dependencyReady(d.task); };
-    return { item, no: i + 1, deps: item.dependsOn.map(no), view, word: view ? wordOf(view, view.id === nextId, index) : null, waits: item.dependsOn.filter(unready).map(no) };
+    const view = views?.get(item.key) ?? null;
+    return { item, no: i + 1, deps: item.dependsOn.map(no), view, word: view ? wordOf(view, view.id === nextId, index) : null, waits: item.dependsOn.filter(unready).map(no), backed: views !== null };
   });
 }
 
 const short = (text: string) => text.length > 15 ? `${text.slice(0, 14).trimEnd()}…` : text;
 const NODE_W = 120, NODE_H = 34, COL = 176, ROW = 46, PAD = 12;
-/** A left-to-right layered drawing: a task sits one column past its last dependency. */
+const numbering = (items: PlanItem[]) => {
+  const at = new Map<string, number>();
+  items.forEach((i, n) => { if (!at.has(i.key)) at.set(i.key, n + 1); });
+  return (key: string) => at.get(key) ?? 0;
+};
+/**
+ * The small inline drawing, left to right: a task sits one column past its last dependency. Large plans use
+ * `layout` in plan-graph. `selected` lights links and must be an explicit pick (`explicitPick` in plan-graph), never
+ * a default such as the first task.
+ */
 export function planGraph(items: PlanItem[], selected: string | null) {
+  const byKey = new Map<string, PlanItem>();
+  for (const i of items) if (!byKey.has(i.key)) byKey.set(i.key, i);
   const depth = new Map<string, number>();
   const depthOf = (key: string, seen: string[] = []): number => {
     if (depth.has(key)) return depth.get(key)!;
     if (seen.includes(key)) return 0;
-    const item = items.find(i => i.key === key);
+    const item = byKey.get(key);
     const d = item && item.dependsOn.length ? Math.max(...item.dependsOn.map(k => depthOf(k, [...seen, key]))) + 1 : 0;
     depth.set(key, d);
     return d;
@@ -93,7 +129,7 @@ export function planGraph(items: PlanItem[], selected: string | null) {
   const height = tallest * ROW + PAD * 2 - (ROW - NODE_H), width = (columns.length - 1) * COL + NODE_W + PAD * 2;
   const at = new Map<string, { x: number; y: number }>();
   columns.forEach((keys, c) => keys.forEach((key, r) => at.set(key, { x: PAD + c * COL, y: PAD + (tallest - keys.length) * ROW / 2 + r * ROW })));
-  const no = (key: string) => items.findIndex(i => i.key === key) + 1;
+  const no = numbering(items);
   const edges = items.flatMap(item => item.dependsOn.filter(d => at.has(d)).map(dep => {
     const a = at.get(dep)!, b = at.get(item.key)!, x1 = a.x + NODE_W, y1 = a.y + NODE_H / 2, x2 = b.x, y2 = b.y + NODE_H / 2, mid = (x1 + x2) / 2;
     return { key: `${dep}>${item.key}`, d: y1 === y2 ? `M${x1} ${y1} L${x2} ${y2}` : `M${x1} ${y1} C${mid} ${y1} ${mid} ${y2} ${x2} ${y2}`, on: dep === selected || item.key === selected };
@@ -102,11 +138,12 @@ export function planGraph(items: PlanItem[], selected: string | null) {
   const leads = items.filter(i => items.some(x => x.dependsOn.includes(i.key))).map(i => `Task ${no(i.key)} leads to ${items.filter(x => x.dependsOn.includes(i.key)).map(x => no(x.key)).join(", ")}.`);
   return { nodes, edges, width, height, label: leads.join(" ") || "No task depends on another." };
 }
+/** The inline graph's caption. It grows with the plan, so the large graph uses the short words in plan-graph instead. `selected` is an explicit pick. */
 export function planCaption(items: PlanItem[], selected: string | null) {
-  const order = `Automatic run order, one at a time: ${runOrder(items).map(k => items.findIndex(i => i.key === k) + 1).join(", ")}.`;
+  const no = numbering(items);
+  const order = `Automatic run order, one at a time: ${runOrder(items).map(no).join(", ")}.`;
   const item = items.find(i => i.key === selected);
   if (!item) return order;
-  const no = (key: string) => items.findIndex(i => i.key === key) + 1;
   const after = items.filter(i => i.dependsOn.includes(item.key)).map(i => no(i.key));
   const needs = item.dependsOn.map(no);
   const parts = [needs.length ? `needs ${needs.join(", ")}` : "starts first", ...(after.length ? [`unblocks ${after.join(", ")}`] : [])];
@@ -125,7 +162,8 @@ const checksOf = (task: Task, word: Word, index: WorkspaceIndex): string => {
 /** An index of real facts: a missing check is never read as a pass, and nothing here is a percentage of progress. */
 export function sprintSummary(index: WorkspaceIndex, sprint: Sprint) {
   const views = sprint.taskIds.flatMap(id => { const v = index.byId.get(id); return v ? [v] : []; });
-  const rows = planRows(index, sprint, views.map(v => ({ key: v.id, title: v.task.title, description: v.task.description, dependsOn: v.task.dependencies.filter(d => views.some(x => x.id === d)) })));
+  const loaded = new Set(views.map(v => v.id));
+  const rows = planRows(index, sprint, views.map(v => ({ key: v.id, title: v.task.title, description: v.task.description, dependsOn: v.task.dependencies.filter(d => loaded.has(d)) })), "tasks");
   const next = views.find(v => v.task.status === "draft" && v.task.dependencies.every(id => { const d = index.byId.get(id); return !!d && dependencyReady(d.task); }));
   const list: SummaryRow[] = views.map(view => {
     const word = wordOf(view, view.id === next?.id, index);

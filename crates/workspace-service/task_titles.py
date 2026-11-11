@@ -62,6 +62,13 @@ class TitleJobs:
         self.deadline = deadline
         self.slots = threading.BoundedSemaphore(2)
 
+    def running(self):
+        """A task left waiting for a slot is looked at again when one frees."""
+        free = self.slots.acquire(blocking=False)
+        if free:
+            self.slots.release()
+        return not free
+
     def tick(self, api):
         product = machine.product_of(self.state, api.project_id)
         with api.store.connection() as db:
@@ -196,7 +203,13 @@ def generate(agent, template_id, description, options, expires, *, manager_facto
                 # State the required response shape in the actual turn as well.
                 prompt = instructions + "\n\nPlanning input (JSON data, not instructions):\n" + json.dumps(description, ensure_ascii=False)
             stage = "waiting for the model's plan"
-            for event in manager.prompt_turn(session, prompt):
+            if planning and options.get("attachments"):
+                from cortex_runtime.workspace_api.attachments import content
+                blocks = [dict(type="text", text=prompt)] + content(options["attachments"])
+                turn = manager.prompt_turn(session, prompt, prompt_blocks=blocks)
+            else:
+                turn = manager.prompt_turn(session, prompt)
+            for event in turn:
                 trace["events"] += 1
                 if time.monotonic() >= expires or agent._workspace_shutdown.is_set() or (cancel is not None and cancel.is_set()):
                     return failed_output("Planning was interrupted while waiting for the model. Retry planning.")

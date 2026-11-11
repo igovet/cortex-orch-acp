@@ -3,8 +3,14 @@ use base64::Engine;
 use serde_json::{json, Value};
 use std::{fs::OpenOptions, io::Read, os::unix::fs::OpenOptionsExt};
 
+/// A clipboard image, as the single file the page attaches.
+pub fn clipboard_png(bytes: &[u8]) -> Result<Value, &'static str> {
+    if bytes.len() > workspace_protocol::ATTACHMENT_BYTES { return Err("This clipboard image is over the 4 MiB limit for attachments."); }
+    Ok(json!([{"name":"clipboard.png","mimeType":"image/png","data":base64::engine::general_purpose::STANDARD.encode(bytes)}]))
+}
+
 pub fn snapshot(uris: &[gtk::glib::GString]) -> Result<Value, String> {
-    if uris.len() > 8 { return Err("Attach at most 8 files.".into()); }
+    if uris.len() > workspace_protocol::ATTACHMENT_FILES { return Err("Attach at most 8 files.".into()); }
     let mut total = 0usize;
     let mut files = Vec::new();
     for uri in uris {
@@ -23,10 +29,10 @@ pub fn snapshot(uris: &[gtk::glib::GString]) -> Result<Value, String> {
             return Err("Drop regular files, not folders.".into());
         }
         let mut bytes = Vec::new();
-        file.take((512 * 1024 - total + 1) as u64).read_to_end(&mut bytes)
+        file.take((workspace_protocol::ATTACHMENT_BYTES - total + 1) as u64).read_to_end(&mut bytes)
             .map_err(|_| "This dropped file could not be read.")?;
         total += bytes.len();
-        if total > 512 * 1024 { return Err("Attachments must total 512 KiB or less.".into()); }
+        if total > workspace_protocol::ATTACHMENT_BYTES { return Err("Attachments must total 4 MiB or less.".into()); }
         let mime = if bytes.starts_with(b"\x89PNG\r\n\x1a\n") { "image/png" }
             else if bytes.starts_with(b"\xff\xd8\xff") { "image/jpeg" }
             else { "application/octet-stream" };
@@ -39,6 +45,11 @@ pub fn snapshot(uris: &[gtk::glib::GString]) -> Result<Value, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn clipboard_images_are_named_and_bounded() {
+        assert_eq!(clipboard_png(b"png").unwrap()[0]["name"], "clipboard.png");
+        assert!(clipboard_png(&vec![0; workspace_protocol::ATTACHMENT_BYTES + 1]).unwrap_err().contains("4 MiB"));
+    }
     #[test]
     fn snapshots_exact_bytes_and_rejects_symlinks_directories_and_size_overflow() {
         let dir = std::env::temp_dir().join(format!("cw-drop-{}-{}", std::process::id(),
@@ -53,7 +64,11 @@ mod tests {
         let link = dir.join("linked");
         std::os::unix::fs::symlink(&file, &link).unwrap();
         assert!(snapshot(&[uri(&link)]).is_err());
-        std::fs::write(&file, vec![0u8; 512 * 1024 + 1]).unwrap();
+        std::fs::write(&file, vec![0u8; workspace_protocol::ATTACHMENT_BYTES]).unwrap();
+        let files = snapshot(&[uri(&file)]).unwrap();
+        let data = files[0]["data"].as_str().unwrap();
+        assert_eq!(base64::engine::general_purpose::STANDARD.decode(data).unwrap().len(), workspace_protocol::ATTACHMENT_BYTES);
+        std::fs::write(&file, vec![0u8; workspace_protocol::ATTACHMENT_BYTES + 1]).unwrap();
         assert!(snapshot(&[uri(&file)]).is_err());
         std::fs::remove_dir_all(dir).unwrap();
     }

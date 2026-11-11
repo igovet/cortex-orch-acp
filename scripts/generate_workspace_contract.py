@@ -70,6 +70,10 @@ def check_subset(schema):
 
 def render(schema, lock):
     check_subset(schema)
+    limits, definitions = schema["x-limits"], schema["$defs"]
+    if (definitions["Attachments"]["maxItems"] != limits["attachmentFiles"]
+            or definitions["Attachment"]["properties"]["data"]["maxLength"] != (limits["attachmentBytes"] + 2) // 3 * 4):
+        raise ValueError("attachment schema bounds must derive from x-limits")
     version = schema["x-wire-version"]
     version_key = str(version["major"]) + "." + str(version["minor"])
     digest = hashlib.sha256(canonical(schema).encode("utf-8")).hexdigest()

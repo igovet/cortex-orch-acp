@@ -71,7 +71,7 @@ describe("text the owner wrote", () => {
   });
 
   it("renders Read more as Markdown, keeping line breaks in the description and the acceptance", async () => {
-    await mount(world({ plan: { version: 1, items: [{ key: "a", title: "Write the brief", description: "# Goal\n\nFirst\nSecond\n\n1. Inspect\n2. Change", acceptance: "- Links work\n- `pnpm test` passes", dependsOn: [] }] } }), `/m/${LOCAL_MACHINE_ID}/p/p/s/sp/planning`);
+    await mount(world({ plan: { version: 1, items: [{ key: "a", title: "Write the brief", description: "# Goal\n\nFirst\nSecond\n\n1. Inspect\n2. Change", acceptance: "- Links work\n- `pnpm test` passes", dependsOn: [] }] } }), `/m/${LOCAL_MACHINE_ID}/p/p/s/sp/plan`);
     all(".ws-more-l")[0].click();
     await settled();
     const [description, acceptance] = all(".ws-read-d");

@@ -16,7 +16,8 @@ import { draftTask, flush, projection, scriptedPort } from "./support";
 let dispose: (() => void) | undefined;
 afterEach(() => { dispose?.(); dispose = undefined; document.body.innerHTML = ""; });
 const active = () => document.querySelector<HTMLDialogElement>("dialog[open]");
-const button = (text: string) => [...active()!.querySelectorAll<HTMLButtonElement>("button")].find(b => b.textContent?.trim() === text)!;
+// A text button by its words, or an icon button, such as the paper plane, by its accessible name.
+const button = (text: string) => [...active()!.querySelectorAll<HTMLButtonElement>("button")].find(b => b.textContent?.trim() === text || b.getAttribute("aria-label") === text)!;
 const type = (selector: string, text: string) => {
   const el = active()!.querySelector<HTMLInputElement>(selector)!;
   el.value = text; el.dispatchEvent(new Event("input", { bubbles: true }));

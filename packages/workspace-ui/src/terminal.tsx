@@ -1,13 +1,17 @@
-import { createEffect, createSignal, onCleanup, Show } from "solid-js";
+import { createEffect, createSignal, on, onCleanup, Show, untrack, useContext } from "solid-js";
 import { Terminal as Xterm } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
 import { inputChunks, type TerminalPage, type TerminalPort } from "./terminal-client";
 import { useWs } from "./ctx";
+import { ScreenActive } from "./freshness";
 import { I } from "./kit";
+import { Toolbar } from "./layout";
 
 export function LiveTerminal(props: { projectId: string; repository: string; port: TerminalPort }) {
   const ws = useWs();
+  const shown = useContext(ScreenActive);
+  let reading = false;
   let host!: HTMLDivElement, term: Xterm | undefined, fit: FitAddon | undefined;
   let alive = true, timer: ReturnType<typeof setTimeout>, session: string | undefined, cursor = 0;
   let sending = false, pending: string[] = [], pendingBytes = 0, opening = false, resizing = false;
@@ -47,10 +51,12 @@ export function LiveTerminal(props: { projectId: string; repository: string; por
   }
   async function poll(attempt: number) {
     if (!alive || failed || attempt !== epoch || !session) return;
+    reading = true;
     try {
       await output(await props.port.read(props.projectId, session, cursor), attempt);
-      if (alive && !failed && attempt === epoch) timer = setTimeout(() => void poll(attempt), 100);
-    } catch (cause) { if (attempt === epoch) fail(cause); }
+      reading = false;
+      if (alive && !failed && attempt === epoch && untrack(shown)) timer = setTimeout(() => void poll(attempt), 100);
+    } catch (cause) { reading = false; if (attempt === epoch) fail(cause); }
   }
   async function send() {
     if (sending) return;
@@ -66,7 +72,7 @@ export function LiveTerminal(props: { projectId: string; repository: string; por
     finally { sending = false; if (alive && !failed && pending.length) void send(); }
   }
   const resize = async () => {
-    if (!term || !fit || !ws.panels.terminalOpen() || !host.clientWidth) return;
+    if (!term || !fit || !ws.panels.terminalOpen() || !untrack(shown) || !host.clientWidth) return;
     fit.fit();
     wantedSize = { cols: Math.min(500, term.cols), rows: Math.min(500, term.rows) };
     if (!session || failed || resizing) return;
@@ -119,23 +125,24 @@ export function LiveTerminal(props: { projectId: string; repository: string; por
     queueMicrotask(() => { if (alive) style(); });
   });
   createEffect(() => {
-    if (ws.panels.terminalOpen()) {
-      if (!term) void open();
-      else { void resize(); term.focus(); }
-    }
+    if (!ws.panels.terminalOpen() || !shown()) return;
+    if (!term) void open(); else void resize();
   });
+  createEffect(on(ws.panels.terminalOpen, open => { if (open && term && untrack(shown)) term.focus(); }, { defer: true }));
+  // A parked tab reads nothing; what the shell printed meanwhile is there to read on return.
+  createEffect(on(shown, on => { clearTimeout(timer); if (on && session && !failed && !reading) void poll(epoch); }, { defer: true }));
   const observer = new ResizeObserver(() => void resize());
   queueMicrotask(() => { if (alive) observer.observe(host); });
   onCleanup(() => { alive = false; ++epoch; clearTimeout(timer); observer.disconnect(); term?.dispose(); });
   return <section class="terminal ws-terminal" aria-label="Terminal">
-    <div class="term-h">
-      <span class="term-tab"><I n="terminal" s={12} />Project shell</span>
-      <span class="mono trunc">{props.repository}</span>
-      <span class="grow" /><span role="status" class="terminal-status">{status()}</span>
-      <Show when={!running()}><button class="btn btn-sm" disabled={busy()} onClick={() => void open()}>Reconnect terminal</button></Show>
-      <button class="ib" aria-label="Close shell" disabled={busy() || !session} onClick={() => void close()}><I n="x" s={14} /></button>
-      <button class="ib" aria-label="Hide terminal" onClick={ws.toggleTerminal}><I n="minus" s={14} /></button>
-    </div>
+    <Toolbar small class="term-h" label="Project shell"
+      start={<span class="term-tab"><I n="terminal" s={12} />Project shell</span>}
+      mid={<><span class="mono trunc" data-whole="">{props.repository}</span><span role="status" class="terminal-status trunc" data-whole="">{status()}</span></>}
+      end={<>
+        <Show when={!running()}><button class="btn btn-sm" disabled={busy()} onClick={() => void open()}>Reconnect terminal</button></Show>
+        <button class="ib" aria-label="Close shell" disabled={busy() || !session} onClick={() => void close()}><I n="x" s={14} /></button>
+        <button class="ib" aria-label="Hide terminal" onClick={ws.toggleTerminal}><I n="minus" s={14} /></button>
+      </>} />
     <Show when={error()}><div class="terminal-error" role="alert">{error()}</div></Show>
     <div class="terminal-screen" ref={host} />
   </section>;

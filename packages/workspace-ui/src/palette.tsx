@@ -25,14 +25,26 @@ export function Palette(props: { open: boolean; onClose: () => void }) {
       { id: "a:close", group: "Task", label: "Close task…", icon: "x", disabled: blocked ?? ws.gate("close_task"), run: () => ws.closeTask(id) },
     ];
   };
+  // The sprint plan on view offers its graph: Show graph from the List view, Fit graph and Full view in the Graph view.
+  const graphActions = (): Entry[] => {
+    const g = ws.panels.graph();
+    if (!g) return [];
+    const open = "Open the graph first";
+    return [
+      { id: "a:graph", group: "Plan", label: "Show graph", icon: "layers", disabled: g.show ? undefined : "The plan is already shown as a graph", run: () => g.show?.() },
+      { id: "a:fit", group: "Plan", label: "Fit graph", icon: "expand", keys: "F", disabled: g.fit ? undefined : open, run: () => g.fit?.() },
+      { id: "a:full", group: "Plan", label: g.fullOn ? "Exit full view" : "Full view", icon: "expand", keys: "E", disabled: g.full ? undefined : open, run: () => g.full?.() },
+    ];
+  };
   const actions = createMemo((): Entry[] => [
     ...taskActions(),
+    ...graphActions(),
     { id: "a:new", group: "Actions", label: "New task", icon: "plus", keys: "Ctrl+N", run: () => ws.newItem("task") },
     { id: "a:sprint", group: "Actions", label: "New sprint", icon: "layers", keys: "Ctrl+Shift+N", disabled: ws.gate("create_sprint"), run: () => ws.newItem("sprint") },
     { id: "a:home", group: "Actions", label: "Go to Home", icon: "home", run: () => ws.go({ name: "home", machine: m() }) },
     { id: "a:inbox", group: "Actions", label: "Go to Inbox", icon: "inbox", keys: "Ctrl+I", run: () => ws.go({ name: "inbox", machine: m() }) },
     { id: "a:archive", group: "Actions", label: "Go to Archive", icon: "archive", run: () => ws.go({ name: "archive", machine: m() }) },
-    { id: "a:side", group: "Actions", label: ws.panels.sidebarHidden() ? "Show sidebar" : "Hide sidebar", icon: "panel-left", keys: "Ctrl+B", run: () => ws.panels.toggleSidebar() },
+    { id: "a:side", group: "Actions", label: ws.panels.sidebarShown() ? "Hide sidebar" : "Show sidebar", icon: "panel-left", keys: "Ctrl+B", run: () => ws.panels.toggleSidebar() },
     { id: "a:ins", group: "Actions", label: ws.panels.inspectorVisible() ? "Hide inspector" : "Show inspector", icon: "panel-right", keys: "Ctrl+Alt+B", disabled: ws.inspectable() ? undefined : "This screen has no inspector", run: () => ws.panels.toggleInspector() },
     { id: "a:term", group: "Actions", label: ws.panels.terminalOpen() ? "Hide terminal" : "Show terminal", icon: "panel-bottom", keys: "Ctrl+J", disabled: ws.terminalAvailable() ? undefined : "Open a project or task to use a terminal", run: () => ws.toggleTerminal() },
     { id: "a:settings", group: "Actions", label: "Open settings", icon: "settings", keys: "Ctrl+,", run: () => ws.go({ name: "settings", section: "appearance", machine: null }) },
@@ -52,7 +64,7 @@ export function Palette(props: { open: boolean; onClose: () => void }) {
     const q = raw.toLowerCase();
     const tasks = index.views.filter(v => v.task.title.toLowerCase().includes(q));
     const projects = [...index.summaries.values()].filter(s => s.project.name.toLowerCase().includes(q));
-    const sprints = index.state.sprints.filter(s => sprintTitle(s).toLowerCase().includes(q));
+    const sprints = index.state.sprints.filter(s => !s.archivedAt && sprintTitle(s).toLowerCase().includes(q));
     return {
       hidden: Math.max(0, tasks.length - RESULT_LIMIT),
       entries: [
@@ -91,7 +103,7 @@ export function Palette(props: { open: boolean; onClose: () => void }) {
           <Show when={i() === 0 || found().entries[i() - 1].group !== entry.group}><div class="mi-h" role="presentation">{entry.group}</div></Show>
           <div id={optionId(i())} class="mi ws-pal-o" role="option" aria-selected={active() === i()} aria-disabled={entry.disabled ? "true" : undefined} data-why={entry.disabled}
             onMouseMove={() => setActive(i())} onClick={() => pick(entry)}>
-            <I n={entry.icon} /><span class="grow trunc">{entry.label}<Show when={entry.sub}><span class="sub trunc">{entry.sub}</span></Show></span>
+            <I n={entry.icon} /><span class="grow trunc">{entry.label}<Show when={entry.sub}><span class="sub trunc">{entry.sub}</span></Show><Show when={entry.disabled}>{why => <span class="sub ws-pal-why">{why()}</span>}</Show></span>
             <Show when={entry.keys}><span class="kbd">{entry.keys}</span></Show>
           </div>
         </>}</For>
@@ -104,10 +116,16 @@ export function Palette(props: { open: boolean; onClose: () => void }) {
 const KEYS: [string, string][] = [
   ["Ctrl+K", "Search and actions"], ["Ctrl+N", "New task"], ["Ctrl+Shift+N", "New sprint"], ["Ctrl+I", "Inbox"],
   ["Ctrl+B", "Sidebar"], ["Ctrl+Alt+B", "Inspector"], ["Ctrl+J", "Terminal"], ["Ctrl+\\", "Worker pane"], ["Ctrl+,", "Settings"],
-  ["Enter", "Steer: send now"], ["Ctrl+Enter", "Queue: keep it unsent"], ["Ctrl+.", "Stop the task"], ["1 to 8", "Pick an answer to the open question"],
+  ["Enter", "Send, as Send now or Queue beside the plane shows"], ["Shift+Enter", "New line in a message"], ["Ctrl+.", "Stop the task"], ["1 to 8", "Choose an answer to the open question; the plane sends it"],
   ["/", "Filter the board or list"], ["Space", "Preview a card in the Inspector"], ["Enter", "Open"], ["Arrow keys", "Move between cards and columns"],
   ["Ctrl+P", "Go to file, in Code"], ["Ctrl+Shift+F", "Search in files, in Code"], ["Ctrl+Enter", "Commit, or send diff comments"],
+  ["Ctrl+T", "New tab"], ["Ctrl+W", "Close tab"], ["Ctrl+Tab, Ctrl+Shift+Tab", "Next and previous tab"], ["Ctrl+1 to Ctrl+9", "Go to tab; 9 is the last"],
   ["Alt+Left, Alt+Right", "Back and Forward"], ["?", "This help"],
+  ["Ctrl+\\, in a sprint", "Switch between the chat and the plan"], ["/ or Ctrl+F, in the graph", "Search tasks"], ["Enter, Shift+Enter", "Next and previous match, in the graph's search"],
+  ["Arrow keys, in the graph", "Move along dependencies, and within a layer"], ["Shift+Left, Shift+Right", "The next dependency or dependent of the same task"],
+  ["Home, End", "First and last task, in the graph"], ["Space, in the graph", "Select a task and light its links"], ["Enter, in the graph", "Open Details, or expand a collapsed layer"],
+  ["C", "Collapse or expand the task's layer"], ["+, -, 0", "Zoom in, zoom out, 100%"], ["F, Shift+F", "Fit the graph, fit the matches"], ["Ctrl+Arrow keys", "Pan the graph"],
+  ["M", "Minimap"], ["T", "Direct links or the whole chain"], ["E", "Full view"], ["Esc, in the graph", "One step back: search, Details, selection, Full view"],
 ];
 export function Help(props: { open: boolean; onClose: () => void }) {
   return <Modal open={props.open} onClose={props.onClose} label="Help and shortcuts">

@@ -62,17 +62,56 @@ export function place(pop: HTMLElement, trigger: HTMLElement, align: Align) {
   if (align === "right") s.right = `${innerWidth - box.right}px`; else s.left = `${box.left}px`;
 }
 export const closePop = (el: Element | null) => (el?.closest("[popover]") as HTMLElement | null)?.hidePopover?.();
+/**
+ * Keeps an open popover whole inside the window: one placed against a trigger near an edge (or opened from another menu) moves
+ * back in by its overflow, and one taller than the window scrolls inside it. Only `translate` and `max-height` are touched, so
+ * the placement itself, from CSS or from `place`, stays as it was for the next opening.
+ */
+export function keepInside(pop: HTMLElement, margin = 8) {
+  pop.style.translate = "";
+  if (pop.hasAttribute("data-fit")) { pop.style.maxHeight = ""; pop.style.overflowY = ""; pop.removeAttribute("data-fit"); }
+  const r = pop.getBoundingClientRect();
+  if (!r.width || !r.height) return;
+  if (r.height > innerHeight - 2 * margin) { pop.style.maxHeight = `${innerHeight - 2 * margin}px`; pop.style.overflowY = "auto"; pop.setAttribute("data-fit", ""); }
+  const h = Math.min(r.height, innerHeight - 2 * margin), w = Math.min(r.width, innerWidth - 2 * margin);
+  const dx = r.left + w > innerWidth - margin ? innerWidth - margin - w - r.left : r.left < margin ? margin - r.left : 0;
+  const dy = r.top + h > innerHeight - margin ? innerHeight - margin - h - r.top : r.top < margin ? margin - r.top : 0;
+  if (dx || dy) pop.style.translate = `${Math.round(dx)}px ${Math.round(dy)}px`;
+}
 
-/** Native popover: light dismiss and Escape come from the platform. */
-export function Pop(props: { id: string; class?: string; align?: Align; label?: string; style?: JSX.CSSProperties; children: JSX.Element; ref?: (el: HTMLDivElement) => void }) {
+/**
+ * Focus that a dialog or a panel puts on its first control as it opens. The quiet focus line belongs to keyboard movement and no
+ * press drew this one, so after a pointer opened it the line still marks where Tab, Enter and Escape act, until focus moves on or
+ * the next press (workspace.css). A text field keeps only its caret.
+ */
+export function placeFocus(el: HTMLElement | null | undefined, options?: FocusOptions) {
+  if (!el) return;
+  el.focus(options);
+  // A text field shows its caret instead, as it does for the keyboard.
+  if (document.activeElement !== el || document.documentElement.hasAttribute("data-keyboard") || el.matches("textarea, input:not([type='checkbox'], [type='radio']), [contenteditable]")) return;
+  el.setAttribute("data-placed-focus", "");
+  const clear = () => { el.removeAttribute("data-placed-focus"); el.removeEventListener("blur", clear); window.removeEventListener("pointerdown", clear, true); };
+  el.addEventListener("blur", clear);
+  window.addEventListener("pointerdown", clear, true);
+}
+
+/**
+ * Native popover: light dismiss and Escape come from the platform. A popover role carries its label: a menu when it holds menu
+ * items, otherwise a non-modal dialog, unless `role` says otherwise.
+ */
+export function Pop(props: { id: string; class?: string; align?: Align; label?: string; role?: "menu" | "dialog"; style?: JSX.CSSProperties; children: JSX.Element; ref?: (el: HTMLDivElement) => void }) {
   let el!: HTMLDivElement;
+  const name = () => { if (!props.role) el.setAttribute("role", el.querySelector("[role='menuitem']") ? "menu" : "dialog"); };
   const onBefore = (e: Event) => {
-    if ((e as ToggleEvent).newState !== "open" || !props.align) return;
-    const trigger = document.querySelector<HTMLElement>(`[popovertarget="${props.id}"]`);
+    if ((e as ToggleEvent).newState !== "open") return;
+    name();
+    if (!props.align) return;
+    const trigger = (el.closest(".ws-pane") ?? document).querySelector<HTMLElement>(`[popovertarget="${props.id}"]`);
     if (trigger) place(el, trigger, props.align);
   };
-  onMount(() => el.addEventListener("beforetoggle", onBefore));
-  return <div ref={r => { el = r; props.ref?.(r); }} popover="auto" id={props.id} class={props.class} style={props.style} aria-label={props.label}>{props.children}</div>;
+  const onToggle = (e: Event) => { if ((e as ToggleEvent).newState === "open") keepInside(el); };
+  onMount(() => { name(); el.addEventListener("beforetoggle", onBefore); el.addEventListener("toggle", onToggle); });
+  return <div ref={r => { el = r; props.ref?.(r); }} popover="auto" id={props.id} class={props.class} style={props.style} role={props.role} aria-label={props.label}>{props.children}</div>;
 }
 export function MenuItem(props: { icon?: string; label: JSX.Element; sub?: string; keys?: string; check?: boolean; danger?: boolean; disabled?: string; needs?: WorkspaceCommand["type"]; onSelect?: () => void }) {
   const ws = useWs();
@@ -81,7 +120,7 @@ export function MenuItem(props: { icon?: string; label: JSX.Element; sub?: strin
   return <button class={`mi${props.danger ? " mi-danger" : ""}`} role="menuitem" aria-disabled={disabled() ? "true" : undefined} data-why={disabled()}
     onClick={e => { const at = e.currentTarget; if (disabled()) return; closePop(at); props.onSelect?.(); }}>
     <Show when={props.icon}><I n={props.icon!} /></Show>
-    <span class="grow">{props.label}<Show when={props.sub}><span class="sub">{props.sub}</span></Show></span>
+    <span class="grow">{props.label}<Show when={props.sub}><span class="sub">{props.sub}</span></Show><Show when={disabled()}>{why => <span class="sub">{why()}</span>}</Show></span>
     <Show when={props.keys}><span class="kbd">{props.keys}</span></Show>
     <Show when={props.check}><I n="check" s={14} /></Show>
   </button>;
@@ -104,7 +143,7 @@ export function Modal(props: { open: boolean; onClose: () => void; onDismiss?: (
       setPriorReceipt(() => ws?.store.receipt());
       back = document.activeElement as HTMLElement | null;
       if (!el.open) { if (typeof el.showModal === "function") el.showModal(); else el.setAttribute("open", ""); }
-      el.querySelector<HTMLElement>("[data-autofocus]")?.focus();
+      placeFocus(el.querySelector<HTMLElement>("[data-autofocus]"));
     } else close();
   }));
   onCleanup(close);
@@ -117,73 +156,24 @@ export function Modal(props: { open: boolean; onClose: () => void; onDismiss?: (
 
 export { createFollow } from "./follow";
 
-export type VirtualApi = { el: HTMLDivElement };
 /**
- * Windowed list. Rows sit at measured offsets (an estimate until a row has rendered), so a long column only keeps what
- * is in view plus overscan. Keys stay stable across snapshots, and the focused row stays rendered while it scrolls away.
+ * A long column of rows in normal flow. Every row is rendered once and the engine paints only what is in view, so scrolling
+ * runs no script and changes nothing in the page. (Windowing rows in and out on each scroll event built, measured and
+ * re-placed cards while the owner scrolled, which dropped frames in WebKitGTK; test/scroll-perf.py measures it.) Keys stay
+ * stable across snapshots, so an updated record redraws inside its row and the focused row keeps its focus.
  */
-export function VirtualList<T>(props: {
-  items: T[]; keyOf: (item: T) => string; estimate: (item: T) => number; gap?: number; overscan?: number;
+export function RowList<T>(props: {
+  items: T[]; keyOf: (item: T) => string; gap?: number;
   class?: string; label?: string; header?: JSX.Element; style?: JSX.CSSProperties; onKeyDown?: (e: KeyboardEvent) => void;
   render: (item: Accessor<T>) => JSX.Element;
 }) {
-  let scroller!: HTMLDivElement, inner!: HTMLDivElement;
-  const [top, setTop] = createSignal(0);
-  const [height, setHeight] = createSignal(600);
-  const [version, setVersion] = createSignal(0);
-  const [held, setHeld] = createSignal<string | null>(null);
-  const measured = new Map<string, number>();
-  const gap = () => props.gap ?? 0;
-  const layout = createMemo(() => {
-    version();
-    const keys = props.items.map(props.keyOf), offsets = new Float64Array(keys.length + 1);
-    keys.forEach((key, i) => { offsets[i + 1] = offsets[i] + (measured.get(key) ?? props.estimate(props.items[i])) + gap(); });
-    return { keys, offsets, at: new Map(keys.map((key, i) => [key, i])) };
-  });
-  const indexAt = (y: number) => {
-    const { offsets } = layout();
-    let lo = 0, hi = Math.max(0, offsets.length - 2);
-    while (lo < hi) { const mid = (lo + hi + 1) >> 1; if (offsets[mid] <= y) lo = mid; else hi = mid - 1; }
-    return lo;
-  };
-  const visible = createMemo(() => {
-    const { keys, at } = layout(), over = props.overscan ?? 4;
-    const out = keys.slice(Math.max(0, indexAt(top()) - over), indexAt(top() + height()) + 1 + over);
-    const pin = held();
-    if (pin && at.has(pin) && !out.includes(pin)) out.push(pin);
-    return out;
-  });
-  const sync = () => {
-    setTop(Math.max(0, scroller.scrollTop - inner.offsetTop));
-    if (scroller.clientHeight) setHeight(scroller.clientHeight);
-  };
-  const observer = typeof ResizeObserver === "undefined" ? undefined : new ResizeObserver(entries => {
-    let changed = false;
-    for (const entry of entries) {
-      const key = (entry.target as HTMLElement).dataset.key!, size = entry.borderBoxSize?.[0]?.blockSize ?? (entry.target as HTMLElement).offsetHeight;
-      const old = measured.get(key) ?? props.estimate(props.items[layout().at.get(key) ?? 0]);
-      if (!size || Math.abs(size - old) < .5) continue;
-      measured.set(key, size); changed = true;
-      // Keep what the reader sees still when a row above the viewport turns out a different height.
-      if (layout().offsets[layout().at.get(key) ?? 0] < top()) scroller.scrollTop += size - old;
-    }
-    if (changed) setVersion(v => v + 1);
-  });
-  onMount(() => {
-    sync();
-    if (typeof ResizeObserver !== "undefined") { const box = new ResizeObserver(sync); box.observe(scroller); onCleanup(() => box.disconnect()); }
-  });
-  onCleanup(() => observer?.disconnect());
-  const item = (key: string) => props.items[layout().at.get(key) ?? 0];
-  return <div ref={scroller} class={props.class} style={props.style} role="group" aria-label={props.label} onScroll={sync} onKeyDown={e => props.onKeyDown?.(e)}
-    onFocusIn={e => setHeld((e.target as HTMLElement).closest<HTMLElement>(".v-row")?.dataset.key ?? null)}
-    onFocusOut={e => { if (!scroller.contains(e.relatedTarget as Node | null)) setHeld(null); }}>
+  const keys = createMemo(() => props.items.map(props.keyOf), undefined, { equals: (a, b) => a.length === b.length && a.every((key, i) => key === b[i]) });
+  const at = createMemo(() => new Map(keys().map((key, i) => [key, i])));
+  const item = (key: string) => props.items[at().get(key) ?? 0];
+  return <div class={props.class} style={props.style} role="group" aria-label={props.label} onKeyDown={e => props.onKeyDown?.(e)}>
     {props.header}
-    <div ref={inner} class="v-inner" style={{ height: `${layout().offsets[layout().keys.length] - (layout().keys.length ? gap() : 0)}px` }}>
-      <For each={visible()}>{key => <div class="v-row" data-key={key} ref={el => { observer?.observe(el); onCleanup(() => observer?.unobserve(el)); }}
-        style={{ transform: `translateY(${layout().offsets[layout().at.get(key) ?? 0]}px)` }}>
-        <Show when={layout().at.has(key)}>{props.render(() => item(key))}</Show>
-      </div>}</For>
+    <div class="v-inner" style={{ gap: `${props.gap ?? 0}px` }}>
+      <For each={keys()}>{key => <div class="v-row" data-key={key}><Show when={at().has(key)}>{props.render(() => item(key))}</Show></div>}</For>
     </div>
   </div>;
 }

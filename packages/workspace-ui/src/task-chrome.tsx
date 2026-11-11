@@ -1,8 +1,10 @@
 import { createEffect, createMemo, createSignal, For, Show } from "solid-js";
-import { capabilityOf } from "@cortex/workspace-domain";
+import { capabilityOf, taskEditable } from "@cortex/workspace-domain";
 import { checkCounts, clock, dayClock, engineLimits, sameBranch, sprintTitle, type TaskView } from "./selectors";
 import { useWs } from "./ctx";
+import { onScreen } from "./freshness";
 import { A, FactLine, I, Modal, Pop } from "./kit";
+import { ActionBar, revealWhenCut } from "./layout";
 import { behindTarget, conflictLine, finishBlocked, taskCheckout } from "./review-model";
 import { checkedResult, checksOf, checkWhy, closeBlocked, closeConsequences, contextLine, editedFiles, languageLabel, modeLabel, sessionModel, stateChip, stoppedAt, stopLabel, taskSettings, tokens, usesMachineRoute, workerFace, type SessionModel } from "./session-model";
 import { CHECK_ICON, VERIFICATION } from "./worker";
@@ -18,10 +20,10 @@ export function TaskTitle(props: { view: TaskView }) {
   const [text, setText] = createSignal<string | null>(null);
   const shown = () => props.view.task.titleState === "failed" ? props.view.task.description.split("\n")[0].slice(0, 60) : props.view.task.title;
   const save = () => { const t = text(); if (t?.trim()) ws.ok({ type: "rename_task", taskId: props.view.id, title: t }, () => { setText(null); }); };
-  return <Show when={text() !== null} fallback={<button class="cur trunc ws-title" {...ws.needs("rename_task")} onClick={() => ws.gate("rename_task") || setText(props.view.task.title.startsWith("Title unavailable") || props.view.task.titleState === "pending" ? "" : props.view.task.title)}>{shown()}</button>}>
+  return <Show when={taskEditable(props.view.task)} fallback={<span ref={revealWhenCut} class="cur trunc ws-title" data-whole="">{shown()}</span>}><Show when={text() !== null} fallback={<button class="cur trunc ws-title" {...ws.needs("rename_task")} onClick={() => !taskEditable(props.view.task) || ws.gate("rename_task") || setText(props.view.task.title.startsWith("Title unavailable") || props.view.task.titleState === "pending" ? "" : props.view.task.title)}>{shown()}</button>}>
     <input class="inp ws-title-in" aria-label="Task title" value={text()!} onInput={e => setText(e.currentTarget.value)} ref={el => queueMicrotask(() => { el.focus(); el.select(); })} onBlur={() => setText(null)}
       onKeyDown={e => { if (e.key === "Enter") { e.preventDefault(); save(); } else if (e.key === "Escape") { e.stopPropagation(); setText(null); } }} />
-  </Show>;
+  </Show></Show>;
 }
 
 /** Where the task works and where it merges. The target stays changeable until merge. */
@@ -32,9 +34,9 @@ export function BranchChip(props: { view: TaskView }) {
   const worktree = () => t().checkout.kind === "worktree";
   const uncommitted = () => taskCheckout(ws.store.state(), t())?.files.length ?? m()?.session.changes?.files;
   return <>
-    <button class="chip branch-chip" popovertarget="m-wt"><I n="branch" s={12} /><span class="w-wide">{worktree() ? "Worktree" : "Main checkout"}</span><Show when={t().checkout.branch}><span class="mono trunc" style={{ "max-width": "170px" }}>{t().checkout.branch}</span></Show></button>
+    <button class="chip branch-chip" popovertarget="m-wt" aria-label={`${worktree() ? "Worktree" : "Project folder"}${t().checkout.branch ? ` ${t().checkout.branch}` : ""}`}><I n="branch" s={12} /><span class="w-wide">{worktree() ? "Worktree" : "Project folder"}</span><Show when={t().checkout.branch}><span class="mono trunc" style={{ "max-width": "170px" }}>{t().checkout.branch}</span></Show></button>
     <Pop id="m-wt" class="pop-anchor" align="left" label="Checkout" style={{ width: "300px", padding: "10px 12px" }}>
-      <div class="st st-idle" style={{ "margin-bottom": "8px" }}><I n="branch" s={12} />{worktree() ? "Separate worktree" : "Main checkout"}</div>
+      <div class="st st-idle" style={{ "margin-bottom": "8px" }}><I n="branch" s={12} />{worktree() ? "Separate worktree" : "Project folder"}</div>
       <dl class="kv">
         <Show when={t().checkout.branch}><dt>Branch</dt><dd class="mono">{t().checkout.branch}</dd></Show>
         <Show when={m()?.session.base}>{b => <><dt>Base</dt><dd class="mono">{b().branch}</dd></>}</Show>
@@ -46,40 +48,54 @@ export function BranchChip(props: { view: TaskView }) {
   </>;
 }
 
+/** The strip on the task page that says why the main action in the title band is off. */
+export const taskWhyId = (id: string) => `task-why-${id}`;
+/** Why the main action in the title band is off, or null. The title band has no room for it, so the task page says it once. */
+export function titleBlock(m: SessionModel): string | null {
+  const v = m.view, t = v.task;
+  if (t.status === "ready_to_merge" && m.mode === "review" && !t.integrationFacts?.alreadyInTarget) {
+    if (sameBranch(t, v.target)) return t.integrationFacts?.commitAvailable ? finishBlocked(t) : null;
+    return v.project.hasGit !== false ? finishBlocked(t) : closeBlocked(m);
+  }
+  return m.mode === "paused" ? closeBlocked(m) : null;
+}
+
 /** State, the one primary action, Stop and the task menu. Offline and unconfirmed tasks offer nothing that could mislead. */
 export function TaskActions(props: { view: TaskView; onMenu: (el: HTMLElement) => void }) {
   const ws = useWs();
   const m = useModel(() => props.view.id);
+  const why = () => taskWhyId(props.view.id);
   const chip = () => m() ? stateChip(m()!) : null;
   const go = () => {
     const task = props.view.id, tab = ws.router.route();
     if (tab.name === "task" && (tab.tab || tab.live)) ws.go({ name: "task", machine: tab.machine, task });
-    queueMicrotask(() => document.querySelector(".dc")?.scrollIntoView({ block: "center" }));
+    queueMicrotask(() => onScreen().querySelector(".dc")?.scrollIntoView({ block: "center" }));
   };
   const mode = () => m()?.mode;
   const blocked = () => m() ? closeBlocked(m()!) : null;
   return <>
-    <Show when={chip()}>{c => <span class="chip"><I n={c().icon} s={12} class={`${c().spin ? "spin " : ""}${c().tone}`} /><span style={{ color: "var(--fg)" }}>{c().text}<Show when={c().wide}><span class="w-wide">{c().wide}</span></Show></span>
+    <Show when={chip()}>{c => <span class="chip tb-state"><I n={c().icon} s={12} class={`${c().spin ? "spin " : ""}${c().tone}`} /><span style={{ color: "var(--fg)" }}>{c().text}<Show when={c().wide}><span class="w-wide">{c().wide}</span></Show></span>
       <Show when={c().next}><I n="chevron-right" s={12} class="faint w-wide" /><span class="w-wide">{c().next}</span></Show></span>}</Show>
+    <Show when={taskEditable(props.view.task)}><button class="btn btn-line tb-fold" {...ws.needs("edit_task")} onClick={() => ws.open({kind:"edit-task",taskId:props.view.id})}>Edit task…</button></Show>
     <Show when={mode() === "live" && props.view.task.conflict === "none" && ((m()?.open.length ?? 0) > 0 || props.view.column === "needs")}><button class="btn btn-primary" onClick={go}>Answer</button></Show>
     <Show when={props.view.task.status === "review" && mode() === "review"}><A class="btn btn-primary" to={{ name: "task", machine: props.view.machine.id, task: props.view.id, tab: "changes", sub: "diff" }}>Review changes</A></Show>
     <Show when={props.view.task.status === "ready_to_merge" && mode() === "review"}>
       <Show when={!props.view.task.integrationFacts?.alreadyInTarget} fallback={<button class="btn btn-primary" {...ws.needs("close_task")} onClick={() => ws.closeTask(props.view.id, "already_in_target")}>Close task…</button>}>
       <Show when={sameBranch(props.view.task, props.view.target)}>
         <Show when={props.view.task.integrationFacts?.commitAvailable} fallback={<button class="btn btn-primary" {...ws.needs("close_task")} onClick={() => ws.closeTask(props.view.id)}>Close as is…</button>}>
-          <button class="btn btn-primary" aria-disabled={finishBlocked(props.view.task) ? "true" : undefined} {...ws.needs("integrate")} onClick={() => { if (!finishBlocked(props.view.task)) ws.open({ kind: "merge", taskId: props.view.id, how: "squash" }); }}>Commit to {props.view.target}…</button>
+          <button class="btn btn-primary" aria-describedby={finishBlocked(props.view.task) ? why() : undefined} aria-disabled={finishBlocked(props.view.task) ? "true" : undefined} data-why={finishBlocked(props.view.task)} {...ws.needs("integrate")} onClick={() => { if (!finishBlocked(props.view.task)) ws.open({ kind: "merge", taskId: props.view.id, how: "squash" }); }}>Commit to <span class="l-branch">{props.view.target}</span>…</button>
         </Show>
       </Show>
       <Show when={!sameBranch(props.view.task, props.view.target)}>
-      <Show when={props.view.project.hasGit !== false} fallback={<button class="btn btn-primary" aria-disabled={blocked() ? "true" : undefined} data-why={blocked()} {...ws.needs("close_task")} onClick={() => { if (!blocked()) ws.closeTask(props.view.id); }}>Close as is…</button>}>
-        <button class="btn btn-primary" aria-disabled={finishBlocked(props.view.task) ? "true" : undefined} data-why={finishBlocked(props.view.task)} {...ws.needs("integrate")} onClick={() => { if (!finishBlocked(props.view.task)) ws.open({ kind: "merge", taskId: props.view.id, how: "squash" }); }}>{props.view.task.acceptance ? "Merge…" : "Review and merge…"}</button>
+      <Show when={props.view.project.hasGit !== false} fallback={<button class="btn btn-primary" aria-describedby={blocked() ? why() : undefined} aria-disabled={blocked() ? "true" : undefined} data-why={blocked()} {...ws.needs("close_task")} onClick={() => { if (!blocked()) ws.closeTask(props.view.id); }}>Close as is…</button>}>
+        <button class="btn btn-primary" aria-describedby={finishBlocked(props.view.task) ? why() : undefined} aria-disabled={finishBlocked(props.view.task) ? "true" : undefined} data-why={finishBlocked(props.view.task)} {...ws.needs("integrate")} onClick={() => { if (!finishBlocked(props.view.task)) ws.open({ kind: "merge", taskId: props.view.id, how: "squash" }); }}>{props.view.task.acceptance ? "Merge…" : "Review and merge…"}</button>
       </Show>
       </Show>
       </Show>
     </Show>
     <Show when={mode() === "live"}><button class="btn btn-line" {...ws.needs("stop_task")} onClick={() => ws.stopTask(props.view.id)}><I n="stop" s={12} class="st-bad" />{stopLabel(ws.can(capabilityOf("continue_task")))}</button></Show>
     <Show when={mode() === "paused"}><button class="btn btn-primary" {...ws.needs("continue_task")} onClick={() => ws.run({ type: "continue_task", taskId: props.view.id, now: ws.store.clock() })}><I n="play" s={12} />Resume</button></Show>
-    <Show when={mode() === "paused" || mode() === "stopping"}><button class="btn btn-line" aria-disabled={blocked() ? "true" : undefined} data-why={blocked()} {...ws.needs("close_task")} onClick={() => { if (!blocked()) ws.closeTask(props.view.id); }}>Close task…</button></Show>
+    <Show when={mode() === "paused" || mode() === "stopping"}><button class="btn btn-line" aria-describedby={blocked() ? why() : undefined} aria-disabled={blocked() ? "true" : undefined} data-why={blocked()} {...ws.needs("close_task")} onClick={() => { if (!blocked()) ws.closeTask(props.view.id); }}>Close task…</button></Show>
     <Show when={mode() === "draft"}><button class="btn btn-primary" {...ws.needs("start_task")} onClick={() => ws.run({ type: "start_task", taskId: props.view.id, now: ws.store.clock() })}><I n="play" s={12} />Start</button></Show>
     <button class="ib" aria-label="Task actions" onClick={e => props.onMenu(e.currentTarget)}><I n="more" /></button>
   </>;
@@ -127,7 +143,7 @@ function SessionPanel(props: { m: SessionModel; pick: string | null }) {
       <div class="ins-h"><span>State</span></div>
       <div class={`st ${chip().tone}`} style={{ "margin-bottom": "6px" }}><I n={chip().icon} s={14} class={chip().spin ? "spin" : undefined} />{chip().text}{chip().wide ?? ""}</div>
       <Show when={note()}><div class="cap muted">{note()}</div></Show>
-      <Show when={!note() && m().view.fact.text !== chip().text + (chip().wide ?? "")}><div class="cap muted"><FactLine fact={m().view.fact} /></div></Show>
+      <Show when={!note() && !m().view.unknown && m().view.fact.text !== chip().text + (chip().wide ?? "")}><div class="cap muted"><FactLine fact={m().view.fact} /></div></Show>
     </div>
     <Show when={m().view.task.status === "paused"}>
       <div class="ins-sec"><div class="ins-h"><span>Stop effect</span></div>
@@ -191,11 +207,10 @@ export function ExternalDoneDialog(props: { taskId: string | null; how: "externa
     <div class="dlg-h"><h2>Done outside the app</h2><button class="ib" aria-label="Keep working" onClick={props.onClose}><I n="x" /></button></div>
     <div class="dlg-b"><p>{props.how === "already_in_target" ? `Already in ${m()?.view.task.integrationFacts?.targetBranch ?? "the target branch"}. ` : ""}Close this task as completed outside the app?</p>
       <p>No acceptance, merge or passing checks will be recorded. Your files and existing check evidence stay unchanged. Finished dependencies can continue in the sprint queue.</p>
-      <Show when={reason()}><div class="note-box plain" role="status">{reason()}</div></Show>
     </div>
-    <div class="dlg-f"><button class="btn btn-line btn-lg" onClick={props.onClose}>Keep working</button>
-      <Show when={!reason()}><button class="btn btn-primary btn-lg" {...ws.needs("close_task")} onClick={confirm}>Close task</button></Show>
-    </div>
+    <ActionBar place="dialog"><button class="btn btn-line btn-lg" onClick={props.onClose}>Keep working</button>
+      <button class="btn btn-primary btn-lg" aria-disabled={reason() ? "true" : undefined} data-why={reason() ?? undefined} {...ws.needs("close_task")} onClick={confirm}>Close task</button>
+    </ActionBar>
   </Modal>;
 }
 
@@ -223,11 +238,10 @@ export function CloseDialog(props: { taskId: string | null; onClose: () => void 
           <div class="note-box plain"><I n="pause" s={14} /><span>Only want to pause? This task is already stopped, and Resume picks it up again.</span></div>
         </Show>
       </div>
-      <div class="dlg-f">
-        <span class="note">Deleting unmerged work is a separate question at archive time.</span>
+      <ActionBar place="dialog" hint="Deleting unmerged work is a separate question at archive time.">
         <button class="btn btn-line btn-lg" data-autofocus onClick={() => props.onClose()}>{paused() ? "Keep it paused" : "Keep working"}</button>
         <Show when={choice() === "as_is"} fallback={<button class="btn btn-danger btn-lg" onClick={close}>Cancel task</button>}><button class="btn btn-primary btn-lg" onClick={close}>Close task</button></Show>
-      </div>
+      </ActionBar>
     </>}</Show>
   </Modal>;
 }

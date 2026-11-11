@@ -100,26 +100,49 @@ class ServiceAgent(Agent):
         machine_tools.cleanup(state, [{"id": api.project_id, "root": api.store.project_root, "name": "Project"}])
 
     def _maintenance_interval(self):
-        return 60
+        return 300
+
+    def _jobs_running(self):
+        """A finishing job frees a slot or a queued item, which no file records."""
+        return bool(self._planning_jobs is not None and self._planning_jobs.jobs) or (
+            self._title_jobs is not None and self._title_jobs.running())
+
+    def _announce_product(self, state, project, seen):
+        """The screens hear about what the queues changed here, instead of rereading to find out."""
+        import machine_tools
+        import scheduler
+        now = scheduler._stat(machine_tools.product_path(state, project))
+        if seen is not None and now != seen:
+            try:
+                self.transport.send_notification({"jsonrpc": "2.0", "method": "_cortex/workspace/update",
+                                                  "params": {"projectId": project, "kind": "product"}}, timeout=1)
+            except Exception:
+                pass  # A screen that misses this reads the same facts on its next look; the queue is not at stake.
+        return now
 
     def _workspace_queues(self, state):
         import scheduler
+        import time
         api = self._workspace_apis[self._service_binding.project_id]
+        gate = scheduler.Gate(api, state)
         maintenance_at = 0
+        announced = None
         while not self._workspace_shutdown.is_set():
             try:
-                scheduler.tick(api, state)
-                if self._planning_jobs is not None:
-                    self._planning_jobs.tick(api)
-                if self._title_jobs is not None:
-                    try:
-                        self._title_jobs.tick(api)
-                    except Exception:
-                        pass  # Naming does not pause an otherwise healthy sprint.
-                import time
+                if gate.due(self._jobs_running()):
+                    scheduler.tick(api, state)
+                    if self._planning_jobs is not None:
+                        self._planning_jobs.tick(api)
+                    if self._title_jobs is not None:
+                        try:
+                            self._title_jobs.tick(api)
+                        except Exception:
+                            pass  # Naming does not pause an otherwise healthy sprint.
+                    gate.done()
                 if time.monotonic() >= maintenance_at:
                     self._maintenance_cleanup(state, api)
                     maintenance_at = time.monotonic() + self._maintenance_interval()
+                announced = self._announce_product(state, api.project_id, announced)
             except Exception:
                 self._service_log("scheduler_failed")
                 import machine_tools

@@ -101,7 +101,7 @@ export function negotiate(local, remote) {
   if (local.protocol.major !== remote.protocol.major) fail("version_mismatch");
   return { protocol: { major: local.protocol.major, minor: Math.min(local.protocol.minor, remote.protocol.minor) },
     operations: [...new Set(local.operations.filter(op => remote.operations.includes(op)))].sort(),
-    limits: Object.fromEntries(Object.keys(LIMITS).map(key => [key, Math.min(local.limits[key], remote.limits[key])])),
+    limits: Object.fromEntries(Object.keys(LIMITS).filter(key => Object.hasOwn(local.limits, key) && Object.hasOwn(remote.limits, key)).map(key => [key, Math.min(local.limits[key], remote.limits[key])])),
     mappingVersion: local.mappingVersion === remote.mappingVersion ? local.mappingVersion : null };
 }
 export function encodeFrame(value) {

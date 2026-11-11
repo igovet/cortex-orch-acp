@@ -2,10 +2,11 @@ import { createEffect, createMemo, createSignal, For, Match, onCleanup, Show, Sw
 import { accessFor, ENGINE_KEYS, engineLabel, ENGINES, mcpProblems, mcpTools, newMcpServer, parseCommandLine, pathMissing, ROLE_CATALOG, serverStatus, setCoordinatorMode, setGrant, setLevel, suggestLevels, toolsDiff, toolWarnings, type ConnectOutcome, type ConnectResult, type EngineKey, type GrantColumn, type McpEnv, type McpObservation, type McpServer, type Problem, type ToolLevel, type ToolRow } from "@cortex/workspace-domain";
 import { useWs } from "./ctx";
 import { A, Count, I, MenuItem, Pop } from "./kit";
+import { ActionBar } from "./layout";
 import { HELP } from "./orch-help";
 import { Bar, orchTo, Shell, slug, useMcp, useReadOnly } from "./orch-shared";
 import { clock } from "./selectors";
-import { Adv, Chk, Err, Hint, Lines, Lock, Pick, Seg, Srow, Sw, Tabs, Tags } from "./settings-kit";
+import { Adv, Chk, Err, Hint, Lines, Lock, Pick, Seg, SetH, Srow, Sw, Tabs, Tags } from "./settings-kit";
 
 const allServer = (s: McpServer) => s.engines ? s.engines.map(engineLabel).join(", ") : "All";
 const counts = (s: McpServer) => `${s.allowedTools.length} writing · ${s.readOnlyTools.length} read-only · ${(s.coordinatorTools ?? s.readOnlyTools).length} coordinator`;
@@ -231,7 +232,7 @@ function AddServer(props: { tab?: string }) {
           <ConnectionFields s={s()} set={set} off={off()} problems={problems()} prefix="new" isNew />
         </div>
         <Adv id="add-sandbox" label="Sandbox" force={s().readPaths.length > 0 || s().writePaths.length > 0 || s().network}><div class="surface"><SandboxFields s={s()} set={set} off={off()} problems={problems()} prefix="new" /></div></Adv>
-        <div class="row"><span class="ws-push"></span><button class="btn btn-primary" aria-disabled={defined() ? undefined : "true"} data-why={defined() ? undefined : "Name the server and its command first"} onClick={() => { if (defined()) go("connect"); }}>Next: Connect</button></div>
+        <ActionBar class="ws-form-f"><button class="btn btn-primary" aria-disabled={defined() ? undefined : "true"} data-why={defined() ? undefined : "Name the server and its command first"} onClick={() => { if (defined()) go("connect"); }}>Next: Connect</button></ActionBar>
       </Match>
       <Match when={tab() === "connect"}>
         <div class="surface ws-pad ws-connect">
@@ -250,19 +251,17 @@ function AddServer(props: { tab?: string }) {
           <p class="cap muted">{ws.t("connectNote")}</p>
         </div>
         <Show when={hand() || (c.result() && !c.result()!.ok)}>
-          <div class="set-h">Enter tool names by hand</div>
+          <SetH title="Enter tool names by hand" />
           <div class="surface ws-pad ws-fld"><span class="cap muted">These rows carry Not checked until a check sees them.</span><Tags label="Tool name" mono hint="exact_tool_name" items={s().handTools} onChange={items => set(setLevel({ ...s(), handTools: items }, items, "writing"))} /><div><button class="btn btn-line btn-sm" aria-disabled={s().handTools.length ? undefined : "true"} data-why={s().handTools.length ? undefined : "Type a tool name first"} onClick={() => { if (s().handTools.length) go("access"); }}>Go to Tool access</button></div></div>
         </Show>
       </Match>
       <Match when={tab() === "access"}>
         <Matrix server={s()} seen={seen()} set={set} off={off()} problems={problems()} prefix="new" />
-        <div class="row">
-          <Show when={others() > 0}><span class="cap muted">Also saves {others()} other unsaved MCP change{others() === 1 ? "" : "s"}.</span></Show>
-          <Show when={blocked()}>{b => <span class="cap st-bad">{b()}</span>}</Show>
-          <span class="ws-push"></span>
+        {/* Why saving is refused takes the bar's words slot; otherwise it says what else the save takes along. */}
+        <ActionBar class="ws-form-f" hint={others() > 0 ? `Also saves ${others()} other unsaved MCP change${others() === 1 ? "" : "s"}.` : undefined}>
           <button class="btn btn-line" aria-disabled={blocked() ? "true" : undefined} data-why={blocked()} onClick={() => finish(false)}>Save, keep off</button>
           <button class="btn btn-primary" aria-disabled={blocked() ? "true" : undefined} data-why={blocked()} onClick={() => finish(true)}>Save and turn on</button>
-        </div>
+        </ActionBar>
       </Match>
     </Switch>
   </Shell>;
@@ -335,7 +334,7 @@ function ServerList() {
   const duplicate = (s: McpServer) => ws.open({ kind: "prompt", title: `Duplicate ${s.name}`, label: "New server name", action: "Duplicate", hint: "Use this to give the same server different engines.", go(name) { const copy = { ...structuredClone(s), name, enabled: false, env: [] }; if (mcpProblems(copy, d.value(), true).some(p => p.path === "name")) return false; d.set([...d.value(), copy]); return true; } });
   const add = () => { if (!off()) ws.go(orchTo(m().id, "tools", { server: "new" })); };
   return <Shell wide title="Tools and MCP" lead="External tools available on this machine, and who may use each one. Servers are per machine: a project cannot add its own." bar={<Bar d={d} />}>
-    <div class="set-h">Servers<Hint text={HELP.mcpIntro} label="MCP servers" /><span class="r"><button class="btn btn-line btn-sm" aria-disabled={off() ? "true" : undefined} data-why={off()} onClick={add}><I n="plus" s={12} />Add server</button></span></div>
+    <SetH title="Servers"><Hint text={HELP.mcpIntro} label="MCP servers" /><button class="btn btn-line btn-sm" aria-disabled={off() ? "true" : undefined} data-why={off()} onClick={add}><I n="plus" s={12} />Add server</button></SetH>
     <Show when={d.value().length > 0} fallback={<div class="surface ws-empty">No servers. Add one to give workers extra tools.</div>}>
       <div class="surface"><div class="gt">
         <div class="gr osrow th"><span>Server</span><span>Tools</span><span>Engines</span><span>Network</span><span>Checked</span><span>Enabled</span><span></span></div>

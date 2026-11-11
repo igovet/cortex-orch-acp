@@ -6,7 +6,7 @@ import pytest
 from cortex_runtime.workspace_api import WorkspaceAPI, WorkspaceError
 from cortex_runtime.workspace_api import storage
 from cortex_runtime.workspace_contract import validate
-from test_workspace_api import api_for, create_command, query
+from test_workspace_api import api_for, create_command, query, runtime_binding
 
 
 def start_command(task, key="start-1", version="1"):
@@ -61,15 +61,18 @@ def test_a_start_with_no_engine_is_refused_with_its_reason_and_leaves_the_task_s
     assert len(calls) == 1
 
 
-def test_concurrent_keys_one_checkout_one_start(tmp_path):
+def test_concurrent_keys_one_checkout_distinct_tasks_start(tmp_path):
     calls = []
     api = connected(tmp_path, calls.append)
     tasks = [api.handle(create_command(str(n)))["target"] for n in range(8)]
     with ThreadPoolExecutor(max_workers=8) as pool:
         receipts = list(pool.map(lambda pair: api.handle(start_command(pair[1], "s"+str(pair[0]))),
                                  enumerate(tasks)))
-    assert sum(r["outcome"] == "recorded" for r in receipts) == len(calls) == 1
-    assert sum(r["outcome"] == "busy" for r in receipts) == 7
+    assert all(r["outcome"] == "recorded" for r in receipts)
+    assert len(calls) == len({r["executionId"] for r in receipts}) == 8
+    task = api.handle(query("tasks.get", tasks[0]))
+    assert api.handle(start_command(tasks[0], "repeat", task["version"]))["outcome"] == "busy"
+    assert len(calls) == 8
 
 
 class Crash(BaseException):
@@ -77,7 +80,7 @@ class Crash(BaseException):
 
 
 @pytest.mark.parametrize("where", ["before_claim", "after_claim", "after_dispatch"])
-def test_crash_never_replays_and_keeps_checkout_busy(tmp_path, monkeypatch, where):
+def test_crash_never_replays_and_only_keeps_its_task_busy(tmp_path, monkeypatch, where):
     calls = []
     api = connected(tmp_path, calls.append)
     task = api.handle(create_command())["target"]
@@ -106,8 +109,45 @@ def test_crash_never_replays_and_keeps_checkout_busy(tmp_path, monkeypatch, wher
     assert len(calls) == old_count
     execution = restarted.handle(query("executions.get", receipt["executionId"]))
     assert execution["state"] == "unknown"
+    task_now = restarted.handle(query("tasks.get", task))
+    assert restarted.handle(start_command(task, "repeat", task_now["version"]))["outcome"] == "busy"
+    monkeypatch.setattr(storage, "claim_start", original)
     other = restarted.handle(create_command("other"))["target"]
-    assert restarted.handle(start_command(other, "other-start"))["outcome"] == "busy"
+    assert restarted.handle(start_command(other, "other-start"))["outcome"] == "recorded"
+    assert len(calls) == old_count + 1 and calls[-1]["task_id"] == other
+    assert restarted.handle(start_command(task)) == receipt
+    assert restarted.handle(query("executions.get", receipt["executionId"]))["state"] == "unknown"
+    with api.store.connection() as db:
+        assert db.execute("SELECT state FROM workspace_starts WHERE execution_id=?",
+                          (receipt["executionId"],)).fetchone()[0] == "unknown"
+
+
+@pytest.mark.parametrize("state", ["RECOVERING", "WAITING_USER"])
+def test_unrelated_ordinary_acp_task_does_not_block_start(tmp_path, state):
+    calls = []
+    api = connected(tmp_path, calls.append)
+    def write(db):
+        db.execute("INSERT INTO tasks VALUES ('ordinary',?,'now')", (api.store.project_root,))
+        db.execute("INSERT INTO runtime_tasks(task_id,state,goal,created_at,updated_at) "
+                   "VALUES ('ordinary',?,'Old task','now','now')", (state,))
+    api.store.immediate_write(write)
+    task = api.handle(create_command())["target"]
+    assert api.handle(start_command(task))["outcome"] == "recorded"
+    assert len(calls) == 1 and calls[0]["task_id"] == task
+    with api.store.connection() as db:
+        assert db.execute("SELECT state FROM runtime_tasks WHERE task_id='ordinary'").fetchone()[0] == state
+
+
+def test_running_workspace_execution_does_not_block_another_task(tmp_path):
+    calls = []
+    api = connected(tmp_path, calls.append)
+    running = api.handle(create_command("running"))["target"]
+    execution = runtime_binding(api, running)
+    assert api.handle(query("executions.get", execution))["state"] == "running"
+    task = api.handle(create_command("other"))["target"]
+    assert api.handle(start_command(task))["outcome"] == "recorded"
+    assert len(calls) == 1 and calls[0]["task_id"] == task
+    assert api.handle(query("executions.get", execution))["state"] == "running"
 
 
 @pytest.mark.parametrize("patch,outcome", [
@@ -149,17 +189,40 @@ def test_prepare_append_failure_rolls_back_intent_and_receipt(tmp_path, monkeypa
     assert api.handle(query("project.snapshot")) == before
 
 
-def test_pending_start_blocks_generic_bootstrap(tmp_path):
+@pytest.mark.parametrize("start_state", ["pending", "unknown", "running"])
+def test_workspace_start_does_not_block_generic_bootstrap(tmp_path, start_state):
     from cortex_runtime.bootstrap import bootstrap_task
     from cortex_runtime.portable.identity import SourceEvent
-    from cortex_runtime.contracts import StoreError
-    api = connected(tmp_path, lambda start: None)
+    def dispatch(start):
+        if start_state != "running":
+            return
+        def capture(db, runtime_task_id, epoch):
+            db.execute("INSERT INTO runtime_tasks(task_id,state,goal,created_at,updated_at) "
+                       "VALUES (?,'EXECUTING','Workspace task','now','now')", (runtime_task_id,))
+            db.execute("INSERT INTO acp_host_sessions VALUES ('session-1',?,?,'{}','{}','[]','now',NULL)",
+                       (api.store.project_root, runtime_task_id))
+            storage.bind_execution_tx(db, start["task_id"], runtime_task_id, "session-1", start=start)
+        bootstrap_task(api.store, SourceEvent(origin=start["source_origin"], event_id=start["source_event_id"]),
+                       "Workspace task", "owner", capture_tx=capture)
+    api = connected(tmp_path, dispatch)
     task = api.handle(create_command())["target"]
-    api.handle(start_command(task))
-    with pytest.raises(StoreError, match="workspace_checkout_busy"):
-        bootstrap_task(api.store, SourceEvent(origin="generic", event_id="one"), "Other task", "owner")
+    started = api.handle(start_command(task))
+    if start_state == "running":
+        assert api.handle(query("executions.get", started["executionId"]))["state"] == "running"
+    else:
+        with api.store.connection() as db:
+            db.execute("UPDATE workspace_starts SET state=?", ("prepare" if start_state == "pending" else start_state,))
+    event = SourceEvent(origin="generic", event_id="one")
+    result = bootstrap_task(api.store, event, "Other task", "owner")
+    assert not result.replayed
+    assert result.channel_id and result.secret
+    replay = bootstrap_task(api.store, event, "Other task", "owner")
+    assert replay.replayed and replay.task_id == result.task_id
+    assert replay.channel_id is None and replay.secret is None
     with api.store.connection() as db:
-        assert db.execute("SELECT count(*) FROM tasks").fetchone()[0] == 0
+        assert db.execute("SELECT count(*) FROM tasks WHERE id=?",
+                          (result.task_id,)).fetchone()[0] == 1
+        assert db.execute("SELECT count(*) FROM source_events WHERE origin='generic'").fetchone()[0] == 1
 
 
 def test_start_table_is_additive_and_never_installed_by_inspection(tmp_path):
@@ -203,6 +266,44 @@ def agent_for(tmp_path, monkeypatch, runtime):
     agent.activate_workspace(session, project_id="project-1", actor_id="local-owner", request_id="activate-1")
     monkeypatch.setattr(agent, "_launch_prompt", lambda args: agent._run_prompt(*args))
     return agent, agent._workspace_apis["project-1"]
+
+
+def test_desktop_dispatch_has_independent_sessions_and_cancellation(tmp_path, monkeypatch):
+    import threading
+    from cortex_runtime.orchestration.state import TaskMachine
+    from cortex_runtime.portable.engine_contract import StopReason
+    ready, release = threading.Barrier(3), threading.Event()
+    seen, cancelled = [], []
+    class Runtime:
+        def start_prompt(self, task_id, session_id, text, emit, cancel_event,
+                         source_origin=None, source_event_id=None):
+            TaskMachine(agent._store_for(str(tmp_path))).create(task_id, text)
+            seen.append((task_id, session_id, cancel_event))
+            ready.wait(timeout=10)
+            assert release.wait(timeout=10)
+            return StopReason.END_TURN
+
+        def cancel(self, session_id):
+            cancelled.append(session_id)
+
+    agent, api = agent_for(tmp_path, monkeypatch, Runtime())
+    tasks = [api.handle(create_command(str(n)))["target"] for n in range(2)]
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(agent._workspace_request, start_command(task, "s" + str(n)))
+                   for n, task in enumerate(tasks)]
+        try:
+            ready.wait(timeout=10)
+            assert len({row[0] for row in seen}) == len({row[1] for row in seen}) == 2
+            bindings = [api.handle(query("executions.get",
+                        api.handle(query("tasks.get", task))["executionId"])) for task in tasks]
+            assert {e["acpSessionId"] for e in bindings} == {row[1] for row in seen}
+            assert {e["runtimeTaskId"] for e in bindings} == {row[0] for row in seen}
+            agent._session_cancel(dict(sessionId=seen[0][1]))
+            assert cancelled == [seen[0][1]]
+            assert seen[0][2].is_set() and not seen[1][2].is_set()
+        finally:
+            release.set()
+        assert all(f.result()["outcome"] == "recorded" for f in futures)
 
 
 @pytest.mark.parametrize("kind", ["answer", "work"])

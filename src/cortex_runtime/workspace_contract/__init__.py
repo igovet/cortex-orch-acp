@@ -173,7 +173,8 @@ def negotiate(local, remote):
     return {"protocol": {"major": local["protocol"]["major"],
                          "minor": min(local["protocol"]["minor"], remote["protocol"]["minor"])},
             "operations": sorted(set(local["operations"]) & set(remote["operations"])),
-            "limits": {key: min(local["limits"][key], remote["limits"][key]) for key in LIMITS},
+            "limits": {key: min(local["limits"][key], remote["limits"][key]) for key in LIMITS
+                       if key in local["limits"] and key in remote["limits"]},
             "mappingVersion": local["mappingVersion"] if local["mappingVersion"] == remote["mappingVersion"] else None}
 
 

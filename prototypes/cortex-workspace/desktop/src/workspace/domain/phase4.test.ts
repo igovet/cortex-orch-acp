@@ -34,7 +34,23 @@ const passed = (p: WorkspacePort, id: string, digest: string) => {
   send(p, { type: "accept_result", taskId: id, digest });
 };
 
+it("does not invent contained-work closure in the simulator", () => {
+  const p = setup(), taskId = send(p, { type: "create_task", projectId: "project", description: "Local fixture", checkout: { kind: "main" } }).entityId!;
+  expect(refuse(p, { type: "close_task", taskId, choice: "already_in_target", confirmed: true, now: NOW })).toContain("real service only");
+  expect(p.snapshot().tasks[0].status).toBe("draft");
+});
+
 describe("sprint planning conversation", () => {
+  it.each(["main", "worktree"] as const)("keeps the sprint-wide %s choice in the demo and creates only drafts", kind => {
+    const p = setup(), id = send(p, { type: "create_sprint", projectId: "project", description: "Plan it", runMode: "manual", checkout: { kind } }).entityId!;
+    expect(queue(p).checkout).toEqual({ kind });
+    expect(p.snapshot().tasks).toHaveLength(0);
+    send(p, { type: "publish_plan", sprintId: id, items: ITEMS });
+    send(p, { type: "materialize_plan", sprintId: id, version: 1 });
+    expect(p.snapshot().tasks).toHaveLength(4);
+    expect(p.snapshot().tasks.every(t => t.checkout.kind === kind && t.status === "draft" && t.executionId === null)).toBe(true);
+    if (kind === "worktree") expect(new Set(p.snapshot().tasks.map(t => t.checkout.kind === "worktree" && t.checkout.path)).size).toBe(4);
+  });
   it("keeps questions, answers and notes, and runs no task while planning", () => {
     const p = setup(), id = send(p, { type: "create_sprint", projectId: "project", description: "Plan it", runMode: "manual" }).entityId!;
     send(p, { type: "plan_note", sprintId: id, text: "I read the code" });

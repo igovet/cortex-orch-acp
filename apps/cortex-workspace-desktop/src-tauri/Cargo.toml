@@ -15,6 +15,10 @@ name = "cortex-workspace-desktop"
 path = "src/main.rs"
 required-features = ["desktop"]
 
+[[example]]
+name = "rendering_close"
+required-features = ["desktop"]
+
 [build-dependencies]
 tauri-build = { version = "=2.5.6", features = [] }
 

@@ -102,6 +102,37 @@ def test_the_probe_listens_for_web_process_death():
     assert 'g_signal_connect(web_view, "web-process-terminated"' in rendered.PROBE
 
 
+def registered(root):
+    """The layout project_guard::reserve leaves at registration, before activation."""
+    root.mkdir()
+    (root / ".cortex-dev").mkdir(mode=0o700)
+    (root / ".cortex-dev/owner.json").write_text("{}")
+    return root
+
+
+def test_inert_registration_is_the_reservation_the_service_makes():
+    guard = (ROOT / "crates/workspace-service/src/project_guard.rs").read_text()
+    assert 'const STORE: &str = ".cortex-dev";' in guard and 'const MARKER: &str = "owner.json";' in guard
+    assert "create(root.join(STORE))" in guard.split("pub fn reserve", 1)[1].split("pub fn activate", 1)[0]
+    source = (ROOT / "packaging/container/check_rendered.py").read_text()
+    assert 'not (project / ".cortex-dev").exists()' not in source
+    assert '(project / ".cortex-dev-owner.json").is_file()' not in source
+
+
+def test_registration_inert_accepts_only_the_bare_reservation(tmp_path):
+    assert rendered.registration_inert(registered(tmp_path / "fresh"))
+    assert not rendered.registration_inert(tmp_path)  # nothing reserved
+    store = registered(tmp_path / "store")
+    (store / ".cortex-dev/cortex.sqlite3").write_text("")
+    assert not rendered.registration_inert(store)
+    release = registered(tmp_path / "release")
+    (release / ".cortex").mkdir()
+    assert not rendered.registration_inert(release)
+    legacy = registered(tmp_path / "legacy")
+    (legacy / ".cortex-dev-owner.json").write_text("{}")
+    assert not rendered.registration_inert(legacy)
+
+
 def lines(*steps):
     return "not json\n" + "\n".join(json.dumps(step) for step in steps) + "\n"
 

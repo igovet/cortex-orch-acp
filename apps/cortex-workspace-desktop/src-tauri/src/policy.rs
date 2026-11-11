@@ -173,6 +173,16 @@ pub fn authorize(window: &str, url: &str, body: Value) -> Result<Call, String> {
         }
         return Ok(call);
     }
+    if call.operation == "native.save_attachment" {
+        // The name is only a suggestion for the save dialog. The owner still chooses where it goes.
+        let map = call.message.as_object().ok_or_else(refused)?;
+        let name = map.get("name").and_then(Value::as_str).ok_or_else(refused)?;
+        let data = map.get("data").and_then(Value::as_str).ok_or_else(refused)?;
+        if map.len() != 2 || name.trim().is_empty() || name.chars().count() > 255 || name.chars().any(|c| c.is_control() || c == '/' || c == '\\') || data.len() > (workspace_protocol::ATTACHMENT_BYTES + 2) / 3 * 4 {
+            return Err(refused());
+        }
+        return Ok(call);
+    }
     if matches!(call.operation.as_str(), "native.open_logs" | "native.clipboard_image" | "native.take_dropped_files" | "native.pick_folder") && call.message == serde_json::json!({}) { return Ok(call); }
     // The owner's typed text is the whole request: the service chooses every root and limit.
     if call.operation.starts_with("directories.") {

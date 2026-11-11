@@ -6,11 +6,11 @@ from dataclasses import replace
 from urllib.parse import quote
 
 from ..acp import replay_store
-from ..workspace_contract import validate
+from ..workspace_contract import LIMITS, validate
 from .storage import WorkspaceError
 
-MAX_BYTES = 512 * 1024
-MAX_FILES = 8
+MAX_BYTES = LIMITS["attachmentBytes"]
+MAX_FILES = LIMITS["attachmentFiles"]
 
 
 def checked(items):

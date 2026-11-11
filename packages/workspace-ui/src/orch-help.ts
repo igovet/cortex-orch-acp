@@ -86,7 +86,7 @@ export const HELP = {
   projectCeiling: "Narrows the owner ceiling for the selected project only; it is stored in that project and never in a profile. The fields mean the same as in the owner ceiling. Recommended: only for projects that must stay on specific routes or providers.",
 
   // --- routing --------------------------------------------------------------
-  routingFile: "Which routing file to edit. Only the first file that exists is used — project, then $CORTEX_ROUTING, then user — and they never merge. Recommended: User routing file; create a project file only when one project needs different models.",
+  routingFile: "Which routing file to edit. Only the first file that exists is used — project, then the environment override, then user — and they never merge. Recommended: User routing file; create a project file only when one project needs different models.",
   modelPolicy: helpBlock(
     "Per-engine, per-model rules for automatic worker routing. Effort choices use that exact model's observed levels; no selector means engine default only. Unknown levels use a visibly marked global fallback. Stored unsupported values stay unchanged until you remove or replace them. Models are matched by exact id; nothing is guessed from names. A model without automatic membership and a tier is never picked automatically (it stays usable by hand).",
     [

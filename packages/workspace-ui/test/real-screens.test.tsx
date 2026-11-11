@@ -71,7 +71,12 @@ async function open(s: ReturnType<typeof machine>, path: string) {
 const settled = async () => { for (let i = 0; i < 12; i++) await flush(); };
 const $ = <T extends Element = HTMLElement>(selector: string) => document.querySelector<T>(selector);
 const all = <T extends Element = HTMLElement>(selector: string) => [...document.querySelectorAll<T>(selector)];
-const button = (text: string) => all("button").find(b => b.textContent?.trim().startsWith(text));
+// A text button by its words, or an icon button, such as the paper plane, by its accessible name.
+const button = (text: string, within = "body") => all(`${within} button`).find(b => b.textContent?.trim().startsWith(text) || b.getAttribute("aria-label") === text);
+/** Chooses Queue as the delivery, then presses the plane, which now reads Queue message. */
+const queue = () => { button("Queue", ".mc-delivery")!.click(); button("Queue message")!.click(); };
+/** Opens the folded team line of the conversation. */
+const openTeam = async () => { all(".timeline button.fold").find(b => /working|finished/.test(b.textContent ?? "") && b.getAttribute("aria-expanded") === "false")?.click(); await settled(); };
 const type = (label: string, value: string) => { const el = $<HTMLTextAreaElement>(`[aria-label="${label}"]`)!; el.value = value; el.dispatchEvent(new Event("input", { bubbles: true })); };
 const prompts = (s: ReturnType<typeof machine>) => s.calls.filter(c => c.operation === "executions.prompt").map(c => (c.message as { text: string }).text);
 const TASK = `/m/${LOCAL_MACHINE_ID}/t/task-1`;
@@ -105,9 +110,9 @@ describe("task session on real data", () => {
   it("names the state and the runtime phase, and marks only that phase as now", async () => {
     await open(machine(), TASK);
     expect($(".tb-actions .chip")?.textContent).toContain("Working");
-    const steps = all(".phases .phase");
-    expect(steps.map(p => p.textContent)).toEqual(["Planned", "Executing", "Independent review", "Verification", "Completion"]);
-    expect(steps.filter(p => p.classList.contains("now")).map(p => p.textContent)).toEqual(["Executing"]);
+    // Progress reads as the current runtime phase in words; no permanent phase strip and no invented percentage.
+    expect($(".taskbar .td-progress")?.textContent).toBe("Executing");
+    expect($(".phases")).toBeNull();
   });
 
   it("claims no progress for a wait, which says nothing about how far the task got", async () => {
@@ -141,7 +146,6 @@ describe("task session on real data", () => {
       return base(message);
     };
     await open(s, `${TASK}/workers/w1/live`);
-    button("Load older activity")!.click();
     await settled();
     expect(document.body.textContent).toContain("Older guidance");
     expect(document.body.textContent).toContain("old-note.txt");
@@ -149,9 +153,15 @@ describe("task session on real data", () => {
     expect(button("Load older activity")).toBeUndefined();
   });
 
+  it("shows the current project branch, not the Git default", async () => {
+    await open(machine(), `/m/${LOCAL_MACHINE_ID}/p/p/board`);
+    expect(document.querySelector('[aria-label="Current branch: dev"]')?.textContent).toBe("dev");
+  });
+
   it("shows the workers in the conversation, in the pane and on their tab", async () => {
     const workers = [worker({}), worker({ id: "w2", role: "code-reviewer", status: "completed", lane: "review", result: { summary: "No findings", checks: [] } })];
     await open(machine(undefined, workers), TASK);
+    await openTeam();
     expect(all(".wrow").map(r => r.textContent)).toEqual([expect.stringContaining("frontend-dev"), expect.stringContaining("code-reviewer")]);
     expect($(".inspector")?.textContent).toContain("1 active, 1 finished");
     dispose?.(); document.body.innerHTML = "";
@@ -295,6 +305,11 @@ describe("questions on real data", () => {
   const waiting = wireTask({ executionId: "e", phase: "waiting", runtimeState: "WAITING_USER", executionState: "waiting_user" });
   const batch = [wireDecision({ decisionId: "d1", questionId: "q1", batchId: "b", prompt: "Which file?", options: [{ optionId: "o1", label: "First" }] }), wireDecision({ decisionId: "d2", questionId: "q2", batchId: "b", prompt: "Which branch?", options: [{ optionId: "o2", label: "Second" }] })];
   const opt = (text: string) => all(".dc .opt").find(o => o.textContent?.includes(text))!;
+  /** Choosing only prepares an answer; the paper plane of the question on view sends it. */
+  const answerWith = async (text: string) => {
+    opt(text).click(); await settled();
+    $<HTMLButtonElement>('.dc-panel:not([aria-hidden="true"]) [aria-label="Send answer"]')!.click(); await settled();
+  };
 
   it("shows the exact pending question while paused without submitting an answer", async () => {
     const s = machine([wireTask({executionId:"e",phase:"paused",runtimeState:"PAUSED",executionState:"paused"})]);
@@ -312,11 +327,14 @@ describe("questions on real data", () => {
     await open(s, TASK);
     opt("First").click();
     await settled();
+    // Choosing sends nothing and marks nothing answered.
+    expect(all('.dc-tab[aria-label$="answered"]')).toEqual([]);
+    $<HTMLButtonElement>('.dc-panel:not([aria-hidden="true"]) [aria-label="Send answer"]')!.click();
+    await settled();
     expect(s.calls.filter(c => c.operation === "decisions.answer")).toEqual([]);
     expect(all('.dc-tab[aria-label$="answered"]').map(t => t.dataset.ask)).toEqual(["d1"]);
     expect(all(".dc")).toHaveLength(1);
-    opt("Second").click();
-    await settled();
+    await answerWith("Second");
     const [sent] = s.calls.filter(c => c.operation === "decisions.answer").map(c => c.message as { target: string; payload: { batchId: string; answers: { text: string }[] } });
     expect(sent.target).toBe("b");
     expect(sent.payload.answers.map(a => a.text)).toEqual(["First", "Second"]);
@@ -327,10 +345,8 @@ describe("questions on real data", () => {
     s.answers["decisions.list"] = () => ({ items: batch, nextCursor: null, highWatermark: "4" });
     s.answers["decisions.answer"] = message => ({ requestId: (message as { requestId: string }).requestId, outcome: "busy", target: "b", entityVersion: "2", recordedAt: "2026-11-05T00:00:00Z" });
     await open(s, TASK);
-    opt("First").click();
-    await settled();
-    opt("Second").click();
-    await settled();
+    await answerWith("First");
+    await answerWith("Second");
     expect($(".ws-receipt")?.textContent).toMatch(/still running/i);
     expect(all(".dc-tab")).toHaveLength(2);
     expect(all('.dc-tab[aria-label$="answered"]')).toEqual([]);
@@ -338,7 +354,7 @@ describe("questions on real data", () => {
 });
 
 describe("messages on real data", () => {
-  it("uses native empty-clipboard/drop fallbacks in Other answer and preserves multiline answer bytes", async () => {
+  it("uses native empty-clipboard/drop fallbacks in the answer composer and preserves multiline answer bytes", async () => {
     const s = machine();
     const attachments = [{name:"clip.png",mimeType:"image/png",data:btoa("fixture png")}];
     s.answers["service.capabilities"] = () => ({methods:["machine.call","native.clipboard_image","native.take_dropped_files"],machine:true});
@@ -348,7 +364,6 @@ describe("messages on real data", () => {
     s.answers["decisions.list"] = () => ({items:[wireDecision()],nextCursor:null,highWatermark:"4"});
     s.answers["decisions.answer"] = message => ({requestId:(message as any).requestId,target:"d",outcome:"recorded",entityVersion:"3",recordedAt:"2026-11-06T00:00:00Z"});
     await open(s,TASK);
-    all("button").find(b => b.textContent?.includes("Other answer"))!.click();
     type("Your answer","first line\nsecond line");
     const textarea = document.querySelector('[aria-label="Your answer"]')!;
     const paste = new Event("paste",{bubbles:true,cancelable:true});
@@ -358,7 +373,7 @@ describe("messages on real data", () => {
     Object.defineProperty(drop,"dataTransfer",{value:{files:[],types:["text/uri-list"]}});
     textarea.dispatchEvent(drop);
     await settled();
-    expect(document.querySelector(".ws-dc-other")?.textContent).toMatch(/clip.png.*drop.txt/s);
+    expect(document.querySelector(".dc-answer")?.textContent).toMatch(/clip.png.*drop.txt/s);
     button("Send answer")!.click();
     await settled();
     const sent = s.calls.find(c => c.operation === "decisions.answer")!.message as any;
@@ -383,15 +398,19 @@ describe("messages on real data", () => {
     await settled();
     expect(document.querySelector(".composer")?.textContent).toMatch(/pick.txt.*drop.txt.*paste.png/s);
     type("Message","With files");
-    button("Queue")!.click();
+    queue();
     await settled();
-    expect($(".queue")?.textContent).toMatch(/pick.txt.*drop.txt.*paste.png/s);
+    // The queued row shows only its text; its files come back in Edit.
+    expect($(".queue")?.textContent).toContain("With files");
+    expect($(".queue")?.textContent).not.toMatch(/pick.txt|drop.txt|paste.png/);
     button("Edit")!.click();
     await settled();
     expect($(".queue")).toBeNull();
     expect($<HTMLTextAreaElement>('[aria-label="Message"]')?.value).toBe("With files");
+    expect(document.querySelector(".dock .composer")?.textContent).toMatch(/pick.txt.*drop.txt.*paste.png/s);
     s.answers["executions.prompt"] = () => { throw new Error("fixture lost acknowledgement"); };
-    button("Steer")!.click();
+    button("Send now", ".mc-delivery")!.click();
+    button("Send message now")!.click();
     await settled();
     expect($<HTMLTextAreaElement>('[aria-label="Message"]')?.value).toBe("With files");
     expect(document.querySelector(".dock .composer")?.textContent).toContain("paste.png");
@@ -403,7 +422,7 @@ describe("messages on real data", () => {
     const s = machine();
     await open(s, TASK);
     type("Message", "Use the other file");
-    button("Queue")!.click();
+    queue();
     await settled();
     expect($(".queue")?.textContent).toContain("Use the other file");
     expect($<HTMLTextAreaElement>('[aria-label="Message"]')?.value).toBe("");
@@ -419,7 +438,7 @@ describe("messages on real data", () => {
     const s = machine();
     await open(s, TASK);
     type("Message", "Second thought");
-    button("Queue")!.click();
+    queue();
     await settled();
     button("Send now")!.click();
     await settled();
@@ -432,7 +451,7 @@ describe("messages on real data", () => {
     const s = machine();
     await open(s, TASK);
     type("Message", "Keep me");
-    button("Queue")!.click();
+    queue();
     await settled();
     s.answers["executions.prompt"] = () => { throw new Error("socket closed"); };
     button("Send now")!.click();
@@ -445,7 +464,7 @@ describe("messages on real data", () => {
     const s = machine();
     await open(s, TASK);
     type("Message", "Mind the race");
-    button("Steer")!.click();
+    button("Send message now")!.click();
     await settled();
     expect(prompts(s)).toEqual(["Mind the race"]);
     expect($(".timeline")?.textContent).toContain("Mind the race");
@@ -456,7 +475,7 @@ describe("messages on real data", () => {
     await open(s, `${TASK}/workers/w1`);
     const field = $<HTMLTextAreaElement>('[aria-label="Message frontend-dev"]')!;
     expect(field.placeholder).toContain("directly");
-    expect($(".livepane .c-route")?.textContent).toContain("next");
+    expect($(".livepane .c-bar")?.textContent).toContain("Next step");
     type("Message frontend-dev", "Keep the old colors");
     $<HTMLElement>('[aria-label="Send to frontend-dev"]')!.click();
     await settled();
@@ -487,14 +506,17 @@ describe("new task on real data", () => {
     expect(radio("Separate worktree").querySelector("input")!.disabled).toBe(false);
     expect(radio("Separate worktree").textContent).toMatch(/currently open branch/);
     expect(radio("Separate worktree").querySelector("input")!.checked).toBe(true);
-    expect(radio("Main checkout").textContent).toContain("dev");
+    expect(radio("Project folder").textContent).toContain("dev");
   });
 
   it("offers per-task routing and a target branch choice", async () => {
     await open(machine([]), NEW);
+    // Model and effort, then access and language under one Settings control.
     const route = all(".c-route .sel");
-    expect(route.map(b => b.textContent?.trim())).toEqual(["Opus", "High", "Auto", "Russian"]);
-    for (const select of route) expect(select.getAttribute("aria-disabled")).not.toBe("true");
+    expect(route.map(b => b.textContent?.trim())).toEqual(["Opus", "High"]);
+    const settings = $(".c-route .c-set")!;
+    expect(settings.getAttribute("aria-label")).toBe("Settings. Access mode: Auto, Message language: Russian");
+    for (const select of [...route, settings]) expect(select.getAttribute("aria-disabled")).not.toBe("true");
     expect($('[aria-label="Merge into main"]')).toBeTruthy();
   });
 

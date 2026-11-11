@@ -1,5 +1,5 @@
 import type { Decision as WireDecision, ProjectSnapshot, Task as WireTask } from "@cortex/workspace-contract";
-import { PROTOCOL, SCHEMA_FINGERPRINT } from "@cortex/workspace-contract";
+import { LIMITS, PROTOCOL, SCHEMA_FINGERPRINT } from "@cortex/workspace-contract";
 import { applyProjection, emptyWorkspace, type CommandEnvelope, type CommandReceipt, type PortCapabilities, type PortUpdate, type ProjectionUpdate, type QueryOperation, type QueryParameters, type QueryResults, type Task, type WorkspacePort, type WorkspaceState } from "@cortex/workspace-domain";
 import type { RealTransport, TransportEvent } from "../src/port/real";
 
@@ -44,7 +44,7 @@ export { applyProjection };
 
 export const capabilitiesWire = (operations: string[]) => ({
   protocol: PROTOCOL, buildIdentity: "1.0.6+test", schemaFingerprint: SCHEMA_FINGERPRINT, mappingVersion: "1", operations,
-  limits: { tasksPerPage: 50, eventsPerPage: 100, historyPerPage: 100, pageContentBytes: 65536, frameBytes: 1048576, textCharacters: 32000, requestIdCharacters: 128 },
+  limits: LIMITS,
   generation: "1", acpCapabilities: {},
 });
 export const wireTask = (patch: Partial<WireTask> = {}): WireTask => ({

@@ -198,6 +198,53 @@ async fn lock_modes_stale_socket_and_real_same_user_peers() {
     again.stop().await.unwrap();
 }
 #[tokio::test]
+async fn endpoint_drop_releases_the_lock_before_a_forked_child_execs() {
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+
+    struct Forked {
+        pid: libc::pid_t,
+        release: Option<OwnedFd>,
+    }
+    impl Drop for Forked {
+        fn drop(&mut self) {
+            self.release.take();
+            while unsafe { libc::waitpid(self.pid, std::ptr::null_mut(), 0) } == -1
+                && std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted
+            {}
+        }
+    }
+
+    let f = Fixture::new();
+    let s = Service::bind(f.config("normal")).await.unwrap();
+    let mut pipe = [-1; 2];
+    assert_eq!(unsafe { libc::pipe2(pipe.as_mut_ptr(), libc::O_CLOEXEC) }, 0);
+    let read = unsafe { OwnedFd::from_raw_fd(pipe[0]) };
+    let write = unsafe { OwnedFd::from_raw_fd(pipe[1]) };
+    let pid = unsafe { libc::fork() };
+    assert!(pid >= 0);
+    if pid == 0 {
+        // Only async-signal-safe calls between fork and _exit. Keep inherited
+        // descriptors open, just as a concurrently spawning peer does before exec.
+        unsafe {
+            libc::close(write.as_raw_fd());
+            let mut byte = 0u8;
+            libc::read(read.as_raw_fd(), (&mut byte as *mut u8).cast(), 1);
+            libc::_exit(0);
+        }
+    }
+    drop(read);
+    let forked = Forked { pid, release: Some(write) };
+    assert!(Service::bind(f.config("normal")).await.is_err());
+    s.stop().await.unwrap();
+    drop(s);
+    let again = Service::bind(f.config("normal")).await.unwrap();
+    assert!(Service::bind(f.config("normal")).await.is_err());
+    drop(forked);
+    assert!(Service::bind(f.config("normal")).await.is_err());
+    again.stop().await.unwrap();
+}
+
+#[tokio::test]
 async fn unsafe_runtime_and_stale_endpoint_are_never_replaced() {
     let f = Fixture::new();
     let runtime = f.0.join("runtime");
@@ -435,6 +482,50 @@ async fn unsupported_host_requests_are_refused_without_stopping_the_reader() {
     s.stop().await.unwrap();
 }
 #[tokio::test]
+async fn scripted_host_peer_correlates_replies_across_interleaved_requests() {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    let f = Fixture::new();
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut peer = tokio::process::Command::new("/usr/bin/python3")
+        .args(["-B", root.join("tests/fake_acp.py").to_str().unwrap(), "host"])
+        .current_dir(f.0.join("projects/one"))
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let mut input = peer.stdin.take().unwrap();
+    let mut output = BufReader::new(peer.stdout.take().unwrap()).lines();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        for request in [
+            json!({"jsonrpc":"2.0","id":1,"method":"_cortex/workspace","params":{"operation":"tasks.get"}}),
+            json!({"jsonrpc":"2.0","id":2,"method":"_cortex/workspace","params":{"operation":"events.page"}}),
+            json!({"jsonrpc":"2.0","id":3,"method":"_cortex/workspace","params":{"operation":"tasks.get"}}),
+            json!({"jsonrpc":"2.0","id":"permission-3","error":{"code":-32000}}),
+            json!({"jsonrpc":"2.0","id":"permission-1","error":{"code":-32601}}),
+        ] {
+            input.write_all(format!("{request}\n").as_bytes()).await.unwrap();
+        }
+        let host: Value = serde_json::from_str(&output.next_line().await.unwrap().unwrap()).unwrap();
+        assert_eq!(host["id"], "permission-1");
+        let events: Value = serde_json::from_str(&output.next_line().await.unwrap().unwrap()).unwrap();
+        assert_eq!(events["id"], 2);
+        assert_eq!(events["result"]["items"], json!([]));
+        let other_host: Value = serde_json::from_str(&output.next_line().await.unwrap().unwrap()).unwrap();
+        assert_eq!(other_host["id"], "permission-3");
+        let other_task: Value = serde_json::from_str(&output.next_line().await.unwrap().unwrap()).unwrap();
+        assert_eq!(other_task["id"], 3);
+        assert_eq!(other_task["result"]["refused"], false);
+        let task: Value = serde_json::from_str(&output.next_line().await.unwrap().unwrap()).unwrap();
+        assert_eq!(task["id"], 1);
+        assert_eq!(task["result"]["refused"], true);
+        drop(input);
+        assert!(peer.wait().await.unwrap().success());
+    }).await.unwrap();
+}
+
+#[tokio::test]
 async fn oversized_stdout_is_invalidated_but_still_drained() {
     let (f, s, p) = activated("oversized").await;
     assert!(s
@@ -647,6 +738,18 @@ async fn a_notification_never_cancels_a_partial_inbound_frame() {
     server.await.unwrap().unwrap();
 }
 #[tokio::test]
+async fn screenshot_sized_local_frames_round_trip() {
+    let value = json!({"attachments":[{"name":"screen.png","mimeType":"image/png",
+        "data":"A".repeat((workspace_protocol::ATTACHMENT_BYTES + 2) / 3 * 4)}]});
+    let (mut send, mut receive) = tokio::io::duplex(1024);
+    let expected = value.clone();
+    let writer = tokio::spawn(async move { write_frame(&mut send, &value).await.unwrap(); });
+    let actual = tokio::time::timeout(std::time::Duration::from_secs(10), read_frame(&mut receive)).await.unwrap().unwrap();
+    assert_eq!(actual, expected);
+    writer.await.unwrap();
+}
+
+#[tokio::test]
 async fn bounded_frames_and_closed_dispatch() {
     let f = Fixture::new();
     let s = Service::bind(f.config("normal")).await.unwrap();
@@ -668,7 +771,7 @@ async fn bounded_frames_and_closed_dispatch() {
     assert!(read_frame(&mut c).await.unwrap().get("error").is_some());
     assert_eq!(s.status().await["stopping"], false);
     use tokio::io::AsyncWriteExt;
-    c.write_all(&(1048577u32.to_be_bytes())).await.unwrap();
+    c.write_all(&((workspace_protocol::FRAME_BYTES as u32 + 1).to_be_bytes())).await.unwrap();
     assert!(read_frame(&mut c).await.is_err());
     s.stop().await.unwrap();
     runner.await.unwrap().unwrap();

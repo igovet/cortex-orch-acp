@@ -68,6 +68,30 @@ def test_owner_closure_does_not_hide_a_live_execution(tmp_path, phase):
     assert api.starts == []
 
 
+def test_manual_start_does_not_enforce_sprint_dependencies(tmp_path):
+    from test_workspace_api import api_for, create_command, query, runtime_binding
+    from test_workspace_start import start_command
+    api = api_for(tmp_path)
+    first = api.handle(create_command("first"))["target"]
+    second = api.handle(create_command("next"))["target"]
+    runtime_binding(api, first, "WAITING_USER")
+    state = tmp_path / "machine"
+    product = machine_tools.product_of(state, api.project_id)
+    product["tasks"][second] = {"dependencies": [first]}
+    product["sprints"] = [dict(id="s", runMode="automatic", planning="created",
+                              queueState="running", taskIds=[first, second])]
+    machine_tools.write_json(machine_tools.product_path(state, api.project_id), product)
+    starts = []
+    api.dispatch_start = starts.append
+    scheduler.tick(api, state)
+    assert not starts
+    assert machine_tools.product_of(state, api.project_id)["sprints"][0]["queueState"] == "paused"
+    # Dependency policy lives in the queue/UI, not the manual wire operation.
+    assert api.handle(start_command(second))["outcome"] == "recorded"
+    assert len(starts) == 1 and starts[0]["task_id"] == second
+    assert api.handle(query("tasks.get", first))["phase"] == "waiting"
+
+
 @pytest.mark.parametrize("mode", ["automatic", "continue", "manual"])
 def test_real_api_starts_dependent_after_owner_closed_task(tmp_path, mode):
     from test_workspace_api import api_for, create_command, query, runtime_binding

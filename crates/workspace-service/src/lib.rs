@@ -646,7 +646,7 @@ impl Service {
         }
     }
     fn query(id: &str, operation: &str, target: Value) -> Value {
-        json!({"protocol":{"major":1,"minor":0},"requestId":"service-read","projectId":id,"operation":operation,"target":target})
+        json!({"protocol":{"major":workspace_protocol::WIRE_MAJOR,"minor":workspace_protocol::WIRE_MINOR},"requestId":"service-read","projectId":id,"operation":operation,"target":target})
     }
     pub async fn workspace(&self, mut request: Value) -> io::Result<Value> {
         self.accepting()?;

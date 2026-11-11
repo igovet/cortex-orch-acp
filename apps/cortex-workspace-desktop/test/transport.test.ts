@@ -116,7 +116,7 @@ it("ships no remote capabilities, generic plugin or network escape", () => {
 it("bundles the design faces as files the closed CSP can load", async () => {
   const result: any = await build({root:fileURLToPath(new URL("..", import.meta.url)),build:{write:false},logLevel:"silent"});
   const names = result.output.filter((o: any) => o.type === "asset").map((o: any) => o.fileName as string);
-  for (const face of ["roboto-latin-wght","roboto-cyrillic-wght","cousine-latin-400","cousine-cyrillic-400"])
+  for (const face of ["noto-sans-latin-wght","noto-sans-cyrillic-wght","cousine-latin-400","cousine-cyrillic-400"])
     expect(names.some((n: string) => n.includes(face) && n.endsWith(".woff2")), face).toBe(true);
   const css = result.output.find((o: any) => String(o.fileName).endsWith(".css")).source as string;
   expect(css).not.toMatch(/url\(["']?data:font|data:application\/font/);

@@ -44,7 +44,7 @@ it("leaves no unavailable route selected when every offer is unavailable", async
   const p = await mount(s, `/m/${LOCAL_MACHINE_ID}/new?project=p`);
   const field = document.querySelector<HTMLTextAreaElement>('[aria-label="Describe the task"]')!;
   field.value = "Do this"; field.dispatchEvent(new Event("input", { bubbles: true }));
-  button("Save as draft").click();
+  document.querySelector<HTMLButtonElement>('[aria-label="Save draft"]')!.click();
   expect((p.commands[0].payload as { settings: { model: string } }).settings.model).toBe("");
 });
 
@@ -70,7 +70,7 @@ it("disables Send and reopen for the entire request and preserves input on failu
   button("Request changes…").click(); await settle();
   const field = document.querySelector<HTMLTextAreaElement>("dialog textarea")!;
   field.value = "Please fix"; field.dispatchEvent(new Event("input", { bubbles: true }));
-  const send = button("Send and reopen"); send.click(); send.click();
+  const send = document.querySelector<HTMLButtonElement>('dialog [aria-label="Send and reopen"]')!; send.click(); send.click();
   expect(p.commands.filter(c => c.operation === "request_changes")).toHaveLength(1);
   expect(send.disabled).toBe(true);
   expect(send.getAttribute("aria-busy")).toBe("true");

@@ -131,7 +131,12 @@ pub struct Child {
     events: broadcast::Sender<Value>,
     cursor: Mutex<(String, String)>,
     poller: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// Wakes a journal poll that has backed off, because someone just asked this child to do something.
+    activity: tokio::sync::Notify,
 }
+/// A quiet project is asked less and less often, down to this.
+const JOURNAL_POLL_FIRST: Duration = Duration::from_millis(500);
+const JOURNAL_POLL_LAST: Duration = Duration::from_secs(4);
 impl Child {
     pub async fn spawn(
         config: &crate::Config,
@@ -186,6 +191,7 @@ impl Child {
             events,
             cursor: Mutex::new((String::new(), String::new())),
             poller: Mutex::new(None),
+            activity: tokio::sync::Notify::new(),
         });
         let refusal_child = Arc::downgrade(&child);
         let refusal_task = tokio::spawn(async move {
@@ -375,6 +381,9 @@ impl Child {
         if !self.valid.load(Ordering::SeqCst) {
             return Err(failure("child_unavailable"));
         }
+        if !matches!(params.get("requestId").and_then(Value::as_str), Some("service-events" | "service-read")) {
+            self.activity.notify_one();
+        }
         let id = self.next.fetch_add(1, Ordering::SeqCst);
         let (tx, rx) = oneshot::channel();
         {
@@ -445,8 +454,16 @@ impl Child {
     pub async fn start_polling(self: &Arc<Self>) {
         let weak = Arc::downgrade(self);
         *self.poller.lock().await = Some(tokio::spawn(async move {
+            let mut wait = JOURNAL_POLL_FIRST;
             loop {
-                tokio::time::sleep(Duration::from_millis(500)).await;
+                let Some(woken) = weak.upgrade() else {
+                    break;
+                };
+                tokio::select! {
+                    _ = tokio::time::sleep(wait) => {}
+                    _ = woken.activity.notified() => wait = JOURNAL_POLL_FIRST,
+                }
+                drop(woken);
                 let Some(child) = weak.upgrade() else {
                     break;
                 };
@@ -503,6 +520,9 @@ impl Child {
                     let _ = child.events.send(
                         json!({"projectId":child.project,"type":"public_events","page":page}),
                     );
+                    wait = JOURNAL_POLL_FIRST;
+                } else {
+                    wait = (wait * 2).min(JOURNAL_POLL_LAST);
                 }
             }
         }));

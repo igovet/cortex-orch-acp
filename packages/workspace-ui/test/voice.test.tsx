@@ -1,7 +1,17 @@
+import { createSignal } from "solid-js";
 import { render } from "solid-js/web";
 import { afterEach, expect, it, vi } from "vitest";
+import type { AttachmentInput } from "@cortex/workspace-domain";
 import { WsContext, type Ws } from "../src/ctx";
-import { OtherAnswer } from "../src/composer";
+import { createAttachments, createDictation, MessageComposer } from "../src/composer";
+
+/** The shared composer as an answer draft: the plane and Insert and send are its only ways to send. */
+function Answer(props: { onSend: (text: string, files: AttachmentInput[]) => void }) {
+  const [text, setText] = createSignal("");
+  const files = createAttachments(), mic = createDictation();
+  return <MessageComposer label="Your answer" placeholder="Your answer" text={text()} onText={setText} files={files} mic={mic}
+    send={{ label: "Send answer", why: text().trim() ? undefined : "Write an answer first", go: () => props.onSend(text(), files.files()), insertAndSend: value => props.onSend(value, files.files()) }} />;
+}
 import { createVoicePort, type VoicePage, type VoicePort } from "../src/voice-client";
 const page = (phase: VoicePage["phase"], text = ""): VoicePage => ({sessionId:"s",phase,text,progress:100,seconds:3,error:""});
 let dispose: (() => void) | undefined;
@@ -10,7 +20,7 @@ afterEach(() => { dispose?.(); document.body.innerHTML = ""; vi.useRealTimers();
 function mount(voice: VoicePort) {
   const send = vi.fn(), root = document.createElement("div"); document.body.append(root);
   const ws = {voice,can:()=>false,t:()=>"",store:{}} as unknown as Ws;
-  dispose = render(() => <WsContext.Provider value={ws}><OtherAnswer onSend={send} onCancel={()=>{}} /></WsContext.Provider>,root);
+  dispose = render(() => <WsContext.Provider value={ws}><Answer onSend={send} /></WsContext.Provider>,root);
   return send;
 }
 const button = (text: string) => [...document.querySelectorAll<HTMLButtonElement>("button")].find(b=>b.textContent === text)!;

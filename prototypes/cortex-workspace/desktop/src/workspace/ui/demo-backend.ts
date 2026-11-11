@@ -1,4 +1,4 @@
-import type { CommandReceipt, PortCapabilities, PortUpdate, ProjectionUpdate, QueryOperation, QueryParameters, QueryResults, WorkspacePort as Port } from "@cortex/workspace-domain";
+import type { AttachmentInput, CommandReceipt, PortCapabilities, PortUpdate, ProjectionUpdate, QueryOperation, QueryParameters, QueryResults, WorkspacePort as Port } from "@cortex/workspace-domain";
 import type { MockReceipt, WorkspaceCommand, WorkspacePort as MockPort, WorkspaceState } from "../domain";
 
 const EVERYTHING: PortCapabilities = { everything: true, operations: [] };
@@ -11,6 +11,7 @@ const EVERYTHING: PortCapabilities = { everything: true, operations: [] };
 export function createDemoBackend(createPort: () => MockPort, now: number) {
   let mock = createPort();
   let current = mock.snapshot();
+  const savedFiles = new Map<string, AttachmentInput[]>();
   let version = 1;
   const opened = Date.now();
   const listeners = new Set<(update: PortUpdate) => void>();
@@ -23,7 +24,11 @@ export function createDemoBackend(createPort: () => MockPort, now: number) {
   };
   const apply = (command: WorkspaceCommand): MockReceipt => {
     const receipt = mock.dispatch(command);
-    if (receipt.ok) publish();
+    if (receipt.ok) {
+      if (command.type === "create_task" && receipt.entityId) savedFiles.set(receipt.entityId, structuredClone(command.attachments ?? []));
+      if (command.type === "edit_task") savedFiles.set(command.taskId, structuredClone(command.attachments));
+      publish();
+    }
     return receipt;
   };
   const port: Port = {
@@ -40,6 +45,11 @@ export function createDemoBackend(createPort: () => MockPort, now: number) {
       const receipt: CommandReceipt = { requestId: envelope.requestId, ok, outcome: ok ? "recorded" : conflict ? "revision_conflict" : "unsupported", message, entityId };
       return Promise.resolve(receipt);
     },
+    readTaskAttachments: async taskId => {
+      const files = savedFiles.get(taskId) ?? [];
+      if (files.some(f => typeof f === "string")) throw new Error("Saved attachment bytes are unavailable in this simulation");
+      return structuredClone(files.filter(f => typeof f !== "string"));
+    },
     subscribe(listener) { listeners.add(listener); return () => { listeners.delete(listener); }; },
   };
   return {
@@ -50,7 +60,7 @@ export function createDemoBackend(createPort: () => MockPort, now: number) {
     clock: () => now + (Date.now() - opened),
     /** What the simulation does on its own. The owner's commands come through the port. */
     dispatch: (command: WorkspaceCommand, _options: { quiet?: boolean } = {}) => apply(command),
-    reset() { mock = createPort(); publish(); },
+    reset() { mock = createPort(); savedFiles.clear(); publish(); },
   };
 }
 export type DemoBackend = ReturnType<typeof createDemoBackend>;

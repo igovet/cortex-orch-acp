@@ -43,7 +43,7 @@ it("opens worker rows directly in the full stream and hides result bookkeeping",
   state.tasks[0].status="working"; state.tasks[0].process="live";
   state.workers=[{id:"w",taskId:"t",executionId:"e",role:"frontend-dev",status:"working",lane:"execution",goal:"Inspect UI",now:null,waitsFor:null,scope:[],route:null,attempt:null,elapsedMs:null,runningSince:null,context:null,usage:null,result:null,
   activity:[
-    {sequence:1,kind:"tool",text:"mcp__cortex__project_read",at:null,args:JSON.stringify({kind:"read",title:"Read",path:"index.html"})},
+    {sequence:1,kind:"tool",text:"mcp__cortex__project_edit",at:null,args:JSON.stringify({kind:"edit",title:"Edit",path:"index.html",oldText:"a",newText:"b"})},
     ...[2,3,4,5].map(sequence=>({sequence,kind:"tool" as const,text:"mcp__cortex__result_submit",at:null}))
   ]} satisfies Worker];
   const session=emptySession("t");
@@ -51,13 +51,18 @@ it("opens worker rows directly in the full stream and hides result bookkeeping",
   state.sessions=[session];
   const port = await mount(`/m/${LOCAL_MACHINE_ID}/t/t`,state);
   expect(document.querySelector(".ws-working")).not.toBeNull();
+  // The team update is one folded line in the conversation; the rows are one activation away.
+  const team=[...document.querySelectorAll<HTMLButtonElement>(".timeline button.fold")].find(b=>b.textContent?.startsWith("Workers:"))!;
+  expect(team.getAttribute("aria-expanded")).toBe("false");
+  expect(document.querySelector(".wrow")).toBeNull();
+  team.click(); await settle();
   (document.querySelector(".wrow") as HTMLButtonElement).click(); await settle();
   expect(document.querySelector(".livepane .stream")).not.toBeNull();
   expect(document.querySelector(".detail")).toBeNull();
   expect(document.body.textContent).not.toMatch(/Full view|Submit result|mcp__cortex__/);
   const fold=document.querySelector<HTMLButtonElement>(".livepane button.fold")!;
   expect(fold.getAttribute("aria-expanded")).toBe("false");
-  expect(fold.textContent).toContain("Read 1 file");
+  expect(fold.textContent).toContain("Edited 1 file");
   fold.click(); await settle();
   (document.querySelector(".livepane .step-row") as HTMLButtonElement).click(); await settle();
   expect(document.querySelector(".ws-step-path")?.textContent).toBe("index.html");
@@ -176,13 +181,35 @@ it("retains an older page when the same worker refreshes while it is loading",as
     p.port.readWorkerActivity=()=>new Promise(r=>{resolve=r;});
   });
   const olderButton=()=>[...document.querySelectorAll<HTMLButtonElement>(".stream button")].find(b=>b.textContent==="Load older activity");
-  olderButton()!.click(); await settle();
+  expect(olderButton()).toBeUndefined(); await settle();
   state.workers[0].now="A refreshed fact";
   port.emit(projection("2",structuredClone(state))); await settle();
   resolve({activity:[older],activityCursor:null}); await settle();
   expect(document.querySelector(".stream")?.textContent).toContain("Earlier observation");
   expect(document.querySelector(".stream")?.textContent).toContain("Latest observation");
   expect(olderButton()).toBeUndefined();
+});
+
+it("automatically reads every history page and retains live arrivals",async()=>{
+  const state=withTask(emptyWorkspace(),"Whole history");
+  state.workers=[feedWorker({status:"working",result:null,activityCursor:"page2",activity:[{sequence:3,kind:"note",text:"Latest page",at:null}]})];
+  const cursors:(string|undefined)[]=[];
+  const port=await mount(`/m/${LOCAL_MACHINE_ID}/t/t/workers/w`,structuredClone(state),p=>{
+    p.port.readWorkerActivity=async(_task,_worker,cursor)=>{
+      cursors.push(cursor);
+      return cursor==="page2"
+        ? {activity:[{sequence:2,kind:"note",text:"Middle page",at:null}],activityCursor:"page1",messages:[]}
+        : {activity:[{sequence:1,kind:"note",text:"First page",at:null}],activityCursor:null,messages:[]};
+    };
+  });
+  await settle();
+  expect(cursors).toEqual(["page2","page1"]);
+  expect(document.querySelector(".stream")?.textContent).toMatch(/First page.*Middle page.*Latest page/);
+  expect(document.querySelector(".stream")?.textContent).not.toContain("Load older");
+  expect(document.querySelector<HTMLInputElement>('[aria-label="Follow new activity"]')?.checked).toBe(true);
+  state.workers[0].activity=[{sequence:4,kind:"note",text:"Live arrival",at:null}];
+  port.emit(projection("2",structuredClone(state))); await settle();
+  expect(document.querySelector(".stream")?.textContent).toMatch(/First page.*Middle page.*Latest page.*Live arrival/);
 });
 
 it("opens the worker result on a card with its report, without a disclosure triangle",async()=>{
@@ -211,6 +238,7 @@ it("shows the recorded model and effort wherever an agent is named, and omits th
   expect(document.querySelector('.wcard[href$="/workers/cortex"] .l3')?.textContent ?? "").toMatch(/gpt-6-luna|luna/i);
   dispose?.(); document.body.innerHTML="";
   await mount(`/m/${LOCAL_MACHINE_ID}/t/t`,state);
+  [...document.querySelectorAll<HTMLButtonElement>(".timeline button.fold")].find(b=>b.textContent?.startsWith("Workers:"))!.click(); await settle();
   expect(document.querySelector(".wrow .route")?.textContent).toMatch(/opus.5\.5/i);
 });
 
@@ -233,6 +261,17 @@ it("shows the coordinator's recorded feed instead of an empty note",async()=>{
   state.tasks[0].title="Coordinator renamed";
   p.emit(projection("2",structuredClone(state))); await settle();
   expect(document.querySelector(".livepane")?.textContent).toContain("Second step.");
+});
+
+it("reads the coordinator's streamed pieces as one message, not one paragraph per piece",async()=>{
+  const state=withTask(emptyWorkspace(),"Coordinator");
+  state.tasks[0].status="working"; state.tasks[0].process="live";
+  const note=(sequence:number,text:string)=>({sequence,kind:"note" as const,text,at:null});
+  const page={activity:[note(1,"Начинаю "),note(2,"делать поля "),note(3,"ввода."),{sequence:4,kind:"tool" as const,text:"mcp__cortex__plan_submit",at:null},note(5,"Изменения "),note(6,"готовы.")],activityCursor:null,messages:[]} as Awaited<ReturnType<NonNullable<ReturnType<typeof scriptedPort>["port"]["readWorkerActivity"]>>>;
+  await mount(`/m/${LOCAL_MACHINE_ID}/t/t/workers/cortex`,structuredClone(state),x=>{x.port.readWorkerActivity=async()=>page;});
+  await settle();
+  const notes=[...document.querySelectorAll(".livepane .ev-note")].map(n=>n.textContent?.trim());
+  expect(notes).toEqual(["Начинаю делать поля ввода.","Изменения готовы."]);
 });
 
 it("never shows a native hover title on a screen",async()=>{

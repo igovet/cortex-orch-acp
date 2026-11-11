@@ -9,7 +9,8 @@ let dispose: (() => void) | undefined;
 beforeEach(() => { localStorage.clear(); sessionStorage.clear(); history.replaceState(null, "", "/"); });
 afterEach(() => { dispose?.(); document.body.innerHTML = ""; });
 const all = (selector: string) => [...document.querySelectorAll<HTMLElement>(selector)];
-const button = (text: string) => all("button").find(b => b.textContent?.trim().endsWith(text))!;
+// A text button by its words, or an icon button, such as the paper plane, by its accessible name.
+const button = (text: string) => all("button").find(b => b.textContent?.trim().endsWith(text) || b.getAttribute("aria-label") === text)!;
 async function settle() { for (let i = 0; i < 8; i++) await flush(); }
 function input(label: string, value: string) {
   const el = document.querySelector<HTMLInputElement | HTMLTextAreaElement>(`[aria-label="${label}"]`)!;
@@ -56,7 +57,7 @@ it("registers, explicitly activates, saves then starts, reopens a question and s
   button("Activate").click(); await settle();
   button("New task").click(); await settle();
   input("Describe the task", "Explain the project");
-  button("Save as draft").click(); await settle();
+  button("Save draft").click(); await settle();
   expect(s.calls.filter(c => c.operation === "tasks.start")).toHaveLength(0);
   (document.querySelector(".card-link") as HTMLElement).click(); await settle();
   button("Start").click(); await settle();
@@ -64,7 +65,7 @@ it("registers, explicitly activates, saves then starts, reopens a question and s
   const path = location.pathname;
   dispose!(); document.body.innerHTML = "";
   await mount(path);
-  button("Other answer").click(); await settle();
+  // The answer is written in the question itself, and only the plane sends it.
   input("Your answer", "first line\nsecond line");
   button("Send answer").click(); await settle();
   expect(s.calls.filter(c => c.operation === "decisions.answer")).toHaveLength(1);
@@ -81,6 +82,6 @@ it("registers, explicitly activates, saves then starts, reopens a question and s
   expect(document.body.textContent).not.toMatch(/accepted by you|reviewed and checked/);
   s.send({type:"connection",state:"disconnected"}); await settle();
   expect(document.body.textContent).toMatch(/Last confirmed.*old/);
-  expect(document.querySelector('[aria-label="Task views"]')?.textContent).not.toMatch(/Code|Terminal|Changes/);
+  expect(document.querySelector('nav[aria-label="Task details"]')?.textContent).not.toMatch(/Code|Terminal|Changes/);
   expect(s.calls.filter(c => c.operation === "tasks.start")).toHaveLength(1);
 });

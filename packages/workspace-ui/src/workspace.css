@@ -1,5 +1,5 @@
-/* Workspace frame on top of mockup-styles.css, which is a verbatim copy of prototypes/cortex-workspace/mockups/styles.css.
-   The mockups drive panels with hidden checkboxes; here state lives in .ws-app attributes. Everything else is reused as is. */
+/* Workspace frame on top of mockup-styles.css (the approved tokens and the component styles still in use) and under
+   layout.css (the primitives). State lives in .ws-app attributes. */
 
 /* The page is the theme surface from edge to edge. #root is the real grid box, with the mockup body's two rows, and these
    wrappers stay out of its way so the title band and workspace are still its rows. */
@@ -11,6 +11,10 @@ a:not([draggable="true"]), img { -webkit-user-drag: none; }
 html.theme-swap *, html.theme-swap *::before, html.theme-swap *::after { transition: none !important; }
 /* The quiet focus line belongs to keyboard movement alone. The engine's :focus-visible also matches after a click that opens a dialog, so the last way of moving decides it. */
 html:not([data-keyboard]) { --focus-line: none; }
+/* Except on the control a dialog or a panel focused as it opened (placeFocus): no press drew that line, and it shows where the keys
+   act. It takes the themes' --focus-line value back, and the next press anywhere clears it. */
+html:not([data-keyboard]) [data-placed-focus] { --focus-line: 1px solid var(--fg-3); }
+[data-placed-focus]:focus { outline: var(--focus-line); outline-offset: 1px; }
 /* A row filling what holds it draws the line just inside itself, where a scroller or the window edge cannot cut it. */
 :is(.sb-scroll, .col-b, .wlist, .flist, .tree, .gscroll, .ws-list, .ws-pal-b, .surface, .etabs, .hist, .trunc) :focus-visible, .sb-usage:focus-visible, .ws-resize:focus-visible { outline-offset: -1px; }
 
@@ -38,17 +42,20 @@ html:not([data-keyboard]) { --focus-line: none; }
 
 [data-terminal="open"] .terminal { display: flex; }
 .ws-terminal { height: clamp(176px, 28vh, 360px); overflow: hidden; }
-.ws-terminal .term-h { flex: 0 0 32px; min-width: 0; }
 .terminal-screen { flex: 1 1 auto; min-height: 0; min-width: 0; padding: 6px 10px; overflow: hidden; }
 .terminal-screen .xterm.terminal { display: block; flex: none; height: 100%; border: 0; background: transparent; }
 .terminal-error { flex: none; padding: 2px 10px; font-size: 12px; color: var(--warn); }
 .terminal-status { flex: none; font-size: 12px; }
 
 /* The project row and its expander are siblings, because a control cannot sit inside a link. The expander keeps its space. */
-.proj-wrap { position: relative; display: flex; align-items: center; }
-.proj-wrap .proj { flex: 1 1 auto; min-width: 0; padding-right: 26px; }
-.proj-x { position: absolute; top: 4px; right: 3px; width: 22px; height: 22px; opacity: 0; }
+.proj-wrap { display: grid; grid-template-columns: minmax(0, 1fr) 26px; align-items: center; border-radius: var(--r-ctl); }
+.proj-wrap .proj { min-width: 0; padding-right: 0; }
+.proj-wrap .proj:hover, .proj-wrap .proj[aria-current="page"] { background: none; }
+.proj-wrap:hover { background: var(--bg-hover); }
+.proj-wrap:has(> .proj[aria-current="page"]) { background: var(--bg-selected); }
+.proj-x { width: 22px; height: 22px; opacity: 0; }
 .proj-wrap:hover .proj-x, .proj-x:focus-visible, .proj-x[aria-expanded="true"] { opacity: 1; }
+.sb-why { border-top: 1px solid var(--line); border-bottom: 0; background: none; font-size: var(--t-cap); line-height: 16px; color: var(--fg-2); }
 
 /* A mouse click leaves no lasting state: a card's menu shows on hover or keyboard focus only. */
 .card:focus-within:not(:hover):not(:has(:focus-visible)) .card-a .ib { opacity: 0; }
@@ -83,9 +90,8 @@ html:not([data-keyboard]) { --focus-line: none; }
  */
 [data-busy] { position: relative; cursor: default; }
 [data-busy]::after { content: ""; position: absolute; left: 6px; right: 6px; bottom: 3px; height: 2px; border-radius: 1px; pointer-events: none; opacity: 0;
-  background: linear-gradient(90deg, transparent, currentColor, transparent) 0 0 / 50% 100% no-repeat; animation: ws-busy-in 1ms linear 150ms forwards, ws-busy-run 1.1s ease-in-out infinite; }
-@keyframes ws-busy-in { to { opacity: 1; } }
-@keyframes ws-busy-run { from { background-position: -100% 0; } to { background-position: 200% 0; } }
+  background: currentColor; animation: ws-busy-in 1ms linear 150ms forwards; }
+@keyframes ws-busy-in { to { opacity: .6; } }
 /* Busy is not disabled-looking: the button keeps its fill, border, size and label. */
 .btn[data-busy][disabled], .ib[data-busy][disabled] { opacity: 1; }
 .btn-primary[data-busy][disabled] { background: var(--primary); }
@@ -94,15 +100,14 @@ html:not([data-keyboard]) { --focus-line: none; }
   [data-busy]::after { opacity: .6; animation: none; background: currentColor; }
 }
 
-/* Virtual lists */
+/* Long row lists (RowList): rows in normal flow, so scrolling them runs no script. */
 .col-b, .ws-list { position: relative; }
-.v-inner { position: relative; flex: none; }
-.v-row { position: absolute; top: 0; left: 0; right: 0; }
+.v-inner { position: relative; flex: none; display: flex; flex-direction: column; }
 .ws-list { display: block; flex: 1 1 auto; min-height: 0; overflow-y: auto; scrollbar-gutter: stable; padding: 0 12px; }
 .ws-list .lrow { border-top: 0; box-shadow: inset 0 1px 0 var(--line); }
 .lrow[aria-current="true"] { background: var(--bg-selected); }
-.ws-list-h { height: 42px; padding-top: 14px; }
-.ws-page-h { flex: none; padding: 16px 24px 8px; }
+.ws-list-h { display: flex; align-items: center; gap: 8px; height: 42px; margin: 0; padding-top: 14px; font-size: var(--t-sec); font-weight: 500; }
+.ws-list-h .n { font-weight: 400; color: var(--fg-3); }
 
 /* The projects table row: the mockups nest a button in a link, which is invalid, so the row itself takes the click. */
 .ws-tr:hover { background: var(--bg-hover); }
@@ -146,7 +151,7 @@ dialog.ws-picker { height: min(460px, 64vh); border: 1px solid var(--line-strong
 .ws-title { display: block; min-width: 0; font: inherit; font-weight: 500; text-align: left; color: var(--fg); }
 .ws-title-in { width: 280px; height: 26px; font-size: var(--t-ui); }
 .ws-rule { justify-content: center; padding: 6px 0; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
-.ws-steps { display: grid; gap: 2px; margin: -8px 0 0 20px; font-size: var(--t-sec); line-height: 19px; color: var(--fg-2); }
+
 .ws-wrow-sum { min-height: 34px; }
 .ws-wins { color: inherit; }
 .ws-wins:hover { background: var(--bg-hover); }
@@ -188,19 +193,19 @@ input.chk { display: inline-block; min-height: 0; }
 
 /* Decision cards */
 .ws-dc-note { padding: 0 12px 8px; }
-.ws-dc-other { margin: 0 8px 8px; }
-.ws-dc-other textarea { height: 64px; padding: 9px 12px 0; font-size: var(--t-sec); }
-.ws-dc-other .c-bar { min-height: 36px; padding: 4px 6px; }
 .ws-dc-kv { padding: 0 12px 8px; }
 .ws-dc-acts { display: flex; align-items: center; justify-content: flex-end; gap: 6px; padding: 0 8px 8px; }
 
-/* The send slot is one fixed width, so Steer and Stop can swap with nothing beside them moving. */
-.ws-send { justify-content: center; min-width: 86px; }
-.ws-round { width: 28px; height: 28px; padding: 0; border-radius: 50%; }
-.ws-q-edit { flex: 1 1 auto; min-width: 0; height: 28px; font-size: var(--t-sec); }
+
 .ws-pill { display: inline-flex; }
 .dock > .ws-pill, .dock-w > .ws-pill, .d-dock > .ws-pill { display: flex; }
+/* The follow pill floats over the feed. In the dark theme a light primary pill would be the one bright block on the screen, so it
+   takes the raised control surface like every other control there; the light theme keeps the approved primary pill. */
+:root:not([data-theme="light"]) .new-pill { background: var(--bg-input); color: var(--fg); box-shadow: var(--shadow-float), 0 0 0 1px var(--line-ctl); }
+:root:not([data-theme="light"]) .new-pill:hover { background: color-mix(in srgb, var(--bg-input) 88%, var(--fg)); }
 .composer textarea:disabled { cursor: default; }
+/* The tallest a growing field gets, as a share of the window so a short one keeps its controls and conversation. */
+textarea[data-grow] { max-height: 40vh; }
 
 /* Review, merge, Code and Git */
 .ws-pad { padding: 8px 12px; }
@@ -210,16 +215,16 @@ input.chk { display: inline-block; min-height: 0; }
 .ws-ml4 { margin-left: 4px; }
 .ws-mt6 { margin-top: 6px; }
 .ws-mt8 { margin-top: 8px; }
-.ws-pl6 { padding-left: 6px; }
+
 .ws-fg { color: var(--fg); }
 .ws-w400 { font-weight: 400; }
 .ws-scope { max-width: 190px; }
-.ws-fix { height: 20px; }
+
 .ws-pre-btn { height: 22px; }
 .ws-flow-b { margin-left: 6px; }
 .ws-free { min-width: 0; }
 .ws-ib { width: 24px; height: 24px; }
-.ws-ib26 { width: 26px; height: 26px; }
+
 .ws-static { cursor: default; }
 .ws-other-b { margin-top: 6px; }
 .ws-fields { display: grid; gap: 10px; }
@@ -229,7 +234,6 @@ input.chk { display: inline-block; min-height: 0; }
 .ws-plus { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; border-radius: 3px; background: var(--bg-selected); color: var(--fg); opacity: 0; }
 .dl:hover .ws-plus, .ws-plus:focus-visible { opacity: 1; }
 .ws-gf { display: inline-flex; flex: 1 1 auto; align-items: center; gap: 7px; min-width: 0; text-align: left; }
-.ws-wg { padding: 8px 12px 2px; }
 .ws-search { padding: 2px 4px 6px; }
 .ws-find-in { height: 28px; }
 .ws-aa { width: 24px; height: 22px; }
@@ -255,6 +259,13 @@ input.chk { display: inline-block; min-height: 0; }
 .composer > .ws-atts { padding: 8px 12px 0; }
 .mine .ws-atts { margin-top: 6px; }
 .ws-att { max-width: 180px; cursor: default; }
+.ws-att-face { display: inline-flex; align-items: center; gap: 5px; min-width: 0; }
+.ws-att-open:hover { color: var(--fg); text-decoration: underline; }
+.ws-att-thumb { width: 16px; height: 16px; flex: none; border-radius: 3px; object-fit: cover; }
+.ws-att-big { display: block; max-width: 100%; max-height: 60vh; margin: 0 auto; border-radius: 4px; }
+.brief .ws-atts, .ai .ws-atts, .qa-a .ws-atts, .cmt-b .ws-atts { margin-top: 6px; }
+.cmt > .ws-atts { padding: 8px 10px 0; }
+.cmt > .cap { padding: 4px 10px 0; }
 .ws-att-x { display: inline-flex; color: var(--fg-3); }
 .ws-att-x:hover { color: var(--fg); }
 
@@ -264,7 +275,9 @@ input.chk { display: inline-block; min-height: 0; }
 .ws-rc-off input { border-color: var(--fg-3); }
 
 /* Sprint */
-.sp-h ~ .strip { min-height: 37px; }
+.sp-plan-h.l-sect { flex: none; border-bottom: 1px solid var(--line); }
+.sp-foot.l-bar, .ws-read-f.l-bar { border-top: 1px solid var(--line); }
+.sp-page .page { flex: 1 1 auto; min-height: 0; }
 .ws-pre { white-space: pre-wrap; }
 .ws-gap { margin-left: 10px; }
 .ws-mt4 { margin-top: 4px; }
@@ -278,19 +291,115 @@ input.chk { display: inline-block; min-height: 0; }
 .pt-row[data-selected="true"] { background: var(--bg-selected); }
 .ws-more-l { flex: none; font-size: var(--t-cap); color: var(--fg-3); }
 .ws-more-l:hover { color: var(--fg); }
-.sp-body[data-reading] { grid-template-columns: minmax(340px, 400px) minmax(0, 1fr) var(--inspector-w); }
-@media (min-width: 1800px) { .sp-body[data-reading] { grid-template-columns: 520px minmax(0, 1fr) var(--inspector-w); } }
-.ws-read { display: flex; flex-direction: column; min-height: 0; border-left: 1px solid var(--line); background: var(--bg-canvas); }
-.ws-read-h { display: flex; align-items: center; justify-content: space-between; flex: none; height: 40px; padding: 0 8px 0 14px; border-bottom: 1px solid var(--line); }
+/* Details is always docked: the screen's one yield rule (sprint-space.ts) sets the columns, and nothing floats over the plan. */
+.ws-read { --inset: 14px; display: flex; flex-direction: column; min-height: 0; border-left: 1px solid var(--line); background: var(--bg-canvas); }
+.ws-read-h.l-sect { flex: none; height: 40px; border-bottom: 1px solid var(--line); }
+.ws-read-h .l-sect-t { font-size: var(--t-cap); color: var(--fg-3); }
 .ws-read-b { flex: 1 1 auto; min-height: 0; overflow-y: auto; scrollbar-gutter: stable; padding: 12px 14px 16px; }
 .ws-read-t { margin-bottom: 10px; font-size: var(--t-ui); font-weight: 500; line-height: 20px; overflow-wrap: anywhere; }
 .ws-read-d { margin-top: 12px; font-size: var(--t-sec); line-height: 20px; color: var(--fg); overflow-wrap: anywhere; }
 .ws-read-s { margin: 16px 0 0; }
-.ws-read-f { flex: none; padding: 10px 14px; border-top: 1px solid var(--line); }
-@media (max-width: 1279px) {
-  .sp-body[data-reading] { grid-template-columns: minmax(340px, 400px) minmax(0, 1fr); }
-  .ws-read { position: fixed; top: 46px; right: 8px; bottom: 8px; z-index: 30; width: 360px; border: 0; border-radius: var(--r-card); box-shadow: var(--shadow-menu); }
-}
+
+/* The plan's Graph view: toolbar, canvas and status band, stacked and never layered. Only the minimap sits on the canvas.
+   Every colour is a token; nothing in the canvas moves by itself, and no SVG uses group opacity, filters or transitions. */
+.sp-plan-h.l-sect { --section-h: 40px; }
+.gv-tag { flex: none; font-size: var(--t-cap); color: var(--fg-2); white-space: nowrap; }
+.gv-open-row { display: flex; align-items: center; gap: 8px; min-width: 0; padding: 8px 12px; border-bottom: 1px solid var(--line); font-size: var(--t-sec); color: var(--fg-2); }
+.gv-open-row .btn { flex: none; margin-left: auto; }
+.gv { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
+.gv-bar.l-toolbar { gap: 4px; padding-inline: 6px; }
+.gv-bar .l-z-start, .gv-bar .l-z-end { gap: 4px; }
+.gv-bar .ib[aria-pressed="true"] { color: var(--fg); background: var(--bg-selected); }
+.gv-search { position: relative; flex: none; width: 180px; }
+.gv[data-tier="2"] .gv-search, .gv[data-tier="3"] .gv-search { width: 120px; }
+.gv-search .i { position: absolute; left: 7px; top: 7px; color: var(--fg-3); pointer-events: none; }
+.gv-search .inp { height: 28px; padding-left: 26px; font-size: var(--t-cap); }
+.gv-count { flex: none; width: 64px; text-align: center; font-size: var(--t-cap); color: var(--fg-2); font-variant-numeric: tabular-nums; }
+.gv-fitm.off, .gv-bar .ib.off { visibility: hidden; }
+.gv-zoom { min-width: 52px; justify-content: center; font-variant-numeric: tabular-nums; }
+.gv-title { font-size: var(--t-sec); font-weight: 500; white-space: nowrap; }
+.gv[data-tier="2"] .t-tier2, .gv[data-tier="3"] .t-tier2, .gv[data-tier="3"] .t-tier3 { display: none; }
+
+.gv-canvas { position: relative; flex: 1 1 0; min-height: 0; overflow: hidden; background: var(--bg-canvas); touch-action: none; }
+.gv-canvas[data-pan] { cursor: grabbing; }
+/* The drawing is one layer moved by its transform; it is drawn again at the new scale when a gesture settles. */
+.gv-layer { position: absolute; left: 0; top: 0; transform-origin: 0 0; will-change: transform; }
+.gsv { display: block; overflow: visible; font-family: var(--font); }
+.gsv text { fill: var(--fg-2); }
+.gsv .n, .gsv .band, .gsv .lh { outline: none; cursor: pointer; }
+.gsv .bx { fill: var(--bg-raised); stroke: var(--line-ctl); stroke-width: 1; vector-effect: non-scaling-stroke; }
+.gsv .l1, .gsv .ts, .gsv .num { fill: var(--fg); }
+.gsv .no { font-weight: 600; fill: var(--fg-2); }
+.gsv .w, .gsv .num, .gsv .ec { font-size: .9167em; }
+.gsv .w { fill: var(--fg-2); }
+.gsv .num { font-variant-numeric: tabular-nums; }
+.gsv .ec { fill: var(--fg-2); }
+.gsv .ic { color: var(--fg-2); }
+.gsv [data-t="st-warn"] .ic, .gsv [data-t="st-warn"] .w { color: var(--warn); fill: var(--warn); }
+.gsv [data-t="st-bad"] .ic, .gsv [data-t="st-bad"] .w { color: var(--danger); fill: var(--danger); }
+.gsv [data-t="st-run"] .ic, .gsv [data-t="st-run"] .w { color: var(--run); fill: var(--run); }
+.gsv [data-t="st-merge"] .ic, .gsv [data-t="st-merge"] .w { color: var(--merged); fill: var(--merged); }
+.gsv .e { fill: none; stroke: var(--line-ctl); stroke-width: 1; vector-effect: non-scaling-stroke; }
+.gsv[data-moving] .e, .gsv[data-low] .e:not(.need, .block) { marker-end: none; }
+.gsv .e.need { stroke: var(--fg); stroke-width: 1.6; }
+.gsv .e.block { stroke: var(--fg); stroke-width: 1.6; stroke-dasharray: 5 4; }
+.gsv .e.dim { stroke: var(--line); stroke-opacity: .6; }
+/* Detail level by one attribute on the root. */
+.gsv .l1, .gsv .l2, .gsv .ls, .gsv .ln, .gsv .ht2 { display: none; }
+.gsv[data-lod="detail"] .l1, .gsv[data-lod="detail"] .l2, .gsv[data-lod="title"] .ls, .gsv[data-lod="number"] .ln { display: inline; }
+.gsv[data-lod="number"]:not([data-ni]) .ln .ic, .gsv[data-lod="overview"] .lh, .gsv[data-lod="number"] .ht1 { display: none; }
+.gsv[data-lod="number"] .ht2 { display: inline; }
+/* At low zoom a box tells its state by stroke weight, dash and fill as well as colour. Unknown is dashed at every level. */
+.gsv[data-low] [data-f="needs"] .bx { stroke: var(--warn); fill: var(--warn-tint); stroke-width: 1.5; }
+.gsv[data-low] [data-f="problem"] .bx { stroke: var(--danger); fill: var(--danger-tint); stroke-width: 1.5; }
+.gsv[data-low] [data-f="working"] .bx { stroke: var(--run); stroke-width: 1.5; }
+.gsv[data-low] [data-f="stopped"] .bx { stroke: var(--idle); }
+.gsv[data-low] [data-f="review"] .bx { stroke: var(--fg-2); }
+.gsv[data-low] [data-f="finish"] .bx { stroke: var(--merged); }
+.gsv[data-low] [data-f="ready"] .bx { stroke: var(--line-ctl); }
+.gsv[data-low] [data-f="waiting"] .bx { stroke: var(--line); }
+.gsv[data-low] [data-f="done"] .bx { fill: var(--bg-input); stroke: none; }
+.gsv [data-f="unknown"] .bx { stroke: var(--idle); stroke-dasharray: 4 3; fill: none; }
+/* Selection and matches: colour only, never size or position. Dimmed text is the quieter text colour, never transparency
+   or a state colour, and keeps 4.5:1 on the canvas in both themes: a dimmed task can still be read and picked. */
+.gsv .n.lk .bx, .gsv .n.mt .bx, .gsv .band.lk .bx { stroke: var(--fg-2); }
+.gsv .n.lk text, .gsv .n.picked text { fill: var(--fg); }
+.gsv .n.picked .bx { fill: var(--bg-selected); stroke: var(--fg); stroke-width: 1.5; }
+.gsv .n.cur .bx { stroke: var(--fg); stroke-width: 1.5; }
+.gsv .n.dim .bx { fill: none; stroke: var(--line); }
+.gsv .n.dim text, .gsv .n.dim .w, .gsv .n.dim .no, .gsv .band.dim text { fill: var(--fg-3); }
+.gsv .n.dim .ic { color: var(--line-ctl); }
+.gsv .band.dim .bx { fill: var(--bg-canvas); stroke: var(--line); }
+.gsv .bt0 { fill: var(--fg); font-weight: 500; }
+.gsv .bwarn { fill: var(--warn); }
+.gsv .bbad { fill: var(--danger); }
+.gsv .lh text { fill: var(--fg-3); }
+.gsv .lh:hover text { fill: var(--fg); }
+.gsv .lh .ic { color: var(--fg-3); }
+.gsv .pin rect { fill: var(--bg-raised); stroke: var(--line-strong); stroke-width: 1; vector-effect: non-scaling-stroke; }
+.gsv .pin text { fill: var(--fg); }
+.gsv .ring { display: none; fill: none; stroke: var(--fg-3); stroke-width: 1; vector-effect: non-scaling-stroke; pointer-events: none; }
+[data-keyboard] .gsv .ring { display: inline; }
+
+.gv-map { position: absolute; right: 8px; bottom: 8px; width: 176px; height: 112px; overflow: hidden; border: 1px solid var(--line-strong); border-radius: 6px; background: var(--bg-sidebar); }
+.gv-map svg { display: block; width: 100%; height: 100%; }
+.gv-map .m0 { fill: var(--line-ctl); }
+.gv-map .m-needs { fill: var(--warn); }
+.gv-map .m-problem { fill: var(--danger); }
+.gv-map .m-unknown { fill: none; stroke: var(--idle); stroke-width: 1; }
+.gv-map .m-match { fill: var(--fg); }
+.gv-map .mv { fill: var(--bg-hover); stroke: var(--fg-2); stroke-width: 1; vector-effect: non-scaling-stroke; }
+.gv-tip { position: absolute; z-index: 3; max-width: 340px; padding: 5px 8px; border-radius: 6px; background: var(--bg-raised); box-shadow: var(--shadow-float); font-size: var(--t-cap); line-height: 16px; color: var(--fg); pointer-events: none; white-space: normal; overflow-wrap: anywhere; }
+.gv-tip .s { display: block; color: var(--fg-2); }
+
+.gv-band.l-bar { border-top: 1px solid var(--line); font-size: var(--t-cap); }
+.gv-band .tx { flex: none; color: var(--fg); font-variant-numeric: tabular-nums; }
+.gv-ti { flex: 0 1 auto; min-width: 40px; }
+.gv-pop .mi { min-height: 28px; font-size: var(--t-sec); }
+.gv-pop label.mi { gap: 8px; }
+.gv-pop .ct { margin-left: auto; font-size: var(--t-cap); color: var(--fg-3); font-variant-numeric: tabular-nums; }
+.gv-pop-scroll { max-height: min(56vh, 380px); overflow-y: auto; }
+.gv-layers { width: 240px; }
 
 /* Archive */
 .ws-filter-wide { width: 240px; height: 28px; }
@@ -305,14 +414,16 @@ input.chk { display: inline-block; min-height: 0; }
 .ws-more { width: 100%; min-height: 34px; --cols: minmax(0, 1fr); text-align: left; }
 
 /* Settings */
-.ws-set-machine { display: flex; align-items: center; gap: 6px; width: 100%; color: var(--fg); font-weight: 500; }
+/* The machine switcher is a row like the ones under it, not a heading: its own height, its label in the middle, the heading's
+   space above kept as a margin. */
+.ws-set-machine { display: flex; align-items: center; gap: 6px; width: 100%; height: 29px; margin-top: 7px; padding: 0 8px; border-radius: var(--r-ctl); color: var(--fg); font-weight: 500; }
+.ws-set-machine:hover { background: var(--bg-hover); }
 .ws-ml-auto { margin-left: auto; font-weight: 400; }
 .ws-short { min-height: 36px; }
 .ws-kbd { font-size: 12px; }
 .ws-name { width: 220px; }
 .ws-path { width: 300px; }
-.ws-used { width: 64px; text-align: right; }
-.ws-rule-t { border-top: 1px solid var(--line); }
+
 .ws-link-row { width: 100%; text-align: left; color: inherit; }
 .ws-link-row:hover { background: var(--bg-hover); }
 .ws-right { text-align: right; }
@@ -339,7 +450,16 @@ input.chk { display: inline-block; min-height: 0; }
 .ws-errline:has(.ws-err) { padding: 0 12px 6px; }
 .ws-errline:not(:has(.ws-err)) { display: none; }
 .ws-num { width: 110px; }
-.ws-hint { display: inline-flex; align-items: center; justify-content: center; width: 16px; height: 16px; margin-left: 5px; border-radius: 50%; font-size: 11px; font-weight: 400; line-height: 1; color: var(--fg-3); }
+/* A help button always has a fill and an edge, as its neighbours do, so its "?" never reads as a stray character. */
+.ws-hint { position: relative; display: inline-flex; align-items: center; justify-content: center; flex: none; width: 16px; height: 16px; margin-left: 5px; border-radius: 50%; background: var(--bg-input); box-shadow: inset 0 0 0 1px var(--line-ctl); font-size: 11px; font-weight: 500; line-height: 1; color: var(--fg-2); }
+/* In a bar or a control row it is a control of the row's own size, beside the run mode switch or a choice. */
+:is(.l-toolbar, .l-bar) .ws-hint { width: var(--ctl-h, 28px); height: var(--ctl-h, 28px); margin: 0; border-radius: var(--r-ctl); box-shadow: none; font-size: var(--t-sec); }
+:is(.l-toolbar, .l-bar) .ws-hint::before { inset: 0; border-radius: inherit; }
+/* The circle and its box stay 16 px, so nothing beside it moves; a press lands anywhere in the 24 px circle around it. */
+.ws-hint::before { content: ""; position: absolute; inset: -4px; border-radius: 50%; }
+/* A changed file's actions: a 24 px target, the 22 px look of the mockups (background inside a 1 px clear edge). */
+.gf .ib { width: 24px; height: 24px; padding: 1px; }
+.gf .ib, .gf .ib:hover { background-clip: content-box; }
 .ws-hint:hover { background: var(--bg-hover); color: var(--fg); }
 [popover].ws-hint-pop { width: 340px; max-height: 320px; overflow-y: auto; padding: 8px 10px; font-size: var(--t-cap); line-height: 17px; color: var(--fg-2); }
 .ws-hint-pop p + p { margin-top: 8px; }
@@ -405,6 +525,25 @@ input.chk { margin: 0; }
 .ogrow { --cols: minmax(150px, .8fr) repeat(3, minmax(150px, 1fr)); }
 .ofrow { --cols: 140px minmax(160px, 1fr) minmax(170px, 1.2fr) 60px 70px 110px; }
 .oyrow { --cols: 150px minmax(220px, 1fr) 50px 54px 56px 56px; }
+/* On a compact pane the tables give their text columns less, so a row never runs past its surface. */
+@container page (max-width: 899.98px) {
+  .lrow { grid-template-columns: 18px minmax(160px, 2fr) 112px minmax(120px, 1.2fr) minmax(140px, 1.4fr) 56px; }
+  .orrow { --cols: minmax(120px, 1fr) 150px 140px minmax(120px, 1fr) 24px; }
+  .ofrow { --cols: 110px minmax(110px, 1fr) minmax(120px, 1.2fr) 60px 70px 100px; }
+  .osrow { --cols: minmax(130px, 1.2fr) 130px 120px 64px 60px 44px 24px; }
+  .okrow { --cols: minmax(140px, 1.2fr) 140px minmax(160px, 1.6fr) 110px; }
+}
+/* A settings table narrower than its columns (a phone) shows each row as labelled lines: the first cell is the row's name, each
+   other cell is preceded by its column's name (data-label, set from the header row by settings.tsx), and the header row goes.
+   Group headings stay. The tool-access matrix keeps its columns and scrolls in its own box. */
+.set-wrap .surface:has(> .gt:not(.ws-matrix)) { container: gtable / inline-size; }
+@container gtable (max-width: 559.98px) {
+  .gt > .gr { --cols: minmax(0, 1fr); row-gap: 6px; padding-block: 10px; align-items: start; }
+  .gt > .gr.th:not(.ws-group) { display: none; }
+  .gt > .gr > :empty { display: none; }
+  .gt > .gr > [data-label]:not(:first-child):not([data-label=""]) { flex-wrap: wrap; }
+  .gt > .gr > [data-label]:not(:first-child):not([data-label=""])::before { content: attr(data-label); display: block; flex-basis: 100%; font-size: var(--t-cap); line-height: 16px; font-weight: 400; color: var(--fg-3); }
+}
 /* The settings sidebar takes its share of the window, so the list and detail stop fitting side by side here. */
 @media (max-width: 1200px) {
   .ws-split { grid-template-columns: minmax(0, 1fr); }
@@ -442,7 +581,6 @@ input, textarea, [contenteditable="true"] { -webkit-user-select: text; user-sele
 .gr { padding-right: 12px; }
 .proj, .task-row { padding-right: 8px; }
 .sb-foot { padding: 0 8px; }
-.proj-x { right: 4px; }
 
 /* A path or a name is one piece: it is cut, never broken across lines. */
 .kv dd.mono { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; overflow-wrap: normal; }
@@ -453,28 +591,62 @@ input, textarea, [contenteditable="true"] { -webkit-user-select: text; user-sele
 .ws-edit-in { width: 100%; height: 24px; }
 input.chk { margin-top: 1px; }
 
-/* The review decision: the result, its checks and the next step, with the same 16px inset on both sides. */
-.rv-bar { flex: none; display: flex; flex-direction: column; gap: 10px; padding: 14px 16px; border-bottom: 1px solid var(--line); background: var(--bg-raised); }
-.rv-h { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; font-size: var(--t-sec); }
+/* The review decision: one bar with the version, its checks, Request changes and Accept, and under it the strip that says
+   why Accept is off. Everything sits on the rows' 12px edge. */
+.rv-bar { flex: none; border-bottom: 1px solid var(--line); background: var(--bg-raised); }
+.rv-bar .l-bar-start .st, .rv-card-f .l-bar-start { font-size: var(--t-cap); }
+.rv-bar .l-strip, .rcard .l-strip { border-top: 1px solid var(--line); border-bottom: 0; }
+.rv-panel > .l-page { flex: 1 1 auto; height: auto; min-height: 0; }
+/* With a diff, the result and its evidence share one bounded region, and the diff keeps at least 240px under its tools. */
+.rv-top { flex: none; max-height: min(45%, calc(100% - 280px)); border-bottom: 1px solid var(--line); }
+.rv-panel .chg-body { flex: 1 1 0; min-height: 240px; }
+.rv-top-in { display: grid; justify-items: start; gap: 8px; padding: 12px 12px 10px; }
+.rv-top-in > * { max-width: 100%; }
 .rv-sum { max-height: 120px; overflow: hidden; font-size: var(--t-sec); line-height: 20px; mask-image: linear-gradient(to bottom, #000 70%, transparent); }
-.rv-sum.open { max-height: 40vh; overflow-y: auto; mask-image: none; }
-.rv-more { align-self: flex-start; font-size: var(--t-cap); }
-.rv-note, .rv-why { display: flex; align-items: center; gap: 8px; font-size: var(--t-sec); line-height: 18px; color: var(--fg-2); }
-.rv-why { flex-wrap: wrap; padding: 8px 10px; border-radius: var(--r-ctl); background: var(--bg-input); color: var(--fg); }
-.rv-acts { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
-.rv-accept { display: inline-flex; flex-direction: column; align-items: flex-end; gap: 2px; }
-.rcard .rv-why { margin: 8px 12px; }
+.rv-sum.open { max-height: none; overflow: visible; mask-image: none; }
+.rv-more { font-size: var(--t-cap); }
+.rv-note { display: flex; align-items: center; gap: 8px; font-size: var(--t-sec); line-height: 18px; color: var(--fg-2); }
+.rv-diff-note { flex-wrap: wrap; gap: 4px 8px; padding: 12px; }
+.rv-foot { border-top: 1px solid var(--line); background: var(--bg-canvas); }
+.rv-card-f { border-top: 1px solid var(--line); }
 .rcard-note { padding: 8px 12px; }
 .ws-mt8 { margin-top: 8px; }
 
-/* Check rows: name, then where it came from and what can be done, never touching each other or the edge. */
-.nv .src, .chk .src { display: inline-flex; align-items: center; gap: 8px; }
+/* Checks: one line of counts, then a heading per kind on the rows' edge, with real space above it. */
+.rv-outc { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 14px; padding: 8px 12px; border-top: 1px solid var(--line); font-size: var(--t-cap); }
+.rv-checks { padding-bottom: 6px; border-top: 1px solid var(--line); }
+.rv-checks .l-sect-t { font-size: var(--t-sec); }
+.rv-checks .l-row, .rv-stale { padding-block: 5px; font-size: var(--t-sec); line-height: 20px; }
+.rv-checks .l-row + .l-row, .rv-checks .rv-cmd + .l-row { border-top: 1px solid var(--line); }
+.rv-checks .l-row-end { line-height: 20px; }
+.rv-cmd { margin: 0 12px 6px 36px; font-size: var(--t-cap); color: var(--fg-2); }
+.rv-cmd pre { margin: 4px 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.chk .src { display: inline-flex; align-items: center; gap: 8px; }
 .chk .why { display: block; font-size: var(--t-cap); line-height: 16px; color: var(--fg-2); }
-/* A disclosure owns a full row, not the icon column of the three-column check grid. */
-details.nv { display: block; }
-details.nv > pre { white-space: pre-wrap; overflow-wrap: anywhere; }
-.evid-b { grid-template-columns: minmax(0, 1fr); gap: 2px; padding: 0 16px 10px; max-height: 200px; overflow-x: hidden; }
-.evid summary { padding: 0 16px; }
+.evid-b { display: block; padding: 0 0 4px; max-height: none; overflow: visible; }
+.evid summary { padding: 0 12px; }
+.evid .rv-checks:first-child { border-top: 0; }
+/* A file's path in its head shortens, and a press shows the whole of it. */
+.fhead .fhead-path { flex: 0 1 auto; color: var(--fg); font-size: 12px; }
+.fhead .r { flex: none; }
+.fhead .tnum { flex: none; white-space: nowrap; }
+/* The diff under a result wraps long lines, so it never scrolls sideways. */
+.rv-panel .dview { overflow-x: hidden; }
+.rv-panel .dview .code { min-width: 0; }
+.rv-panel :is(.dl, .sl) > .c { white-space: pre-wrap; overflow-wrap: anywhere; }
+/* A long branch shortens inside its field in a dialog. */
+.dlg .pick { min-width: 0; max-width: 100%; }
+.ws-rows { padding: 0; }
+.ws-rows .l-row { padding-block: 6px; font-size: var(--t-sec); line-height: 20px; }
+.ws-rows .l-row + .l-row { border-top: 1px solid var(--line); }
+.flow { display: inline-flex; align-items: center; gap: 6px; min-width: 0; }
+.flow .l-whole { max-width: 16ch; }
+
+/* The task page head: the plan line and the tabs are two small toolbars of one height each. */
+.l-toolbar.planbar, .l-toolbar.tabs { height: var(--toolbar-h-sm); padding: 0 12px; gap: 12px; }
+.planbar .l-z-mid { gap: 14px; }
+.planbar .l-z-end { gap: 14px; font-size: var(--t-cap); color: var(--fg-2); }
+.ws-tablist { display: flex; align-items: center; gap: 2px; min-width: 0; }
 
 /* A tool step opens to its input and output. */
 .ev-toggle { display: inline-flex; align-items: flex-start; gap: 6px; max-width: 100%; padding: 0; font: inherit; color: inherit; text-align: left; }
@@ -482,13 +654,19 @@ details.nv > pre { white-space: pre-wrap; overflow-wrap: anywhere; }
 .ev-toggle:hover span { text-decoration: underline; text-underline-offset: 2px; }
 .ev-detail { display: flex; flex-direction: column; }
 .ev-dh { padding: 6px 10px 0; font-size: var(--t-cap); color: var(--fg-3); }
-.ev-raw { padding-bottom: 6px; }
+
 .ev-detail .args { max-height: 280px; overflow: auto; }
 .ws-step-detail { display: grid; gap: 8px; min-width: 0; padding: 8px 12px; border: 1px solid var(--line); border-radius: var(--r-ctl); overflow-wrap: anywhere; }
-.ws-step-detail pre { margin: 0; white-space: pre-wrap; }
+.ws-step-detail pre { margin: 0; white-space: break-spaces; }
 .ws-step-detail .args { margin: 0; white-space: pre-wrap; max-height: 280px; overflow: auto; }
 .ws-step-path { text-align: left; overflow-wrap: anywhere; }
 .ws-step-detail .diff { max-height: 320px; overflow: auto; white-space: pre-wrap; }
+/* Recorded output keeps its lines as written: a long line scrolls sideways inside its own box, which never grows past its column.
+   The box is a named tab stop, so the arrow keys scroll it too; its focus line is drawn inside, where no parent cuts it. */
+.step-sub .ws-out { display: block; min-width: 0; max-width: 100%; max-height: 280px; overflow-x: auto; overflow-y: auto; white-space: pre; overflow-wrap: normal; word-break: normal; overscroll-behavior-x: contain; }
+.step-sub .ws-out.diff { display: grid; grid-template-columns: minmax(100%, max-content); align-content: start; max-height: 320px; }
+.step-sub .ws-out.diff > div { overflow: visible; text-overflow: clip; }
+.ws-out:focus-visible { outline-offset: -1px; }
 .ws-working { display: flex; align-items: center; gap: 8px; min-height: 24px; margin: 12px 0; color: var(--fg-2); font-size: var(--t-sec); }
 .card-error { padding: 8px 12px; color: var(--warn); overflow-wrap: anywhere; }
 .ws-drag-card { position: fixed !important; left: 0; top: 0; margin: 0 !important; box-sizing: border-box; pointer-events: none; z-index: -1; transform: none !important; contain: layout paint; }
@@ -517,24 +695,23 @@ details.nv > pre { white-space: pre-wrap; overflow-wrap: anywhere; }
 .ws-worker-result .res-sec { font-size: var(--t-sec); }
 body[data-tab="conversation"] .task-body { grid-template-columns: minmax(0, 1fr); }
 .ws-worker-picker { display: none; }
-.live-tools { min-width: 0; overflow-x: auto; flex: none; }
-.live-tools > * { flex-shrink: 0; }
 @media (max-width: 900px) {
   body[data-tab="workers"] .task-body.live { grid-template-columns: minmax(0, 1fr); }
   .task-body.live > .task-panel { display: none; }
   .ws-worker-picker { display: flex; align-items: center; gap: 8px; padding: 8px 12px; }
   .ws-worker-picker select { width: auto; min-width: 0; flex: 1; }
-  body[data-tab="workers"] .tabs, body[data-tab="workers"] .planbar { overflow-x: auto; flex: none; }
   .stream-in { padding: 12px 12px 160px; }
-  .stream-in .ev-sub { margin-left: 22px; }
+
   .dock-w { padding: 0 12px 12px; }
-  .ev .rt { flex-wrap: wrap; }
-  .stream-in .card2-f { flex-wrap: wrap; gap: 6px; }
+
   .livepane .d-h { padding: 12px; }
   body[data-tab="workers"] .tb-main { overflow-x: auto; }
   body[data-tab="workers"] .crumbs { flex: 1 0 100px; }
 }
-@media (prefers-reduced-motion: reduce) { .ws-working .spin { animation: none; } }
+/* Working is a recorded state, not a request for permanent compositor frames.
+   Keep its icon and words visible; only real progress changes the screen. */
+.spin, .typing .tick, .shimmer { animation: none; }
+.shimmer { background: none; -webkit-text-fill-color: currentColor; }
 
 /* A frameless window takes the outer 5px of each edge for resizing, ahead of the page. Scrollers at the window's right and
    bottom edge stop short of it, so a scrollbar is always grabbed and an edge always resizes. The desktop bridge widens the
@@ -567,48 +744,304 @@ button.step-row:hover { background: var(--bg-hover); color: var(--fg); }
 .ws-step-acts { display: flex; justify-content: flex-end; }
 /* Reverse flex changes the scroll origin as streamed content grows in WebKitGTK. */
 .timeline, .stream { display: block; overflow-anchor: none; }
-.stream-in { max-width: 808px; padding: 16px 24px 148px; gap: 14px; }
+.stream-in { max-width: 808px; padding: 16px 24px max(148px, var(--dock-clear, 0px)); gap: 14px; }
 .ev-note .tx { font-size: var(--t-content); line-height: 22px; }
 .ws-cf-err { padding: 8px 14px; }
 
-/* A control that cannot be used says why, in words, right where it stands. A hover popup never does. */
+/* A control that cannot be used says why in the bar it stands in (layout.tsx, layout.css), never inside its own box, and a hover popup never does. */
 .ws-hide { visibility: hidden; }
-[data-why]:not(input, select, textarea)::after { content: attr(data-why); font-size: var(--t-cap); font-weight: 400; line-height: 15px; color: var(--fg-3); white-space: normal; text-align: left; }
-.btn[data-why]:not(.c-send) { flex-flow: row wrap; justify-content: flex-start; height: auto; min-height: 28px; padding-top: 4px; padding-bottom: 4px; max-width: 280px; white-space: normal; }
-.btn[data-why]:not(.c-send)::after { flex: 1 0 100%; }
-.mi[data-why] { flex-wrap: wrap; }
-.mi[data-why]::after { flex: 1 0 100%; padding-left: 24px; }
-.ib[data-why]:not(.c-send), .seg > [data-why] { width: auto; height: auto; min-width: 26px; gap: 4px; padding-left: 4px; padding-right: 4px; }
-.c-send[data-why]::after { content: none; }
-.sel[data-why]::after { white-space: nowrap; }
-.c-route .sel[data-why]::after { content: none; }
-.tab[data-why]::after, .sel[data-why]::after, .pick[data-why]::after, .chip[data-why]::after, .ws-adv-h[data-why]::after { margin-left: 8px; }
 .ws-why { margin-left: 8px; font-size: var(--t-cap); line-height: 15px; color: var(--fg-3); }
-/* A one-line toolbar keeps its height: the words live in the row's own status text and strips, never inside the button. */
-:is(.git-sum, .ecrumb, .commit-box, .sp-plan-h) [data-why]:not(.c-send)::after { content: none; }
-:is(.git-sum, .ecrumb) .ib[data-why]:not(.c-send) { width: 28px; height: 28px; min-width: 0; padding: 0; }
-:is(.ecrumb, .commit-box, .sp-plan-h) .btn[data-why]:not(.c-send) { flex-flow: row nowrap; justify-content: center; height: 24px; min-height: 0; padding: 0 8px; max-width: none; white-space: nowrap; }
+.ws-pal-why { white-space: normal; overflow-wrap: anywhere; }
 
 /* Long names shorten in place: a row never wraps, and its controls keep their width beside it. */
-.tn, .res-file, .gf, .git-sum, .ecrumb { min-width: 0; }
+.tn, .res-file, .gf { min-width: 0; }
 .ws-res-n { flex: none; }
-.ecrumb { white-space: nowrap; }
+/* The side panes' and the editor's toolbars: small type, the panes' own tighter edge. */
+:is(.ecrumb, .side-opts, .chg-tools, .git-sum).l-toolbar { font-size: var(--t-cap); color: var(--fg-2); }
+:is(.side-h, .side-opts, .git-sum).l-toolbar { padding-inline: 8px; gap: 6px; }
 .ws-crumb { display: flex; align-items: center; gap: 5px; flex: 1 1 0; min-width: 0; }
-.ws-crumb > .trunc { flex: 0 1 auto; }
+/* The folder gives up its room first, then the name; each keeps enough to be pressed for the whole of it. */
+.ws-crumb > .trunc { flex: 0 1 auto; min-width: 48px; }
 .ws-crumb > .ws-crumb-d { flex-shrink: 1000; }
-.ecrumb .r { flex: 0 1 auto; min-width: 0; }
-.ecrumb .r > * { flex: none; }
-.ecrumb .r > .ws-against { flex: 0 1 auto; min-width: 40px; max-width: 200px; }
+.ws-crumb > .ws-against { min-width: 40px; max-width: 200px; margin-left: auto; padding-left: 8px; }
 .ecrumb .ws-save-state { min-width: 64px; }
-.side-opts { white-space: nowrap; }
+/* A narrow editor gives up the file's folder before its name, then the words of its open-elsewhere button, which keeps its icon
+   and its name. */
+.ecrumb.l-toolbar { container: ecrumb / inline-size; }
+.ws-ext > .i { display: none; }
+@container ecrumb (max-width: 639px) { .ws-crumb > :is(.i, .ws-crumb-d) { display: none; } }
+@container ecrumb (max-width: 459px) { .ws-ext > .i { display: inline-block; } .ws-ext > .ws-ext-t { display: none; } .ecrumb .ws-ext { width: var(--ctl-h) !important; padding: 0; justify-content: center; } }
+.commit-bar.l-bar, .ws-form-f.l-bar { padding-inline: 0; }
+/* A state in the Inspector's narrow column wraps instead of running past it. */
+.inspector .st { max-width: 100%; white-space: normal; overflow-wrap: anywhere; align-items: flex-start; }
+.inspector .st > .i { margin-top: 2px; }
+/* Home's projects table gives up its worktree count before it would run past its own edge. */
+.surface.table { container: ptable / inline-size; }
+@container ptable (max-width: 860px) {
+  .tr { grid-template-columns: minmax(160px, 2fr) 72px 84px 64px minmax(96px, 1.1fr) 104px 32px; }
+  .tr > :nth-child(6) { display: none; }
+}
+/* On a phone-width pane it keeps the project and what waits in it: working, needs you and review, then the way in. */
+@container ptable (max-width: 560px) {
+  .tr { grid-template-columns: minmax(0, 1fr) 56px 72px 52px 28px; }
+  .tr > :is(:nth-child(5), :nth-child(6), :nth-child(7)) { display: none; }
+  .tr.th > * { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+}
+/* The Archive's rows give up the project, machine and size columns on a compact pane, and on a phone-width one keep the
+   task, its cleanup and its menu (which still holds Restore). Its filters then scroll in their own strip, never off the page. */
+@container page (max-width: 899.98px) {
+  .ar-cols { --cols: 22px minmax(0, 1fr) 96px 112px 104px 28px; }
+  .ar-cols > :is(:nth-child(3), :nth-child(4), :nth-child(7)) { display: none; }
+}
+@container page (max-width: 560px) {
+  .ar-cols { --cols: 22px minmax(0, 1fr) 96px 28px; }
+  .ar-cols > :is(:nth-child(5), :nth-child(8)) { display: none; }
+  .tbar.l-toolbar { overflow-x: auto; scrollbar-width: none; }
+  .tbar.l-toolbar::-webkit-scrollbar { display: none; }
+  .tbar.l-toolbar .ws-filter-wide { width: 160px; flex: none; }
+}
+/* A phone-width pane: a toolbar's middle zone scrolls in its own strip instead of cutting its last tabs off; a list row keeps
+   its icon, title and state; the two places a new task can work stand one above the other; mono paths wrap. */
+@container page (max-width: 560px) {
+  .l-toolbar .l-z-mid { overflow-x: auto; scrollbar-width: none; }
+  .l-toolbar .l-z-mid::-webkit-scrollbar { display: none; }
+  .lrow { grid-template-columns: 18px minmax(0, 1fr) minmax(0, 42%); }
+  .lrow > :is(:nth-child(3), :nth-child(4), :nth-child(6)) { display: none; }
+  .create .two { grid-template-columns: minmax(0, 1fr); }
+  .rc .mono { overflow-wrap: anywhere; }
+  /* A setting reads as its name and description, then its control on the next line, never a word a line beside it. */
+  .srow { grid-template-columns: minmax(0, 1fr) !important; }
+  .srow .ctl { justify-content: flex-start; flex-wrap: wrap; }
+}
+/* Home and the plain pages measure their own width, so a phone-width pane reflows them as it does a work page; so does a
+   settings page that is not built on the page frame (Voice input, Updates). */
+.home, .page, .create, .set-main { container: page / inline-size; }
+/* Needs you: the place each line comes from starts at the same point on every line. */
+.need .where { flex: 0 1 280px; }
+@container page (max-width: 560px) {
+  /* A phone-width pane reads a Needs you line in three: what kind and how long, what it asks, and where. */
+  .need { display: grid; grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "kind age" "ask ask" "where where"; row-gap: 4px; height: auto; min-height: 44px; padding-block: 10px; }
+  .need .kind { grid-area: kind; width: auto; }
+  .need .age { grid-area: age; width: auto; }
+  .need .ask { grid-area: ask; white-space: normal; overflow-wrap: anywhere; }
+  .need .where { grid-area: where; max-width: none; }
+  .home { padding-inline: 16px; }
+  .home-in { grid-template-columns: minmax(0, 1fr); }
+}
+.gscroll { --inset: 6px; }
 /* Tabs give way to the view switch; many tabs scroll under it instead of pushing it off the bar. */
 .etabs { overflow-x: auto; scrollbar-width: none; }
 .etabs::-webkit-scrollbar { display: none; }
 .etab { flex: 0 1 auto; min-width: 72px; max-width: 240px; }
 .etab .x { flex: none; }
-.etab-tools { position: sticky; right: 0; flex: none; background: var(--bg-sidebar); }
+/* The tabs give up width first and scroll in their own strip; the view switch stands beside them, never over them. */
+.etab-list { display: flex; align-items: stretch; flex: 1 1 auto; min-width: 0; overflow-x: auto; scrollbar-width: none; }
+.etab-list::-webkit-scrollbar { display: none; }
+.etab-tools { flex: none; }
 /* The reading panel takes the acceptance column's place, so a task's name keeps its width beside it. */
 .sp-body[data-reading] .pt-row { grid-template-columns: 22px minmax(0, 1fr) 104px; }
 .sp-body[data-reading] .pt-row > .ac, .sp-body[data-reading] .pt-row.th > :nth-child(3):not(:last-child) { display: none; }
 /* Room for "12 hours ago" on one line. */
 .hrow { grid-template-columns: 56px minmax(0, 1fr) 96px 64px 84px; }
+
+/* Browser-style tabs. Each pane stays laid out while parked, so nothing inside it re-measures or loses its scroll. */
+.ws-tabstrip { display: flex; align-items: stretch; flex: none; height: 36px; border-bottom: 1px solid var(--line); background: var(--bg-sidebar); overflow-x: auto; scrollbar-width: none; }
+.ws-tabstrip::-webkit-scrollbar { display: none; }
+.ws-tab { display: flex; align-items: center; gap: 2px; flex: 0 1 200px; min-width: 96px; padding-right: 6px; border-right: 1px solid var(--line); color: var(--fg-2); font-size: var(--t-sec); }
+.ws-tab:hover { color: var(--fg); }
+.ws-tab[data-on] { background: var(--bg-canvas); color: var(--fg); }
+.ws-tab-name { flex: 1 1 auto; display: flex; align-items: center; min-width: 0; height: 100%; padding: 0 4px 0 10px; text-align: left; }
+.ws-tab-x { flex: none; display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 18px; border-radius: 4px; color: var(--fg-3); }
+.ws-tab-x:hover { background: var(--bg-hover); color: var(--fg); }
+.ws-tab-new { flex: none; align-self: center; margin: 0 4px; }
+.ws-panes { position: relative; flex: 1 1 auto; min-height: 0; }
+.crumbs > .cur { flex: 0 1 auto; min-width: 64px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+/* The project crumb gives up its room first, so the task's own title stays readable; a press on either leads to all of it. */
+.crumbs > a { flex: 0 3 auto; min-width: 40px; overflow: hidden; text-overflow: ellipsis; }
+/* The title band holds its controls at every window and sidebar width, and measures itself to do it. The title shortens
+   first, then the checkout chip's branch; on a narrower band the branch name and the project crumb give way, then the state
+   chip, which the task's own strip repeats. The crumbs are the band's own items, each with its own floor, so the title
+   shortens in place and nothing runs into its neighbour. */
+.tb-main { container: tb / inline-size; }
+.tb-main > .crumbs { display: contents; }
+.tb-main > .crumbs > .sep { margin-inline: -2px; }
+.tb-main > .crumbs > .ws-title-in { flex: 0 1 280px; width: auto; min-width: 64px; }
+.tb-main .branch-chip { flex: 0 0.05 auto; min-width: 56px; overflow: hidden; }
+.tb-main .branch-chip .mono { min-width: 0; }
+/* The band's facts are whole words or absent: the room they get decides how many show, least needed first, so none is cut
+   to "1 proj…". The count of what needs you goes last. */
+.tb-facts { container: facts / inline-size; flex: 1 1 0; min-width: 0; }
+.tb-facts > span { flex: none; white-space: nowrap; }
+@container facts (max-width: 419px) { .tb-fact-t { display: none; } }
+@container facts (max-width: 259px) { .tb-fact-p { display: none; } }
+@container facts (max-width: 179px) { .tb-fact-w { display: none; } }
+@container facts (max-width: 89px) { .tb-fact-n { display: none; } }
+/* Secondary actions in the band (a sprint's New task and Close sprint…, a task's Edit task…) fold into the band's menu,
+   which has them too, when the band is narrow, so the primary action, the menu and the window's controls stay in the window. */
+.tb-fold-only { display: none; }
+@container tb (max-width: 799px) {
+  .tb-actions > .tb-fold { display: none; }
+  .tb-fold-only { display: block; }
+  .tb-main .branch-chip { flex-shrink: 0; min-width: auto; }
+  .tb-main .branch-chip .mono, .crumbs > a:first-child, .crumbs > a:first-child + .sep { display: none; }
+  /* The project's folder is cut to a few characters here, which reads as a stray slash; Project settings shows it whole. */
+  .tb-main > .tb-repo { display: none; }
+}
+/* The narrowest band, at the smallest window with the sidebar dragged wide, also drops a panel control's empty place and
+   tightens the actions, and the title keeps less: the tab right under it carries the same name. */
+@container tb (max-width: 679px) {
+  .tb-actions > .tb-state, .tb-fixed > .ws-hide, .tb-main > .tb-facts { display: none; }
+  .tb-actions { gap: 4px; }
+  .crumbs > .cur { min-width: 48px; }
+}
+.ws-pane { position: absolute; inset: 0; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+.ws-pane[data-parked] { visibility: hidden; pointer-events: none; }
+.ws-pane[data-parked] * { animation-play-state: paused !important; }
+
+/* A composer's reason stands between its choices and its send controls, and takes no room from either until there is space. */
+.c-bar > .l-reason { order: 1; flex: 1 1 0; min-width: 0; margin-inline: 6px 4px; }
+.c-bar > .c-end { order: 2; }
+/* The choices keep most of the free room, so a reason never folds them to icons before the window would. */
+.c-bar > .c-route { flex-grow: 3; }
+/* The commit bar sits in a narrow pane: Ctrl+Enter stays the shortcut, and its words give way to why Commit is off. */
+.commit-bar .btn .key { display: none; }
+/* On a compact pane the history gives up its author column first; the commit's own details still name the author. */
+@container page (max-width: 899.98px) {
+  .hrow { grid-template-columns: 56px minmax(0, 1fr) 64px 84px; }
+  .hrow > :nth-child(3) { display: none; }
+}
+/* A plan in a narrow column names its tasks first: the acceptance column gives way, and Read more still opens all of it. */
+.sp-plan { container: plan / inline-size; }
+@container plan (max-width: 519.98px) {
+  .sp-plan .pt-row:not(.ws-plain) { grid-template-columns: 22px minmax(0, 1fr) 104px; }
+  .sp-plan .pt-row > .ac, .sp-plan .pt-row.th:not(.ws-plain) > :nth-child(3) { display: none; }
+}
+/* New task: the choice row is a toolbar on the form's own edge, and the foot is the page's bar, pinned under the form. */
+.create-top.l-toolbar { border-bottom: 0; padding-inline: 0; }
+.create-foot.l-bar { position: sticky; bottom: 0; z-index: 1; padding-inline: 0; border-top: 1px solid var(--line); background: var(--bg-canvas); }
+
+/* Surfaces that adjust a primitive: their own edge, type and fill, never its height or its zones. */
+.term-h.l-toolbar { gap: 4px; padding-inline: 10px 6px; font-size: var(--t-cap); color: var(--fg-2); }
+.l-sect .more { font-weight: 400; font-size: var(--t-cap); color: var(--fg-2); }
+.l-sect .more:hover { color: var(--fg); }
+/* A section's head on a page sits on the edge of the surface under it. */
+.home-in, .page-in { --inset: 0px; }
+.cdetail > :not(.l-sect) { padding-inline: 12px; }
+/* The selection bar takes the filter bar's place at the same height, so rows below never move. */
+.tbar.l-toolbar { border-bottom: 0; padding-inline: 0; }
+.tbar .l-z-mid { justify-content: flex-end; }
+.tbar .pick { max-width: 240px; }
+.sel-bar.l-toolbar { padding-inline: 12px 6px; border: 1px solid var(--line-ctl); border-radius: var(--r-card); background: var(--bg-selected); font-size: var(--t-sec); }
+.sp-h .tt { font-size: var(--t-ui); font-weight: 500; }
+.set-ctx.l-toolbar { padding-inline: 24px; font-size: var(--t-cap); color: var(--fg-2); }
+.set-ctx b { font-weight: 500; color: var(--fg); }
+.set-wrap > .l-page { flex: 1 1 auto; height: auto; min-height: 0; }
+.set-in { --inset: 0px; max-width: 860px; margin: 0 auto; display: grid; gap: 12px; }
+.set-h { margin-top: 6px; }
+/* A reason under a heading or a setting reads as its next line, from the start. */
+:is(.set-h, .srow) .l-reason { text-align: start; }
+.savebar.l-bar { padding-inline: 24px; border-top: 1px solid var(--line); font-size: var(--t-sec); background: var(--bg-canvas); }
+.savebar .l-reason { text-align: start; font-size: var(--t-sec); color: var(--fg); }
+
+/* The paper plane: the one send glyph, drawn like every other icon. */
+.i-send{--m:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M14.536 21.686a.5.5 0 0 0 .937-.024l6.5-19a.496.496 0 0 0-.635-.635l-19 6.5a.5.5 0 0 0-.024.937l7.93 3.18a2 2 0 0 1 1.112 1.11z'/%3E%3Cpath d='m21.854 2.147-10.94 10.939'/%3E%3C/svg%3E")}
+
+/* The shared message composer. Every control in its tools row has one box: 32 px at every width and with every pointer (a
+   phone gets the desktop's compact controls, never enlarged ones), the same text and icon size, and 8 px between controls.
+   Attach and Voice lead, the plane ends the row. Hover, focus, selection and a busy state never change a box. */
+.mc { --ctl-h: 32px; container: mc / inline-size; }
+.mc > .mc-effect { padding: 12px 12px 0; font-size: var(--t-cap); line-height: 16px; color: var(--fg-2); overflow-wrap: anywhere; }
+.mc > .mc-effect strong { font-weight: 500; color: var(--fg); }
+.mc > textarea { min-height: 46px; padding: 12px 12px 0; }
+.mc .c-bar { gap: 8px; row-gap: 8px; min-height: 0; padding: 8px 12px 12px; font-size: var(--t-sec); }
+.mc .mc-tools, .mc .c-bar > .c-route, .mc .c-bar > .c-end { gap: 8px; }
+.mc .mc-tools { display: flex; align-items: center; flex: none; }
+.mc .c-bar :is(.btn, .ib, .sel, .seg) { box-sizing: border-box; height: var(--ctl-h); margin: 0; font-size: var(--t-sec); font-weight: 500; }
+.mc .c-bar :is(.mc-tools, .c-end) > :is(.btn, .ib, .sel, .seg) { flex: none; }
+.mc .c-bar .ib { width: var(--ctl-h); padding: 0; }
+.mc .c-bar :is(.btn, .sel) { padding: 0 10px; border: 1px solid transparent; }
+.mc .c-bar .btn-line { border-color: var(--line-ctl); }
+.mc .c-bar .i:not(.s12):not(.s14) { width: 16px; height: 16px; }
+.mc .c-bar .seg { padding: 2px; }
+.mc .c-bar .seg > * { height: 100%; padding: 0 10px; font-size: var(--t-sec); font-weight: 500; }
+.mc .c-bar .seg > [aria-pressed="true"] { background: var(--bg-canvas); color: var(--fg); box-shadow: 0 0 0 1px var(--line-strong); }
+.mc .mc-send { margin: 0; border-radius: var(--r-ctl); background: var(--primary); color: var(--primary-fg); }
+.mc .mc-send:hover { background: var(--primary); color: var(--primary-fg); opacity: .9; }
+.mc .mc-send[aria-disabled="true"]:not([data-busy]) { background: var(--bg-input); color: var(--fg-3); box-shadow: inset 0 0 0 1px var(--line-ctl); opacity: 1; }
+.mc .mc-fixed, .mc .mc-fixed:hover { background: none; color: var(--fg-2); cursor: default; }
+.mc .c-bar .ib[aria-disabled="true"]:not(.mc-send) { color: var(--fg-3); }
+.mc-inline { box-shadow: none; }
+/* A comment being written is the shared composer itself, not a composer inside a comment box. */
+.cmt.cmt-edit { border: 0; background: none; }
+.mc-inline > textarea { min-height: 64px; font-size: var(--t-sec); }
+.dc-answer { margin: 0 8px 8px; box-shadow: none; }
+.dc-answer > textarea { min-height: 46px; font-size: var(--t-sec); }
+.opt[aria-checked="true"] { border-color: var(--warn-line); background: var(--bg-raised); }
+.mc-fold { display: flex; justify-content: center; }
+.mc-fold .btn { height: 32px; background: var(--bg-raised); box-shadow: var(--shadow-float); }
+/* A narrow pane keeps every control, on two deliberate rows: model, effort and Settings, then the tools and the plane. */
+@container mc (max-width: 520px) {
+  .mc .c-bar > .c-route { order: -1; flex: 1 0 100%; flex-wrap: wrap; row-gap: 8px; }
+  /* A narrower box, such as an answer inside its question card, moves a choice to the next line before it would cut its text. */
+  .mc .c-bar > .c-route > .sel { flex-shrink: 0; max-width: 100%; }
+  .mc .c-bar > .l-reason { order: 3; flex: 1 0 100%; margin: 0; text-align: start; }
+}
+/* A composer that cannot send now says why once, in its writing area; its tools stay in their row at their size. */
+.mc > textarea:disabled { min-height: 0; }
+
+/* A queued message is one row of same-size controls; on a narrow pane its text takes its own line above them. */
+.qrow { --ctl-h: 28px; gap: 8px; height: auto; min-height: 40px; padding: 5px 6px; }
+.qrow :is(.btn, .ib) { height: var(--ctl-h); font-size: var(--t-sec); }
+.qrow .ib { width: var(--ctl-h); }
+.qrow-end { gap: 8px; }
+/* Below the desktop window's smallest size, which only a phone-width view of the shared UI reaches, the title band keeps the
+   title and the task's actions; the panel toggles and window buttons give way so nothing runs off the edge. */
+@media (max-width: 519.98px) {
+  .titlebar .tb-fixed, .titlebar .win, .titlebar .branch-chip { display: none; }
+}
+/* The title band's state reads at the height of the buttons beside it, so nothing in that row looks smaller than its neighbour. */
+.tb-actions > :is(.chip, .btn, .ib), .tb-main > :is(.chip, .btn, .ib) { box-sizing: border-box; height: 28px; }
+/* The row contract: controls that stand side by side in one row share one box, the row's --ctl-h (28 px by default, 32 in a
+   dialog or a composer, the same at every width), so a small button, a chip or a taller field never sits beside a regular one
+   and reads as a layout bug. Only a row with an actionable control and at least two controls is touched; a row of status
+   chips alone keeps its own size. A section head is a dense row: its controls are the compact 24 px. */
+:is(.ctl, .row, .item, .page-h, .set-h, .sb-foot, .l-strip-a, .l-sect-end, .l-sect-lead, .ws-line-r, .ws-pick):has(> :is(.btn, .ib, .sel, .seg, input.inp, select.inp)):has(> :is(.btn, .ib, .sel, .seg, .chip, input.inp, select.inp) ~ :is(.btn, .ib, .sel, .seg, .chip, input.inp, select.inp)) > :is(.btn, .ib, .sel, .seg, .chip, input.inp, select.inp) { box-sizing: border-box; height: var(--ctl-h); }
+:is(.ctl, .row, .item, .page-h, .set-h, .sb-foot, .l-strip-a, .l-sect-end, .l-sect-lead, .ws-line-r, .ws-pick):has(> :is(.btn, .ib, .sel, .seg, input.inp, select.inp)):has(> :is(.btn, .ib, .sel, .seg, .chip, input.inp, select.inp) ~ :is(.btn, .ib, .sel, .seg, .chip, input.inp, select.inp)) > .ib { width: var(--ctl-h); }
+:is(.ctl, .row, .item, .page-h, .set-h, .sb-foot, .l-strip-a, .l-sect-end, .l-sect-lead, .ws-line-r, .ws-pick) > .seg > * { height: 100%; }
+.l-sect { --ctl-h: 24px; }
+.l-sect :is(.l-sect-end, .l-sect-lead) > :is(.btn, .ib, .sel, .seg, .chip) { box-sizing: border-box; height: var(--ctl-h); }
+.l-sect :is(.l-sect-end, .l-sect-lead) > .ib { width: var(--ctl-h); }
+@container page (max-width: 520px) {
+  /* A phone-width pane: the reading column and the dock keep 16 and 12 px from the edges, and nothing runs off sideways. */
+  .tl-in { padding-inline: 16px; }
+  .dock { padding: 0 12px 12px; }
+  .queue-h { height: auto; min-height: 26px; padding-block: 4px; white-space: normal; flex-wrap: wrap; }
+  /* Answers take the full width, one per line, and an explanation sits under its answer instead of running into it. */
+  /* One column in block flow, not grid or flex: WebKit sizes a wrapping button from its label's narrowest form, one word a line. */
+  .dc-opts { display: block; }
+  .dc-opts .opt + .opt { margin-top: 4px; }
+  .dc-opts .opt { width: 100%; }
+  .dc-opts .opt { display: block; position: relative; min-height: 32px; padding: 6px 10px 6px 33px; }
+  .dc-opts .opt .n { position: absolute; left: 8px; top: 7px; }
+  .dc-opts .opt .t, .dc-opts .opt .sub { display: block; margin-left: 0; white-space: normal; }
+  .qrow { flex-wrap: wrap; white-space: normal; }
+  .qrow-t { flex: 1 1 calc(100% - 56px); }
+  .qrow-end { margin-left: auto; }
+}
+
+/* The task bar: progress in words, then the details one activation away. A narrow pane folds them into one menu. */
+.taskbar .td-progress { flex: 0 1 auto; min-width: 0; font-size: var(--t-sec); color: var(--fg-2); }
+.taskbar .td-links { display: flex; align-items: center; gap: 4px; }
+.taskbar .td-link { color: var(--fg-2); }
+.taskbar .td-link[aria-current="page"] { background: var(--bg-selected); color: var(--fg); }
+.taskbar .td-link .n { margin-left: 2px; font-weight: 400; color: var(--fg-3); }
+.taskbar .td-more { display: none; }
+@container page (max-width: 760px) {
+  .taskbar .td-links { display: none; }
+  .taskbar .td-more { display: inline-flex; }
+}
+.ws-prev-result { color: var(--fg-2); }
+/* The proposed plan as a line of the planning conversation; its Open plan sits at the line's end on the line's centre. */
+.answered.sp-plan-line { align-items: center; }
+.answered.sp-plan-line .i { margin-top: 0; }
+.sp-plan-line > .btn { flex: none; }

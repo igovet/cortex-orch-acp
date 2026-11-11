@@ -71,6 +71,19 @@ fn json_schema_numbers_and_unicode_boundaries() {
 }
 
 #[test]
+fn older_peers_have_no_new_limit_fields() {
+    let current = workspace_protocol::capabilities("current", "1", &["tasks.get"]).unwrap();
+    let mut old = current.clone();
+    old["protocol"]["minor"] = json!(6);
+    old["limits"]["frameBytes"] = json!(1048576);
+    old["limits"].as_object_mut().unwrap().remove("attachmentBytes");
+    old["limits"].as_object_mut().unwrap().remove("attachmentFiles");
+    let result = workspace_protocol::negotiate(&current, &old).unwrap();
+    assert_eq!(result["limits"]["frameBytes"], 1048576);
+    assert!(result["limits"].get("attachmentBytes").is_none());
+}
+
+#[test]
 fn framed_json_and_limits() {
     let value = json!({"text":"line\n😀"});
     assert_eq!(decode_frame(&encode_frame(&value).unwrap()).unwrap(), value);
@@ -82,7 +95,7 @@ fn framed_json_and_limits() {
     ] {
         assert!(decode_frame(&bytes).is_err());
     }
-    assert!(encode_frame(&json!({"text":"x".repeat(1048576)})).is_err());
+    assert!(encode_frame(&json!({"text":"x".repeat(workspace_protocol::FRAME_BYTES)})).is_err());
     let mut nested = Value::Null;
     for _ in 0..65 {
         nested = json!([nested]);

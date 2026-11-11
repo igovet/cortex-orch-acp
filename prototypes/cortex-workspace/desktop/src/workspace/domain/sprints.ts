@@ -1,5 +1,5 @@
 import type { PlanItem, Sprint, SprintEntry, WorkspaceCommand, WorkspaceState } from "./types";
-import { dependencyReady, openPlanningQuestion, runBlocker, validatePlan } from "@cortex/workspace-domain";
+import { dependencyReady, openPlanningQuestion, runBlocker, sprintTaskCheckout, validatePlan } from "@cortex/workspace-domain";
 import { entity, nextId, nonempty, requireFact } from "./core";
 import { generateMockTitle } from "./projections";
 import { createTask, startTask } from "./tasks";
@@ -11,7 +11,7 @@ function revise(sprint: Sprint, items: PlanItem[]) {
   sprint.plan = { version: (sprint.plan?.version ?? 0) + 1, items: structuredClone(items) };
 }
 export function advanceSprint(state: WorkspaceState, sprint: Sprint, now?: number) {
-  if (sprint.runMode !== "automatic" || sprint.queueState !== "running") return;
+  if (sprint.archivedAt || sprint.runMode !== "automatic" || sprint.queueState !== "running") return;
   const tasks = sprint.taskIds.map(id => entity(state.tasks, id));
   if (tasks.some(t => ["needs_you", "stopping", "paused"].includes(t.status) || t.closedAs)) {
     sprint.queueState = "paused"; sprint.pauseReason = "Task needs owner attention"; return;
@@ -30,8 +30,12 @@ export function handleSprint(state: WorkspaceState, command: WorkspaceCommand): 
   const sprint = entity(state.sprints, command.sprintId);
   const machine = entity(state.machines, entity(state.projects, sprint.projectId).machineId);
   requireFact(machine.connection === "connected", "Machine offline; sprint changes unavailable");
+  requireFact(!sprint.archivedAt || command.type === "close_sprint", "Sprint is closed");
   const planningOnly = () => requireFact(!sprint.materializedVersion, "Plan already materialized");
   switch (command.type) {
+    case "close_sprint":
+      requireFact(command.confirmed, "Owner confirmation required");
+      sprint.archivedAt ??= Date.now(); sprint.queueState = "paused"; sprint.pauseReason = "Sprint closed by you"; break;
     case "rename_sprint": sprint.title = nonempty(command.title, "Sprint title"); break;
     case "set_sprint_settings": sprint.settings = { model: "opus[1m]", effort: "high", ...sprint.settings, ...command.settings }; break;
     case "plan_note":
@@ -70,7 +74,10 @@ export function handleSprint(state: WorkspaceState, command: WorkspaceCommand): 
       requireFact(sprint.planning === "ready", "Plan is not ready");
       const ids = new Map(sprint.plan.items.map(item => [item.key, nextId(state, "task")]));
       for (const item of sprint.plan.items) {
-        const task = createTask(state, { projectId: sprint.projectId, sprintId: sprint.id, description: item.description, checkout: item.checkout ?? { kind: "main" } }, ids.get(item.key));
+        const choice = sprintTaskCheckout(sprint, item), id = ids.get(item.key)!;
+        // Fictional paths for the demo only; the real service owns actual worktree naming.
+        const checkout = choice.kind === "main" ? choice : { ...choice, branch: choice.branch ?? `cw/${id}`, path: choice.path ?? `worktrees/${id}` };
+        const task = createTask(state, { projectId: sprint.projectId, sprintId: sprint.id, description: item.description, checkout }, id);
         task.title = item.title ?? generateMockTitle(item.description); task.titleState = "generated";
         task.dependencies = item.dependsOn.map(key => ids.get(key)!);
         sprint.taskIds.push(task.id);

@@ -155,7 +155,8 @@ it.skipIf(!socket || !project)("owner screens survive window detach through the 
     await until(()=>!!document.querySelector(".queue"));
     detach(); await mount(path);
     await until(()=>document.querySelector(".queue")?.textContent?.includes("Held across relaunch") === true);
-    expect(document.querySelector(".queue")?.textContent).toContain("queued.txt");
+    // The queued row shows only its text; the kept file comes back in Edit, below.
+    expect(document.querySelector(".queue")?.textContent).not.toContain("queued.txt");
     button("Edit").click();
     await until(()=>!document.querySelector(".queue") && (document.querySelector('[aria-label="Message"]') as HTMLTextAreaElement)?.value === "Held across relaunch");
     expect((document.querySelector('[aria-label="Message"]') as HTMLTextAreaElement).value).toBe("Held across relaunch");
@@ -260,9 +261,8 @@ it.skipIf(!socket || !project)("owner screens survive window detach through the 
     const paths=()=>all(".stream .step-t").map(e => e.textContent);
     await openFolds();
     for (let pages=0; pages<10 && !paths().includes("fixture-history/0.txt"); pages++) {
-      await until(()=>!!button("Load older activity"));
-      button("Load older activity").click();
-      await until(()=>!button("Loading older activity…"));
+      await new Promise(r => setTimeout(r, 50));
+      expect(button("Load older activity")).toBeUndefined();
       expect(document.querySelector(".stream [role=alert]")).toBeNull();
       await openFolds();
     }

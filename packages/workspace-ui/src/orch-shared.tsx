@@ -1,7 +1,8 @@
-import { createEffect, createMemo, For, Show, type JSX } from "solid-js";
+import { createEffect, createMemo, createUniqueId, For, Show, type JSX } from "solid-js";
 import { defaultsProblems, mcpProblems, profileChanges, profileDifferences, profileState, PROFILE_SECTION_LABELS, projectsWithRouting, routingFor, routingProblems, routingSource, sessionsOf, SURFACE_LABELS, type McpServer, type RoutingRules, type UserDefaults } from "@cortex/workspace-domain";
 import { useWs } from "./ctx";
 import { A, I, MenuItem, Pop } from "./kit";
+import { Page, revealCutIn, StatusLane, Toolbar, type StripItem } from "./layout";
 import type { OrchestrationPage, Route } from "./router";
 import { clock, projectsOn } from "./selectors";
 import { Pick, SaveBar } from "./settings-kit";
@@ -18,7 +19,7 @@ export function useReadOnly() {
 /** Machine routing can also be switched off by the environment, which wins over the file and cannot be written from here. */
 export function useRoutingOff() {
   const ws = useWs(), off = useReadOnly();
-  return () => off() ?? (!ws.settings.scope() && ws.machine().config.files.envRouting ? "Routing comes from $CORTEX_ROUTING here, which is read-only" : undefined);
+  return () => off() ?? (!ws.settings.scope() && ws.machine().config.files.envRouting ? "Routing uses an environment override and is read-only here" : undefined);
 }
 export const useProjectName = () => {
   const ws = useWs();
@@ -87,8 +88,11 @@ export function useSwitchProfile() {
     else ws.run({ type: "activate_profile", machineId: m.id, profileId, keep: "discard" });
   };
 }
-/** Which machine, which profile, which scope. It reads the same on every page, so nothing moves between them. */
-function Context(props: { scoped?: boolean }) {
+/**
+ * Which machine, which profile, which scope. It reads the same on every page, so nothing moves between them.
+ * It has no room for words: `offId` and `scopeId` name the strips under it that say why its controls are off.
+ */
+function Context(props: { scoped?: boolean; offId: string; scopeId: string }) {
   const ws = useWs(), off = useReadOnly(), switchTo = useSwitchProfile();
   const m = () => ws.machine(), scope = () => ws.settings.scope(), c = () => m().config;
   const projects = createMemo(() => projectsOn(ws.store.index(), m().id));
@@ -96,13 +100,15 @@ function Context(props: { scoped?: boolean }) {
   const diffs = createMemo(() => profileChanges(m()));
   const count = () => diffs().reduce((n, d) => n + d.lines.length, 0);
   createEffect(() => { const id = ws.settings.scope(); if (id && !projects().some(p => p.project.id === id)) ws.settings.setScope(null); });
-  return <div class="set-ctx">
-    <span><b>{m().name}</b></span>
-    <Show when={m().connection === "connected"} fallback={<span class="st st-idle"><I n="wifi-off" s={12} />Offline</span>}><span class="st st-ok"><I n="check-circle" s={12} />Connected</span></Show>
-    <span class="r">
-      <span class="faint">Profile</span>
-      <Pick id="m-ctx-profile" label="Profile" value={c().active ?? ""} width="120px" disabled={off()} options={c().profiles.map(p => ({ id: p.id, label: p.name, sub: p.description || undefined }))} onPick={switchTo} />
-      <Show when={state() === "modified"} fallback={<span class={`chip ws-static ${state() === "in_sync" ? "" : "st-warn"}`}>{STATE_TEXT[state() as keyof typeof STATE_TEXT]}</span>}>
+  return <Toolbar small class="set-ctx" label="Machine and profile"
+    mid={<>
+      <b class="trunc l-compact-hide">{m().name}</b>
+      <Show when={m().connection === "connected"} fallback={<span class="st st-idle l-compact-hide"><I n="wifi-off" s={12} />Offline</span>}><span class="st st-ok l-compact-hide"><I n="check-circle" s={12} />Connected</span></Show>
+    </>}
+    end={<>
+      <span class="faint l-compact-hide">Profile</span>
+      <Pick id="m-ctx-profile" label="Profile" value={c().active ?? ""} empty="None" width="120px" disabled={off()} describedBy={off() ? props.offId : undefined} options={c().profiles.map(p => ({ id: p.id, label: p.name, sub: p.description || undefined }))} onPick={switchTo} />
+      <Show when={state() === "modified"} fallback={<Show when={state() !== "none"}><span class={`chip ws-static ${state() === "in_sync" ? "" : "st-warn"}`}>{STATE_TEXT[state() as keyof typeof STATE_TEXT]}</span></Show>}>
         <button class="chip st-warn" popovertarget="m-ctx-diff">Modified ({count()})</button>
         <Pop id="m-ctx-diff" class="pop-right ws-hint-pop" align="right" label="Differences from the profile">
           <For each={diffs()}>{d => <div class="ws-diff"><b>{sentence(PROFILE_SECTION_LABELS[d.section])}</b><For each={d.lines}>{line => <span class="cap">{line}</span>}</For></div>}</For>
@@ -112,15 +118,14 @@ function Context(props: { scoped?: boolean }) {
         </Pop>
       </Show>
       <Show when={props.scoped}>
-        <span class="faint">Scope</span>
+        <span class="faint l-compact-hide">Scope</span>
         <div class="seg" role="group" aria-label="Scope">
           <button aria-current={scope() ? "false" : "true"} onClick={() => ws.settings.setScope(null)}>Machine</button>
-          <button aria-current={scope() ? "true" : "false"} aria-disabled={projects().length ? undefined : "true"} data-why={projects().length ? undefined : "This machine has no projects"} onClick={() => { if (projects().length) ws.settings.setScope(scope() ?? projects()[0].project.id); }}>Project</button>
+          <button aria-current={scope() ? "true" : "false"} aria-disabled={projects().length ? undefined : "true"} data-why={projects().length ? undefined : "This machine has no projects"} aria-describedby={projects().length ? undefined : props.scopeId} onClick={() => { if (projects().length) ws.settings.setScope(scope() ?? projects()[0].project.id); }}>Project</button>
         </div>
         <Show when={scope()}><Pick id="m-scope-project" label="Project" width="130px" value={scope()!} options={projects().map(p => ({ id: p.project.id, label: p.project.name }))} onPick={id => ws.settings.setScope(id)} /></Show>
       </Show>
-    </span>
-  </div>;
+    </>} />;
 }
 
 /** What changes for this source of rules, said once at the top of the page. */
@@ -134,22 +139,29 @@ export function SourceStrips() {
     <Show when={m().config.files.migration}><div class="note-box"><I n="alert" s={14} /><span>The model policy needs migration before work can run. <A class="lnk" to={orchTo(m().id, "files")}>Open Files and presets</A></span></div></Show>
     <Show when={scope() && source().kind !== "project"}><div class="note-box plain"><I n="pencil" s={14} /><span>Saving creates this project's own routing file. It replaces machine rules for this project, so it starts from them.</span></div></Show>
     <Show when={scope() && source().kind === "project"}><div class="note-box plain"><I n="check" s={14} /><span>Editing the project's own routing file. Machine rules do not apply here.</span></div></Show>
-    <Show when={!scope() && source().kind === "environment"}><div class="note-box"><I n="lock" s={14} /><span>Routing comes from $CORTEX_ROUTING ({source().path}), which is read-only here.</span></div></Show>
+    <Show when={!scope() && source().kind === "environment"}><div class="note-box"><I n="lock" s={14} /><span>Routing uses an environment override and is read-only here.</span></div></Show>
     <Show when={!scope() && others().length > 0}><div class="note-box"><I n="alert" s={14} /><span>Project routing wins in {others().join(", ")}, so machine changes do not apply there.</span></div></Show>
   </>;
 }
 
+/** Every orchestration page: the context toolbar, the strips that apply to the whole page, the page, and its save bar. */
 export const Shell = (props: { scoped?: boolean; wide?: boolean; title: string; lead: string; head?: JSX.Element; children: JSX.Element; bar?: JSX.Element }) => {
   const readOnly = useReadOnly();
   const ws = useWs();
-  return <>
-    <Context scoped={props.scoped} />
-    <Show when={readOnly()}>{r => <div class="strip info"><I n="wifi-off" s={14} class="faint" /><span>{r()}. Last confirmed {clock(ws.machine().lastConfirmedAt)}. Nothing is queued.</span></div>}</Show>
-    <Show when={!readOnly() && ws.machine().kind === "remote" && ws.t("remoteWrites")}><div class="strip info"><I n="cloud" s={14} class="faint" /><span>{ws.t("remoteWrites")}</span></div></Show>
-    <div class="set-main"><div class={`set-in${props.wide ? " wide" : ""}`}>
+  const offId = createUniqueId(), scopeId = createUniqueId();
+  // Each strip is one item for the life of the page, so a change of words redraws only the words.
+  const offline: StripItem = { id: "offline", tone: "info", domId: offId, icon: <I n="wifi-off" s={14} class="faint" />, get text() { return `${readOnly()}. Last confirmed ${clock(ws.machine().lastConfirmedAt)}. Nothing is queued.`; } };
+  const remote: StripItem = { id: "remote", tone: "info", icon: <I n="cloud" s={14} class="faint" />, get text() { return ws.t("remoteWrites"); } };
+  const noProjects: StripItem = { id: "scope", tone: "info", domId: scopeId, icon: <I n="help" s={14} class="faint" />, text: "Project scope needs a project on this machine. This machine has no projects." };
+  const status = createMemo<StripItem[]>(() => [
+    ...(readOnly() ? [offline] : []),
+    ...(!readOnly() && ws.machine().kind === "remote" && ws.t("remoteWrites") ? [remote] : []),
+    ...(props.scoped && projectsOn(ws.store.index(), ws.machine().id).length === 0 ? [noProjects] : []),
+  ]);
+  return <Page class="l-work set-page" scroll="none" head={<Context scoped={props.scoped} offId={offId} scopeId={scopeId} />} status={<StatusLane items={status()} />} foot={props.bar}>
+    <div class="set-main" ref={revealCutIn}><div class={`set-in${props.wide ? " wide" : ""}`}>
       <div class="ws-title-row"><div><h1 class="set-title">{props.title}</h1><p class="set-lead">{props.lead}</p></div>{props.head}</div>
       {props.children}
     </div></div>
-    {props.bar}
-  </>;
+  </Page>;
 };

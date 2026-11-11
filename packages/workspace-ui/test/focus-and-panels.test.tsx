@@ -138,7 +138,10 @@ describe("focus and panel styles", () => {
   it("keeps the line for keyboard movement alone", () => {
     const set = all.filter(r => r.body.includes("--focus-line:"));
     expect(set.filter(r => /--focus-line:\s*none/.test(r.body)).map(r => r.selector)).toEqual(["html:not([data-keyboard])"]);
-    expect(set.filter(r => /--focus-line:\s*1px solid var\(--fg-3\)/.test(r.body))).toHaveLength(2);
+    const line = set.filter(r => /--focus-line:\s*1px solid var\(--fg-3\)/.test(r.body)).map(r => r.selector);
+    // The two themes define it. The one exception gives it back to the control a dialog or a panel focused as it opened (placeFocus).
+    expect(line.filter(s => s.includes("data-theme"))).toHaveLength(2);
+    expect(line.filter(s => !s.includes("data-theme"))).toEqual(["html:not([data-keyboard]) [data-placed-focus]"]);
   });
   it("draws the line in a colour that stands out from every surface, in both themes", () => {
     for (const theme of ["dark", "light"] as const) for (const surface of ["bg-canvas", "bg-sidebar", "bg-raised", "bg-input", "bg-selected"]) {

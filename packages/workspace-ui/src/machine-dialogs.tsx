@@ -4,6 +4,7 @@ import { UnmergedDialog } from "./archive";
 import { useWs } from "./ctx";
 import type { WsDialog } from "./dialogs";
 import { I, Modal } from "./kit";
+import { ActionBar } from "./layout";
 import { ProjectPicker } from "./project-picker";
 import { Seg, Stepper } from "./settings-kit";
 
@@ -58,12 +59,12 @@ function AddMachine(props: { onClose: () => void }) {
         </Show>
       </div></Show>
     </div>
-    <div class="dlg-f">
+    <ActionBar place="dialog">
       <button class="btn btn-line btn-lg" onClick={() => props.onClose()}>Cancel</button>
       <Show when={step() === 1}><button class="btn btn-primary btn-lg" data-autofocus onClick={() => setStep(2)}>I have a code</button></Show>
       <Show when={step() === 2}><button class="btn btn-primary btn-lg" onClick={connect}>Connect</button></Show>
       <Show when={step() === 3 && !differs()}><button class="btn btn-primary btn-lg" onClick={confirm}>Fingerprints match, confirm</button></Show>
-    </div>
+    </ActionBar>
   </>;
 }
 
@@ -76,6 +77,7 @@ export function AddConnection(props: { onClose: () => void }) {
   const [key, setKey] = createSignal("");
   const [busy, setBusy] = createSignal(false), [note, setNote] = createSignal(""), [failed, setFailed] = createSignal(false);
   const native = () => engine() === "codex" ? "codex-acp" : "claude-agent-acp";
+  const saveWhy = () => busy() ? undefined : auth() === "key" && !label().trim() ? "Name the connection first" : auth() === "key" && !key().trim() ? "Paste the API key first" : undefined;
   const run = async (login: boolean) => {
     if (busy()) return;
     setBusy(true); setNote(""); setFailed(false);
@@ -110,7 +112,7 @@ export function AddConnection(props: { onClose: () => void }) {
       </Show>
       <Show when={note()}><p role={failed() ? "alert" : "status"}>{note()}</p></Show>
     </div></div>
-    <div class="dlg-f"><button class="btn btn-line btn-lg" onClick={() => {setKey(""); props.onClose();}}>Cancel</button><button class="btn btn-primary btn-lg" disabled={busy() || (auth() === "key" && (!key().trim() || !label().trim()))} onClick={() => void run(false)}>{busy() ? "Checking…" : auth() === "key" ? "Save API-key connection" : "Recheck native login and connect"}</button></div>
+    <ActionBar place="dialog"><button class="btn btn-line btn-lg" onClick={() => {setKey(""); props.onClose();}}>Cancel</button><button class="btn btn-primary btn-lg" disabled={busy()} aria-disabled={saveWhy() ? "true" : undefined} data-why={saveWhy()} onClick={() => { if (!saveWhy()) void run(false); }}>{busy() ? "Checking…" : auth() === "key" ? "Save API-key connection" : "Recheck native login and connect"}</button></ActionBar>
   </>;
 }
 
@@ -136,8 +138,8 @@ function ClearOld(props: { onClose: () => void }) {
       </ul>
       <label class="ck"><input type="checkbox" disabled={ws.store.mode === "real"} checked={force()} onChange={e => setForce(e.currentTarget.checked)} /><span>Include stale protected tasks<span class="hint ws-block">Desktop always protects active and unknown executions. Stop or resolve them before deleting.</span></span></label>
     </div>
-    <div class="dlg-f"><button class="btn btn-line btn-lg" data-autofocus onClick={() => props.onClose()}>Keep them</button>
-      <button class="btn btn-danger btn-lg" aria-disabled={n() ? undefined : "true"} data-why={n() ? undefined : "No old task can be cleared"} {...ws.needs("clear_old")} onClick={go}>Delete {n()} task{n() === 1 ? "" : "s"}</button></div>
+    <ActionBar place="dialog"><button class="btn btn-line btn-lg" data-autofocus onClick={() => props.onClose()}>Keep them</button>
+      <button class="btn btn-danger btn-lg" aria-disabled={n() ? undefined : "true"} data-why={n() ? undefined : "No old task can be cleared"} {...ws.needs("clear_old")} onClick={go}>Delete {n()} task{n() === 1 ? "" : "s"}</button></ActionBar>
   </>;
 }
 
@@ -149,11 +151,11 @@ function Unsaved() {
   return <Modal open={s.pending() !== null} onClose={() => s.setPending(null)} label="Unsaved changes">
     <div class="dlg-h"><h2>Unsaved changes</h2></div>
     <div class="dlg-b"><div>This section has changes that are not saved on the machine.</div></div>
-    <div class="dlg-f">
+    <ActionBar place="dialog">
       <button class="btn btn-line btn-lg" data-autofocus onClick={() => s.setPending(null)}>Stay</button>
       <button class="btn btn-line btn-lg" onClick={() => { s.dropCurrent(); go(); }}>Discard</button>
       <button class="btn btn-primary btn-lg" onClick={() => { void s.saveCurrent().then(saved => { if (saved) go(); }); }}>Save here</button>
-    </div>
+    </ActionBar>
   </Modal>;
 }
 
@@ -168,11 +170,11 @@ function SwitchProfile(props: { d: Of<"switch-profile">; onClose: () => void }) 
       <Show when={props.d.drafts > 0}><div class="ws-mt6">{props.d.drafts} unsaved draft{props.d.drafts === 1 ? " is" : "s are"} dropped either way.</div></Show>
       <div class="cap muted ws-mt6">Running tasks keep the configuration they started with.</div>
     </div>
-    <div class="dlg-f">
+    <ActionBar place="dialog">
       <button class="btn btn-line btn-lg" data-autofocus onClick={() => props.onClose()}>Cancel</button>
       <button class="btn btn-danger btn-lg" {...ws.needs("activate_profile")} onClick={() => go("discard")}>Discard and switch</button>
       <button class="btn btn-primary btn-lg" {...ws.needs("activate_profile")} onClick={() => go("save")}>Save and switch</button>
-    </div>
+    </ActionBar>
   </>;
 }
 

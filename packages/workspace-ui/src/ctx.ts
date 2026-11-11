@@ -48,6 +48,8 @@ export type WindowChrome = {
   guardClose: (guard: () => boolean) => void;
   /** Closes without asking, after the owner decided. */
   closeNow: () => void;
+  /** Why the window could not close, while that still matters. */
+  closeError?: Accessor<string | null>;
 };
 
 export type Ws = {

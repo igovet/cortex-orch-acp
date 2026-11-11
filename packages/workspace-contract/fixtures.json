@@ -93,7 +93,7 @@
         "minor": 0
       },
       "buildIdentity": "1.0.6+test",
-      "schemaFingerprint": "e24bf2391268aea08e621a7aa8e1f65d71132c2f01329f4fbef393961b52155c",
+      "schemaFingerprint": "1e16662965c450f7cb8142751a54573723bc5d985a030f99cecb6c636f145464",
       "mappingVersion": "1",
       "operations": [
         "capabilities.get",
@@ -116,7 +116,7 @@
         "eventsPerPage": 100,
         "historyPerPage": 100,
         "pageContentBytes": 65536,
-        "frameBytes": 1048576,
+        "frameBytes": 8388608,
         "textCharacters": 32000,
         "requestIdCharacters": 128
       },
@@ -1369,7 +1369,7 @@
         "futureField": true
       },
       "buildIdentity": "1.0.6+test",
-      "schemaFingerprint": "e24bf2391268aea08e621a7aa8e1f65d71132c2f01329f4fbef393961b52155c",
+      "schemaFingerprint": "1e16662965c450f7cb8142751a54573723bc5d985a030f99cecb6c636f145464",
       "mappingVersion": "1",
       "operations": [
         "capabilities.get",
@@ -1392,7 +1392,7 @@
         "eventsPerPage": 100,
         "historyPerPage": 100,
         "pageContentBytes": 65536,
-        "frameBytes": 1048576,
+        "frameBytes": 8388608,
         "textCharacters": 32000,
         "requestIdCharacters": 128
       },

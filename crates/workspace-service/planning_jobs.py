@@ -79,14 +79,14 @@ class PlanningJobs:
             key = sprint["id"]
             existing = self.jobs.get(key)
             if existing:
-                if (sprint["planning"] != "planning" or self.shutdown.is_set()
+                if (sprint.get("archivedAt") or sprint["planning"] != "planning" or self.shutdown.is_set()
                         or sprint.get("planningAttempt") is None):
                     existing[1].set()
                 if existing[0].is_alive():
                     continue
                 self.jobs.pop(key)
             # Never silently rerun an interrupted or old hidden execution.
-            if sprint["planning"] != "planning" or sprint.get("planningTaskId") or self.shutdown.is_set():
+            if sprint.get("archivedAt") or sprint["planning"] != "planning" or sprint.get("planningTaskId") or self.shutdown.is_set():
                 continue
             if len(self.jobs) >= 2:
                 continue
@@ -94,7 +94,7 @@ class PlanningJobs:
             with machine.Locked(self.state):
                 current = machine.product_of(self.state, api.project_id)
                 saved = next(s for s in current["sprints"] if s["id"] == key)
-                if saved["planning"] != "planning" or saved.get("planningTaskId"):
+                if saved.get("archivedAt") or saved["planning"] != "planning" or saved.get("planningTaskId"):
                     continue
                 if saved.get("planningAttempt"):
                     saved["planning"] = "cancelled"
@@ -108,9 +108,16 @@ class PlanningJobs:
                 started = time.monotonic()
                 diagnostics = None
                 try:
-                    prompt = json.dumps(dict(description=sprint["description"], conversation=sprint.get("conversation", []),
+                    conversation_input = [{k: v for k, v in c.items() if k != "attachments"}
+                                          for c in sprint.get("conversation", [])]
+                    attachments = list(sprint.get("attachments", []))
+                    for entry in sprint.get("conversation", []):
+                        attachments.extend(entry.get("attachments", []))
+                    # One turn has the same bounded total budget as any owner input.
+                    machine.validate_attachments(attachments)
+                    prompt = json.dumps(dict(description=sprint["description"], conversation=conversation_input,
                                              language=(sprint.get("settings") or {}).get("language", "auto")), ensure_ascii=False)
-                    text = self.generate(prompt, {"settings": sprint.get("settings")}, time.monotonic() + 90, cancel)
+                    text = self.generate(prompt, {"settings": sprint.get("settings"), "attachments": attachments}, time.monotonic() + 90, cancel)
                     parsed = parse(text)
                     if parsed["kind"] == "plan" and len(parsed["items"]) == 1:
                         # A sole item owns all input. Multi-item scope is the planner's

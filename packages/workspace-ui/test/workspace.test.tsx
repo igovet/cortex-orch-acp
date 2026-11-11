@@ -119,9 +119,12 @@ describe("production workspace", () => {
 
   it("names a service it cannot reach, offers a retry, and never falls back to demo data", async () => {
     const root = await mount(createRealPort({ transport: unavailableTransport(), actorId: "owner" }));
-    const notice = $('[role="alert"].ws-conn');
-    expect(notice?.textContent).toMatch(/not connected/i);
-    expect(button("Retry")).toBeTruthy();
+    // Offline, not a failed start: the workspace frame with its Offline notice, and nothing about projects guessed.
+    expect($(".l-startup")).toBeNull();
+    expect($(".ws-conn")).toBeTruthy();
+    expect($(".main [role=status]")?.textContent).toMatch(/could not be loaded/i);
+    expect(root.textContent).not.toMatch(/No projects on this machine/);
+    expect(button("Try again")).toBeTruthy();
     expect(root.textContent).not.toMatch(/mock-|fixture|Cedar Notes|Mosaic/i);
     expect(all(".proj").length).toBe(0);
   });
@@ -132,9 +135,11 @@ describe("production workspace", () => {
     expect($(".ws-conn")).toBeTruthy();
     s.answers["capabilities.get"] = () => capabilitiesWire(["capabilities.get", "project.snapshot", "tasks.create"]);
     s.answers["project.snapshot"] = () => snapshot("1", [wireTask()]);
-    button("Retry")!.click();
+    button("Try again")!.click();
     await flush(); await flush();
+    expect($(".l-startup")).toBeNull();
     expect($(".ws-conn")).toBeNull();
+    expect(root.textContent).not.toMatch(/could not be loaded/);
     expect(root.textContent).toContain("Cedar");
   });
 
@@ -172,14 +177,18 @@ describe("production workspace", () => {
 
   it("leaves model, effort, access and language unavailable until a session offers them", async () => {
     await mount(scriptedPort().port, `/m/${LOCAL_MACHINE_ID}/new`);
-    const selects = all(".c-route .sel");
-    expect(selects).toHaveLength(4);
+    // Model and effort, then one Settings control for access and language.
+    const selects = all(".c-route :is(.sel, .c-set)");
+    expect(selects).toHaveLength(3);
     for (const select of selects) expect(select.getAttribute("aria-disabled")).toBe("true");
   });
 
-  it("offers no voice input it cannot deliver", async () => {
+  it("keeps Voice in its place but unusable, with its reason, where it cannot be delivered", async () => {
     await mount(scriptedPort().port, `/m/${LOCAL_MACHINE_ID}/new`);
-    expect(all("button").find(b => b.getAttribute("aria-label") === "Voice input")).toBeUndefined();
+    const voice = all("button").find(b => b.getAttribute("aria-label") === "Voice input")!;
+    expect(voice.getAttribute("aria-disabled")).toBe("true");
+    expect(voice.dataset.why).toBeTruthy();
+    voice.click(); await flush();
     expect($(".micbar")).toBeNull();
   });
 

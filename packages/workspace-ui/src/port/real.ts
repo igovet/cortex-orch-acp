@@ -1,8 +1,9 @@
 import { wireAttachments as checkedAttachments } from "../attachments";
 import { capabilities as localCapabilities, decodeResponse, negotiate, PROTOCOL, validate } from "@cortex/workspace-contract";
 import type { Answer as WireAnswer, Decision as WireDecision, Receipt as WireReceipt, Result as WireResult, Task as WireTask, HistoryRow, WireTypes } from "@cortex/workspace-contract";
-import { ACCESS_MODES, capabilityOf, checksPassed, DomainError, effortLabel, ENGINE_KEYS, engineLabel, FEATURES, LANGUAGES, LOCAL_MACHINE_ID, MACHINE_COMMANDS, mapProjectSlice, readableCheckReason, emptySession, overlayTask, runOrder, validatePlan, WIRE_OPERATIONS } from "@cortex/workspace-domain";
+import { ACCESS_MODES, capabilityOf, checksPassed, DomainError, effortLabel, ENGINE_KEYS, engineLabel, FEATURES, LANGUAGES, LOCAL_MACHINE_ID, MACHINE_COMMANDS, mapProjectSlice, readableCheckReason, emptySession, overlayTask, runOrder, sprintTaskCheckout, validatePlan, WIRE_OPERATIONS } from "@cortex/workspace-domain";
 import { conversationOf } from "./history";
+import { same } from "../stable";
 import type { CommandEnvelope, CommandReceipt, DirectorySearch, EngineConnection, EngineWeeklyUsage, FileDiff, FileRead, FileSaveResult, Machine, MachineConfig, MachineFacts, Message, PlanItem, PortCapabilities, PortUpdate, ProjectFacts, ProjectionUpdate, ProjectRepo, ProjectSlice, QueryOperation, QueryParameters, QueryResults, SessionOptions, Sprint, TaskChanges, TaskOverlay, Worker, WorkspaceCommand, WorkspacePort } from "@cortex/workspace-domain";
 
 /** How the native bridge reaches the machine service. The bridge owns the socket; this side only ever sees typed messages. */
@@ -55,8 +56,11 @@ const refusalOf = (requestId: string, error: unknown): CommandReceipt => {
 };
 const unsupported = (requestId: string): CommandReceipt => ({ requestId, ok: false, outcome: "unsupported", message: OUTCOME_WORDS.unsupported });
 
-/** How often a connected app rereads what moves without telling it: Git, workers and the owner's own records. */
-const FACTS_POLL_MS = 5000, MACHINE_POLL_EVERY = 6;
+/**
+ * How often a visible app rereads what moves without telling it. Task progress and the service's own writes are pushed.
+ * What is left is outside Git and config: a quiet round waits longer, and returning to the window reads at once.
+ */
+export const FACTS_POLL_MS = 30_000, FACTS_POLL_MAX_MS = 120_000, FACTS_FOCUS_MIN_MS = 5_000, MACHINE_POLL_MS = 300_000;
 type Product = { tasks: Record<string, TaskOverlay>; sprints: (Sprint & { planningTaskId?: string })[]; drafts?: Record<string, string>; messages?: Message[]; comments?: Record<string, TaskChanges["comments"]> };
 type MachineRead = Partial<Machine> & { name: string };
 type ConfigRead = { config: MachineConfig; connections: EngineConnection[]; tokens: Record<string, unknown>; usage?: EngineWeeklyUsage[] };
@@ -90,7 +94,7 @@ function sessionOptions(config: MachineConfig): SessionOptions {
   const efforts = [...new Set(reported.flatMap(m => m.efforts))].map(id => ({ id, label: effortLabel(id) }));
   return { models, efforts, modes: [...ACCESS_MODES], languages: [...LANGUAGES] };
 }
-/** The files a task in the main checkout left there, once per path. */
+/** The files a task in the project folder left there, once per path. */
 function changesOf(repo: ProjectRepo | null, taskId?: string, overlay?: TaskOverlay): FileDiff[] {
   const main = repo?.checkouts.find(c => overlay?.checkout?.kind === "worktree" ? c.taskId === taskId : c.kind === "main");
   const byPath = new Map<string, FileDiff>();
@@ -122,6 +126,10 @@ export function createRealPort(options: RealPortOptions): WorkspacePort {
   const projectConfigTokens = new Map<string, Record<string, unknown>>();
   const projectConfigBases = new Map<string, Record<string, unknown>>();
   let attachmentSupport = false, presentationRead = 0;
+  // The facts each project's screens last received, by the coherent read or the poll. A poll sends only what differs.
+  const sent = new Map<string, ProjectFacts>();
+  /** Projects whose events arrived since the last refresh; the next refresh reads these and leaves the rest. */
+  let invalidated = new Set<string>(), readScope = new Set<string>();
   let offered: string[] = [], serviceMethods: string[] = [], machineOn = false, configTokens: Record<string, unknown> = {}, configRead: ConfigRead | null = null;
 
   async function machine<T>(op: string, projectId?: string, params?: unknown): Promise<T> {
@@ -170,7 +178,14 @@ export function createRealPort(options: RealPortOptions): WorkspacePort {
       let deferred = false;
       current.pending = current.pending.then(value => {
         current.value = value;
-        if (deferred && repoReads.get(id) === current) for (const notify of observers) notify({kind:"refresh"});
+        if (deferred && repoReads.get(id) === current) {
+          // A slow Git reply is new facts, not a new task snapshot. A full refresh
+          // could outlast the cache and spawn the next slow Git read forever.
+          const project = projects.find(p => p.projectId === id);
+          if (project) void factsOf(project).then(facts => {
+            if (repoReads.get(id) === current) { sent.set(id, facts); for (const notify of observers) notify({kind:"facts",facts}); }
+          }).catch(() => {}); // Keep the last confirmed facts; the normal poll retries.
+        }
         return value;
       }).catch(() => { current.error = true; return current.value; }).finally(() => { current.running = false; current.at = Date.now(); });
       // Only fast Git belongs on the coherent task refresh path. A large checkout finishes separately.
@@ -186,8 +201,9 @@ export function createRealPort(options: RealPortOptions): WorkspacePort {
     let product = await machine<Product>("product.read", id);
     // Queue scheduling and planning result adoption belong to the owning service child.
     // Reading the screen never starts work.
-    const repository = await repositoryFacts(id), repo = repository.value;
-    if (repo) for (const c of repo.checkouts) c.draft = localDrafts.get(c.id) ?? c.draft;
+    const repository = await repositoryFacts(id), read = repository.value;
+    // A copy, never the cached read itself: the next reads share that one, and the poll compares these facts with the last sent.
+    const repo = read && { ...read, checkouts: read.checkouts.map(c => ({ ...c, draft: localDrafts.get(c.id) ?? c.draft })) };
     const started = [...tasks].filter(([, t]) => t.projectId === id && t.executionId).map(([taskId]) => taskId);
     const workers = project.activated === false || !started.length ? [] : await machine<Worker[]>("workers", id, { taskIds: started });
     for (const w of workers) {
@@ -255,7 +271,7 @@ export function createRealPort(options: RealPortOptions): WorkspacePort {
     }
     if (cursor !== null) throw new Error("Task history exceeds the read budget");
     if (new Set(items.map(t => t.taskId)).size !== items.length) throw new Error("Duplicate task identities");
-    return { version: snapshot.version, items };
+    return { version: snapshot.version, watermark: snapshot.highWatermark, eventCursor: typeof snapshot.eventCursor === "string" ? snapshot.eventCursor : null, items };
   }
   async function projectDecisions(project: ProjectLocator, tasks: WireTask[]): Promise<WireDecision[]> {
     if (!offered.includes("decisions.list")) return [];
@@ -284,14 +300,44 @@ export function createRealPort(options: RealPortOptions): WorkspacePort {
       return result;
     }));
   }
+  // Task versions alone do not reliably describe conversation changes.
+  const historyReads = new Map<string, { projectId: string; version: string; executionId: string; rows: HistoryRow[] }>();
+  const historyPositions = new Map<string, { watermark: string; cursor: string | null }>();
   async function readSnapshot(project: ProjectLocator): Promise<ProjectionUpdate> {
     // A project whose Cortex is away still has a page, with its reason on it. A store keeps what it
     // last confirmed, because version zero is never newer. The machine stays connected for the rest.
     const away = project.activated !== false && serviceMethods.includes("projects.status") && (await transport.request("projects.status", { projectId: project.projectId }) as { ready?: boolean }).ready !== true;
-    const { version, items } = project.activated === false || away ? {version:"0",items:[] as WireTask[]} : await projectTasks(project);
+    const { version, watermark, eventCursor, items } = project.activated === false || away ? {version:"0",watermark:"0",eventCursor:null,items:[] as WireTask[]} : await projectTasks(project);
+    const prior = historyPositions.get(project.projectId);
+    if (prior && prior.watermark !== watermark) {
+      let complete = false;
+      if (prior.cursor && eventCursor && offered.includes("events.page")) {
+        try {
+          let cursor: string | null = prior.cursor;
+          for (let page = 0; page < PAGE_LIMIT && cursor; page++) {
+            const events: WireTypes["EventPage"] = await read("EventPage", "events.page", request(project.projectId, "events.page", {cursor}));
+            for (const event of events.items) {
+              if (event.kind === "task") historyReads.delete(event.entityId);
+              else if (event.kind === "execution") for (const [id, cached] of historyReads) { if (cached.projectId === project.projectId && cached.executionId === event.entityId) historyReads.delete(id); }
+              else if (event.kind === "unknown") throw new Error("Unknown event target");
+            }
+            cursor = events.nextCursor;
+            if (!cursor) { complete = true; break; }
+          }
+        } catch { complete = false; }
+      }
+      if (!complete) for (const [id, cached] of historyReads) if (cached.projectId === project.projectId) historyReads.delete(id);
+    }
+    historyPositions.set(project.projectId, {watermark, cursor:eventCursor});
     const asked = project.activated === false || away ? [] : await projectDecisions(project, items), results = away ? [] : await projectResults(project, items);
     const histories = new Map<string, HistoryRow[]>();
+    for (const [id, held] of historyReads) if (held.projectId === project.projectId && !items.some(t => t.taskId === id && t.executionId !== null)) historyReads.delete(id);
     if (offered.includes("history.page")) for (const task of items.filter(t => t.executionId !== null)) {
+      const held = historyReads.get(task.taskId);
+      if (held?.projectId === project.projectId && held.version === task.version && held.executionId === task.executionId) {
+        histories.set(task.taskId, held.rows);
+        continue;
+      }
       const rows: HistoryRow[] = [];
       let cursor: string | null = null;
       for (let page = 0; page < PAGE_LIMIT; page++) {
@@ -301,6 +347,7 @@ export function createRealPort(options: RealPortOptions): WorkspacePort {
       }
       if (cursor !== null) throw new Error("Conversation exceeds the read budget");
       histories.set(task.taskId, rows);
+      historyReads.set(task.taskId, {projectId:project.projectId, version:task.version, executionId:task.executionId!, rows});
     }
     for (const wire of items) tasks.set(wire.taskId, { projectId: project.projectId, version: wire.version, executionId: wire.executionId });
     for (const [key, value] of decisions) if (value.projectId === project.projectId) decisions.delete(key);
@@ -383,12 +430,14 @@ export function createRealPort(options: RealPortOptions): WorkspacePort {
     const ok = () => done(requestId);
     const task = (taskId: string) => { const id = projectOfTask(taskId); if (!id) throw new Refusal("unknown_task", "Unknown task."); return id; };
     const execution = (taskId: string) => { const e = tasks.get(taskId)?.executionId; if (!e) throw new Refusal("not_started", "This task has not started."); return e; };
-    const prompt = async (taskId: string, text: string, key = requestId, attachments?: Message["attachments"]) => { const r = await transport.request("executions.prompt", { projectId: task(taskId), executionId: execution(taskId), text, requestId:key, ...(attachments?.length ? {attachments:wireAttachments(attachments)} : {}) }) as {outcome?:string}; if (r.outcome !== "recorded") throw new Refusal("unknown_outcome", OUTCOME_WORDS.unknown_outcome); return ok(); };
-    const control = async (taskId: string, params: Record<string, unknown>) => { const reply = await transport.request("executions.control", {projectId:task(taskId), executionId:execution(taskId), requestId, ...params}) as {outcome?:string;message?:string}; if (reply.outcome && !RECORDED.has(reply.outcome) && reply.outcome !== "stop_requested") throw new Refusal(reply.outcome, reply.message ?? OUTCOME_WORDS[reply.outcome] ?? "The action could not run. Refresh and try again."); return ok(); };
+    const prompt = async (taskId: string, text: string, key = requestId, attachments?: Message["attachments"]) => { historyReads.delete(taskId); const r = await transport.request("executions.prompt", { projectId: task(taskId), executionId: execution(taskId), text, requestId:key, ...(attachments?.length ? {attachments:wireAttachments(attachments)} : {}) }) as {outcome?:string}; if (r.outcome !== "recorded") throw new Refusal("unknown_outcome", OUTCOME_WORDS.unknown_outcome); return ok(); };
+    const control = async (taskId: string, params: Record<string, unknown>) => { historyReads.delete(taskId); const reply = await transport.request("executions.control", {projectId:task(taskId), executionId:execution(taskId), requestId, ...params}) as {outcome?:string;message?:string}; if (reply.outcome && !RECORDED.has(reply.outcome) && reply.outcome !== "stop_requested") throw new Refusal(reply.outcome, reply.message ?? OUTCOME_WORDS[reply.outcome] ?? "The action could not run. Refresh and try again."); return ok(); };
     const messageCall = async (taskId: string, params: Record<string, unknown>) => { await machine("product.message", task(taskId), params); return ok(); };
     const workerTask = (workerId: string) => { const id = workerTasks.get(workerId); if (!id) throw new Refusal("worker_unavailable", "This worker is not available."); return id; };
     const note = (taskId: string, text: string, delivery: "queued" | "recorded", attachments?: Message["attachments"]) => messageCall(taskId, {action:"add",message:{ id: requestId, taskId, workerId: null, text, mode: "queue", delivery, at: Date.now(), deliveredAt: null, failure: null, ...(attachments?.length ? { attachments: wireAttachments(attachments) } : {}) }});
-    const say = async (taskId: string, text: string, attachments?: Message["attachments"]) => { await prompt(taskId, text, requestId, attachments); await taskCall(task(taskId), {action:"reopen",taskId}); return ok(); };
+    // The machine has the message by now: a copy that no longer fits must not turn a delivered message into a failed one.
+    const keepSent = async (taskId: string, text: string, attachments?: Message["attachments"]) => { if (attachments?.length) await note(taskId, text, "recorded", attachments).catch(() => undefined); };
+    const say = async (taskId: string, text: string, attachments?: Message["attachments"]) => { await prompt(taskId, text, requestId, attachments); await keepSent(taskId, text, attachments); await taskCall(task(taskId), {action:"reopen",taskId}); return ok(); };
     const queued = (id: string) => { const at = messages.findIndex(m => m.id === id && m.delivery === "queued"); if (at < 0) throw new Refusal("unknown_message", "This message is no longer in the queue."); return at; };
     const git = async (checkoutId: string, params: Record<string, unknown>) => { await machine("git", projectOfCheckout(checkoutId), { checkoutId, ...params }); return ok(); };
     const local = async (patch: unknown) => { await machine("machine.update", undefined, { patch }); return ok(); };
@@ -415,6 +464,10 @@ export function createRealPort(options: RealPortOptions): WorkspacePort {
         if (!ref) throw new Refusal("native_command", "Native engine actions have no stop receipt.");
         return control(taskId, {action:"command_stop",toolCallRef:ref,reason:command.reason});
       }
+      case "edit_queued": {
+        const m = messages[queued(command.messageId)];
+        return messageCall(m.taskId, {action:"edit",messageId:m.id,text:command.text,...(command.attachments === undefined ? {} : {attachments:wireAttachments(command.attachments)})});
+      }
       case "remove_queued": { const m = messages[queued(command.messageId)]; return messageCall(m.taskId, {action:"remove",messageId:m.id}); }
       case "move_queued": {
         const message = messages[queued(command.messageId)];
@@ -424,7 +477,9 @@ export function createRealPort(options: RealPortOptions): WorkspacePort {
         // It leaves the queue only once the machine has it, so a failed send never loses a message.
         const message = messages[queued(command.messageId)];
         await prompt(message.taskId, message.text, message.id, message.attachments);
-        return messageCall(message.taskId, {action:"remove",messageId:message.id});
+        await messageCall(message.taskId, {action:"remove",messageId:message.id});
+        await keepSent(message.taskId, message.text, message.attachments);
+        return ok();
       }
       case "request_changes": return say(command.taskId, command.text, command.attachments);
       case "rerun_check": {
@@ -434,14 +489,14 @@ export function createRealPort(options: RealPortOptions): WorkspacePort {
         if (check.kind === "manual" || check.kind === "policy" || check.rerunnable !== true || !check.command?.length) throw new Refusal("unsupported", "This item has no runnable command or needs owner authorization. Check it manually; it has not passed.");
         return control(command.taskId, {action:"rerun_check",checkIndex:command.checkIndex,checkName:check.name,digest:command.digest,resultVersion:result.sourceVersion});
       }
-      case "add_comment": await machine("product.comment", task(command.taskId), {action:"add",taskId:command.taskId,comment:{id:requestId,path:command.path,line:command.line,text:command.text,sent:false}}); return ok();
-      case "edit_comment": await machine("product.comment", task(command.taskId), {action:"edit",taskId:command.taskId,commentId:command.commentId,text:command.text}); return ok();
+      case "add_comment": await machine("product.comment", task(command.taskId), {action:"add",taskId:command.taskId,comment:{id:requestId,path:command.path,line:command.line,text:command.text,attachments:wireAttachments(command.attachments),sent:false}}); return ok();
+      case "edit_comment": await machine("product.comment", task(command.taskId), {action:"edit",taskId:command.taskId,commentId:command.commentId,text:command.text,...(command.attachments === undefined ? {} : {attachments:wireAttachments(command.attachments)})}); return ok();
       case "remove_comment": await machine("product.comment", task(command.taskId), {action:"remove",taskId:command.taskId,commentId:command.commentId}); return ok();
       case "send_comments": {
         const product = await machine<Product>("product.read", task(command.taskId));
         const pending = (product.comments?.[command.taskId] ?? []).filter(c => !c.sent);
         if (!pending.length) throw new Refusal("no_comments", "No draft comments to send.");
-        await say(command.taskId, "Please address these review comments:\n\n" + pending.map(c => `${c.path}:${c.line}\n${c.text}`).join("\n\n"));
+        await say(command.taskId, "Please address these review comments:\n\n" + pending.map(c => `${c.path}:${c.line}\n${c.text}`).join("\n\n"), wireAttachments(pending.flatMap(c => c.attachments ?? [])));
         await machine("product.comment", task(command.taskId), {action:"mark_sent",taskId:command.taskId,ids:pending.map(c => c.id)});
         return ok();
       }
@@ -451,7 +506,7 @@ export function createRealPort(options: RealPortOptions): WorkspacePort {
         return say(command.taskId, "I resolved the conflict in the task checkout. Rerun the required checks and return a fresh result for review. Do not merge or push the target branch.");
       case "abort_merge": await taskCall(task(command.taskId), {action:"abort_merge",taskId:command.taskId}); return ok();
       case "resolve_with_cortex":
-        await say(command.taskId, "Resolve the retained Git merge conflict in this task's own checkout. Preserve both intended changes, run the required checks, and return a fresh result for my review. Do not merge or push the target branch. Owner guidance: " + command.guidance);
+        await say(command.taskId, "Resolve the retained Git merge conflict in this task's own checkout. Preserve both intended changes, run the required checks, and return a fresh result for my review. Do not merge or push the target branch. Owner guidance: " + (command.guidance ?? ""), command.attachments);
         await taskCall(task(command.taskId), {action:"resolution_started",taskId:command.taskId,guidance:command.guidance});
         return ok();
       case "stop_resolution": await transport.request("executions.cancel", {projectId:task(command.taskId),executionId:execution(command.taskId)}); return ok();
@@ -462,6 +517,25 @@ export function createRealPort(options: RealPortOptions): WorkspacePort {
         await taskCall(id, {action:"settings",taskId:command.taskId,settings});
         return ok();
       }
+      case "edit_task": {
+        const id = task(command.taskId);
+        const reply = await machine<{version:string}>("product.task", id, {action:"edit",taskId:command.taskId,expectedVersion:command.expectedVersion,
+          payload:{title:command.title,description:command.description,attachments:wireAttachments(command.attachments),...(command.settings.model ? {settings:command.settings} : {}),checkout:command.checkout}});
+        const current = tasks.get(command.taskId);
+        if (current) tasks.set(command.taskId, {...current,version:reply.version});
+        return ok();
+      }
+      case "create_task": {
+        if (!command.sprintId) return null;
+        const sprint = (await machine<Product>("product.read", command.projectId)).sprints.find(s => s.id === command.sprintId);
+        if (!sprint || sprint.archivedAt || sprint.planning !== "created") throw new Refusal("sprint_unavailable", "Choose an open sprint with created tasks.");
+        const made = await send({...envelope,payload:{...command,checkout:sprint.checkout ?? command.checkout}});
+        if (!made.ok || !made.entityId) return made;
+        try { await taskCall(command.projectId, {action:"sprint",taskId:made.entityId,sprintId:command.sprintId,dependencies:[]}); }
+        catch { return {...made,ok:false,outcome:"partial_effect",message:"The task was saved outside the sprint, but joining the sprint was not confirmed. Refresh the project; do not create it again."}; }
+        return made;
+      }
+      case "close_sprint": await machine("product.sprint", await projectOfSprint(command.sprintId), {action:"close",sprintId:command.sprintId,confirmed:command.confirmed}); return ok();
       case "rename_task": await taskCall(task(command.taskId), { action: "rename", taskId: command.taskId, title: command.title }); return ok();
       case "archive_task": await taskCall(task(command.taskId), { action: "archive", taskId: command.taskId }); return ok();
       case "answer_archive": await taskCall(task(command.taskId), { action: "answer_archive", taskId: command.taskId, discard: command.discard }); return ok();
@@ -548,7 +622,7 @@ export function createRealPort(options: RealPortOptions): WorkspacePort {
         const available = await machine<ConfigRead>("config.read");
         const selected = command.settings?.model?.trim();
         if (!selected || !ENGINE_KEYS.some(engine => available.config.catalogue[engine].models.some(m => (m.routeId ?? m.id) === selected || m.id === selected))) throw new Refusal("model_required", "Connect an engine and select an available model before starting sprint planning. Your description is kept.");
-        const { sprintId } = await machine<{ sprintId: string }>("product.sprint", command.projectId, { action: "create", description: command.description, runMode: command.runMode, settings: command.settings, targetBranch: command.targetBranch });
+        const { sprintId } = await machine<{ sprintId: string }>("product.sprint", command.projectId, { action: "create", description: command.description, attachments: wireAttachments(command.attachments), runMode: command.runMode, checkout: command.checkout, settings: command.settings, targetBranch: command.targetBranch });
         // The service plans from descriptions without a runtime execution or project tools.
         return done(requestId, sprintId);
       }
@@ -584,7 +658,7 @@ export function createRealPort(options: RealPortOptions): WorkspacePort {
         const items = sprint.plan?.items ?? [], created = new Map<string, string>();
         for (const key of runOrder(items)) {
           const item = items.find(i => i.key === key)!;
-          const made = await send({ requestId: `${requestId}-${key}`, operation: "create_task", expectedVersion: null, payload: { type: "create_task", projectId: id, description: item.description, settings: sprint.settings ? {mode:"guarded",language:"auto",...sprint.settings} : undefined, checkout: item.checkout ?? { kind: "main" } } });
+          const made = await send({ requestId: `${requestId}-${key}`, operation: "create_task", expectedVersion: null, payload: { type: "create_task", projectId: id, description: item.description, settings: sprint.settings ? {mode:"guarded",language:"auto",...sprint.settings} : undefined, checkout: sprintTaskCheckout(sprint, item) } });
           if (!made.ok || !made.entityId) return { ...made, requestId };
           created.set(key, made.entityId);
           await taskCall(id, { action: "sprint", taskId: made.entityId, sprintId: command.sprintId, dependencies: item.dependsOn.map(d => created.get(d)) });
@@ -597,7 +671,7 @@ export function createRealPort(options: RealPortOptions): WorkspacePort {
         const id = await projectOfSprint(command.sprintId), sprint = (await machine<Product>("product.read", id)).sprints.find(s => s.id === command.sprintId)!;
         const taskId = sprint.planningTaskId, text = command.type === "answer_planning" ? command.answer : command.text;
         if (!taskId) {
-          await machine("product.sprint", id, {action:"note",sprintId:command.sprintId,kind:command.type === "answer_planning" ? "answer" : "message",text});
+          await machine("product.sprint", id, {action:"note",sprintId:command.sprintId,kind:command.type === "answer_planning" ? "answer" : "message",text,attachments:wireAttachments(command.attachments)});
           await sprintPatch(id, command.sprintId, {planning:"planning"});
           return ok();
         }
@@ -608,11 +682,11 @@ export function createRealPort(options: RealPortOptions): WorkspacePort {
           const asked = named?.wire.status === "pending" && named.wire.executionId === execution ? named : command.decisionId ? undefined : [...decisions.values()].find(d => d.wire.status === "pending" && !isHeld(d.wire) && d.wire.executionId === execution);
           if (!asked) throw new Refusal("superseded", "This question is no longer open. Refresh before answering.");
           const receipt = await send({ requestId, operation: "answer_decision", expectedVersion: null, payload: { type: "answer_decision", taskId, decisionId: asked.wire.decisionId, answer: text, attachments: command.attachments, ...(command.optionId === undefined ? {} : { optionId: command.optionId }) } });
-          if (receipt.ok) await machine("product.sprint", id, {action:"note",sprintId:command.sprintId,kind:"answer",text});
+          if (receipt.ok) await machine("product.sprint", id, {action:"note",sprintId:command.sprintId,kind:"answer",text,attachments:wireAttachments(command.attachments)});
           return {...receipt,requestId};
         }
-        await machine("product.sprint", id, {action:"note",sprintId:command.sprintId,kind:"message",text});
-        return prompt(taskId, text);
+        await machine("product.sprint", id, {action:"note",sprintId:command.sprintId,kind:"message",text,attachments:wireAttachments(command.attachments)});
+        return prompt(taskId, text, requestId, command.attachments);
       }
       default: return null;
     }
@@ -620,6 +694,7 @@ export function createRealPort(options: RealPortOptions): WorkspacePort {
 
   async function send(envelope: CommandEnvelope): Promise<CommandReceipt> {
     const wire = wireCommand(envelope);
+    if (envelope.payload.type === "answer_decision") historyReads.delete(envelope.payload.taskId);
     if (!wire) return unsupported(envelope.requestId);
     if (wire === "held") return done(envelope.requestId);
     validate("Command", wire.message);
@@ -631,13 +706,13 @@ export function createRealPort(options: RealPortOptions): WorkspacePort {
     catch (error) { return refusalOf(envelope.requestId, error); }
     const receipt = decodeResponse("Receipt", reply).value;
     if (receipt.requestId !== envelope.requestId) return {requestId:envelope.requestId,ok:false,outcome:"unknown_outcome",message:OUTCOME_WORDS.unknown_outcome};
-    const result = toReceipt(envelope.requestId, receipt);
+    const result = toReceipt(envelope.requestId, receipt, wire.operation);
     // A task just created can be started before its first projection, so its version is kept from the receipt.
     if (result.ok && envelope.payload.type === "create_task") tasks.set(receipt.target, { projectId: envelope.payload.projectId, version: receipt.entityVersion });
     return result;
   }
-  const toReceipt = (requestId: string, wire: WireReceipt): CommandReceipt => ({
-    requestId, ok: RECORDED.has(wire.outcome), outcome: wire.outcome, message: wire.reason ?? OUTCOME_WORDS[wire.outcome] ?? OUTCOME_WORDS.unknown, entityId: wire.target, entityVersion: wire.entityVersion,
+  const toReceipt = (requestId: string, wire: WireReceipt, operation: string): CommandReceipt => ({
+    requestId, ok: RECORDED.has(wire.outcome), outcome: wire.outcome, message: wire.reason ?? (operation === "tasks.start" && wire.outcome === "busy" ? "This task was already started. Refresh to see its execution." : OUTCOME_WORDS[wire.outcome] ?? OUTCOME_WORDS.unknown), entityId: wire.target, entityVersion: wire.entityVersion,
   });
 
   return {
@@ -646,12 +721,16 @@ export function createRealPort(options: RealPortOptions): WorkspacePort {
       if (operation === "capabilities.get") return capabilitiesGet() as Promise<QueryResults[O]>;
       if (operation === "machine.facts") return (machineOn ? machineFacts().then(f => [f]) : Promise.resolve([])) as Promise<QueryResults[O]>;
       const { projectId } = parameters as QueryParameters["project.snapshot"];
+      // A refresh caused by one project's events rereads that project, not every project on the machine.
+      if (operation === "project.snapshot" && !projectId) { readScope = invalidated; invalidated = new Set(); }
+      const wanted = (p: ProjectLocator) => projectId ? p.projectId === projectId : !readScope.size || readScope.has(p.projectId);
       if (operation === "project.facts") {
         presentationRead++;
-        const facts = machineOn ? Promise.all(projects.filter(p => !projectId || p.projectId === projectId).map(factsOf)) : Promise.resolve([]);
-        return facts.finally(() => { presentationRead++; }) as Promise<QueryResults[O]>;
+        const facts = machineOn ? Promise.all(projects.filter(wanted).map(factsOf)) : Promise.resolve([]);
+        if (!projectId) readScope = new Set();
+        return facts.then(all => { for (const f of all) sent.set(f.projectId, f); return all; }).finally(() => { presentationRead++; }) as Promise<QueryResults[O]>;
       }
-      return Promise.all(projects.filter(p => !projectId || p.projectId === projectId).map(snapshotOf)) as Promise<QueryResults[O]>;
+      return Promise.all(projects.filter(wanted).map(snapshotOf)) as Promise<QueryResults[O]>;
     },
     async command(envelope) {
       const command = envelope.payload;
@@ -723,6 +802,18 @@ export function createRealPort(options: RealPortOptions): WorkspacePort {
     async cancelDirectorySearch(machineId, session) {
       if (machineId === LOCAL_MACHINE_ID && serviceMethods.includes("directories.cancel")) await transport.request("directories.cancel", { session }).catch(() => undefined);
     },
+    async readTaskAttachments(taskId) {
+      const projectId = projectOfTask(taskId);
+      if (!projectId) throw new Refusal("unknown_task", "Unknown task.");
+      // An older service answers this with its whole product state, which has no files to offer.
+      const files = await machine<Message["attachments"]>("product.read", projectId, {taskId, attachments:true});
+      if (!Array.isArray(files)) throw new Refusal("attachments_unavailable", "Saved attachments could not be read. Refresh or update the service before editing.");
+      return wireAttachments(files);
+    },
+    async saveAttachment(file) {
+      if (!serviceMethods.includes("native.save_attachment")) throw new Refusal("unsupported", "Saving a copy needs the desktop app.");
+      return await transport.request("native.save_attachment", {name:file.name, data:file.data}) as {path:string|null};
+    },
     async readClipboardImage() {
       if (!serviceMethods.includes("native.clipboard_image")) return [];
       return wireAttachments(await transport.request("native.clipboard_image", {}) as Message["attachments"]);
@@ -753,18 +844,38 @@ export function createRealPort(options: RealPortOptions): WorkspacePort {
     },
     subscribe(listener: (update: PortUpdate) => void) {
       observers.add(listener);
-      let active = true, tick = 0;
+      let active = true, wait = FACTS_POLL_MS, timer: ReturnType<typeof setTimeout> | undefined, lastRound = Date.now(), machineRead = Date.now();
       // A slow repository must not stack reads behind itself: the next round starts when this one ended.
       const running = new Set<string>();
-      const once = (key: string, read: () => Promise<void>) => { if (running.has(key)) return; running.add(key); void read().catch(() => {}).finally(() => running.delete(key)); };
-      const poll = setInterval(() => {
-        if (!active || !machineOn) return;
-        for (const project of projects) once(project.projectId, () => {
+      const once = (key: string, read: () => Promise<void>) => { if (running.has(key)) return Promise.resolve(); running.add(key); return read().catch(() => {}).finally(() => { running.delete(key); }); };
+      const hidden = () => typeof document !== "undefined" && document.hidden;
+      const plan = () => { clearTimeout(timer); timer = active && !hidden() ? setTimeout(round, wait) : undefined; };
+      const round = () => {
+        if (!active || hidden()) return;
+        lastRound = Date.now();
+        if (!machineOn) { plan(); return; }
+        let moved = false;
+        const reads = projects.map(project => once(project.projectId, () => {
           const generation = presentationRead;
-          return factsOf(project).then(facts => { if (active && generation === presentationRead) listener({ kind: "facts", facts }); });
-        });
-        if (++tick % MACHINE_POLL_EVERY === 0) once("machine", () => machineFacts().then(facts => { if (active) listener({ kind: "machine", facts }); }));
-      }, FACTS_POLL_MS);
+          return factsOf(project).then(facts => {
+            if (!active || generation !== presentationRead || same(sent.get(project.projectId), facts)) return;
+            sent.set(project.projectId, facts);
+            moved = true;
+            listener({ kind: "facts", facts });
+          });
+        }));
+        if (Date.now() - machineRead >= MACHINE_POLL_MS) {
+          machineRead = Date.now();
+          reads.push(once("machine", () => machineFacts().then(facts => { if (active) listener({ kind: "machine", facts }); })));
+        }
+        void Promise.all(reads).then(() => { wait = moved ? FACTS_POLL_MS : Math.min(wait * 2, FACTS_POLL_MAX_MS); plan(); });
+      };
+      // Coming back from another window is exactly when Git may have moved.
+      const back = () => { if (hidden()) { plan(); return; } wait = FACTS_POLL_MS; if (Date.now() - lastRound >= FACTS_FOCUS_MIN_MS) round(); else plan(); };
+      const page = typeof document !== "undefined" ? document : undefined, screen = typeof window !== "undefined" ? window : undefined;
+      page?.addEventListener("visibilitychange", back);
+      screen?.addEventListener("focus", back);
+      plan();
       const stop = transport.subscribe(event => {
         if (event.type === "connection") { listener({ kind: "connection", connection: { state: event.state, reason: event.reason ?? null, at: Date.now() } }); return; }
         if (event.type === "refresh") { listener({ kind: "refresh" }); return; }
@@ -773,9 +884,10 @@ export function createRealPort(options: RealPortOptions): WorkspacePort {
         // A failed reread leaves the last confirmed state on screen. It says nothing about the machine.
         // The store rereads the projection and product facts as one presentation commit.
         // A wire-only update would momentarily undo sprint/archive/owner state.
+        invalidated.add(project.projectId);
         listener({ kind: "refresh" });
       });
-      return () => { observers.delete(listener); active = false; clearInterval(poll); stop(); };
+      return () => { observers.delete(listener); active = false; clearTimeout(timer); page?.removeEventListener("visibilitychange", back); screen?.removeEventListener("focus", back); stop(); };
     },
   };
 }

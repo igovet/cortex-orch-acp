@@ -13,6 +13,22 @@ function shareList(prev: unknown[], next: unknown[]) {
   return out.length === prev.length && out.every((item, i) => item === prev[i]) ? prev : out;
 }
 
+/** Equal as data, plain values all the way down. It stops at the first difference and builds no text, so comparing a
+ *  repository's facts with the last ones costs a walk, not a serialization of megabytes of diffs. */
+export function same(a: unknown, b: unknown): boolean {
+  if (Object.is(a, b)) return true;
+  if (Array.isArray(a)) {
+    if (!Array.isArray(b) || a.length !== b.length) return false;
+    for (let i = 0; i < a.length; i++) if (!same(a[i], b[i])) return false;
+    return true;
+  }
+  if (!plain(a) || !plain(b)) return false;
+  const keys = Object.keys(a);
+  if (keys.length !== Object.keys(b).length) return false;
+  for (const key of keys) if (!(key in b) || !same(a[key], b[key])) return false;
+  return true;
+}
+
 export function share<T>(prev: T, next: T): T {
   if (Object.is(prev, next)) return prev;
   if (Array.isArray(prev) && Array.isArray(next)) return shareList(prev, next) as T;

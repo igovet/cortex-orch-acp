@@ -25,8 +25,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from cortex_runtime.project_storage import project_store_directory
+from cortex_runtime.workspace_contract import LIMITS
+from cortex_runtime.workspace_api.attachments import checked as checked_attachments
 
-FRAME_BUDGET = 900_000
+FRAME_BUDGET = LIMITS["frameBytes"] - 64 * 1024
 GIT_TIMEOUT = 25
 MAX_TREE = 20_000
 MAX_DIFF_BYTES = 400_000
@@ -112,11 +114,10 @@ def conversation_action(project, state, params, *, comments=False):
             item = params.get("comment" if comments else "message")
             if not isinstance(item, dict) or not isinstance(item.get("id"), str) or not isinstance(item.get("text"), str) or not item["text"].strip() or len(item["text"]) > 32000:
                 raise Refused("invalid_message", "Write a message first, up to 32000 characters.")
-            if not comments and (item.get("delivery") != "queued" or item.get("workerId") is not None):
+            # Recorded rows keep what a sent message carried; the runtime's transcript only keeps its text.
+            if not comments and (item.get("delivery") not in ("queued", "recorded") or item.get("workerId") is not None):
                 raise Refused("invalid_message", "Only unsent task messages go into the queue.")
-            if not comments:
-                from cortex_runtime.workspace_api.attachments import checked
-                checked(item.get("attachments", []))
+            validate_attachments(item.get("attachments", []))
             old = next((r for r in rows if r["id"] == item["id"]), None)
             if old and old != item:
                 raise Refused("payload_conflict", "This message identity already has different content.")
@@ -145,10 +146,13 @@ def conversation_action(project, state, params, *, comments=False):
                 item = rows.pop(index)
                 before = next((i for i, row in enumerate(rows) if row["id"] == before_id), len(rows))
                 rows.insert(before, item)
-            elif action == "edit" and comments and isinstance(params.get("text"), str) and params["text"].strip() and len(params["text"]) <= 32000:
+            elif action == "edit" and isinstance(params.get("text"), str) and params["text"].strip() and len(params["text"]) <= 32000:
+                if "attachments" in params:
+                    rows[index]["attachments"] = validate_attachments(params["attachments"])
                 rows[index]["text"] = params["text"]
             else:
                 raise Refused("unsupported_action", "This action is not available.")
+        drop_retained_files(product)
         if len(json.dumps(product).encode()) > FRAME_BUDGET:
             raise Refused("queue_full", "Saved conversation state is full. Remove queued items first.")
         write_json(product_path(state, project), product)
@@ -455,7 +459,7 @@ def repo_snapshot(root, project, state):
                                "ahead": 0, "behind": 0, "behindOf": {}, "files": [], "draft": "", "sources": {},
                                "updateConflict": None}],
                 "taskDiffs": {task: {"files": [], "reason": "This folder has no Git history. Review files in Code; result acceptance is still available."}
-                              for task in product_read(root, state, project)["tasks"]},
+                              for task in product_read(root, state, project, review=False)["tasks"]},
                 "fetchedAt": None, "openBranch": "", "defaultBranch": ""}
     product = product_read(root, state, project, review=False)
     drafts = product.get("drafts", {})
@@ -886,25 +890,34 @@ def iso_ms(text):
         return None
 
 
+def worker_tool_ref(payload):
+    ref = payload.get("activity_ref")
+    if not isinstance(ref, str):
+        return None
+    if ref.startswith("tool-error:"):
+        ref = "tool:" + ref[len("tool-error:"):]
+    return ref if ref.startswith("tool:") or payload.get("tool_kind") else None
+
+
 def worker_activity(events):
     from cortex_runtime.workspace_api.history import hidden_step, merge_tool_update, tool_detail
     activity, calls = [], {}
     for number, event in enumerate(events):
         payload = loads(event["payload_json"])
-        ref = payload.get("activity_ref")
-        if isinstance(ref, str) and ref.startswith("tool-error:"):
-            ref = "tool:" + ref[len("tool-error:"):]
-        if ref and payload.get("tool_kind"):
+        ref = worker_tool_ref(payload)
+        if ref:
+            payload["activity_ref"] = ref
             if ref in calls:
                 first, merged = calls[ref]
-                calls[ref] = (first, merge_tool_update(merged, payload))
+                calls[ref] = (first, merge_tool_update(merged, {k: v for k, v in payload.items()
+                                                            if v not in (None, "", {}, [])}))
                 continue
             calls[ref] = (event, dict(payload))
         else:
             calls[f"event:{event['id']}"] = (event, payload)
     for event, payload in calls.values():
         kind = payload.get("tool_kind")
-        if kind and hidden_step(payload.get("title")):
+        if hidden_step(kind) or (kind and hidden_step(payload.get("title"))):
             continue
         detail = tool_detail(payload)
         title = payload.get("title") or payload.get("message") or payload.get("summary") or payload.get("text") or event["event_type"]
@@ -987,6 +1000,9 @@ def history_text(value, limit=8192):
 
 
 def worker_history(db, runtime, refs, channel, task_id, worker_id, status, binding, cursor, budget):
+    from cortex_runtime.workspace_api.history import HIDDEN_STEPS
+    hidden = sorted(HIDDEN_STEPS)
+    hidden_marks = ",".join("?" for _ in hidden)
     marks = ",".join("?" for _ in refs)
     maximum = 9223372036854775807
     before_t = db.execute("SELECT COALESCE(MAX(id),0)+1 FROM task_events WHERE task_id=?", (runtime,)).fetchone()[0]
@@ -1001,8 +1017,9 @@ def worker_history(db, runtime, refs, channel, task_id, worker_id, status, bindi
     task_rows = db.execute(f"SELECT id,event_type,created_at,payload_json FROM task_events WHERE task_id=? "
         f"AND assignment_ref IN ({marks}) AND id<? AND "
         "(event_type IN ('worker_result','worker_question','assignment_failed','assignment_cancelled') OR "
-        "(json_valid(payload_json) AND json_extract(payload_json,'$.kind')='worker_activity')) "
-        "ORDER BY id DESC LIMIT 201", (runtime, *refs, before_t)).fetchall()
+        "(json_valid(payload_json) AND json_extract(payload_json,'$.kind')='worker_activity' "
+        f"AND lower(trim(COALESCE(json_extract(payload_json,'$.tool_kind'),''))) NOT IN ({hidden_marks}))) "
+        "ORDER BY id DESC LIMIT 201", (runtime, *refs, before_t, *hidden)).fetchall()
     runtime_rows = db.execute("SELECT id,type,created_at,payload_json FROM runtime_events WHERE task_id=? AND id<? AND "
         "((type='COMMAND_PROCESS_STARTED' AND actor=?) OR (type='WORKER_GUIDANCE' AND "
         "json_extract(payload_json,'$.channelId')=?)) ORDER BY id DESC LIMIT 201",
@@ -1033,9 +1050,9 @@ def worker_history(db, runtime, refs, channel, task_id, worker_id, status, bindi
             added, said = worker_controls(db, runtime, channel, task_id, worker_id, status, [row])
         else:
             payload = loads(row["payload_json"])
-            ref = payload.get("activity_ref")
+            ref = worker_tool_ref(payload)
             related = [row]
-            if ref and payload.get("tool_kind"):
+            if ref:
                 # Recover split input/status updates even across a page boundary.
                 canonical = "tool:" + ref[len("tool-error:"):] if ref.startswith("tool-error:") else ref
                 error_ref = "tool-error:" + canonical[len("tool:"):] if canonical.startswith("tool:") else canonical
@@ -1221,6 +1238,47 @@ def _workers_of_db(db, project, task_ids, *, worker_id=None, cursor=None):
 
 # --- Task and sprint decisions --------------------------------------------------
 
+# Reading a result walks the project and its evidence (about 140 ms each), and every helper is a new process.
+REVIEW_MAX_AGE_MS = 30_000
+
+
+def _review_path(state, project):
+    return Path(state) / "review-cache" / (project + ".json")
+
+
+def _review_seen(state, project):
+    try:
+        held = read_json(_review_path(state, project), {})
+    except Refused:
+        held = {}  # A cache that cannot be read costs only this read.
+    return {"tasks": held, "changed": False}
+
+
+def _review_key(row):
+    return [row["execution_id"], row["version"]]
+
+
+def _review_held(seen, row):
+    """An unchanged task's review from a moment ago. Accepting it still re-checks the result."""
+    known = seen["tasks"].get(row["task_id"])
+    if known and known["key"] == _review_key(row) and 0 <= now_ms() - known["at"] < REVIEW_MAX_AGE_MS:
+        return dict(known["actions"])
+    return None
+
+
+def _review_keep(seen, row, actions):
+    seen["tasks"][row["task_id"]] = {"key": _review_key(row), "at": now_ms(), "actions": dict(actions)}
+    seen["changed"] = True
+
+
+def _review_save(state, project, seen):
+    if seen["changed"]:
+        try:
+            write_json(_review_path(state, project), seen["tasks"])
+        except OSError:
+            pass  # A cache that cannot be saved costs only the next read.
+
+
 def product_read(root, state, project, *, review=True):
     product = product_of(state, project)
     db = store_reader(root)
@@ -1232,6 +1290,8 @@ def product_read(root, state, project, *, review=True):
                     options = loads(row["options_json"])
                     record = task_record(product, row["task_id"])
                     record.update({k: v for k, v in options.items() if k in {"checkout", "settings", "baseRevision"}})
+                    if "draftTitle" in options:
+                        record.update(title=options["draftTitle"], titleState="user")
                     checkout = record.get("checkout")
                     if checkout and checkout["kind"] == "main":
                         checkout["branch"] = out(root, "branch", "--show-current").strip() if is_repo(root) else ""
@@ -1248,7 +1308,8 @@ def product_read(root, state, project, *, review=True):
                 from cortex_runtime.workspace_api import WorkspaceError
                 from cortex_runtime.contracts import StoreError
                 store = None
-                for row in db.execute("SELECT t.task_id,e.execution_id,r.state FROM workspace_tasks t "
+                seen = _review_seen(state, project)
+                for row in db.execute("SELECT t.task_id,t.version,e.execution_id,r.state FROM workspace_tasks t "
                                       "JOIN workspace_executions e ON e.execution_id=t.execution_id "
                                       "LEFT JOIN runtime_tasks r ON r.task_id=e.runtime_task_id WHERE t.project_id=?", (project,)):
                     record = task_record(product, row["task_id"])
@@ -1256,19 +1317,25 @@ def product_read(root, state, project, *, review=True):
                                    unblockAction="wait", acknowledgeOpenChecks=False)
                     if row["state"] == "COMPLETED" and record.get("status") != "done":
                         try:
-                            if store is None:
-                                store = Store(project_store_directory(root), initialize=False, project_root=root, runtime_access=True)
-                            result = result_projection(db, store, project, "wr_" + row["execution_id"])
-                            actions = result_actions(result)
-                            actions.update(resultId=result["resultId"], version=result["version"],
-                                           digest=result.get("observedWorkspaceDigest") or f'result:{result["resultId"]}:{result["version"]}')
-                            if record.get("requiresFreshResult") == {"resultId": result["resultId"], "version": str(result["version"])}:
+                            held = _review_held(seen, row)
+                            if held is None:
+                                if store is None:
+                                    store = Store(project_store_directory(root), initialize=False, project_root=root, runtime_access=True)
+                                result = result_projection(db, store, project, "wr_" + row["execution_id"])
+                                actions = result_actions(result)
+                                actions.update(resultId=result["resultId"], version=result["version"],
+                                               digest=result.get("observedWorkspaceDigest") or f'result:{result["resultId"]}:{result["version"]}')
+                                _review_keep(seen, row, actions)
+                            else:
+                                actions = held
+                            if record.get("requiresFreshResult") == {"resultId": actions["resultId"], "version": str(actions["version"])}:
                                 actions.update(accept=False, reason="The source changed after this result. Request changes for fresh checks and review.",
                                                unblockAction="request_changes")
                         except (WorkspaceError, StoreError):
                             actions.update(reason="This result binding is unavailable. Refresh or reopen the project before requesting a new result.",
                                            unblockAction="refresh")
                     record["reviewActions"] = actions
+                _review_save(state, project, seen)
         finally:
             db.close()
     # Conflict completion is promoted only by the scheduler after fresh runtime verification.
@@ -1351,7 +1418,23 @@ def task_action(root, project, state, params):
         product = product_read(root, state, project, review=False)
         record = task_record(product, task)
         at = now_ms()
-        if action == "settings":
+        if action == "edit":
+            from cortex_runtime.store import Store
+            from cortex_runtime.workspace_api import WorkspaceAPI, WorkspaceError
+            store = Store(project_store_directory(root), project_root=root)
+            with store.connection() as db:
+                owner = db.execute("SELECT activated_by FROM workspace_projects WHERE project_id=?", (project,)).fetchone()
+            if owner is None or record.get("status") == "done" or record.get("archive") or record.get("purged"):
+                raise Refused("not_editable", "Only a saved task that has not started can be edited.")
+            try:
+                version = WorkspaceAPI(store, project_id=project, actor_id=owner[0]).edit_draft(
+                    task, expected_version=params.get("expectedVersion"), payload=params.get("payload") or {})
+            except WorkspaceError as error:
+                raise Refused(str(error), "The task started or changed. Refresh before editing; your draft was not saved.") from None
+            record.update(title=params["payload"]["title"].strip(), titleState="user")
+            write_json(product_path(state, project), product)
+            return {"done": True, "version": version}
+        elif action == "settings":
             from cortex_runtime.workspace_contract import validate
             from cortex_runtime.workspace_api import task_options
             from cortex_runtime.store import Store
@@ -1365,11 +1448,31 @@ def task_action(root, project, state, params):
                 options = task_options.read(db, task)
                 options["settings"] = chosen
                 task_options.save(db, task, options)
+                from cortex_runtime.workspace_api.storage import append_public_tx
+                db.execute("UPDATE workspace_tasks SET version=version+1 WHERE task_id=?", (task,))
+                db.execute("UPDATE workspace_projects SET version=version+1 WHERE project_id=?", (project,))
+                append_public_tx(db, project_id=project, entity_id=task, kind="task", version=row["version"] + 1)
             store.immediate_write(save)
         elif action == "rename":
             title = str(params.get("title", "")).strip()
             if not title:
                 raise Refused("empty_title", "Write a title first.")
+            from cortex_runtime.store import Store
+            from cortex_runtime.workspace_api import task_options
+            store = Store(project_store_directory(root), project_root=root)
+            def rename(db):
+                row = db.execute("SELECT execution_id,version FROM workspace_tasks WHERE task_id=? AND project_id=?", (task, project)).fetchone()
+                if row is not None:
+                    if row["execution_id"] is not None:
+                        raise Refused("task_started", "A started task's saved request is read-only.")
+                    options = task_options.read(db, task)
+                    options["draftTitle"] = title[:200]
+                    task_options.save(db, task, options)
+                    from cortex_runtime.workspace_api.storage import append_public_tx
+                    db.execute("UPDATE workspace_tasks SET version=version+1 WHERE task_id=?", (task,))
+                    db.execute("UPDATE workspace_projects SET version=version+1 WHERE project_id=?", (project,))
+                    append_public_tx(db, project_id=project, entity_id=task, kind="task", version=row["version"] + 1)
+            store.immediate_write(rename)
             record.update(title=title[:200], titleState="user")
         elif action in ("resolve_block", "finish_merge", "abort_merge", "resolution_started"):
             if record.get("conflict") == "resolving" and action != "resolution_started":
@@ -1463,9 +1566,37 @@ def task_action(root, project, state, params):
             sprint = next((s for s in product["sprints"] if s["id"] == params.get("sprintId")), None)
             if sprint is None:
                 raise Refused("unknown_sprint", "Unknown sprint.")
-            record.update(sprintId=sprint["id"], dependencies=params.get("dependencies") or [], planning=bool(params.get("planning")))
-            if "targetBranch" not in record or record.get("targetInherited"):
-                record.update(targetBranch=sprint.get("targetBranch"), targetInherited=True)
+            if sprint.get("archivedAt"):
+                raise Refused("sprint_closed", "This sprint is closed. Create the task outside it.")
+            dependencies = params.get("dependencies") or []
+            if not isinstance(dependencies, list) or len(set(dependencies)) != len(dependencies) or any(d not in sprint["taskIds"] or d == task for d in dependencies):
+                raise Refused("invalid_dependencies", "Dependencies must be earlier tasks in this sprint.")
+            # Never move or reorder an existing member: appending cannot introduce a dependency cycle.
+            if record.get("sprintId") and record["sprintId"] != sprint["id"]:
+                raise Refused("already_linked", "This task already belongs to a sprint.")
+            if task in sprint["taskIds"] and record.get("dependencies", []) != dependencies:
+                raise Refused("already_linked", "Existing task dependencies stay unchanged.")
+            def link(db=None):
+                if db is not None:
+                    row = db.execute("SELECT execution_id FROM workspace_tasks WHERE project_id=? AND task_id=?", (project, task)).fetchone()
+                    if row is None or row["execution_id"] is not None:
+                        raise Refused("not_editable", "Only a task that has not started can join a sprint.")
+                record.update(sprintId=sprint["id"], dependencies=dependencies, planning=bool(params.get("planning")))
+                if task not in sprint["taskIds"] and not params.get("planning"):
+                    sprint["taskIds"].append(task)
+                    if sprint["queueState"] == "complete":
+                        sprint.update(queueState="paused", pauseReason="New task added. Continue the queue when ready.")
+                if "targetBranch" not in record or record.get("targetInherited"):
+                    record.update(targetBranch=sprint.get("targetBranch"), targetInherited=True)
+                write_json(product_path(state, project), product)
+            db = store_reader(root)
+            if db is None:
+                link()
+            else:
+                db.close()
+                from cortex_runtime.store import Store
+                Store(project_store_directory(root), project_root=root).immediate_write(link)
+            return {"done": True}
         else:
             raise Refused("unsupported_action", "This machine does not support that yet.")
         write_json(product_path(state, project), product)
@@ -1477,6 +1608,28 @@ def integrate(root, project, state, params):
     return task_git.integrate(sys.modules[__name__], root, project, state, params)
 
 
+def validate_attachments(items):
+    try:
+        return checked_attachments(items)
+    except ValueError:
+        raise Refused("invalid_attachments", "Choose valid files: at most 8 files totaling 4 MiB, with readable contents and simple filenames.") from None
+
+
+def drop_retained_files(product):
+    """Copies of already-sent files give way first, oldest first: their names stay, so a message still says what it carried."""
+    for row in product.get("messages", []):
+        if len(json.dumps(product, ensure_ascii=False).encode()) <= FRAME_BUDGET:
+            return
+        if row.get("delivery") == "recorded" and any(isinstance(item, dict) for item in row.get("attachments", [])):
+            row["attachments"] = [item["name"] if isinstance(item, dict) else item for item in row["attachments"]]
+
+
+def check_product_size(product):
+    drop_retained_files(product)
+    if len(json.dumps(product, ensure_ascii=False).encode()) > FRAME_BUDGET:
+        raise Refused("product_full", "Saved attachments and conversation exceed this project's display limit. Reduce the new attachments or remove queued items before retrying.")
+
+
 def sprint_action(project, state, params):
     action = params.get("action")
     with Locked(state):
@@ -1486,15 +1639,35 @@ def sprint_action(project, state, params):
                       "targetBranch": params.get("targetBranch"), "settings": params.get("settings"), "planning": "planning", "conversation": [], "plan": None, "history": [], "materializedVersion": None, "taskIds": [], "queueState": "idle", "pauseReason": None}
             if not sprint["description"].strip() or sprint["runMode"] not in ("manual", "automatic"):
                 raise Refused("invalid_sprint", "Describe the sprint first.")
+            if "checkout" in params:
+                checkout = params["checkout"]
+                if not isinstance(checkout, dict) or set(checkout) != {"kind"} or checkout["kind"] not in ("main", "worktree"):
+                    raise Refused("invalid_checkout", "Choose Project folder or Separate worktree for the sprint.")
+                sprint["checkout"] = checkout
             if sprint.get("settings"):
                 from cortex_runtime.workspace_contract import validate
                 validate("CreatePayload", {"description":"sprint", "settings":sprint["settings"]})
+            sprint["attachments"] = validate_attachments(params.get("attachments", []))
             product["sprints"].append(sprint)
+            check_product_size(product)
             write_json(product_path(state, project), product)
             return {"sprintId": sprint["id"]}
         sprint = next((s for s in product["sprints"] if s["id"] == params.get("sprintId")), None)
         if sprint is None:
             raise Refused("unknown_sprint", "Unknown sprint.")
+        if action == "close":
+            if params.get("confirmed") is not True:
+                raise Refused("confirmation_required", "Confirm before closing the sprint.")
+            if not sprint.get("archivedAt"):
+                # Archive the container only. Task closure, acceptance and discard still require their own decisions.
+                sprint.update(archivedAt=now_ms(), queueState="paused", pauseReason="Sprint closed by you")
+                sprint.pop("pauseKind", None)
+                sprint.pop("questionExecutions", None)
+                sprint.pop("planningAttempt", None)
+            write_json(product_path(state, project), product)
+            return {"done": True}
+        if sprint.get("archivedAt"):
+            raise Refused("sprint_closed", "This sprint is closed and read-only.")
         patch = params.get("patch")
         if action == "patch" and isinstance(patch, dict):
             allowed = {"title", "runMode", "targetBranch", "planning", "plan", "history", "materializedVersion", "taskIds", "queueState", "pauseReason", "settings", "planningTaskId"}
@@ -1516,9 +1689,13 @@ def sprint_action(project, state, params):
                     if record.get("sprintId") == sprint["id"] and record.get("targetInherited"):
                         record["targetBranch"] = patch["targetBranch"]
         elif action == "note":
-            sprint["conversation"].append({"kind": params.get("kind", "note"), "text": str(params.get("text", ""))[:32000], "at": now_ms()})
+            sprint["conversation"].append({"kind": params.get("kind", "note"), "text": str(params.get("text", ""))[:32000], "at": now_ms(),
+                                           "attachments": validate_attachments(params.get("attachments", []))})
         else:
             raise Refused("unsupported_action", "This machine does not support that yet.")
+        # Every planning retry resends all owner input, so bound that input before saving.
+        validate_attachments(sprint.get("attachments", []) + [a for entry in sprint.get("conversation", []) for a in entry.get("attachments", [])])
+        check_product_size(product)
         write_json(product_path(state, project), product)
     return {"done": True}
 
@@ -1618,7 +1795,7 @@ def cleanup(state, projects, *, clock=now_ms):
     removed = asked = freed = skipped = reclamation_failed = 0
     with Locked(state):
         for project in projects:
-            product = product_read(project["root"], state, project["id"])
+            product = product_read(project["root"], state, project["id"], review=False)
             for task, record in list(product["tasks"].items()):
                 archive = record.get("archive")
                 if archive and at - archive["at"] >= settings["retentionDays"] * DAY_MS and not record.get("purgeBlocker"):
@@ -1636,7 +1813,8 @@ def cleanup(state, projects, *, clock=now_ms):
                     elif (record.get("archiveAskAfter") or 0) <= at:
                         record["archiveQuestion"] = True
                         asked += 1
-            write_json(product_path(state, project["id"]), product)
+            if product != read_json(product_path(state, project["id"]), None):
+                write_json(product_path(state, project["id"]), product)
     run = {"at": at, "removed": removed, "skipped": skipped, "asked": asked, "freedMb": freed / (1024 * 1024), "reclamationFailed": reclamation_failed}
     record_run(state, "cleanup", run)
     return run
@@ -2082,6 +2260,18 @@ def run(request):
     if op == "workers":
         return workers_of(root, project, params.get("taskIds") or [], worker_id=params.get("workerId"), cursor=params.get("cursor"))
     if op == "product.read":
+        if params and params.get("attachments") is True:
+            db = store_reader(root)
+            if db is None:
+                raise Refused("unknown_task", "Unknown task.")
+            try:
+                row = db.execute("SELECT o.options_json FROM workspace_task_options o JOIN workspace_tasks t USING(task_id) WHERE t.project_id=? AND t.task_id=?",
+                                 (project, params.get("taskId"))).fetchone()
+                if row is None:
+                    raise Refused("unknown_task", "Unknown task.")
+                return validate_attachments(loads(row[0]).get("attachments", []))
+            finally:
+                db.close()
         return product_read(root, state, project)
     if op in ("product.message", "product.comment"):
         return conversation_action(project, state, params, comments=op == "product.comment")

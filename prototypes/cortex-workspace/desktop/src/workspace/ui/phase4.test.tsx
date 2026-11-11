@@ -105,10 +105,10 @@ describe("sprint planning", () => {
     await click(named(".sp-conv .c-send", "Send to the planner"));
     expect($(".sp-conv").textContent).toContain("Split the export page in two");
     expect($(".sp-h .btn-primary").title).toContain("Still working on the plan");
-    await click(named(".strip .btn", "Cancel planning"));
+    await click(named(":is(.strip, .l-strip) .btn", "Cancel planning"));
     expect($(".sp-h .st-idle").textContent).toContain("Planning cancelled");
     expect($(".sp-plan-h").textContent).toContain("Plan v3");
-    await click(named(".strip .btn", "Resume planning"));
+    await click(named(":is(.strip, .l-strip) .btn", "Resume planning"));
     expect($(".sp-h .st-idle").textContent).toContain("Planning");
   });
 
@@ -149,15 +149,15 @@ describe("sprint runs", () => {
     await created("Automatic");
     await click(named(".sp-h .btn-primary", "Run sprint"));
     await click(named("#m-mock .mi", "Active task fails a check"));
-    expect($(".strip.warn").textContent).toContain("Queue paused: Result has failed, not run or unverified checks");
+    expect($(".l-strip[data-tone='warn']").textContent).toContain("Queue paused: Result has failed, not run or unverified checks");
     expect(named(".sp-h .btn-primary", "Continue queue").getAttribute("aria-disabled")).toBe("true");
     expect(named(".sp-h .btn-primary", "Continue queue").title).toContain("Review Add the audit events table first");
     await click(named('[role="tab"]', "Summary"));
-    expect($(".strip.warn").textContent).toContain("Queue paused");
+    expect($(".l-strip[data-tone='warn']").textContent).toContain("Queue paused");
     expect($(".gr:not(.th) .cap.muted").textContent).toBe("1 failed");
     await click(named('[role="tab"]', "Board"));
-    expect($(".sprint-bar")).toBeTruthy();
-    expect($(".strip.warn").textContent).toContain("Queue paused");
+    expect($("[aria-label=\"Sprint queue\"]")).toBeTruthy();
+    expect($(".l-strip[data-tone='warn']").textContent).toContain("Queue paused");
   });
   it("the summary reports the fixture sprint in the mockup's words, with no invented pass", async () => {
     const usage = loadFixtures().workspace.sprints.find(s => s.description === "Usage billing")!;
@@ -215,9 +215,9 @@ describe("archive", () => {
     const total = () => $(".ws-facts").textContent;
     expect(total()).toContain("1 wait");
     await click(named("#ar-wait ~ .surface .btn", "Decide"));
-    expect(named(".dlg-f .btn", "Keep the work")).toBeTruthy();
+    expect(named("[data-bar=dialog] .btn", "Keep the work")).toBeTruthy();
     expect($("dialog[open]").textContent).toContain("5 commits on cw/async-webhooks");
-    await click(named(".dlg-f .btn", "Keep the work"));
+    await click(named("[data-bar=dialog] .btn", "Keep the work"));
     expect($("#ar-wait")).toBeNull();
     expect(total()).not.toContain("wait");
   });
@@ -226,7 +226,7 @@ describe("archive", () => {
     const before = archiveView(index(), NO_FILTER).total;
     await click(named("#ar-wait ~ .surface .btn", "Decide"));
     await click(all('input[name="unmerged"]')[1]);
-    await click(named(".dlg-f .btn-danger", "Delete 5 commits and 2 files"));
+    await click(named("[data-bar=dialog] .btn-danger", "Delete 5 commits and 2 files"));
     expect($(".ws-facts").textContent).toContain(`${before + 1} tasks`);
     expect($("#ar-wait")).toBeNull();
   });
@@ -244,7 +244,7 @@ describe("archive", () => {
     expect(text()).toContain("Skipped: Nightly index rebuild");
     expect(text()).toContain("Merged commits, remote branches and pull requests stay in Git");
     expect(text()).toContain("6 tasks and their saved history, 111 MB freed");
-    await click(named(".dlg-f .btn-danger", "permanently"));
+    await click(named("[data-bar=dialog] .btn-danger", "permanently"));
     expect(document.body.textContent).not.toContain("Migrate the cache layer");
     expect($('[aria-labelledby="ar-block"]').textContent).toContain("Add invoice numbering spike");
   });
@@ -258,21 +258,21 @@ describe("archive", () => {
     const del = named("#m-arrow .mi", "Delete now");
     expect(del.getAttribute("aria-disabled")).toBe("true");
     await click(named("#m-arrow .mi", "Decide"));
-    await click(named(".dlg-f .btn-danger", "Discard the new files"));
+    await click(named("[data-bar=dialog] .btn-danger", "Discard the new files"));
     expect($('[aria-labelledby="ar-block"]').textContent).not.toContain("Add invoice numbering spike");
   });
   it("opens an archived task read-only, with Restore on it", async () => {
     await mount(`/m/${LOCAL}/t/${WORKSPACE_CASES.archive2}`);
-    expect($(".strip.info").textContent).toContain("Archived, read-only. 2 days left before cleanup.");
-    await click(named(".strip .btn", "Restore"));
-    expect($(".strip.info")?.textContent ?? "").not.toContain("Archived");
+    expect($(":is(.strip.info, .l-strip[data-tone=info])").textContent).toContain("Archived, read-only. 2 days left before cleanup.");
+    await click(named(":is(.strip, .l-strip) .btn", "Restore"));
+    expect($(":is(.strip.info, .l-strip[data-tone=info])")?.textContent ?? "").not.toContain("Archived");
   });
   it("the task menu's Archive asks first when work is unmerged", async () => {
     await mount(`/m/${LOCAL}/t/${WORKSPACE_CASES.cancelled}`);
     await click(named(".tb-actions .ib", "Task actions"));
     await click(named("#m-task .mi", "Archive"));
     expect($("dialog[open]").textContent).toContain("has unmerged work");
-    await click(named(".dlg-f .btn", "Keep the work"));
+    await click(named("[data-bar=dialog] .btn", "Keep the work"));
     expect($("dialog[open]")).toBeNull();
   });
 });
@@ -293,31 +293,31 @@ describe("machines and Inbox", () => {
   it("adds a remote machine only after both fingerprints match, and a bad code connects nothing", async () => {
     await mount(`/m/${LOCAL}`);
     await click(named("#m-machine .mi", "Add remote machine"));
-    await click(named(".dlg-f .btn-primary", "I have a code"));
+    await click(named("[data-bar=dialog] .btn-primary", "I have a code"));
     await type($<HTMLInputElement>('[aria-label="Pairing code or link"]'), "nope");
     await type($<HTMLInputElement>('[aria-label="Name for this machine"]'), "Lab box");
-    await click(named(".dlg-f .btn-primary", "Connect"));
+    await click(named("[data-bar=dialog] .btn-primary", "Connect"));
     expect($(".dlg-b .err").textContent).toContain("Enter the code");
     await click(named("#m-mock .mi", "code expired"));
     await type($<HTMLInputElement>('[aria-label="Pairing code or link"]'), "7kq2-m9xd");
-    await click(named(".dlg-f .btn-primary", "Connect"));
+    await click(named("[data-bar=dialog] .btn-primary", "Connect"));
     expect($(".dlg-b .err").textContent).toContain("This code expired");
-    await click(named(".dlg-f .btn-primary", "Connect"));
+    await click(named("[data-bar=dialog] .btn-primary", "Connect"));
     expect($(".fpr").textContent).toContain("4F2A 91C7 D03E");
-    await click(named(".dlg-f .btn-primary", "Fingerprints match"));
+    await click(named("[data-bar=dialog] .btn-primary", "Fingerprints match"));
     expect(named("#m-machine .mi", "Lab box")).toBeTruthy();
   });
   it("stops pairing when the fingerprints differ", async () => {
     await mount(`/settings/app/machines`);
     await click(named("#m-mock .mi", "fingerprints differ"));
     await click(named(".set-h .btn", "Add remote machine"));
-    await click(named(".dlg-f .btn-primary", "I have a code"));
+    await click(named("[data-bar=dialog] .btn-primary", "I have a code"));
     await type($<HTMLInputElement>('[aria-label="Pairing code or link"]'), "7KQ2-M9XD");
     await type($<HTMLInputElement>('[aria-label="Name for this machine"]'), "Lab box");
-    await click(named(".dlg-f .btn-primary", "Connect"));
+    await click(named("[data-bar=dialog] .btn-primary", "Connect"));
     expect($(".note-box.bad").textContent).toContain("no project data has been sent");
-    expect(all(".dlg-f .btn-primary").length).toBe(0);
-    await click(named(".dlg-f .btn", "Cancel"));
+    expect(all("[data-bar=dialog] .btn-primary").length).toBe(0);
+    await click(named("[data-bar=dialog] .btn", "Cancel"));
     expect(all(".mcard").length).toBe(3);
   });
   it("a reconnect lets a machine act again, and every card reads as the machine it is", async () => {
@@ -357,10 +357,10 @@ describe("machine settings", () => {
     await click(named('[aria-label="Effort"] button', "Low"));
     await click(named(".snav", "Engine connections"));
     expect(location.pathname).toContain("orchestration/defaults");
-    await click(named(".dlg-f .btn", "Stay"));
+    await click(named("[data-bar=dialog] .btn", "Stay"));
     expect($(".savebar")).toBeTruthy();
     await click(named(".snav", "Engine connections"));
-    await click(named(".dlg-f .btn", "Discard"));
+    await click(named("[data-bar=dialog] .btn", "Discard"));
     expect(location.pathname).toContain("/connections");
     await click(named(".snav.sub", "Coordinator"));
     expect($(".savebar")).toBeNull();
@@ -378,7 +378,7 @@ describe("machine settings", () => {
   });
   it("an offline machine's settings are read-only, with nothing queued", async () => {
     await mount(`/settings/machine/${REMOTE}/orchestration/defaults`);
-    expect($(".strip.info").textContent).toContain("Nothing is queued");
+    expect($(":is(.strip.info, .l-strip[data-tone=info])").textContent).toContain("Nothing is queued");
     expect(named('[aria-label="Effort"] button', "Low").getAttribute("aria-disabled")).toBe("true");
     await click(named('[aria-label="Effort"] button', "Low"));
     expect($(".savebar")).toBeNull();
@@ -399,10 +399,10 @@ describe("machine settings", () => {
     await click(named(".srow .btn", "Clear old tasks"));
     expect($("dialog[open]").textContent).toContain("Will be removed: 0 tasks");
     expect($("dialog[open]").textContent).toContain("Kept: 3 with unmerged work");
-    expect(named(".dlg-f .btn-danger", "Delete 0 tasks").getAttribute("aria-disabled")).toBe("true");
+    expect(named("[data-bar=dialog] .btn-danger", "Delete 0 tasks").getAttribute("aria-disabled")).toBe("true");
     for (let i = 0; i < 6; i++) await click($('[aria-label="Fewer: Older than"]'));
     expect($("dialog[open]").textContent).toContain("Will be removed: 2 tasks");
-    await click(named(".dlg-f .btn-danger", "Delete 2 tasks"));
+    await click(named("[data-bar=dialog] .btn-danger", "Delete 2 tasks"));
     expect($("dialog[open]")).toBeNull();
   });
   it("sets where worktrees live, with a default and a refusal for a relative path", async () => {
@@ -430,7 +430,7 @@ describe("machine settings", () => {
     await click(named(".snav", "Remote access"));
     expect($(".pair").textContent).toBe("7KQ2-M9XD");
     await click(named(".srow .btn", "Revoke"));
-    await click(named(".dlg-f .btn-danger", "Revoke"));
+    await click(named("[data-bar=dialog] .btn-danger", "Revoke"));
     expect(document.body.textContent).toContain("No device is paired");
     await click($('[aria-label="Allow remote access"]'));
     expect($(".pair")).toBeNull();
@@ -448,7 +448,7 @@ describe("commands as controls", () => {
     await mount(`/m/${LOCAL}/p/${CEDAR}/knowledge`);
     await click(named(".srow .btn", "Collect knowledge"));
     await type($<HTMLInputElement>('[aria-label="Scope, optional"]'), "the export code");
-    await click(named(".dlg-f .btn-primary", "Create the task"));
+    await click(named("[data-bar=dialog] .btn-primary", "Create the task"));
     expect(location.pathname).toContain("/t/");
     expect($(".brief").textContent).toContain("harvest: the export code");
   });

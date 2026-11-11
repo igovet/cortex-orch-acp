@@ -7,6 +7,7 @@ import { Confirmed } from "./freshness";
 import { CodePanel } from "./code";
 import { GitPanel } from "./git";
 import { A, FactLine, I, Keyed, MenuItem, Pop } from "./kit";
+import { revealCutIn, Strip, Whole } from "./layout";
 import { SIDEBAR_DEFAULT, SIDEBAR_MAX, SIDEBAR_MIN } from "./prefs";
 import { APP_SECTIONS, MACHINE_SECTIONS, ORCHESTRATION_PAGES, type OrchestrationPage, type Route, type SettingsSection } from "./router";
 import { defaultCheckout, repoOf } from "./review-model";
@@ -41,18 +42,18 @@ function Facts() {
   const home = createMemo(() => homeView(ws.store.index(), ws.machine().id));
   const offline = () => ws.machine().connection !== "connected";
   const known = () => offline() ? " last known" : "";
-  return <div class="row sec muted" style={{ gap: "14px", "margin-left": "10px" }}>
-    <Show when={home().projects.length > 0}><span class="trunc">{home().projects.length} project{home().projects.length === 1 ? "" : "s"}</span></Show>
-    <span class="trunc">{home().working.length} working{known()}</span>
-    <span class={`trunc${home().needs.length ? " st-warn" : ""}`}>{home().needs.length} need{home().needs.length === 1 ? "s" : ""} you{known()}</span>
-    <span class="trunc faint">{ws.store.mode === "demo" ? (offline() ? `Offline, last confirmed ${clock(ws.machine().lastConfirmedAt)}` : `as of ${clock(ws.store.now)}`) : ""}</span>
+  return <div class="row sec muted tb-facts" style={{ gap: "14px", "margin-left": "10px" }}>
+    <Show when={home().projects.length > 0}><span class="tb-fact-p">{home().projects.length} project{home().projects.length === 1 ? "" : "s"}</span></Show>
+    <span class="tb-fact-w">{home().working.length} working{known()}</span>
+    <span class={`tb-fact-n${home().attention.length ? " st-warn" : ""}`}>{home().attention.length} need{home().attention.length === 1 ? "s" : ""} you{known()}</span>
+    <span class="tb-fact-t faint">{ws.store.mode === "demo" ? (offline() ? `Offline, last confirmed ${clock(ws.machine().lastConfirmedAt)}` : `as of ${clock(ws.store.now)}`) : ""}</span>
   </div>;
 }
 
 /** The band moves the window from anywhere that is not a control. Moving a few pixels starts the drag, so a double click stays a double click. */
 const BAND_CONTROLS = "a, button, input, textarea, select, label, summary, [popover], [role='button'], [role='separator'], [contenteditable='true']";
 const DRAG_SLOP = 3;
-function bandHandlers(chrome: WindowChrome | undefined) {
+export function bandHandlers(chrome: WindowChrome | undefined) {
   if (!chrome) return {};
   const free = (e: MouseEvent) => e.button === 0 && !(e.target as Element).closest(BAND_CONTROLS);
   return {
@@ -72,7 +73,7 @@ function bandHandlers(chrome: WindowChrome | undefined) {
   };
 }
 
-function WindowControls() {
+export function WindowControls() {
   const ws = useWs();
   return <Show when={ws.chrome} fallback={<Show when={ws.store.mode === "demo"}><div class="win" aria-hidden="true">
     <button tabindex="-1"><I n="minus" s={14} /></button>
@@ -94,11 +95,9 @@ export function TitleBar() {
     return r.name === "home" ? "Home" : r.name === "inbox" ? "Inbox" : r.name === "archive" ? "Archive" : r.name === "new" ? (r.kind === "sprint" ? "New sprint" : "New task") : r.name === "settings" ? "Settings" : r.name === "notfound" ? "Not found" : "";
   };
   const areaName = () => { const r = route(); return r.name !== "project" ? null : r.view === "code" ? "Code" : r.view === "git" || r.view === "worktrees" ? "Git" : null; };
-  const connection = () => !ws.store.ready() && ws.store.connection().state === "connecting"
-    ? { text: "Connecting", tone: "st-idle" } : ws.machine().connection === "connected"
-    ? { text: "Connected", tone: "st-ok" } : { text: "Offline", tone: "st-idle" };
-  return <header class="titlebar" {...bandHandlers(ws.chrome)}>
-    <button class="ib panel-t tb-toggle" aria-label="Sidebar" aria-pressed={!ws.panels.sidebarHidden()} onClick={() => ws.panels.toggleSidebar()}><I n="panel-left" /></button>
+  const connection = () => ws.machine().connection === "connected" ? { text: "Connected", tone: "st-ok" } : { text: "Offline", tone: "st-idle" };
+  return <header ref={revealCutIn} class="titlebar" {...bandHandlers(ws.chrome)}>
+    <button class="ib panel-t tb-toggle" aria-label="Sidebar" aria-pressed={ws.panels.sidebarShown()} onClick={() => ws.panels.toggleSidebar()}><I n="panel-left" /></button>
     <div class="tb-side">
       <button class="machine" popovertarget="m-machine">
         <I n={ws.machine().kind === "local" ? "laptop" : "server"} /><span class="trunc">{ws.machine().name}</span>
@@ -124,14 +123,14 @@ export function TitleBar() {
         </Switch>
       </div>
       <Show when={ctx.view()}>{v => <BranchChip view={v()} />}</Show>
-      <Show when={ws.store.ready() && route().name === "home"}><Facts /></Show>
+      <Show when={route().name === "home"}><Facts /></Show>
       <Show when={route().name === "archive"}><ArchiveFacts /></Show>
       <Show when={route().name === "project" && !areaName() && ctx.summary()}>{s => <>
-        <span class="mono faint trunc" style={{ "margin-left": "4px" }}>{s().project.repository}</span>
-        <Show when={s().project.defaultBranch}><span class="chip"><I n="branch" s={12} /><span class="mono">{s().project.defaultBranch}</span></span></Show>
+        <span class="mono faint trunc tb-repo" style={{ "margin-left": "4px" }}>{s().project.repository}</span>
+        <Show when={s().project.openBranch}><span class="chip branch-chip" aria-label={`Current branch: ${s().project.openBranch}`} style={{ "max-width": "194px" }}><I n="branch" s={12} /><Whole class="mono" text={s().project.openBranch} /></span></Show>
       </>}</Show>
       <span class="grow"></span>
-      <div class="tb-actions"><Show when={ws.store.ready()}>
+      <div class="tb-actions">
         <Show when={ctx.view()} fallback={<Show when={ctx.sprint()} fallback={<Show when={route().name === "archive"} fallback={<>
           <Show when={areaName() === "Code"}><button class="btn btn-line" onClick={() => ws.setCodeLeft("search")}><I n="search" s={14} />Search</button></Show>
           <Show when={areaName() === "Git" && ctx.summary()}>{s => <button class="btn btn-line" {...ws.needs("create_branch")} onClick={() => ws.open({ kind: "branch", projectId: s().project.id })}><I n="branch" s={14} />New branch</button>}</Show>
@@ -141,7 +140,7 @@ export function TitleBar() {
           </span></Show>
           <Show when={route().name === "project"}><button class="ib" popovertarget="m-project" aria-label="Project actions"><I n="more" /></button></Show>
         </>}><DeleteArchive /></Show>}>{s => <SprintActions sprint={s()} tab={(route() as Extract<Route, { name: "sprint" }>).tab} />}</Show>}>{v => <TaskActions view={v()} onMenu={el => ws.openTaskMenu(v().id, el)} />}</Show>
-      </Show></div>
+      </div>
       <div class="tb-fixed">
         {ws.demo?.chip()}
         <button class="ib panel-t" classList={{ "ws-hide": !ws.terminalAvailable() }} aria-label="Terminal"
@@ -214,12 +213,17 @@ function SidebarUsage() {
 function SidebarFoot() {
   const ws = useWs();
   const route = () => ws.router.route();
-  return <div class="sb-foot">
-    <button class="btn btn-sm" {...ws.needs("add_project")} onClick={() => ws.open({ kind: "add-project" })}><I n="folder-plus" s={14} />Add project</button>
+  // The foot has no room for words: why a project cannot be added stands in a strip right above it.
+  const why = () => ws.gate("add_project");
+  return <>
+  <Show when={why()}><Strip id="sb-why" class="sb-why">{why()}</Strip></Show>
+  <div class="sb-foot">
+    <button class="btn" {...ws.needs("add_project")} aria-describedby={why() ? "sb-why" : undefined} onClick={() => ws.open({ kind: "add-project" })}><I n="folder-plus" s={14} />Add project</button>
     <span class="grow"></span>
     <A class="ib" to={{ name: "settings", section: "appearance", machine: null }} aria-label="Settings" aria-current={route().name === "settings" ? "page" : undefined}><I n="settings" /></A>
     <button class="ib" aria-label="Help and shortcuts" onClick={() => ws.openHelp()}><I n="help" /></button>
-  </div>;
+  </div>
+  </>;
 }
 
 export function Limit(props: { row: EngineLimit }) {
@@ -265,9 +269,9 @@ function Sidebar() {
         <Keyed each={pinned()} by={v => v.id}>{v => <A class="task-row" style={{ "padding-left": "8px" }} to={{ name: "task", machine: v().machine.id, task: v().id }}><I n="pin" s={14} class="faint" /><span class="trunc">{v().task.title}</span></A>}</Keyed>
       </Show>
       <div class="sb-h"><span>Projects</span><button class="ib" style={{ width: "22px", height: "22px" }} popovertarget="m-sort" aria-label="Sort projects"><I n="chevrons-v" s={14} /></button></div>
-      <Show when={ws.store.ready()}><Show when={projects().length > 0} fallback={<p class="cap faint ws-side-empty">No projects on this machine.</p>}>
+      <Show when={projects().length > 0} fallback={<p class="cap faint ws-side-empty">{ws.store.ready() ? "No projects on this machine." : "Not loaded yet."}</p>}>
         <Keyed each={projects()} by={s => s.project.id}>{(s, i) => <ProjectRow summary={s()} n={i()} openByDefault={s().project.id === firstLive()} />}</Keyed>
-      </Show></Show>
+      </Show>
     </div>
     <SidebarUsage />
     <SidebarFoot />
@@ -349,7 +353,7 @@ export function TaskPanel(props: { view: TaskView; heading: string }) {
     <div class="ins-sec">
       <div class="ins-h"><span>Checkout</span></div>
       <dl class="kv">
-        <dt>Type</dt><dd>{task().checkout.kind === "worktree" ? "Worktree" : "Main checkout"}</dd>
+        <dt>Type</dt><dd>{task().checkout.kind === "worktree" ? "Worktree" : "Project folder"}</dd>
         <Show when={task().checkout.branch}><dt>Branch</dt><dd class="mono">{task().checkout.branch}</dd></Show>
         <Show when={task().checkout.kind === "worktree"}><dt>Path</dt><dd class="mono">{(task().checkout as { path: string }).path}</dd></Show>
         <Show when={props.view.target}><dt>{sameBranch(task(), props.view.target) ? "Target branch" : "Merge into"}</dt><dd class="mono">{props.view.target}</dd></Show>
@@ -405,7 +409,7 @@ export function Inspector() {
   const repoArea = () => { const r = route(); return r.name === "project" && ["code", "git", "worktrees"].includes(r.view ?? "") && !!repoOf(ws.store.state(), r.project); };
   // A component: called with the task, the button was redrawn every time the task moved on.
   const Open = (p: { v: TaskView }) => <div class="ins-sec"><A class="btn btn-line ws-wide" to={{ name: "task", machine: p.v.machine.id, task: p.v.id }}>Open task<I n="arrow-right" s={14} /></A></div>;
-  return <aside class="inspector" aria-label="Inspector">
+  return <aside ref={revealCutIn} class="inspector" aria-label="Inspector">
     <Switch fallback={<MachinePanel />}>
       <Match when={ctx.view() && route().name === "task"}><TaskInspector id={ctx.view()!.id} pick={(route() as { worker?: string }).worker ?? null} /></Match>
       <Match when={selected()}>{v => <><TaskPanel view={v()} heading="Selected task" /><Open v={v()} /></>}</Match>
@@ -467,10 +471,10 @@ export function Terminal() {
     const repo = !v && s ? repoOf(ws.store.state(), s.project.id) : null;
     if (repo && r.name === "project" && r.checkout) {
       const c = defaultCheckout(repo, r.checkout);
-      return `${c.path} (${c.kind === "main" ? "main checkout" : "worktree"}, ${c.branch})`;
+      return `${c.path} (${c.kind === "main" ? "project folder" : "worktree"}, ${c.branch})`;
     }
-    if (v) return `${v.task.checkout.kind === "worktree" ? `${(v.task.checkout as { path: string }).path} (worktree` : `${v.project.repository} (main checkout`}, ${v.task.checkout.branch})`;
-    return s ? `${s.project.repository} (main checkout, ${s.project.openBranch})` : "";
+    if (v) return `${v.task.checkout.kind === "worktree" ? `${(v.task.checkout as { path: string }).path} (worktree` : `${v.project.repository} (project folder`}, ${v.task.checkout.branch})`;
+    return s ? `${s.project.repository} (project folder, ${s.project.openBranch})` : "";
   };
   return <section class="terminal" aria-label="Terminal">
     <div class="term-h">

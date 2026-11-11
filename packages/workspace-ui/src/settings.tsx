@@ -1,26 +1,28 @@
-import { createEffect, createMemo, createSignal, For, Match, onCleanup, Show, Switch } from "solid-js";
+import { createEffect, createMemo, createSignal, For, Match, onCleanup, Show, Switch, useContext } from "solid-js";
 import { CONNECTION_ENGINE, DEFAULT_WORKTREE_ROOT, engineLabel, ENGINES, LANGUAGES, type EngineKey, type Machine } from "@cortex/workspace-domain";
 import type { ThemePref } from "./theme";
 import { sizeText } from "./archive-model";
 import { useWs } from "./ctx";
+import { ScreenActive } from "./freshness";
 import { A, I, MenuItem, NameEdit, Pop } from "./kit";
+import { Page as Frame, revealCutIn } from "./layout";
 import { Orchestration, useReadOnly } from "./orchestration";
 import type { Route } from "./router";
 import { clock, dayClock, engineLimits, plainVersion, projectsOn } from "./selectors";
 import { HELP } from "./orch-help";
-import { Adv, Hint, Pick, SaveBar, Seg, Srow, Stepper, Sw } from "./settings-kit";
+import { Adv, Hint, Pick, SaveBar, Seg, SetH, Srow, Stepper, Sw } from "./settings-kit";
 import { useDraft } from "./settings-state";
 import { Updates } from "./maintenance";
 import { duration } from "./session-model";
 import { VoiceSettings } from "./voice-settings";
 
-const Page = (props: { title: string; lead: string; children: unknown; bar?: unknown }) => <>
-  <div class="set-main"><div class="set-in">
+/** A settings page: its title and lead, its sections, and its save bar pinned under it. Only the page scrolls. */
+const Page = (props: { title: string; lead: string; children: unknown; bar?: unknown }) => <Frame class="l-work set-page" scroll="none" foot={props.bar as never}>
+  <div class="set-main" ref={revealCutIn}><div class="set-in">
     <div><h1 class="set-title">{props.title}</h1><p class="set-lead">{props.lead}</p></div>
     {props.children as never}
   </div></div>
-  {props.bar as never}
-</>;
+</Frame>;
 
 const THEMES: { id: ThemePref; label: string; icon: string }[] = [{ id: "system", label: "System", icon: "monitor" }, { id: "light", label: "Light", icon: "sun" }, { id: "dark", label: "Dark", icon: "moon" }];
 /** The only place the theme changes. */
@@ -39,8 +41,10 @@ function Appearance() {
   </Page>;
 }
 
-const SHORTCUTS: [string, string][] = [["New task", "Ctrl+N"], ["New sprint", "Ctrl+Shift+N"], ["Search and actions", "Ctrl+K"], ["Inbox", "Ctrl+I"], ["Sidebar", "Ctrl+B"], ["Inspector", "Ctrl+Alt+B"], ["Terminal", "Ctrl+J"], ["Stop task", "Ctrl+."], ["Queue message", "Ctrl+Enter"]];
-const Shortcuts = () => <Page title="Shortcuts" lead="Close, Cancel, Delete and Merge have no shortcut on purpose.">
+const SHORTCUTS: [string, string][] = [["New task", "Ctrl+N"], ["New sprint", "Ctrl+Shift+N"], ["Search and actions", "Ctrl+K"], ["Inbox", "Ctrl+I"], ["Sidebar", "Ctrl+B"], ["Inspector", "Ctrl+Alt+B"], ["Terminal", "Ctrl+J"], ["Stop task", "Ctrl+."], ["Send a message, as Send now or Queue shows", "Enter"], ["New line in a message", "Shift+Enter"], ["New tab", "Ctrl+T"], ["Close tab", "Ctrl+W"], ["Next tab", "Ctrl+Tab"], ["Previous tab", "Ctrl+Shift+Tab"], ["Go to tab", "Ctrl+1 to Ctrl+9"],
+  ["Chat or plan, in a sprint", "Ctrl+\\"], ["Search the graph", "/ or Ctrl+F"], ["Full view of the graph", "E"], ["Fit the graph, fit the matches", "F, Shift+F"],
+  ["Zoom the graph", "+, -, 0"], ["Pan the graph", "Ctrl+Arrow keys"], ["Collapse a layer", "C"], ["Minimap", "M"], ["Direct links or the whole chain", "T"]];
+const Shortcuts = () => <Page title="Shortcuts" lead="Close task, Cancel, Delete and Merge have no shortcut on purpose. While you type in a terminal, Ctrl+T and Ctrl+W stay with the shell.">
   <div class="surface"><For each={SHORTCUTS}>{([what, keys]) => <div class="srow ws-short"><span class="t ws-w400">{what}</span><span class="kbd ws-kbd">{keys}</span></div>}</For></div>
 </Page>;
 
@@ -51,7 +55,7 @@ function Machines() {
   const count = (m: Machine) => projectsOn(ws.store.index(), m.id).length;
   const reconnect = (m: Machine) => ws.demo ? ws.demo.reconnect(m.id) : void ws.store.reload();
   return <Page title="Machines" lead="A machine is a running copy of this app. Projects live on a machine. You work on one at a time, while Inbox and Archive cover them all.">
-    <div class="set-h">{list().length} machine{list().length === 1 ? "" : "s"}<span class="r"><button class="btn btn-primary" {...ws.needs("pair_machine")} onClick={() => ws.open({ kind: "add-machine" })}><I n="plus" s={14} />Add remote machine…</button></span></div>
+    <SetH title={<>{list().length} machine{list().length === 1 ? "" : "s"}</>}><button class="btn btn-primary" {...ws.needs("pair_machine")} onClick={() => ws.open({ kind: "add-machine" })}><I n="plus" s={14} />Add remote machine…</button></SetH>
     <div class="surface"><For each={list()}>{m => <div class="mcard">
       <span class="mi2"><I n={machineIcon(m)} /></span>
       <span class="ws-free"><span class="tt">{m.name}</span><span class="ds">
@@ -92,7 +96,7 @@ function Overview() {
       <Show when={m().diskMb !== null}><Srow t="Disk used" d="Database and saved reports."><A class="lnk" to={{ name: "settings", section: "storage", machine: m().id }}>{sizeText(m().diskMb!)}</A></Srow></Show>
       <Show when={limits().length > 0}><Srow t="Engine limits" d="Used this week."><A class="lnk" to={{ name: "settings", section: "connections", machine: m().id }}>{limits().map(l => `${l.label} ${l.usedPercent}%`).join(", ")}</A></Srow></Show>
     </div>
-    <div class="set-h">Open machine settings</div>
+    <SetH title="Open machine settings" />
     <div class="two">
       <A class="rc" to={{ name: "settings", section: "orchestration", machine: m().id }}><span><span class="t">Orchestration</span><span class="d">Models, effort, access and routing for new tasks</span></span></A>
       <A class="rc" to={{ name: "settings", section: "storage", machine: m().id }}><span><span class="t">Storage and archive</span><span class="d">{m().retentionDays} days retention, {m().autoArchiveDays} days before auto archive</span></span></A>
@@ -112,13 +116,13 @@ function Connections() {
   const setupNote = (e: EngineKey) => { const s = m().config.setup[e]; return [setupText[s.status], s.automatic ? "automatic setup on" : "", s.reason ?? "", s.autoConnectDisabled ? "automatic connection off" : ""].filter(Boolean).join(", "); };
   const enableOpenCode = () => ws.open({ kind: "prompt", title: "Enable OpenCode", label: "Connection name", value: "OpenCode", action: "Enable", hint: "OpenCode is never downloaded. It uses the one on this machine.", go: name => ws.run({ type: "enable_opencode", machineId: m().id, name }).then(r => r.ok) });
   return <Page title="Engine connections" lead="How this machine reaches each engine and how much of their limits is used. Secrets are never shown.">
-    <div class="set-h">Engines: download and connect<Hint text={HELP.engineSetup} label="engine setup" /></div>
+    <SetH title="Engines: download and connect"><Hint text={HELP.engineSetup} label="engine setup" /></SetH>
     <div class="surface"><For each={ENGINES}>{e => <Srow t={e.label} d={setupNote(e.id)}>
       <Show when={e.id === "opencode"} fallback={<Show when={m().config.setup[e.id].status === "not_downloaded"}><button class="btn btn-line btn-sm" aria-disabled={off() ? "true" : undefined} data-why={off()} {...ws.needs("download_engine")} onClick={guard(() => ws.run({ type: "download_engine", machineId: m().id, engine: e.id }))}>Download engine</button></Show>}>
         <Show when={m().config.setup.opencode.status !== "connected"}><button class="btn btn-line btn-sm" aria-disabled={off() ? "true" : undefined} data-why={off()} {...ws.needs("enable_opencode")} onClick={guard(enableOpenCode)}>Enable OpenCode…</button></Show>
       </Show>
     </Srow>}</For></div>
-    <div class="set-h">Connections<Hint text={HELP.connections} label="connections" /><span class="r"><button class="btn btn-line btn-sm" aria-disabled={off() ? "true" : undefined} data-why={off()} {...ws.needs("add_connection")} onClick={guard(() => ws.open({ kind: "add-connection" }))}><I n="plus" s={12} />Add connection…</button></span></div>
+    <SetH title="Connections"><Hint text={HELP.connections} label="connections" /><button class="btn btn-line btn-sm" aria-disabled={off() ? "true" : undefined} data-why={off()} {...ws.needs("add_connection")} onClick={guard(() => ws.open({ kind: "add-connection" }))}><I n="plus" s={12} />Add connection…</button></SetH>
     <Show when={waiting().length > 0}><div class="note-box"><I n="alert" s={14} class="st-warn" /><span>To finish setup, sign in to {waiting().map(c => c.label).join(", ")} on this machine, then press Check.</span></div></Show>
     <div class="surface"><div class="gt">
       <div class="gr crow th"><span>Connection</span><span>State</span><span></span><span></span></div>
@@ -134,11 +138,11 @@ function Connections() {
         </Pop>
       </div>}</For>
     </div></div>
-    <A class="lnk" to={{name:"settings", section:"orchestration", machine:m().id, page:"models"}}>View connected engine models and observed context</A>
+    <A class="lnk" to={{name:"settings", section:"orchestration", machine:m().id, page:"models"}}>Engine models and observed context</A>
     <For each={m().connections}>{c => <Adv id={`conn-${c.id}`} label={`Details of ${c.label}`}><div class="surface ws-pad ws-kv">
       <For each={[["Engine", engineLabel(CONNECTION_ENGINE[c.engine])], ["Provider", c.detail.provider], ["Sign-in", c.detail.authMode], ["Key kind", c.detail.keyKind], ["Endpoint", c.detail.endpoint], ["Launch command", c.detail.launchCommand], ["Credential", c.detail.credential], ["Qualified", c.detail.qualified ? "Yes" : "No"], ["Created", c.detail.createdAt], ["Updated", c.detail.updatedAt]].filter(([, v]) => v)}>{([k, v]) => <><span class="cap muted">{k}</span><span class="cap mono trunc">{v}</span></>}</For>
     </div></Adv>}</For>
-    <div class="set-h">Limits</div>
+    <SetH title="Limits" />
     <Show when={limits().rows.some(r => r.usedPercent !== null)} fallback={<div class="surface ws-empty">{limits().note}</div>}>
       <div class="surface"><div class="gt">
         <div class="gr urow th"><span>Engine</span><span>Window</span><span>Used</span><span>Resets</span><span>Basis</span></div>
@@ -160,7 +164,7 @@ function Worktrees() {
   const d = useDraft<string>({ key: () => `${m().id}:worktrees`, saved: () => m().worktreeRoot, name: () => "Worktrees", where: () => m().name, commit: path => ws.run({ type: "set_worktree_root", machineId: m().id, path }) });
   const defaultRoot = () => m().defaultWorktreeRoot ?? (ws.store.mode === "demo" ? DEFAULT_WORKTREE_ROOT : undefined);
   const example = () => `${d.value().replace(/\/+$/, "")}/<project-key>/<task-id>`;
-  return <Page title="Worktrees" lead="Where this machine keeps the separate checkouts of tasks that do not run in the main checkout." bar={<SaveBar d={d} />}>
+  return <Page title="Worktrees" lead="Where this machine keeps the separate checkouts of tasks that do not run in the project folder." bar={<SaveBar d={d} />}>
     <div class="surface">
       <Srow t="Folder" d="New worktrees go here, one folder per project. Existing worktrees stay where they are.">
         <input class="inp mono ws-path" aria-label="Worktree folder" value={d.value()} disabled={!!off()} onInput={e => d.set(e.currentTarget.value)} />
@@ -178,7 +182,7 @@ function Storage() {
   const total = () => m().storage.reduce((sum, s) => sum + s.mb, 0);
   const last = () => m().cleanup;
   return <Page title="Storage and archive" lead="How long this machine keeps finished work, and what it uses." bar={<SaveBar d={d} />}>
-    <div class="set-h">Archive rules</div>
+    <SetH title="Archive rules" />
     <div class="surface">
       <Srow t="Auto archive" d="Tasks move from Done to Archive after this many days. Unmerged work asks you first."><Stepper label="Auto archive" value={d.value().auto} suffix="days" min={1} max={90} disabled={off()} onChange={auto => d.set({ ...d.value(), auto })} /></Srow>
       <Srow t="Retention" d="Archived tasks are cleaned up after this many days. 30 by default, set per machine."><Stepper label="Retention" value={d.value().retention} suffix="days" min={1} max={365} disabled={off()} onChange={retention => d.set({ ...d.value(), retention })} /></Srow>
@@ -188,10 +192,10 @@ function Storage() {
       </Srow>
     </div>
     <Show when={m().storage.length > 0}>
-      <div class="set-h">Space used<span class="r"><span class="cap muted tnum">{sizeText(total())} in total</span></span></div>
+      <SetH title="Space used"><span class="cap muted tnum">{sizeText(total())} in total</span></SetH>
       <div class="surface ws-pad"><For each={m().storage}>{s => <div class="dbar"><span class="trunc">{s.label}</span><span class="bar"><i style={{ width: `${Math.round(s.mb / total() * 100)}%` }}></i></span><span class="tnum muted ws-right">{sizeText(s.mb)}</span></div>}</For></div>
     </Show>
-    <div class="set-h">Old tasks outside the Archive</div>
+    <SetH title="Old tasks outside the Archive" />
     <div class="surface"><Srow t="Clear old tasks" d="Pick a date, preview what would go, then confirm. Never runs by itself."><button class="btn btn-line btn-sm" aria-disabled={off() ? "true" : undefined} data-why={off()} {...ws.needs("clear_old")} onClick={() => { if (!off()) ws.open({ kind: "clear-old" }); }}>Clear old tasks…</button></Srow></div>
   </Page>;
 }
@@ -226,8 +230,9 @@ function RemoteAccess() {
   const m = () => ws.machine(), off = useReadOnly();
   const access = () => m().remoteAccess;
   const [left, setLeft] = createSignal(PAIR_SECONDS);
+  const shown = useContext(ScreenActive);
   createEffect(() => {
-    if (!access().allowed) return;
+    if (!access().allowed || !shown()) return;
     const timer = setInterval(() => setLeft(s => Math.max(0, s - 1)), 1000);
     onCleanup(() => clearInterval(timer));
   });
@@ -239,19 +244,43 @@ function RemoteAccess() {
       <Show when={access().allowed}><Srow t="Server connector" d="Relays the connection. It cannot read task content on its own."><span class="st st-ok"><I n="check-circle" s={12} />Reachable</span></Srow></Show>
     </div>
     <Show when={access().allowed}>
-      <div class="set-h">Pairing code</div>
+      <SetH title="Pairing code" />
       <div class="pair">7KQ2-M9XD</div>
       <div class="cap faint"><Show when={left() > 0} fallback={<>This code expired. <button class="lnk" onClick={() => setLeft(PAIR_SECONDS)}>Make a new one</button></>}>Expires in {time()}. Enter it on the other machine, then compare the fingerprints on both sides.</Show></div>
     </Show>
-    <div class="set-h">Paired devices<Show when={access().devices.length > 0}><span class="r"><button class="btn btn-line btn-sm" aria-disabled={off() ? "true" : undefined} {...ws.needs("revoke_device")} onClick={() => { if (!off()) revoke(null, ""); }}>Revoke all…</button></span></Show></div>
+    <SetH title="Paired devices"><Show when={access().devices.length > 0}><button class="btn btn-line btn-sm" aria-disabled={off() ? "true" : undefined} {...ws.needs("revoke_device")} onClick={() => { if (!off()) revoke(null, ""); }}>Revoke all…</button></Show></SetH>
     <Show when={access().devices.length > 0} fallback={<div class="surface ws-empty">No device is paired with this machine.</div>}>
       <div class="surface"><For each={access().devices}>{d => <Srow t={d.name} d={`Paired ${d.paired}${d.lastSeen ? `, last seen ${d.lastSeen}` : ""}.`}><button class="btn btn-line btn-sm" aria-disabled={off() ? "true" : undefined} {...ws.needs("revoke_device")} onClick={() => { if (!off()) revoke(d.id, d.name); }}>Revoke…</button></Srow>}</For></div>
     </Show>
   </Page>;
 }
 
+/**
+ * Names each cell of a settings table after its column, so a table too narrow for its columns (a phone) can show its rows as
+ * labelled lines (workspace.css, container gtable). The header row stays the one source of the names; the matrix of tool
+ * access keeps its columns and scrolls in its own box.
+ */
+function labelTableCells(root: HTMLElement) {
+  let frame = 0;
+  const apply = () => {
+    frame = 0;
+    for (const table of root.querySelectorAll<HTMLElement>(".gt:not(.ws-matrix)")) {
+      const head = table.querySelector<HTMLElement>(":scope > .gr.th:not(.ws-group)");
+      if (!head) continue;
+      // A column's name is its own words, without the help or lock control beside them.
+      const names = [...head.children].map(c => [...c.childNodes].filter(n => !(n instanceof Element && n.matches("button, [popover], .i"))).map(n => n.textContent ?? "").join("").trim());
+      for (const row of table.querySelectorAll<HTMLElement>(":scope > .gr:not(.th)"))
+        [...row.children].forEach((cell, i) => { const name = names[i] ?? ""; if (cell.getAttribute("data-label") !== name) cell.setAttribute("data-label", name); });
+    }
+  };
+  const watch = new MutationObserver(() => { if (!frame) frame = requestAnimationFrame(apply); });
+  watch.observe(root, { childList: true, subtree: true });
+  apply();
+  onCleanup(() => { watch.disconnect(); if (frame) cancelAnimationFrame(frame); });
+}
+
 export function SettingsPage(props: { route: Extract<Route, { name: "settings" }> }) {
-  return <div class="set-wrap"><Switch>
+  return <div class="set-wrap" ref={labelTableCells}><Switch>
     <Match when={props.route.section === "appearance"}><Appearance /></Match>
     <Match when={props.route.section === "voice"}><VoiceSettings /></Match>
     <Match when={props.route.section === "updates"}><Updates /></Match>

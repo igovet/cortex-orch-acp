@@ -1,0 +1,123 @@
+/* The layout layer: the nine primitives of layout.tsx and the only sanctioned way to build bars, headings, rows, action
+   groups, dialog footers and bottom bars. Layout only: colour, type and radii stay in the design tokens.
+   The older sheets and the element resets are unlayered, so they outrank a layer. Where one of them sets the same property,
+   the declaration here is !important: an important declaration in a layer outranks every older rule, whatever its
+   specificity. Everything else stays plain, and a surface adjusts a primitive through the variables below, not by overriding it. */
+@layer layout {
+  :root {
+    --toolbar-h: 44px; --toolbar-h-sm: 36px; --bar-h: 48px; --bar-h-dlg: 52px; --bar-h-card: 34px;
+    --section-h: 32px; --ctl-h: 28px; --ctl-h-dlg: 32px; --strip-min: 36px; --strip-max: 56px; --inset: 12px;
+  }
+
+  /* 1. Page: head, status lane, body, foot. Only the body scrolls, and it keeps its track so nothing moves when content grows. */
+  .l-page { display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: auto auto minmax(0, 1fr) auto; min-width: 0; min-height: 0; height: 100%; container: page / inline-size; }
+  .l-page-head { grid-row: 1; min-width: 0; }
+  .l-page-status { grid-row: 2; min-width: 0; }
+  .l-page-body { grid-row: 3; min-width: 0; min-height: 0; overflow-x: hidden; overflow-y: scroll; }
+  .l-page-body[data-scroll="sideways"] { overflow-x: auto; overflow-y: hidden; }
+  .l-page-body[data-scroll="none"] { overflow: hidden; }
+  .l-page-foot { grid-row: 4; min-width: 0; }
+  /* A work area hands its whole body to what it shows: the board's columns, the list, or a repository pane. */
+  .l-work > .l-page-body { display: flex; flex-direction: column; }
+
+  /* 2. Toolbar: a fixed height, three zones, nothing wraps. It gives up items by declared tier, never by growing. */
+  .l-toolbar { flex: none; display: flex; align-items: center; gap: 12px; height: var(--toolbar-h); padding-inline: 12px; min-width: 0; overflow: hidden; border-bottom: 1px solid var(--line); white-space: nowrap; }
+  .l-toolbar[data-bar="toolbar-sm"] { height: var(--toolbar-h-sm); }
+  .l-z-start, .l-z-end { display: flex; align-items: center; gap: 8px; flex: none; min-width: 0; }
+  .l-z-mid { display: flex; align-items: center; gap: 8px; flex: 1 1 0; min-width: 0; overflow: hidden; }
+  .l-z-start:empty, .l-z-end:empty { display: none; }
+
+  /* 3. ActionBar: left group, reason slot, actions. The same component in a card, at a page's foot and in a dialog. */
+  .l-bar { flex: none; display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; column-gap: 12px; height: var(--bar-h); padding-inline: 12px; min-width: 0; overflow: hidden; }
+  .l-bar[data-bar="dialog"] { height: var(--bar-h-dlg); padding-inline: 16px; --ctl-h: var(--ctl-h-dlg); border-top: 1px solid var(--line); }
+  .l-bar[data-bar="card"] { height: var(--bar-h-card); padding-inline: 10px 6px; column-gap: 8px; --ctl-h: 24px; }
+  .l-bar-start, .l-bar-actions { display: flex; align-items: center; gap: 8px; min-width: 0; white-space: nowrap; }
+  .l-bar-actions { justify-content: flex-end; }
+  /* On a phone a left group and the actions do not fit on one line, and a group shrunk below its words runs under the
+     actions. There the group takes its own line, and the reason and the actions share the line under it. */
+  @media (max-width: 559.98px) {
+    .l-bar:has(> .l-bar-start:not(:empty)) { grid-template-columns: minmax(0, 1fr) auto; grid-template-rows: auto auto; row-gap: 6px; height: auto; min-height: var(--bar-h); padding-block: 8px; }
+    .l-bar:has(> .l-bar-start:not(:empty)) > .l-bar-start { grid-column: 1 / -1; overflow: hidden; }
+    .l-bar > .l-bar-start:empty { display: none; }
+    .l-bar:has(> .l-bar-start:empty) { grid-template-columns: minmax(0, 1fr) auto; }
+  }
+
+  /* 4. Action: inside a bar every control has one height in every state, and nothing can grow it. */
+  :is(.l-toolbar, .l-bar) :is(.btn, .ib, .chip, .pick, .sel, .ptab, .tab, .scope-btn), .l-action { height: var(--ctl-h) !important; flex: none !important; white-space: nowrap !important; flex-wrap: nowrap !important; }
+  :is(.l-toolbar, .l-bar) .ib, .ib.l-action { width: var(--ctl-h) !important; }
+  :is(.l-toolbar, .l-bar) .seg { height: var(--ctl-h) !important; flex: none !important; white-space: nowrap !important; }
+  :is(.l-toolbar, .l-bar) .seg > * { height: 100% !important; flex: none !important; white-space: nowrap !important; }
+  .l-act-slot { min-width: 116px; }
+  /* The one control that gives up width for what stands beside it: a scope or checkout name, cut with an ellipsis. */
+  .l-toolbar .l-scope { flex: 0 1 auto !important; min-width: 140px; max-width: 38cqw; overflow: hidden; }
+  /* A short status in a toolbar: its label stays, a long title shortens and leads to the whole of it. */
+  .l-fact { display: flex; align-items: center; gap: 5px; flex: 0 1 auto; min-width: 0; font-size: var(--t-cap); color: var(--fg-2); }
+  .l-fact-n { flex: none; }
+  .l-fact b { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-weight: 500; color: var(--fg); }
+  .l-fact .lab { flex: none; color: var(--fg-3); }
+  a.l-fact:hover b { text-decoration: underline; text-underline-offset: 2px; }
+  /* A branch name inside a control gives up width first, and only the name shortens. */
+  .l-branch { min-width: 0; max-width: 24ch; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+  /* Text that may be cut, such as a path: one line, and a press shows the whole of it. */
+  .l-whole { display: inline-block; min-width: 0; max-width: 100%; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; vertical-align: bottom; }
+  [data-whole][role="button"] { cursor: pointer; }
+  /* Everywhere, not only in a bar: a control that cannot be used still looks like a control. A busy one keeps its own fill. */
+  .btn:is([aria-disabled="true"], [disabled]):not([data-busy]) { opacity: 1 !important; color: var(--fg-3) !important; }
+  :is(.btn-primary, .btn-danger):is([aria-disabled="true"], [disabled]):not([data-busy]) { background: var(--bg-input) !important; box-shadow: inset 0 0 0 1px var(--line-ctl) !important; }
+
+  /* 5. ReasonSlot: one per bar, at most two lines, which always fit inside the bar. */
+  .l-reason { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; min-width: 0; text-align: end; font-size: var(--t-cap); line-height: 16px; color: var(--fg-2); overflow-wrap: anywhere; }
+  /* The whole reason, opened by a press or by keyboard focus, never by hover. */
+  .l-why-tip { position: fixed; margin: 0; width: max-content; min-width: 0 !important; max-width: min(360px, calc(100vw - 16px)); max-height: calc(100vh - 16px); overflow: hidden; padding: 8px 10px !important; font-size: var(--t-cap) !important; line-height: 16px; color: var(--fg); white-space: normal; overflow-wrap: anywhere; pointer-events: none; }
+
+  /* 6. SectionHead: the only heading inside a panel, on the same inset as its rows. */
+  .l-sect { display: flex; align-items: center; gap: 8px; height: var(--section-h); padding-inline: var(--inset); min-width: 0; }
+  .l-sect-t { flex: 1 1 auto; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: var(--t-sec); line-height: 18px; font-weight: 500 !important; }
+  .l-sect > .n { flex: none; font-size: var(--t-cap); color: var(--fg-3); font-variant-numeric: tabular-nums; }
+  .l-sect-end { display: flex; align-items: center; gap: 6px; flex: none; }
+  .l-sect-lead { display: flex; align-items: center; gap: 6px; flex: none; margin-inline-start: -4px; }
+
+  /* 7. Strip: at most two lines of text, its one action pinned right. The lane under a page head shows two and folds the rest. */
+  .l-strip { flex: none; display: grid; grid-template-columns: 14px minmax(0, 1fr) auto; align-items: center; column-gap: 8px; min-height: var(--strip-min); max-height: var(--strip-max); padding: 9px 12px; border-bottom: 1px solid var(--line); font-size: var(--t-sec); line-height: 18px; overflow: hidden; }
+  .l-strip[data-tone="fail"] { background: var(--danger-tint); }
+  .l-strip[data-tone="warn"] { background: var(--warn-tint); }
+  .l-strip[data-tone="ok"] { background: var(--ok-tint); }
+  .l-strip[data-tone="info"] { background: var(--bg-raised); }
+  .l-strip-i { display: flex; align-items: center; justify-content: center; }
+  .l-strip-t { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; min-width: 0; overflow-wrap: anywhere; }
+  .l-strip-a { display: flex; align-items: center; gap: 8px; flex: none; white-space: nowrap; }
+  .l-lane[data-open] { max-height: calc(var(--strip-max) * 3); overflow-y: auto; }
+  .l-lane-more { display: block; height: 24px; padding-inline: 34px 12px !important; font-size: var(--t-cap); line-height: 24px; color: var(--fg-2); }
+
+  /* 8. Row: lead, one-line title, up to two detail lines, right-aligned end. It grows only by text lines. */
+  .l-row { display: grid; grid-template-columns: var(--row-lead, 16px) minmax(0, 1fr) auto; column-gap: var(--row-gap, 8px); align-items: start; min-width: 0; padding-inline: var(--row-pad-l, var(--inset)) var(--row-pad-r, var(--inset)) !important; }
+  .l-row-line { align-items: center; height: var(--row-h, 28px); }
+  .l-row-lead { grid-column: 1; grid-row: 1; display: flex; align-items: center; justify-content: center; }
+  .l-row:not(.l-row-line) > .l-row-lead { height: 20px; }
+  .l-row-t { grid-column: 2; grid-row: 1; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+  .l-row[data-open] > .l-row-t { white-space: normal; overflow-wrap: anywhere; }
+  .l-row-d { grid-column: 2; grid-row: 2; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; min-width: 0; color: var(--fg-3); font-size: var(--t-cap); line-height: 16px; overflow-wrap: anywhere; }
+  .l-row-d[data-open] { display: block; -webkit-line-clamp: unset; }
+  .l-row-end { grid-column: 3; grid-row: 1; display: flex; align-items: center; gap: 6px; justify-self: end; white-space: nowrap; font-size: var(--t-cap); color: var(--fg-2); }
+
+  /* 9. Region: the only inner scroller, for when something beside it must stay in view. Never inside another scroller. */
+  .l-region { min-width: 0; min-height: 0; overflow-x: hidden; overflow-y: scroll; }
+
+  /* Startup: the logo centred on the theme surface, at the same place as the static one index.html paints first.
+     Everything else is placed around that centre, so nothing that appears later can move it. */
+  .l-startup { position: fixed; inset: 0; display: grid; place-items: center; background: var(--bg-canvas); }
+  .l-startup-logo { width: 96px; height: 96px; }
+  .l-startup-logo > img { display: block; width: 96px; height: 96px; }
+  .l-startup-band { position: absolute; inset: 0 0 auto 0; display: flex; justify-content: flex-end; height: var(--titlebar-h); padding-right: 8px; -webkit-app-region: drag; }
+  .l-startup-band button { -webkit-app-region: no-drag; }
+  .l-startup-slot { position: absolute; inset: calc(50% + 64px) 0 auto; margin-inline: auto; width: min(480px, calc(100% - 48px)); display: flex; flex-direction: column; align-items: center; gap: 8px; text-align: center; font-size: var(--t-sec); line-height: 18px; color: var(--fg-2); }
+  .l-startup-why { max-height: 54px; overflow-y: auto; overflow-wrap: anywhere; font-size: var(--t-cap); color: var(--fg-3); }
+  .l-startup-notice { display: flex; flex-direction: column; gap: 4px; font-size: var(--t-cap); color: var(--fg-3); }
+  .l-startup-notice .strip { display: block; min-height: 0; padding: 0; border: 0; background: none !important; overflow-wrap: anywhere; }
+
+  /* Declared collapse order, by the width of the pane and never of the window. */
+  .l-compact-only, .l-tight-only, .l-tight-block { display: none !important; }
+  @container page (max-width: 1199.98px) { .l-roomy-only { display: none !important; } }
+  @container page (max-width: 899.98px) { .l-compact-hide { display: none !important; } .l-compact-only { display: inline-flex !important; } .l-toolbar .l-branch { max-width: 12ch; } }
+  @container page (max-width: 719.98px) { .l-tight-hide { display: none !important; } .l-tight-only { display: inline-flex !important; } .l-tight-block { display: block !important; } .ws-filter { width: 120px !important; } }
+}

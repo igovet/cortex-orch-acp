@@ -276,6 +276,40 @@ def seed_workers(project):
                 db.execute("INSERT INTO task_events (task_id, event_type, assignment_ref, dedup_key, payload_json, origin, created_at) VALUES (?,?,?,?,?,'runtime',?)", (runtime, kind, assignment, f"seed-{number}-{index}", json.dumps(payload), now))
 
 
+def registration_inert(project):
+    """Dev registration reserves only the private .cortex-dev directory and its owner.json: no store, report or engine, and no release data."""
+    dev = project / ".cortex-dev"
+    return (not (project / ".cortex").exists() and dev.is_dir() and not dev.is_symlink()
+            and sorted(item.name for item in dev.iterdir()) == ["owner.json"] and (dev / "owner.json").is_file()
+            and not (dev / "owner.json").is_symlink() and not (project / ".cortex-dev-owner.json").exists())
+
+
+# A real clipboard owner, offering exactly the targets a shape names, as a screenshot tool or a browser would.
+CLIPBOARD_FIXTURE = """import sys, gi
+from pathlib import Path
+gi.require_version("Gtk", "3.0")
+from gi.repository import Gtk, Gdk, GdkPixbuf
+pixel = GdkPixbuf.Pixbuf.new(GdkPixbuf.Colorspace.RGB, True, 8, 1, 1)
+pixel.fill(0x506070ff)
+shape = sys.argv[2].split(",")
+if shape == ["pixbuf"]:
+    Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD).set_image(pixel)
+else:
+    bodies = {"image/png": pixel.save_to_bufferv("png", [], [])[1], "image/bmp": pixel.save_to_bufferv("bmp", [], [])[1],
+              "text/html": b"<img src='https://example.invalid/shot.png'>", "text/plain": b"plain clipboard text",
+              "text/plain;charset=utf-8": b"plain clipboard text", "UTF8_STRING": b"plain clipboard text",
+              "text/uri-list": b"file:///tmp/shot.png\\r\\n", "x-special/gnome-copied-files": b"copy\\nfile:///tmp/shot.png"}
+    owner = Gtk.Invisible()
+    owner.show()
+    for info, name in enumerate(shape):
+        Gtk.selection_add_target(owner, Gdk.SELECTION_CLIPBOARD, Gdk.Atom.intern(name, False), info)
+    owner.connect("selection-get", lambda widget, data, info, time: data.set(data.get_target(), 8, bodies[shape[info]]))
+    assert Gtk.selection_owner_set(owner, Gdk.SELECTION_CLIPBOARD, Gdk.CURRENT_TIME)
+Path(sys.argv[1]).touch()
+Gtk.main()
+"""
+
+
 def outcome(step, status="passed", **details):
     if status == "passed":
         PROGRESS.update(step=step, screen=details.get("screen", PROGRESS["screen"]), passed=PROGRESS["passed"] + 1)
@@ -1244,7 +1278,7 @@ contained:br.left>=cr.left-1 && br.right<=cr.right+1,controls:[...b.querySelecto
             subprocess.run(["xdotool", "key", "--clearmodifiers", "ctrl+d"], check=True)
             wait_for(lambda: "Ready to insert" in voice_status(), "voice_stopped_without_send", 20)
             assert js("return document.querySelector('[aria-label=\"Describe the task\"]').value;") == "Typed draft"
-            assert not (project / ".cortex").exists() and not (project / ".cortex-dev").exists(), "voice_must_not_start_engine_or_save_task"
+            assert registration_inert(project), "voice_must_not_start_engine_or_save_task"
             press("Insert")
             wait_for(lambda: not js("return document.querySelector('.micbar') ? 'yes' : '';"), "voice_insert_closed")
             inserted = js("return document.querySelector('[aria-label=\"Describe the task\"]').value;")
@@ -1256,7 +1290,7 @@ contained:br.left>=cr.left-1 && br.right<=cr.right+1,controls:[...b.querySelecto
             wait_for(lambda: not js("return document.querySelector('.micbar') ? 'yes' : '';"), "voice_cancel")
             assert js("return document.querySelector('[aria-label=\"Describe the task\"]').value;") == inserted
             wait_for(lambda: subprocess.check_output(["pactl","list","short","source-outputs"],text=True).strip() == "", "voice_capture_reaped")
-            assert not (project / ".cortex").exists() and not (project / ".cortex-dev").exists()
+            assert registration_inert(project)
             # Closed native controls exercise the same real socket manager, with no test-only product route.
             bridge = query("return JSON.stringify({invoke:typeof window.__TAURI_INTERNALS__?.invoke});")
             assert bridge["invoke"] == "function", "native_invoke_not_observed"
@@ -1281,7 +1315,7 @@ contained:br.left>=cr.left-1 && br.right<=cr.right+1,controls:[...b.querySelecto
             # PTYs are owner sessions; opening one must not activate an ACP engine.
             subprocess.run(["xdotool", "key", "--clearmodifiers", "ctrl+j"], check=True)
             wait_for(lambda: js("return document.querySelector('.terminal-status')?.textContent === 'Running' ? 'yes' : '';") == "yes", "terminal_running")
-            assert not (project / ".cortex").exists() and not (project / ".cortex-dev").exists()
+            assert registration_inert(project)
             def terminal_text():
                 return js("return document.querySelector('.terminal-screen')?.textContent ?? '';")
             def shell_input(text):
@@ -1339,10 +1373,81 @@ contained:br.left>=cr.left-1 && br.right<=cr.right+1,controls:[...b.querySelecto
             click("Activate")
             wait_for(lambda: not find("Activate"), "attachment_activation")
             click("New task")
+            clipboard_script = scratch / "clipboard_fixture.py"
+            clipboard_script.write_text(CLIPBOARD_FIXTURE)
+            def own_clipboard(shape):
+                ready = scratch / ("clipboard-ready-" + str(next(sequence)))
+                owner = subprocess.Popen([sys.executable, "-B", str(clipboard_script), str(ready), shape],
+                                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+                wait_for(ready.exists, "image_clipboard_ready")
+                return owner
+            js("window.__pasteFacts = []; document.addEventListener('paste', e => window.__pasteFacts.push({types:[...e.clipboardData.types], files:e.clipboardData.files.length, items:[...e.clipboardData.items].map(i => [i.kind,i.type,!!i.getAsFile()])}), true); return 'yes';")
+            task_field = '[aria-label="Describe the task"]'
+            wait_for(lambda: js(f"return document.querySelector({json.dumps(task_field)}) ? 'yes' : ''") == "yes", "new_task_form")
+            def paste_seen(shape, field):
+                owner = own_clipboard(shape)
+                try:
+                    js("window.__pasteFacts.length = 0; return 'yes';")
+                    pointer(window_id(), *rect_of(field), "click", "1")
+                    subprocess.run(["xdotool", "key", "--clearmodifiers", "ctrl+v"], check=True)
+                    time.sleep(1.2)
+                    seen = {"facts": query("return JSON.stringify(window.__pasteFacts);"),
+                            "chips": query("return JSON.stringify([...document.querySelectorAll('.composer .ws-att')].map(e => e.textContent));"),
+                            "thumbnails": query("return JSON.stringify([...document.querySelectorAll('.composer .ws-att img')].map(e => e.naturalWidth));"),
+                            "value": query(f"return JSON.stringify(document.querySelector({json.dumps(field)}).value);"),
+                            "alert": query("return JSON.stringify([...document.querySelectorAll('.composer [role=alert]')].map(e => e.textContent));")}
+                    outcome("paste_probe", "diagnostic", shape=shape, field=field, **seen)
+                    return seen
+                finally:
+                    stop(owner)
+            def clear_form(field):
+                js(f"[...document.querySelectorAll('.composer .ws-att-x')].forEach(e => e.click()); const f = document.querySelector({json.dumps(field)}); f.value = ''; f.dispatchEvent(new Event('input', {{bubbles:true}})); return 'yes';")
+            # Every clipboard shape WebKitGTK was observed to report differently, on the form the owner reported.
+            for shape in ("pixbuf", "image/png", "image/png,text/html", "image/png,text/plain", "image/bmp"):
+                seen = paste_seen(shape, task_field)
+                if seen["chips"] != ["clipboard.png"] or seen["thumbnails"] != [1]:
+                    fault("webkitgtk_image_paste_shape", shape=shape, **seen)
+                clear_form(task_field)
+            seen = paste_seen("text/plain;charset=utf-8,UTF8_STRING", task_field)
+            if seen["chips"] or seen["value"] != "plain clipboard text" or seen["alert"]:
+                fault("webkitgtk_text_paste_kept", **seen)
+            clear_form(task_field)
+            seen = paste_seen("text/uri-list,x-special/gnome-copied-files", task_field)
+            if seen["chips"] or "no image" not in "".join(seen["alert"]):
+                fault("webkitgtk_paste_without_image_says_so", **seen)
+            clear_form(task_field)
+            outcome("webkitgtk_new_task_paste_shapes", form="New task")
+            click("Sprint")
+            sprint_field = '[aria-label="Describe the sprint"]'
+            wait_for(lambda: js(f"return document.querySelector({json.dumps(sprint_field)}) ? 'yes' : ''") == "yes", "new_sprint_form")
+            seen = paste_seen("image/png,text/html", sprint_field)
+            if seen["chips"] != ["clipboard.png"]:
+                fault("webkitgtk_sprint_paste", **seen)
+            js("document.querySelector('.composer .ws-att-x').click(); return 'yes';")
+            wait_for(lambda: js("return document.querySelector('.composer .ws-att') ? '' : 'yes';") == "yes", "sprint_remove")
+            outcome("webkitgtk_new_sprint_paste", form="New sprint", removed=True)
+            click("Task")
+            wait_for(lambda: js(f"return document.querySelector({json.dumps(task_field)}) ? 'yes' : ''") == "yes", "new_task_form_again")
+            if paste_seen("image/png", task_field)["chips"] != ["clipboard.png"]:
+                fault("webkitgtk_task_paste_kept_for_save")
             fill("Describe the task", "Explain this disposable project.")
             click("Save as draft")
             wait_for(lambda: js("return document.querySelector('.card-link') ? 'yes' : ''") == "yes", "attachment_draft")
             js("document.querySelector('.card-link').click(); return 'yes';")
+            # Read back from the service, shown in the real page, and written out through the system's save dialog.
+            wait_for(lambda: js("return document.querySelector('.brief .ws-att-open') ? 'yes' : ''") == "yes", "saved_task_attachment")
+            js("document.querySelector('.brief .ws-att-open').click(); return 'yes';")
+            wait_for(lambda: js("return document.querySelector('dialog[open] img.ws-att-big')?.naturalWidth === 1 ? 'yes' : ''") == "yes", "saved_attachment_preview")
+            saved_copy = scratch / "saved-copy.png"
+            js("[...document.querySelectorAll('dialog[open] button')].find(b => b.textContent.trim() === 'Save a copy').click(); return 'yes';")
+            time.sleep(.8)
+            subprocess.run(["xdotool", "key", "--clearmodifiers", "ctrl+a"], check=True)
+            subprocess.run(["xdotool", "type", "--clearmodifiers", "--delay", "3", "--", str(saved_copy)], check=True)
+            subprocess.run(["xdotool", "key", "--clearmodifiers", "Return"], check=True)
+            wait_for(saved_copy.exists, "saved_attachment_copy")
+            assert saved_copy.read_bytes().startswith(b"\x89PNG\r\n\x1a\n"), "saved copy is not the pasted PNG"
+            js("[...document.querySelectorAll('dialog[open] button')].find(b => b.textContent.trim() === 'Close').click(); return 'yes';")
+            outcome("attachment_saved_and_opened", surface="task page", save_dialog=True)
             click("Start")
             wait_for(lambda: text_seen("Which direction"), "attachment_question")
             (project / "expect-attachments").touch()
@@ -1368,28 +1473,11 @@ contained:br.left>=cr.left-1 && br.right<=cr.right+1,controls:[...b.querySelecto
                 wait_for(lambda: (project / "answer-resource-received").exists(), "attachment_answer_retry")
             outcome("attachment_answer_resource_received", engine="fake", multiline=True)
 
-            clipboard_script = scratch / "clipboard_fixture.py"
-            clipboard_script.write_text("""import sys, gi
-from pathlib import Path
-gi.require_version("Gtk", "3.0")
-from gi.repository import Gtk, Gdk, GdkPixbuf
-pixel=GdkPixbuf.Pixbuf.new(GdkPixbuf.Colorspace.RGB,True,8,1,1)
-pixel.fill(0x506070ff)
-clipboard=Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD)
-clipboard.set_image(pixel)
-Path(sys.argv[1]).touch()
-Gtk.main()
-""")
-            ready = scratch / "clipboard-ready"
-            clipboard = subprocess.Popen([sys.executable, "-B", str(clipboard_script), str(ready)],
-                                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+            clipboard = own_clipboard("pixbuf")
             try:
-                wait_for(ready.exists, "image_clipboard_ready")
-                js("document.addEventListener('paste', e => { window.__pasteFacts = {types:[...e.clipboardData.types], files:e.clipboardData.files.length, items:[...e.clipboardData.items].map(i => [i.kind,i.type,!!i.getAsFile()])}; }, {once:true}); return 'yes';")
                 pointer(window_id(), *rect_of('[aria-label="Message"]'), "click", "1")
                 subprocess.run(["xdotool", "key", "--clearmodifiers", "ctrl+v"], check=True)
                 time.sleep(.8)
-                outcome("clipboard_event_facts", "diagnostic", facts=query("return JSON.stringify(window.__pasteFacts ?? null);"))
                 wait_for(lambda: js("return document.querySelector('.dock .composer .ws-att') ? 'yes' : '';") == "yes", "webkitgtk_native_image_paste")
                 js("document.querySelector('.dock .composer .ws-att-x').click(); return 'yes';")
             finally:
@@ -1448,6 +1536,7 @@ Gtk.main()
             fill("Message", "Focus on durable conversation")
             press("Steer")
             wait_for(lambda: js("return document.querySelector('.timeline')?.textContent.includes('Focus on durable conversation') ? 'yes' : ''") == "yes", "attachment_steer")
+            wait_for(lambda: js("return [...document.querySelectorAll('.timeline .ws-att-open')].some(e => e.textContent.includes('drop.txt')) ? 'yes' : ''") == "yes", "sent_message_attachment_openable")
             (project / "release-stream").touch()
             wait_for(lambda: (project / "resources-received").exists(), "attachment_runtime_resource")
             outcome("attachments_native_journey", queue_edit=True, runtime_received=True, screenshots=0)
@@ -1482,8 +1571,7 @@ Gtk.main()
         loaded()
         add_project(project)
         wait_for(lambda: find("Activate"), "registered_project_visible")
-        assert not (project / ".cortex").exists() and not (project / ".cortex-dev").exists()
-        assert (project / ".cortex-dev-owner.json").is_file()
+        assert registration_inert(project)
         outcome("registration_is_inert", channel="dev")
         audit("project before activation", "dark")
         click("Activate")
@@ -1613,8 +1701,9 @@ Gtk.main()
             popovers(f"worker {href.rsplit('/', 1)[-1]}")
         open_link(next(href for href in follow(".wlist a.wcard") if href.endswith("/a-build")))
         time.sleep(0.2)
-        open_link(follow(".d-title a.btn")[0])
-        time.sleep(0.3)
+        # The worker's card is the way to its live view: there is no intermediate pane or Full view switch (SCREENS.md, Task workers),
+        # so the opened page itself must hold the running worker's heading, its activity stream and its message composer.
+        wait_for(lambda: js("return location.pathname.endsWith('/workers/a-build') && document.querySelector('.livepane .d-h .d-title') && document.querySelector('.livepane .stream .stream-in') && document.querySelector('.livepane .dock-w textarea') ? 'yes' : '';") == "yes", "worker_live_view")
         audit("worker live view", "dark")
         open_link(tabs[0])
         time.sleep(0.2)
@@ -1674,7 +1763,8 @@ Gtk.main()
         wait_for(lambda: (project / "worker-guidance-delivered").exists(), "worker_guidance_safe_point")
         wait_for(lambda: text_seen("Worker guidance completed."), "finished_worker_result", 20)
         audit("actual finished worker", "dark")
-        js("[...document.querySelectorAll('a')].find(a => a.textContent.trim() === 'Show full history').click(); return 'yes';")
+        # A finished worker's stream is its whole history, read-only, with the result at its end (SCREENS.md, Finished worker view):
+        # there is no Show full history link to press, so the history must already be on this page.
         wait_for(lambda: text_seen("Worker received owner guidance and inspected the project."), "finished_worker_history")
         outcome("worker_message_and_finished_history", receipt="Cortex safe point, not proof of model action")
         js(f"history.pushState(null,'',{json.dumps(two_href)}); dispatchEvent(new PopStateEvent('popstate')); return 'yes';")
@@ -1684,7 +1774,8 @@ Gtk.main()
         js("[...document.querySelectorAll('dialog[open] button')].find(b => b.textContent.trim() === 'Stop command').click(); return 'yes';")
         wait_for(lambda: (project / "worker-command-stopped").exists(), "gateway_command_stopped")
         wait_for(lambda: js("return document.querySelector('dialog[open]') ? '' : 'yes';") == "yes", "command_stop_dialog_closed")
-        press("Stop…")
+        # The worker heading's own stop control, which opens the Stop worker dialog.
+        press("Stop worker…")
         press("Stop worker")
         wait_for(lambda: text_seen("Cancelled"), "worker_cancelled", 20)
         wait_for(lambda: js("return document.querySelector('dialog[open]') ? '' : 'yes';") == "yes", "worker_stop_dialog_closed")

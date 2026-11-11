@@ -7,6 +7,8 @@ import { createEffect, createSignal, onCleanup, onMount, type Accessor } from "s
 export function createFollow(el: () => HTMLElement | undefined, size: Accessor<number>) {
   const [following, setFollowing] = createSignal(true), [missed, setMissed] = createSignal(0);
   let seen = size(), dragging = false, anchor: { node: Element; y: number } | undefined;
+  // Where the end was last pinned. Content or clearance that grows after it moves the end away without the reader scrolling up.
+  let placed = -1;
   const bottom = (box: HTMLElement) => Math.max(0, box.scrollHeight - box.clientHeight);
   const remember = () => {
     const box = el(), inner = box?.firstElementChild;
@@ -22,7 +24,7 @@ export function createFollow(el: () => HTMLElement | undefined, size: Accessor<n
   const sync = () => {
     const box = el();
     if (!box || dragging) return;
-    if (following()) box.scrollTop = bottom(box);
+    if (following()) { box.scrollTop = bottom(box); placed = box.scrollTop; }
     else if (anchor?.node.isConnected) {
       const delta = anchor.node.getBoundingClientRect().top - anchor.y;
       if (Math.abs(delta) > .1) box.scrollTop += delta;
@@ -34,6 +36,8 @@ export function createFollow(el: () => HTMLElement | undefined, size: Accessor<n
     const box = el();
     if (!box) return;
     const atEnd = Math.abs(bottom(box) - box.scrollTop) <= 2;
+    // Not at the end, yet not above where the end was pinned: the layout grew under a reader who stays at the end.
+    if (!atEnd && following() && !dragging && placed >= 0 && box.scrollTop >= placed - 1) { remember(); return; }
     setFollowing(atEnd);
     if (atEnd) setMissed(0);
     remember();

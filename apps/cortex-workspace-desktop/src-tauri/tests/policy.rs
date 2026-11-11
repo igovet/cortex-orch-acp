@@ -26,7 +26,6 @@ fn the_window_grant_is_exactly_its_own_frame() {
             "core:window:allow-toggle-maximize",
             "core:window:allow-is-maximized",
             "core:window:allow-close",
-            "core:window:allow-destroy",
             "core:window:allow-start-dragging",
         ]
     );
@@ -34,6 +33,18 @@ fn the_window_grant_is_exactly_its_own_frame() {
     let csp = config["app"]["security"]["csp"].as_str().unwrap();
     assert!(csp.contains("font-src 'self';") && csp.contains("script-src 'self';"));
     assert!(!csp.contains("unsafe-eval") && !csp.contains("https:"));
+}
+
+#[test]
+fn saving_an_attachment_takes_only_a_plain_name_and_bounded_bytes() {
+    let call = |message: Value| authorize("main", "tauri://localhost/", json!({"operation":"native.save_attachment","message":message}));
+    assert!(call(json!({"name":"shot.png","data":"eA=="})).is_ok());
+    assert!(call(json!({"name":"../shot.png","data":"eA=="})).is_err());
+    assert!(call(json!({"name":"","data":"eA=="})).is_err());
+    assert!(call(json!({"name":"a\nb","data":"eA=="})).is_err());
+    assert!(call(json!({"name":"shot.png","data":"eA==","path":"/tmp/x"})).is_err());
+    assert!(call(json!({"name":"shot.png","data":"x".repeat(workspace_protocol::ATTACHMENT_BYTES * 2)})).is_err());
+    assert!(authorize("other", "tauri://localhost/", json!({"operation":"native.save_attachment","message":{"name":"a","data":""}})).is_err());
 }
 
 #[test]

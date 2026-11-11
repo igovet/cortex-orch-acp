@@ -1,4 +1,6 @@
-import { readdirSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
+// The sources, from the package or from the repository root.
+const SRC = existsSync("src/layout.css") ? "src/" : "packages/workspace-ui/src/";
 import ts from "typescript";
 import { afterEach, expect, it } from "vitest";
 
@@ -12,8 +14,8 @@ const controls = [
 ];
 it("every custom clickable source element uses a covered pointer family", () => {
   const uncovered: string[] = [];
-  for (const name of readdirSync("src").filter(n => n.endsWith(".tsx"))) {
-    const file = ts.createSourceFile(name, readFileSync("src/" + name, "utf8"), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  for (const name of readdirSync(SRC).filter(n => n.endsWith(".tsx"))) {
+    const file = ts.createSourceFile(name, readFileSync(SRC + name, "utf8"), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
     const visit = (node: ts.Node) => {
       if (ts.isJsxOpeningElement(node) || ts.isJsxSelfClosingElement(node)) {
         const tag = node.tagName.getText(file), attrs = node.attributes.properties;
@@ -37,7 +39,7 @@ it("every custom clickable source element uses a covered pointer family", () => 
 });
 function style() {
   const s = document.createElement("style"); s.id = "cursor-styles";
-  s.textContent = readFileSync("src/mockup-styles.css", "utf8") + readFileSync("src/workspace.css", "utf8"); document.head.append(s);
+  s.textContent = readFileSync(SRC + "mockup-styles.css", "utf8") + readFileSync(SRC + "workspace.css", "utf8"); document.head.append(s);
 }
 it("every clickable control family has a pointer in the actual shared cascade", () => {
   style(); document.body.innerHTML = controls.join("");

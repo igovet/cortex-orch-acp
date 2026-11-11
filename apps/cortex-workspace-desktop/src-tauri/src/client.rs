@@ -219,7 +219,7 @@ impl Bridge {
             | "terminal.close" => self.rpc(&call.operation, call.message).await,
             "service.capabilities" => {
                 let mut value = self.rpc("service.capabilities", call.message).await?;
-                if let Some(methods) = value["methods"].as_array_mut() { methods.push(json!("native.clipboard_image")); methods.push(json!("native.take_dropped_files")); methods.push(json!("native.pick_folder")); }
+                if let Some(methods) = value["methods"].as_array_mut() { methods.push(json!("native.clipboard_image")); methods.push(json!("native.take_dropped_files")); methods.push(json!("native.pick_folder")); methods.push(json!("native.save_attachment")); }
                 let vs_code = opener::vs_code().is_some();
                 let system = opener::system_opener().is_some();
                 if let Some(methods) = value["methods"].as_array_mut() {
@@ -239,7 +239,13 @@ impl Bridge {
             },
             "native.open_editor" => self.open_editor(&call.message).await.map_err(|text| format!("{REFUSED}{text}")),
             "native.open_logs" => self.open_logs().await.map_err(|text| format!("{REFUSED}{text}")),
-            "capabilities.get" => self.capabilities().await,
+            "capabilities.get" => {
+                let mut value = self.capabilities().await?;
+                if call.message["protocol"]["minor"].as_u64().is_some_and(|minor| minor <= 6) {
+                    value["limits"]["frameBytes"] = json!(1024 * 1024);
+                }
+                Ok(value)
+            },
             _ => self.rpc("workspace", call.message).await,
         }
     }

@@ -85,7 +85,7 @@ export type Project = {
   /** Whether the project folder is a Git repository, once the machine has said. Unknown until then. */
   hasGit?: boolean;
 };
-export type CheckoutChoice = { kind: "main" } | { kind: "worktree"; branch: string; path: string };
+export type CheckoutChoice = { kind: "main" } | { kind: "worktree"; branch?: string; path?: string };
 export type Checkout = { kind: "main"; branch: string } | { kind: "worktree"; branch: string; path: string };
 export type CheckOutcome = "passed" | "failed" | "not_run" | "unverified";
 export type Check = { name: string; outcome: CheckOutcome; detail: string; source?: "runtime" | "worker"; technicalReason?: string; kind?: "automated" | "manual" | "policy"; command?: string[]; cwd?: string; rerunnable?: boolean; output?: string; exitCode?: number; running?: boolean };
@@ -112,6 +112,7 @@ export type MergeState = MergeSeed & {
 };
 export type Task = {
   id: string; projectId: string; sprintId: string | null; description: string;
+  sourceVersion?: string;
   title: string; titleState: "pending" | "generated" | "user" | "failed";
   checkout: Checkout; targetBranch: string | null; dependencies: string[];
   status: TaskStatus; resumeStatus: "working" | "needs_you"; issue: string | null;
@@ -140,9 +141,12 @@ export type TaskSettings = { model: string; effort: string; mode: "development" 
 export type PlanItem = { key: string; description: string; dependsOn: string[]; checkout?: CheckoutChoice; title?: string; acceptance?: string };
 export type PlanVersion = { version: number; items: PlanItem[] };
 /** One line of the planning conversation. `event` lines record what the owner did, not what anyone said. */
-export type SprintEntry = { kind: "question" | "answer" | "note" | "message" | "event"; text: string; options?: string[]; at?: number | null; mock?: true };
+export type SprintEntry = { attachments?: AttachmentInput[]; kind: "question" | "answer" | "note" | "message" | "event"; text: string; options?: string[]; at?: number | null; mock?: true };
 export type Sprint = {
-  id: string; projectId: string; description: string; title?: string | null; runMode: "manual" | "automatic";
+  id: string; projectId: string; description: string; attachments?: AttachmentInput[]; title?: string | null; runMode: "manual" | "automatic";
+  /** Chosen once for all new sprint tasks. Absent on older sprints. */
+  checkout?: { kind: CheckoutChoice["kind"] };
+  archivedAt?: number;
   planningFailure?: string; planningTaskId?: string; targetBranch: string | null; planning: "planning" | "question" | "ready" | "created" | "cancelled";
   conversation: SprintEntry[]; settings?: { model: string; effort: string; mode?: TaskSettings["mode"]; language?: TaskSettings["language"] };
   plan: PlanVersion | null; history?: PlanVersion[]; materializedVersion: number | null;
@@ -241,7 +245,7 @@ export type RepoCheckout = {
 /** The Git facts of one project, as a projection reports them. */
 export type ProjectRepo = { projectId: string; hasGit?: boolean; remote: string; tree: string[]; sources: Record<string, string>; commits: Commit[]; branches: Branch[]; checkouts: RepoCheckout[]; fetchedAt: number | null; mock?: true };
 export type ChangeScope = { id: string; label: string; sub?: string; paths: string[] };
-export type ReviewComment = { id: string; path: string; line: number; text: string; sent: boolean; mock?: true };
+export type ReviewComment = { attachments?: AttachmentInput[]; id: string; path: string; line: number; text: string; sent: boolean; mock?: true };
 /** What one task changed, as the Changes tab reviews it. */
 export type TaskChanges = { taskId: string; sha: string; unavailableReason?: string; files: FileDiff[]; scopes: ChangeScope[]; comments: ReviewComment[]; mock?: true };
 export type EngineUsageInput = {
@@ -299,10 +303,11 @@ export type WorkspaceCommand =
   | { type: "revoke_device"; machineId: string; deviceId: string | null; confirmed: boolean }
   | ({ type: "create_task" } & NewTask)
   | { type: "rename_task"; taskId: string; title: string }
+  | { type: "edit_task"; taskId: string; expectedVersion: string; title: string; description: string; attachments: AttachmentInput[]; settings: TaskSettings; checkout: { kind: CheckoutChoice["kind"] } }
   | { type: "generate_title"; taskId: string; fail?: boolean }
   | { type: "start_task" | "continue_task" | "confirm_stop" | "clear_issue" | "restore_task" | "flush_queue" | "stop_resolution" | "abort_merge" | "finish_merge" | "update_from_target"; taskId: string; now?: number }
   | { type: "retry_delivery"; messageId: string }
-  | { type: "resolve_with_cortex"; taskId: string; guidance?: string; now?: number }
+  | { type: "resolve_with_cortex"; taskId: string; guidance?: string; attachments?: AttachmentInput[]; now?: number }
   | { type: "resolve_block"; taskId: string; path: string; blockId: string; choice: Exclude<BlockChoice, "cortex"> }
   | { type: "stop_task"; taskId: string; confirmed: boolean; now?: number }
   | { type: "set_task_settings"; taskId: string; settings: Partial<TaskSettings> }
@@ -311,8 +316,8 @@ export type WorkspaceCommand =
   | { type: "accept_result"; taskId: string; digest: string; openChecks?: boolean; now?: number }
   | { type: "integrate"; taskId: string; method: "squash" | "pr" | "commit"; confirmed: boolean; digest: string; targetBranch: string; now: number; message?: string; title?: string; draft?: boolean; deleteWorktree?: boolean }
   | { type: "request_changes"; taskId: string; text: string; attachments?: AttachmentInput[]; now?: number }
-  | { type: "add_comment"; taskId: string; path: string; line: number; text: string }
-  | { type: "edit_comment"; taskId: string; commentId: string; text: string }
+  | { type: "add_comment"; taskId: string; path: string; line: number; text: string; attachments?: AttachmentInput[] }
+  | { type: "edit_comment"; taskId: string; commentId: string; text: string; attachments?: AttachmentInput[] }
   | { type: "remove_comment"; taskId: string; commentId: string }
   | { type: "send_comments"; taskId: string; now?: number }
   | { type: "git_stage"; checkoutId: string; path: string; staged: boolean; hunk?: number }
@@ -327,13 +332,14 @@ export type WorkspaceCommand =
   | { type: "revert_commit"; checkoutId: string; sha: string; confirmed: boolean; now?: number }
   | { type: "delete_worktree"; checkoutId: string; confirmed: boolean; discard: boolean; now?: number }
   | { type: "attach_worktree"; checkoutId: string }
-  | { type: "create_sprint"; projectId: string; description: string; runMode: Sprint["runMode"]; settings?: TaskSettings; targetBranch?: string | null }
+  | { type: "create_sprint"; projectId: string; description: string; attachments?: AttachmentInput[]; runMode: Sprint["runMode"]; checkout?: Sprint["checkout"]; settings?: TaskSettings; targetBranch?: string | null }
   | { type: "answer_planning"; sprintId: string; answer: string; attachments?: AttachmentInput[]; now?: number; decisionId?: string; optionId?: string | null }
-  | { type: "plan_message"; sprintId: string; text: string; now?: number }
+  | { type: "plan_message"; sprintId: string; text: string; attachments?: AttachmentInput[]; now?: number }
   | { type: "edit_plan"; sprintId: string; items: PlanItem[]; now?: number }
   | { type: "materialize_plan"; sprintId: string; version: number; now?: number }
   | { type: "cancel_planning" | "resume_planning"; sprintId: string }
   | { type: "rename_sprint"; sprintId: string; title: string }
+  | { type: "close_sprint"; sprintId: string; confirmed: boolean }
   | { type: "set_sprint_settings"; sprintId: string; settings: Partial<TaskSettings> }
   | { type: "run_sprint" | "pause_sprint"; sprintId: string; now?: number }
   | { type: "set_run_mode"; sprintId: string; runMode: Sprint["runMode"] }
@@ -346,7 +352,7 @@ export type WorkspaceCommand =
   | { type: "clear_purge_block"; taskId: string; confirmed: boolean }
   | { type: "clear_old"; taskIds?: string[]; machineId: string; cutoff: number; force: boolean; confirmed: boolean; now: number }
   | { type: "send_message"; taskId: string; workerId?: string; text: string; mode: Message["mode"]; resume?: boolean; now?: number; attachments?: AttachmentInput[] }
-  | { type: "edit_queued"; messageId: string; text: string }
+  | { type: "edit_queued"; messageId: string; text: string; attachments?: AttachmentInput[] }
   | { type: "remove_queued"; messageId: string }
   | { type: "move_queued"; messageId: string; before: string | null }
   | { type: "send_queued"; messageId: string; resume?: boolean; now?: number }

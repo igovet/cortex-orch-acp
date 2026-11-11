@@ -1,9 +1,11 @@
 import { createEffect, createMemo, createSignal, For, on, onCleanup, Show } from "solid-js";
 import { capabilityOf, FEATURES, machineDefaults, type TaskSettings } from "@cortex/workspace-domain";
-import { attachmentEvents, AttachmentStatus, AttachButton, AttachChips, createAttachments, createDictation, MicBar, MicButton, RouteBar, withFiles } from "./composer";
+import { createAttachments, createDictation, MessageComposer, RouteBar } from "./composer";
 import { useWs } from "./ctx";
+import { createUnsent } from "./freshness";
 import { Tile } from "./frame";
 import { I, MenuItem, Pop } from "./kit";
+import { ActionBar, Toolbar } from "./layout";
 import type { Route } from "./router";
 import { projectsOn, sprintTitle } from "./selectors";
 
@@ -25,11 +27,14 @@ export function NewPage(props: { route: Extract<Route, { name: "new" }> }) {
   const [saving, setSaving] = createSignal(false);
   const defaults = machineDefaults(ws.machine());
   const [chosen, setCheckout] = createSignal<"worktree" | "main">(defaults.checkout);
+  let checkoutPicked = false;
+  createEffect(() => { const value = machineDefaults(ws.machine()).checkout; if (!checkoutPicked) setCheckout(value); });
+  const chooseCheckout = (value: "worktree" | "main") => { checkoutPicked = true; setCheckout(value); };
   // A folder without Git has no branches: the task works in the folder itself, and nothing offers a branch choice.
   const noGit = () => summary()?.project.hasGit === false;
   const separate = () => ws.can(FEATURES.taskWorktrees) && !noGit();
-  const noWorktree = () => noGit() ? "A worktree needs Git. This folder has no Git repository, so the task works in the folder itself." : ws.t("noTaskWorktrees");
-  const checkout = () => separate() ? chosen() : "main";
+  const noWorktree = () => noGit() ? "A worktree needs Git. This folder has no Git repository, so work stays in the project folder." : ws.t("noTaskWorktrees");
+  const checkout = () => pickedSprint()?.checkout?.kind ?? (separate() ? chosen() : "main");
   const [runMode, setRunMode] = createSignal<"manual" | "automatic">("manual");
   const [chosenRoute, setSettings] = createSignal<TaskSettings>(defaults.settings);
   let routePicked = false;
@@ -68,8 +73,7 @@ export function NewPage(props: { route: Extract<Route, { name: "new" }> }) {
   const swap = (next: "task" | "sprint") => ws.go({ ...props.route, kind: next }, { replace: true });
   const mic = createDictation();
   const files = createAttachments();
-  const description = () => withFiles(text(), files.files());
-  const append = (spoken: string) => write(text().trim() ? `${text().trimEnd()} ${spoken}` : spoken);
+  createUnsent(() => !empty() || files.files().length > 0);
   let naming: ReturnType<typeof setTimeout> | undefined;
   const generate = () => {
     clearTimeout(naming);
@@ -94,7 +98,7 @@ export function NewPage(props: { route: Extract<Route, { name: "new" }> }) {
     setSaving(true);
     try {
     if (kind() === "sprint") {
-      const receipt = await ws.run({ type: "create_sprint", projectId: s.project.id, description: description(), runMode: runMode(), settings: settings(), targetBranch: target() });
+      const receipt = await ws.run({ type: "create_sprint", projectId: s.project.id, description: text(), attachments: files.files(), runMode: runMode(), checkout: { kind: checkout() }, settings: settings(), targetBranch: target() });
       if (!receipt.ok || !receipt.entityId) return;
       // Route and target are recorded before the planning start.
       ws.go({ name: "sprint", machine: s.machine.id, project: s.project.id, sprint: receipt.entityId, tab: "planning" });
@@ -104,7 +108,10 @@ export function NewPage(props: { route: Extract<Route, { name: "new" }> }) {
       type: "create_task", projectId: s.project.id, description: text(), attachments:files.files(), settings: settings(), sprintId: pickedSprint()?.id,
       checkout: checkout() === "main" ? { kind: "main" } : { kind: "worktree", branch: branch(), path: `worktrees/${slug(title())}-${ws.unique()}` },
     });
-    if (!receipt.ok || !receipt.entityId) return;
+    if (!receipt.ok || !receipt.entityId) {
+      if (receipt.entityId && receipt.outcome === "partial_effect") ws.go({ name: "task", machine: s.machine.id, task: receipt.entityId });
+      return;
+    }
     const taskId = receipt.entityId;
     // The task exists now: a refused target must not keep the owner on this form, where saving again would make a second task.
     if (target() && ws.can(capabilityOf("set_target"))) { const saved = await ws.run({ type: "set_target", taskId, branch: target() }); if (!saved.ok) { ws.go({ name: "task", machine: s.machine.id, task: taskId }); return; } }
@@ -118,13 +125,14 @@ export function NewPage(props: { route: Extract<Route, { name: "new" }> }) {
     } finally { setSaving(false); }
   };
 
-  let saveButton: HTMLButtonElement | undefined, startButton: HTMLButtonElement | undefined;
+  let form: HTMLDivElement | undefined;
   /** The whole save, from the first command to the page change, keeps the pressed button loading. */
-  const submit = (start: boolean, control?: HTMLElement) => { void ws.busy(create(start), control); };
+  const submit = (start: boolean, control?: HTMLElement | null) => { void ws.busy(create(start), control); };
+  const plane = () => form?.querySelector<HTMLElement>(".mc-send") ?? null;
 
   const Target = (p: { hint: string }) => <Show when={mergeInto() && !noGit()}><div class="fld ws-inline">
     <span class="lab">Merge into</span>
-    <span class="row"><button class="pick mono" popovertarget="m-new-target" style={{ height: "28px" }} aria-label={`Merge into ${mergeInto()}`}><I n="branch" s={14} class="faint" />{mergeInto()}<I n="chevron-down" s={12} /></button>
+    <span class="row"><button class="pick mono" popovertarget="m-new-target" style={{ height: "28px" }} aria-label={`Merge into ${mergeInto()}`}><I n="branch" s={14} class="faint" /><span class="trunc">{mergeInto()}</span><I n="chevron-down" s={12} /></button>
       <span class="hint">{p.hint}</span></span>
     <Show when={otherBranch() !== null}><span class="row ws-other">
       <input class="inp mono" aria-label="Other branch" placeholder="branch name" value={otherBranch()!} onInput={e => setOtherBranch(e.currentTarget.value)} ref={el => queueMicrotask(() => el.focus())}
@@ -132,29 +140,39 @@ export function NewPage(props: { route: Extract<Route, { name: "new" }> }) {
     </span></Show>
   </div></Show>;
 
+  const Checkout = () => <div class="fld">
+    <span class="lab">Where it works</span>
+    <div class="two">
+      <label class={`rc${separate() ? "" : " ws-rc-off"}`}><input type="radio" name="checkout" disabled={!separate()} checked={checkout() === "worktree"} onChange={() => chooseCheckout("worktree")} /><span><span class="t">Separate worktree</span><span class="d"><Show when={separate()} fallback={noWorktree()}>{kind() === "sprint" ? "Each task gets its own branch and worktree" : "New task branch"}<Show when={kind() === "task"}> <span class="mono">{ws.demo ? branch() : "cw/…"}</span></Show> from the currently open branch <span class="mono">{openBranch()}</span>. Your open checkout is not touched.</Show></span></span></label>
+      <label class="rc"><input type="radio" name="checkout" checked={checkout() === "main"} onChange={() => chooseCheckout("main")} /><span><span class="t">Project folder</span><span class="d">{kind() === "sprint" ? "All tasks work" : "Works"} in <span class="mono">{summary()?.project.repository ?? "the project"}</span><Show when={openBranch() && !noGit()}> on the open branch <span class="mono">{openBranch()}</span></Show>.</span></span></label>
+    </div>
+    <Show when={checkout() === "main"}><div class="note-box"><I n="alert" s={14} class="st-warn" /><span>{kind() === "sprint" ? "All tasks edit" : "The task edits"} the same files you have open, and your uncommitted changes count as part of the work. Rules for two tasks writing here at once are not settled yet.</span></div></Show>
+  </div>;
+
   return <div class="create"><div class="create-in">
-    <div class="create-top">
+    <Toolbar class="create-top" label="What to create and where" start={<>
       <div class="seg tall" role="group" aria-label="What to create">
         <button aria-current={kind() === "task" ? "true" : "false"} onClick={() => swap("task")}>Task</button>
         <button aria-current={kind() === "sprint" ? "true" : "false"} {...ws.needs("create_sprint")} onClick={() => { if (!ws.gate("create_sprint")) swap("sprint"); }}>Sprint</button>
       </div>
-      <button class="pick" popovertarget="m-new-project" aria-disabled={summary() ? undefined : "true"} data-why={summary() ? undefined : "No project is open"}>
-        <Show when={summary()} fallback="No project"><Tile name={summary()!.project.name} n={Math.max(0, projects().indexOf(summary()!))} />{summary()!.project.name}</Show><I n="chevron-down" s={12} />
+    </>} mid={<>
+      <button class="pick l-scope" popovertarget="m-new-project" aria-disabled={summary() ? undefined : "true"} data-why={summary() ? undefined : "No project is open"}>
+        <Show when={summary()} fallback="No project"><Tile name={summary()!.project.name} n={Math.max(0, projects().indexOf(summary()!))} /><span class="trunc">{summary()!.project.name}</span></Show><I n="chevron-down" s={12} />
       </button>
-      <Pop id="m-new-project" class="pop-anchor" align="left" label="Project" style={{ width: "260px" }}>
-        <div class="mi-h">Project on {ws.machine().name}</div>
-        <For each={projects()}>{s => <MenuItem label={s.project.name} sub={s.offline ? "Offline" : undefined} check={s === summary()} onSelect={() => setPicked(s.project.id)} />}</For>
-      </Pop>
       <Show when={kind() === "task" && sprints().length > 0}>
-        <button class="pick" popovertarget="m-new-sprint"><I n="layers" s={14} class="faint" /><span class="trunc">{pickedSprint() ? sprintTitle(pickedSprint()!) : "No sprint"}</span><I n="chevron-down" s={12} /></button>
-        <Pop id="m-new-sprint" class="pop-anchor" align="left" label="Sprint" style={{ width: "260px" }}>
-          <MenuItem label="No sprint" check={!pickedSprint()} onSelect={() => setSprintId(null)} />
-          <For each={sprints()}>{s => <MenuItem icon="layers" label={sprintTitle(s)} check={s.id === sprintId()} onSelect={() => setSprintId(s.id)} />}</For>
-        </Pop>
+        <button class="pick l-scope" popovertarget="m-new-sprint"><I n="layers" s={14} class="faint" /><span class="trunc">{pickedSprint() ? sprintTitle(pickedSprint()!) : "No sprint"}</span><I n="chevron-down" s={12} /></button>
       </Show>
-      <span class="grow"></span>
-      <Show when={ws.store.mode === "demo"}><span class="cap faint">Defaults come from {ws.machine().name}</span></Show>
-    </div>
+    </>} end={<Show when={ws.store.mode === "demo"}><span class="cap faint">Defaults come from {ws.machine().name}</span></Show>} />
+    <Show when={kind() === "task" && sprints().length > 0}>
+      <Pop id="m-new-sprint" class="pop-anchor" align="left" label="Sprint" style={{ width: "260px" }}>
+        <MenuItem label="No sprint" check={!pickedSprint()} onSelect={() => setSprintId(null)} />
+        <For each={sprints()}>{s => <MenuItem icon="layers" label={sprintTitle(s)} check={s.id === sprintId()} onSelect={() => setSprintId(s.id)} />}</For>
+      </Pop>
+    </Show>
+    <Pop id="m-new-project" class="pop-anchor" align="left" label="Project" style={{ width: "260px" }}>
+      <div class="mi-h">Project on {ws.machine().name}</div>
+      <For each={projects()}>{s => <MenuItem label={s.project.name} sub={s.offline ? "Offline" : undefined} check={s === summary()} onSelect={() => setPicked(s.project.id)} />}</For>
+    </Pop>
     <Show when={!noGit()}><Pop id="m-new-target" class="pop-anchor" align="left" label="Merge into" style={{ width: "280px" }}>
       <div class="mi-h">Merge into</div>
       <For each={branches()}>{b => <MenuItem label={<span class="mono">{b}</span>} sub={b === defaultBranch() ? "Git default branch" : undefined} check={b === mergeInto()} onSelect={() => setTarget(b === defaultBranch() ? null : b)} />}</For>
@@ -162,19 +180,11 @@ export function NewPage(props: { route: Extract<Route, { name: "new" }> }) {
       <MenuItem label="Other branch…" onSelect={() => setOtherBranch(target() ?? "")} />
     </Pop></Show>
 
-    <div class="composer" style={{ "margin-top": "2px" }} {...attachmentEvents(files, () => kind() === "task" && !saving())}>
-      <MicBar mic={mic} onInsert={append} />
-      <AttachChips files={files.files()} onRemove={files.remove} />
-      <AttachmentStatus a={files} />
-      <textarea aria-label={kind() === "sprint" ? "Describe the sprint" : "Describe the task"} placeholder={kind() === "sprint" ? "Describe the sprint." : ws.store.mode === "demo" ? "Describe the task. Use @ to add files, or paste images and logs." : "Describe the task."}
-        value={text()} onInput={e => write(e.currentTarget.value)} ref={el => queueMicrotask(() => el.focus())}
-        onKeyDown={e => { if ((e.ctrlKey || e.metaKey) && e.key === "Enter") { e.preventDefault(); const start = ws.store.mode === "demo" && kind() === "task"; submit(start, start ? startButton : saveButton); } }} />
-      <div class="c-bar">
-        <AttachButton a={files} disabled={kind() === "sprint" ? "Attachments are not available for sprints yet. Describe what the files contain, or attach them to a task." : undefined} />
-        <RouteBar id="new" disabled={ws.can(FEATURES.taskRoute) ? undefined : ws.t("machineRoute")} settings={settings()} onChange={patch => { routePicked = true; setSettings({ ...settings(), ...patch }); }} />
-        <div class="c-end"><MicButton mic={mic} /></div>
-      </div>
-    </div>
+    {/* The plane saves a draft, or for a sprint starts planning. Saving never starts the task: Start now below is its own explicit choice. */}
+    <div ref={form}><MessageComposer label={kind() === "sprint" ? "Describe the sprint" : "Describe the task"} placeholder={kind() === "sprint" ? "Describe the sprint." : "Describe the task. Paste images and logs, or attach files."}
+      text={text()} onText={write} files={files} mic={mic} autofocus sendKey="mod-enter" attachOff={saving() ? "Saving…" : undefined}
+      route={<RouteBar id="new" disabled={ws.can(FEATURES.taskRoute) ? undefined : ws.t("machineRoute")} settings={settings()} onChange={patch => { routePicked = true; setSettings({ ...settings(), ...patch }); }} />}
+      send={kind() === "sprint" ? { label: "Start planning", needs: "create_sprint", go: () => submit(false, plane()) } : { label: "Save draft", needs: "create_task", go: () => submit(false, plane()) }} /></div>
     <div class="ws-slot"><Show when={tried() && (empty() || blocked())}><div class="err">{blocked() ?? "Describe what needs doing."}</div></Show></div>
 
     <Show when={kind() === "task"} fallback={<div style={{ display: "grid", gap: "14px" }}>
@@ -186,6 +196,7 @@ export function NewPage(props: { route: Extract<Route, { name: "new" }> }) {
           <label class="rc"><input type="radio" name="sprint-run" checked={runMode() === "automatic"} onChange={() => setRunMode("automatic")} /><span><span class="t">Automatic</span><span class="d">One task at a time, in dependency order. Questions and failures pause the queue.</span></span></label>
         </div>
       </div>
+      <Checkout />
       <Target hint="Git default branch for this sprint. Each task can override it." />
     </div>}>
       <div style={{ display: "grid", gap: "14px" }}>
@@ -200,24 +211,15 @@ export function NewPage(props: { route: Extract<Route, { name: "new" }> }) {
             <Show when={titleState() === "failed"}><dd><button class="tt muted ws-edit" onClick={() => setRenaming(draftTitle())}>{draftTitle()}</button></dd><dd class="row"><span class="cap st-warn">Title not generated</span><button class="btn btn-sm" onClick={generate}>Retry</button></dd></Show>
           </Show>
         </dl></Show>
-        <div class="fld">
-          <span class="lab">Where it works</span>
-          <div class="two">
-            <label class={`rc${separate() ? "" : " ws-rc-off"}`}><input type="radio" name="checkout" disabled={!separate()} checked={checkout() === "worktree"} onChange={() => setCheckout("worktree")} /><span><span class="t">Separate worktree</span><span class="d"><Show when={separate()} fallback={noWorktree()}>New task branch <span class="mono">{ws.demo ? branch() : "cw/…"}</span> from the currently open branch <span class="mono">{openBranch()}</span>. Your open checkout is not touched.</Show></span></span></label>
-            <label class="rc"><input type="radio" name="checkout" checked={checkout() === "main"} onChange={() => setCheckout("main")} /><span><span class="t">{noGit() ? "Project folder" : "Main checkout"}</span><span class="d">Works in <span class="mono">{summary()?.project.repository ?? "the project"}</span><Show when={openBranch() && !noGit()}> on the open branch <span class="mono">{openBranch()}</span></Show>.</span></span></label>
-          </div>
-          <Show when={checkout() === "main"}><div class="note-box"><I n="alert" s={14} class="st-warn" /><span>The task edits the same files you have open, and your uncommitted changes count as part of the task. Rules for two tasks writing here at once are not settled yet.</span></div></Show>
-        </div>
+        <Show when={!pickedSprint()?.checkout} fallback={<div class="cap muted">Checkout follows this sprint: {checkout() === "worktree" ? "Separate worktree per task" : "Project folder"}.</div>}><Checkout /></Show>
         <Target hint="Git default branch. The task stops at Ready to merge for your confirmation." />
       </div>
     </Show>
 
-    <div class="create-foot">
-      <Show when={kind() === "task"} fallback={<><span class="cap faint note">Planning runs on the chosen model.</span><button class="btn btn-primary btn-lg" {...ws.needs("create_sprint")} onClick={e => submit(false, e.currentTarget)}>Start planning</button></>}>
-        <span class="cap faint note">{ws.store.mode === "real" ? "Ctrl+Enter saves a draft." : ws.t("newTaskNote")}</span>
-        <button class="btn btn-line btn-lg" ref={saveButton} {...ws.needs("create_task")} onClick={e => submit(false, e.currentTarget)}>Save as draft</button>
-        <button class="btn btn-primary btn-lg" ref={startButton} {...ws.needs("start_task")} onClick={e => { if (!ws.gate("start_task")) submit(true, e.currentTarget); }}>Start now</button>
+    <ActionBar class="create-foot" hint={kind() === "task" ? (ws.store.mode === "real" ? "The plane saves a draft. Saving does not start the task." : ws.t("newTaskNote")) : "The plane starts planning on the chosen model."}>
+      <Show when={kind() === "task"}>
+        <button class="btn btn-line btn-lg" {...ws.needs("start_task")} onClick={e => { if (!ws.gate("start_task")) submit(true, e.currentTarget); }}><I n="play" />Start now</button>
       </Show>
-    </div>
+    </ActionBar>
   </div></div>;
 }

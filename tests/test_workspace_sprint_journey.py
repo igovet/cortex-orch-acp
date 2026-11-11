@@ -92,4 +92,28 @@ def test_first_sprints_through_real_port(journey):
     errors = j.project / ".cortex-dev/fake-errors"
     assert not errors.exists(), errors.read_text() if errors.exists() else ""
     assert result.returncode == 0
-    assert len(j.product()["sprints"]) == 2
+    product = j.product()
+    assert len(product["sprints"]) == 2
+    # Bind both saved sprint modes to every real runtime task/session working tree.
+    import sqlite3
+    with sqlite3.connect(j.project / ".cortex-dev/cortex.sqlite3") as db:
+        for sprint in product["sprints"]:
+            kind = "main" if sprint["runMode"] == "manual" else "worktree"
+            assert sprint["checkout"] == dict(kind=kind)
+            paths = []
+            for task in sprint["taskIds"]:
+                runtime_task, session = db.execute(
+                    "SELECT runtime_task_id,acp_session_id FROM workspace_executions WHERE task_id=?",
+                    (task,)).fetchone()
+                path = db.execute("SELECT workspace_root FROM task_workspaces WHERE task_id=?",
+                                  (runtime_task,)).fetchone()[0]
+                assert db.execute("SELECT workspace_root FROM acp_session_workspaces WHERE session_id=?",
+                                  (session,)).fetchone()[0] == path
+                paths.append(path)
+                assert product["tasks"][task]["checkout"]["kind"] == kind
+                if kind == "worktree":
+                    assert product["tasks"][task]["checkout"]["path"] == path
+            if kind == "main":
+                assert paths == [str(j.project)] * 2
+            else:
+                assert len(set(paths)) == 2 and str(j.project) not in paths

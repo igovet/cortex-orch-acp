@@ -1,5 +1,3 @@
-import { batch, createSignal, onCleanup } from "solid-js";
-
 export const PROJECT_VIEWS = ["board", "list", "code", "git", "worktrees", "knowledge", "settings"] as const;
 export type ProjectView = typeof PROJECT_VIEWS[number];
 export const APP_SECTIONS = ["appearance", "voice", "updates", "shortcuts", "machines"] as const;
@@ -7,7 +5,8 @@ export const MACHINE_SECTIONS = ["overview", "orchestration", "connections", "wo
 export type SettingsSection = typeof APP_SECTIONS[number] | typeof MACHINE_SECTIONS[number];
 export const ORCHESTRATION_PAGES = ["defaults", "models", "routing", "effective", "policy", "tools", "profiles", "files"] as const;
 export type OrchestrationPage = typeof ORCHESTRATION_PAGES[number];
-export const SPRINT_TABS = ["planning", "summary"] as const;
+/** `planning` is the planning chat, `plan` the plan's List and Graph; each has the whole width. */
+export const SPRINT_TABS = ["planning", "plan", "summary"] as const;
 export type SprintTab = typeof SPRINT_TABS[number];
 export type Scope = { kind: "all" } | { kind: "standalone" } | { kind: "sprint"; id: string };
 export const TASK_TABS = ["workers", "changes", "code", "terminal"] as const;
@@ -117,44 +116,9 @@ export function hrefOf(route: Route): string {
   }
 }
 
-const MAX_KEY = "cw.ws.historyMax";
-const readMax = () => { try { return Number(sessionStorage.getItem(MAX_KEY)) || 0; } catch { return 0; } };
-const writeMax = (n: number) => { try { sessionStorage.setItem(MAX_KEY, String(n)); } catch { /* session only */ } };
-const historyIndex = () => { const n = (history.state as { ws?: unknown } | null)?.ws; return typeof n === "number" ? n : null; };
-
-/** Route state plus the position in session history, so the title bar can disable Back and Forward truthfully. */
-export function createRouter() {
-  const known = historyIndex();
-  if (known === null) history.replaceState({ ws: 0 }, "", location.href);
-  const [path, setPath] = createSignal(location.pathname);
-  const [search, setSearch] = createSignal(location.search);
-  const [index, setIndex] = createSignal(known ?? 0);
-  const [max, setMax] = createSignal(known === null ? 0 : Math.max(readMax(), known));
-  // One update: a screen must never see the new path with the old query.
-  const sync = () => batch(() => { setPath(location.pathname); setSearch(location.search); });
-  const onPop = () => {
-    const at = historyIndex() ?? 0;
-    setIndex(at);
-    if (at > max()) { setMax(at); writeMax(at); }
-    sync();
-  };
-  window.addEventListener("popstate", onPop);
-  onCleanup(() => window.removeEventListener("popstate", onPop));
-  return {
-    path, search, route: () => parseRoute(path(), search()),
-    canBack: () => index() > 0, canForward: () => index() < max(),
-    back: () => history.back(), forward: () => history.forward(),
-    go(to: string | Route, opts: { replace?: boolean } = {}) {
-      const href = typeof to === "string" ? to : hrefOf(to);
-      if (href === location.pathname + location.search) return;
-      if (opts.replace) history.replaceState({ ws: index() }, "", href);
-      else {
-        const next = index() + 1;
-        history.pushState({ ws: next }, "", href);
-        setIndex(next); setMax(next); writeMax(next);
-      }
-      sync();
-    },
-  };
-}
-export type Router = ReturnType<typeof createRouter>;
+/** A tab's place: its route and its position in its own Back/Forward history. */
+export type Router = {
+  path: () => string; search: () => string; route: () => Route;
+  canBack: () => boolean; canForward: () => boolean; back: () => void; forward: () => void;
+  go: (to: string | Route, opts?: { replace?: boolean }) => void;
+};

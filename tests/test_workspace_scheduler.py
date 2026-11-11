@@ -3,6 +3,8 @@ import importlib.util
 from pathlib import Path
 import sys
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "crates/workspace-service"))
 import machine_tools
@@ -20,6 +22,8 @@ class API:
         op = request["operation"]
         if op == "project.snapshot":
             return {"tasks": {"items": self.tasks, "nextCursor": None}}
+        if op == "tasks.get":
+            return next(task.copy() for task in self.tasks if task["taskId"] == request["target"])
         if op == "executions.get":
             return {"resultId": "result"}
         if op == "results.get":
@@ -45,6 +49,24 @@ def test_service_advances_after_verified_result_without_screen(tmp_path):
     scheduler.tick(api, tmp_path)
     assert api.starts == ["next"]
     assert machine_tools.product_of(tmp_path, "project")["tasks"]["first"]["status"] == "ready_to_merge"
+
+
+@pytest.mark.parametrize("started", [False, True])
+def test_start_rechecks_selected_task_after_snapshot(tmp_path, started):
+    class ChangedAPI(API):
+        def handle(self, request):
+            if request["operation"] == "project.snapshot":
+                snapshot = super().handle(request)
+                snapshot["tasks"]["items"] = [task.copy() for task in self.tasks]
+                self.tasks[1].update(version="2", executionId="other" if started else None)
+                return snapshot
+            if request["operation"] == "tasks.start":
+                assert request["expectedVersion"] == "2"
+            return super().handle(request)
+
+    api = ChangedAPI(setup(tmp_path), [{"outcome": "passed"}])
+    scheduler.tick(api, tmp_path)
+    assert api.starts == ([] if started else ["next"])
 
 
 def test_finished_work_is_not_reopened_when_cleanup_removes_its_checkout(tmp_path):

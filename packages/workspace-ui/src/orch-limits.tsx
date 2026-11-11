@@ -4,7 +4,7 @@ import { useWs } from "./ctx";
 import { A, I } from "./kit";
 import { HELP } from "./orch-help";
 import { Bar, orchTo, Shell, useDefaults, useProjectName, useReadOnly } from "./orch-shared";
-import { Adv, Chk, Err, Hint, KeyValues, Lock, NumField, Pick, Seg, Srow, Sw } from "./settings-kit";
+import { Adv, Chk, Err, Hint, KeyValues, Lock, NumField, Pick, Seg, SetH, Srow, Sw } from "./settings-kit";
 import { useDraft } from "./settings-state";
 
 const FALLBACK_EFFORTS = "Not observed: this is a general list.";
@@ -26,16 +26,16 @@ export function Coordinator() {
   const patchRoute = (x: Partial<NonNullable<ReturnType<typeof route>>>) => set({ routeDefault: { ...route()!, ...x } });
   return <Shell title="Coordinator" lead="What a new task on this machine starts with. You can still change each one in the composer for a single task." bar={<Bar d={d} />}>
     <div class="surface">
-      <Srow t={<>Model<Hint text={HELP.coordinator} label="coordinator" /></>} d="Enabled models, grouped by engine."><Pick id="m-def-model" label="Main model" width="260px" value={coord() ? `${coord()!.engine}|${coord()!.model}` : ""} options={models()} disabled={off()} onPick={pick} /></Srow>
+      <Srow t={<>Model<Hint text={HELP.coordinator} label="coordinator" /></>} d="Enabled models, grouped by engine."><Pick id="m-def-model" label="Main model" width="260px" value={coord() ? `${coord()!.engine}|${coord()!.model}` : ""} empty="Choose a model" options={models()} disabled={off()} onPick={pick} /></Srow>
       <Show when={coord()}><Srow t="Effort" d={efforts().observed ? "The levels this model reports." : FALLBACK_EFFORTS}><Seg label="Effort" value={coord()!.effort} disabled={off()} options={efforts().levels.map(e => ({ id: e, label: effortLabel(e) }))} onChange={effort => set({ coordinator: { ...coord()!, effort } })} /></Srow></Show>
       <Srow t="Access mode" d="How much a task may do without asking."><Seg label="Access mode" value={v().mode} disabled={off()} options={ACCESS_MODES} onChange={mode => set({ mode })} /></Srow>
       <Srow t={<>Language<Hint text={HELP.language} label="language" /></>} d="Language of messages. It does not guarantee the language of model replies."><Seg label="Language" value={v().language} disabled={off()} options={LANGUAGES.map(l => ({ id: l.id, label: l.id === "auto" ? "Automatic" : l.label as string }))} onChange={language => set({ language })} /></Srow>
-      <Srow t="Checkout for new tasks" d="Preselected in New task. You choose each time."><Seg label="Default checkout" value={v().checkout} disabled={off()} options={[{ id: "worktree", label: "Worktree" }, { id: "main", label: "Main checkout" }] as const} onChange={checkout => set({ checkout })} /></Srow>
+      <Srow t="Checkout for new tasks" d="Preselected in New task. You choose each time."><Seg label="Default checkout" value={v().checkout} disabled={off()} options={[{ id: "worktree", label: "Worktree" }, { id: "main", label: "Project folder" }] as const} onChange={checkout => set({ checkout })} /></Srow>
       <Srow t="Status" d="What this resolves to now."><Show when={bound().ok} fallback={<><span class="st st-bad"><I n="x-circle" s={12} />{(bound() as { text: string }).text}</span><A class="lnk" to={orchTo(m().id, "models")}>Fix in Models</A></>}><span class="st st-ok"><I n="check-circle" s={12} />Bound to {(bound() as { route: string }).route}</span></Show></Srow>
     </div>
     <Adv id="coordinator" force={!!route() || Object.keys(coord()?.parameters ?? {}).length > 0 || d.problems().length > 0}>
       <Show when={coord()}><div class="surface ws-pad"><div class="ws-fld"><span class="lab">Other coordinator parameters<Hint text={HELP.parameters} label="parameters" /></span><KeyValues label="Parameter" values={coord()!.parameters} disabled={off()} onChange={parameters => set({ coordinator: { ...coord()!, parameters } })} /></div></div></Show>
-      <div class="set-h">Exact default route<Hint text={HELP.defaultRoute} label="exact route" /></div>
+      <SetH title="Exact default route"><Hint text={HELP.defaultRoute} label="exact route" /></SetH>
       <Show when={route()} fallback={<div class="surface"><Srow t="Portable coordinator is in use" d="An exact route changes if a connection is registered again, so the portable form is better."><button class="btn btn-line btn-sm" aria-disabled={off() ? "true" : undefined} data-why={off()} onClick={() => { if (!off()) set({ routeDefault: first(), coordinator: null }); }}>Use an exact route</button></Srow></div>}>
         <div class="surface">
           <Srow t="Model" d="An exact route changes if a connection is registered again."><Pick id="m-def-route" label="Route model" width="260px" value={route()!.routeId} disabled={off()} options={routeChoices()} onPick={id => { const r = routes().find(x => x.id === id); if (r) patchRoute({ routeId: id, model: r.model }); }} /></Srow>
@@ -66,7 +66,7 @@ function StoredLimits(props: { c: Ceiling }) {
   const s = () => props.c.stored;
   const rows = () => [["Permission level", s().permissionLevel], ["Calls", s().calls], ["Tokens", s().tokens], ["Concurrency", s().concurrency], ["Spend limit", s().spendLimit], ["Spend limit enforceable", s().spendLimit === null ? null : s().spendEnforceable ? "Yes" : "No"]].filter(([, v]) => v !== null) as [string, string | number][];
   return <Show when={rows().length > 0}>
-    <div class="set-h">Stored, not applied</div>
+    <SetH title="Stored, not applied" />
     <div class="surface"><For each={rows()}>{([t, v]) => <Srow t={t} d="Saved in the configuration, but not enforced."><span class="tnum">{v}</span><Lock text="Read-only" /></Srow>}</For></div>
   </Show>;
 }
@@ -82,13 +82,13 @@ function MachineLimits() {
   const d = useDefaults(), off = useReadOnly(), o = useLimitOptions();
   const c = () => d.value().ceiling, set = (x: Partial<Ceiling>) => d.set({ ...d.value(), ceiling: { ...c(), ...x } });
   return <Shell scoped title="Limits and fallback" lead="The hard ceiling for this machine. A project can narrow it, never widen it." bar={<Bar d={d} />}>
-    <div class="set-h">Permission to run<Hint text={HELP.limits} label="limits" /></div>
+    <SetH title="Permission to run"><Hint text={HELP.limits} label="limits" /></SetH>
     <div class="surface">
       <Srow t="Attempts per task" d="Empty means no limit."><NumField label="Attempts per task" value={c().attempts} placeholder="No limit" disabled={off()} onChange={attempts => set({ attempts })} /><Err problems={d.problems()} path="attempts" /></Srow>
       <Srow t={<>Connections<Hint text={HELP.allowedConnections} label="connections" /></>} d="Which engine accounts tasks may use."><ListLimit label="Connections" value={c().allowedConnections} options={o.connections()} off={off()} onChange={allowedConnections => set({ allowedConnections })} /></Srow>
       <Srow t={<>Data recipients<Hint text={HELP.allowedRecipients} label="data recipients" /></>} d="Which providers may receive project data."><ListLimit label="Data recipients" value={c().allowedRecipients} options={recipients()} off={off()} onChange={allowedRecipients => set({ allowedRecipients })} /></Srow>
     </div>
-    <div class="set-h">Fallback<Hint text={HELP.fallback} label="fallback" /></div>
+    <SetH title="Fallback"><Hint text={HELP.fallback} label="fallback" /></SetH>
     <div class="note-box plain"><I n="alert" s={14} /><span>Off unless all of these allow it.</span></div>
     <div class="surface">
       <Srow t="Failure classes" d="What may trigger a move to another route."><ListLimit label="Failure classes" value={c().failureClasses} options={FAILURE_CLASSES} off={off()} onChange={failureClasses => set({ failureClasses })} /></Srow>

@@ -155,7 +155,7 @@ it("failed Start planning keeps the entered description and creates nothing",asy
   const description=root.querySelector<HTMLTextAreaElement>("textarea")!;
   description.value="Keep this multiline sprint\nwith all the details";
   description.dispatchEvent(new Event("input",{bubbles:true}));
-  button("Start planning").click(); await settle();
+  root.querySelector<HTMLButtonElement>('[aria-label="Start planning"]')!.click(); await settle();
   expect(document.body.textContent).toMatch(/Connect an engine and select an available model/);
   expect(description.value).toBe("Keep this multiline sprint\nwith all the details");
   expect(m.helper("product.read").result.sprints).toEqual([]);

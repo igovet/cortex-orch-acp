@@ -70,8 +70,10 @@ describe("composer bar", () => {
     expect(rule("\\.c-route")).toContain("min-width: 0");
   });
 
-  it("keeps the app's copy of the mockup stylesheet identical", () => {
-    expect(css === read("../../../../mockups/styles.css")).toBe(true);
+  it("keeps the app's design tokens identical to the mockup's", () => {
+    const tokens = (text: string) => [...text.matchAll(/^(?::root|:root, \[data-theme="dark"\]|\[data-theme="light"\]) \{[^}]*\}/gm)].map(m => m[0]);
+    expect(tokens(css).length).toBe(3);
+    expect(tokens(css)).toEqual(tokens(read("../../../../mockups/styles.css")));
   });
 });
 

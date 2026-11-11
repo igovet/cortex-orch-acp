@@ -276,11 +276,12 @@ pub fn negotiate(local: &Value, remote: &Value) -> Result<Value, String> {
         .collect();
     let mut limits = serde_json::Map::new();
     for (key, number) in local["limits"].as_object().unwrap() {
-        limits.insert(
-            key.clone(),
-            json!((number.as_f64().unwrap() as u64)
-                .min(remote["limits"][key].as_f64().unwrap() as u64)),
-        );
+        if let Some(peer) = remote["limits"][key].as_f64() {
+            limits.insert(
+                key.clone(),
+                json!((number.as_f64().unwrap() as u64).min(peer as u64)),
+            );
+        }
     }
     Ok(json!({"protocol":{"major":local["protocol"]["major"],
         "minor":(local["protocol"]["minor"].as_f64().unwrap() as u64).min(remote["protocol"]["minor"].as_f64().unwrap() as u64)},

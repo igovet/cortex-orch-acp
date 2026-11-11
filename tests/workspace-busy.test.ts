@@ -4,7 +4,7 @@ import { createRoot } from "../packages/workspace-ui/node_modules/solid-js/dist/
 import { dependencyReady, emptyWorkspace, runBlockerOf } from "../packages/workspace-domain/src";
 import { createWorkspaceStore } from "@busy/store";
 import { createRealPort } from "@busy/port";
-import { capabilitiesWire, draftTask, scriptedPort, scriptedTransport, withTask } from "../packages/workspace-ui/test/support";
+import { capabilitiesWire, draftTask, scriptedPort, scriptedTransport, snapshot, wireTask, withTask } from "../packages/workspace-ui/test/support";
 
 const realSocket = process.env.WORKSPACE_BUSY_SOCKET;
 function serviceRequest(method: string, params: unknown): Promise<any> {
@@ -66,6 +66,26 @@ it.each(["as_is", "external", "cancel"] as const)("owner closure %s has consiste
   expect(runBlockerOf(state, sprint) === null).toBe(choice !== "cancel");
   expect(task.acceptance).toBeNull();
   if (choice === "cancel") expect(dependencyReady({...task,work:"merged"})).toBe(false);
+});
+
+it("starts a draft beside another execution and describes duplicate starts as task-local", async () => {
+  const s = scriptedTransport({
+    "capabilities.get": () => capabilitiesWire(["capabilities.get", "project.snapshot", "tasks.start"]),
+    "project.snapshot": () => snapshot("4", [
+      wireTask(), wireTask({taskId:"other",executionId:"e",phase:"execution",executionState:"running",runtimeState:"EXECUTING"}),
+    ]),
+    "tasks.start": message => ({requestId:(message as any).requestId,outcome:"recorded",target:"task-1",entityVersion:"2",recordedAt:"2026-11-05T00:00:00Z"}),
+  });
+  const port = createRealPort({transport:s.transport,actorId:"owner",projects:[{projectId:"p",name:"P",repository:"/p",openBranch:"main",defaultBranch:"main"}]});
+  await port.query("capabilities.get", {});
+  await port.query("project.snapshot", {});
+  const payload = {type:"start_task",taskId:"task-1"} as const;
+  expect(await port.command({requestId:"start",operation:"start_task",expectedVersion:null,payload})).toMatchObject({ok:true,outcome:"recorded"});
+  s.answers["tasks.start"] = message => ({requestId:(message as any).requestId,outcome:"busy",target:"task-1",entityVersion:"2",recordedAt:"2026-11-05T00:00:00Z"});
+  expect(await port.command({requestId:"duplicate",operation:"start_task",expectedVersion:null,payload})).toMatchObject({
+    ok:false,outcome:"busy",message:"This task was already started. Refresh to see its execution.",
+  });
+  expect(s.calls.filter(c => c.operation === "tasks.start")).toHaveLength(2);
 });
 
 it("keeps a transient refresh quiet and retries without a command", async () => {

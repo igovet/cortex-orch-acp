@@ -1,13 +1,15 @@
 # Local task execution
 
 **Status: implemented source slice, not full product or installed-package qualification.**
-The local wire version is 1.6. See [protocol](protocol.md) and
+The local wire version is 1.8. See [protocol](protocol.md) and
 [IDE and Git](ide-and-git.md) for the wider contract.
 
 For update, native/API-key connection, voice-settings and command-control behavior,
 see [desktop maintenance and controls](maintenance-and-controls.md).
 
 ## Recorded data and pending questions
+
+Machine connectivity and task process confirmation are separate. An unconfirmed task on a connected machine shows one notice with one icon, explains that the machine is connected but cannot confirm whether the task is running or stopped, and offers **Re-check state**. The composer stays read-only and points to that control, not a fictitious reconnect requirement. Re-check rereads the existing projections; a still-unknown reply stays blocked and points to Machine settings → Diagnostics. A failed read keeps the task and a retry explanation. No task is resumed, stopped or replayed by this read.
 
 Coordinator messages and selected tool steps use the retained public `history.page`
 sequence, not the coordinator's one-line status note. Available history rows
@@ -19,10 +21,12 @@ Pages bind the project, task, session and page size, freeze their high-water mar
 and survive window reopen and helper restart. Runtime bookkeeping and thoughts
 are hidden without deleting source history; hidden-only pages still advance.
 Oversized or missing display content remains explicitly unavailable.
+The window reuses complete conversation histories only while project, task version and execution identity match; transactional history invalidations cause a fresh read. Page construction validates each row and the final page without revalidating every growing prefix. Working indicators retain their icon and status text without continuous animation; slow Git completion publishes updated facts rather than triggering another full task read.
 
 The machine `workers` helper accepts `workerId: "coordinator:<taskId>"` with that
 task in `taskIds`, returning a coordinator detail with the same activity and
 continuation fields as a worker. It reads the same public history projection.
+Opening a worker activity view automatically reads each available continuation page, without a Load older control. A failed page keeps loaded rows and offers Retry; new live-tail rows remain retained for the same attempt. Existing keyed rows, collapsed tool groups and scroll anchoring are reused (the activity stream has no virtualizer). Project-folder checkout labels are separate from branch names; the project title chip uses the observed open branch rather than the Git default.
 Ordinary worker lists stay worker-only. They retain each work-graph retry;
 the latest keeps the assignment identity, and older attempts use their own
 selection identities. `routeAttempts` additionally records each audited engine
@@ -45,10 +49,32 @@ A worker can ask while the runtime remains EXECUTING for other workers. Its acti
 
 Weekly Claude/Codex usage comes from the runtime quota reader used by route selection. Packaged Claude discovery can use the verified SDK CLI when no global `claude` is on PATH. Claude uses named weekly windows; Codex uses the reported 10080-minute duration in either primary or secondary, never the slot name alone. Missing Codex duration stays unknown. Multiple scopes/connections use the highest reported percentage, not their sum or the last entry. Unknown usage/observation time remains unknown; OpenCode and five-hour windows are omitted. These source and fixture checks do not qualify live account availability.
 
+## Editing saved tasks and closing sprints
+
+A task that has never started offers **Edit task…** in its title bar and board/list menu. The shared composer edits the original description and attachments, with title, model/effort/access/language and checkout choices. Saved files load before Save is enabled; a failed read offers Retry and never silently replaces them with an empty list. Save changes starts nothing. The original task version is checked transactionally against Start: an intervening edit refuses a stale save, and any execution identity (including an unknown or failed start) permanently makes the saved request read-only. Live messages and supported session-option changes remain separate actions.
+
+**New task** on a created sprint adds a draft even while its queue is active. It inherits the sprint checkout choice. New members append to the existing order; existing tasks and dependencies are not rewritten. Editing a pending member changes only its request, not the original planning document or dependency graph. Adding after queue completion leaves the queue paused until the owner continues it. If saving succeeds but linking is unconfirmed, the UI opens the saved task and explains the partial effect rather than creating another copy.
+
+**Close sprint…** is visible beside the sprint actions (in the sprint's actions menu when the title band is narrow) and asks for confirmation. It archives the sprint container and stops its automatic queue and planner. It does **not** cancel, accept, merge, close, archive or delete member tasks or discard files: unfinished tasks remain in the project outside active sprint grouping, and tasks already running continue. Individual task closure and unmerged-work/archive decisions keep their existing confirmations. The closed sprint disappears from active lists, sidebar, search and New task choices, and appears under **Archive → Closed sprints**, with its retained Summary. Closed sprint controls cannot restart its queue or accept new members. This is not permanent deletion or release qualification.
+
 ## Choices and checkout
 
 `tasks.create` saves the description and optional per-task model route, effort,
 access mode, message language and checkout kind. Saving does not start work.
+Explicit Start is task-local: another Workspace execution, pending/unknown start,
+or ordinary ACP task in the project never refuses it. A task with an existing
+execution still returns `busy`; refresh to see that execution instead of starting
+it again. Request replay returns the original receipt without redispatch. A
+crashed start remains unknown for that task only and is never replayed.
+The reverse direction is independent too: pending, unknown or running Workspace
+starts do not reserve the project against a new ordinary ACP first prompt.
+Source-event replay still recovers the original ACP task without creating another.
+Each execution has its own ACP session and cancellation target. Project-folder
+tasks still share files; start admission is not a filesystem isolation boundary.
+Sprint queues retain their dependency checks and pause rules. Manual
+`tasks.start` does not itself check sprint dependencies; dependency-aware
+board/sprint controls are presentation guards, not server enforcement.
+
 Selections are session-local: they do not rewrite machine defaults. Auto language
 does not inherit a previously chosen explicit language. Composer changes require
 an idle owning session; busy or unavailable sessions refuse them. A multi-setting failure explicitly names acknowledged and unconfirmed fields; it never reports a partial update as a successful whole. Refresh before retrying an unconfirmed step.
@@ -57,7 +83,7 @@ The Settings machine catalogue retains every connection-selectable route identit
 efforts for the chosen model. Unsupported or withdrawn routes are not silently
 replaced. A failed dispatch remains unknown and is not replayed automatically.
 
-A folder without Git runs in the project folder. On start, a saved worktree choice becomes `main` because there is no repository from which to create a worktree; no repository is created implicitly. Tasks, results, review and acceptance do not depend on Git. Code can read/save project files, while Changes explains that a Git diff is unavailable. Accepted work reaches Ready to merge; the owner can close it as-is without Git, or explicitly initialize Git before using Git integration. Closing as-is a result that already reached Ready to merge through acceptance or the automatic passed-checks promotion keeps it checked (`notVerifiedByCortex` stays false); closing any other result as-is still records the lasting Not verified warning.
+A folder without Git runs in the project folder. On start, a saved worktree choice becomes the project-folder checkout (internal kind `main`) because there is no repository from which to create a worktree; no repository is created implicitly. Tasks, results, review and acceptance do not depend on Git. Code can read/save project files, while Changes explains that a Git diff is unavailable. Accepted work reaches Ready to merge; the owner can close it as-is without Git, or explicitly initialize Git before using Git integration. Closing as-is a result that already reached Ready to merge through acceptance or the automatic passed-checks promotion keeps it checked (`notVerifiedByCortex` stays false); closing any other result as-is still records the lasting Not verified warning.
 
 A separate worktree is prepared on explicit start under the machine's configured
 worktree root, grouped by repository identity. New task branches and directory names
@@ -69,12 +95,12 @@ default-root change. The default root is
 `~/.local/share/cortex-workspace/worktrees` when the service has no XDG data override. The dev service sets XDG data to `<channel-state>/data`, so its default is `<channel-state>/data/cortex-workspace/worktrees`. Overview reports the absolute default separately from the saved root; the real reset control and example use that value. Changing or resetting the root never moves existing worktrees. Settings reject roots inside Git checkouts or registered non-Git projects, and locations occupied by files or lacking write/search permission. A writable external folder such as `/mnt/Big_Storage/.cortex/worktrees` is allowed; the `.cortex` name alone does not make it a project store. A refused save retains the draft and a persistent readable reason beside Save. The actual linked checkout is the ACP session cwd and permanent runtime
 task workspace; it shares the main repository's **one store per channel**: `.cortex/cortex.sqlite3` for release/default ACP, `.cortex-dev/cortex.sqlite3` for Workspace Dev. Dev never opens the release store; see [channel ownership](backlog/CW-S12.md).
 Task Changes reads that task's baseline-to-current diff, including its untracked
-files, not another checkout's diff. Main-checkout tasks share the owner's files;
+files, not another checkout's diff. Project-folder tasks share the owner's files;
 pre-existing uncommitted work therefore belongs to that visible checkout.
 
 Activation adds the exact Workspace helper paths to local Git excludes, without
 editing tracked ignore rules. File projections and app staging exclude them too;
-a commit refuses helper data already staged by another client. Separate-branch integration enumerates changed/untracked user paths and stages them literally, without adding or pathspec-matching ignored helper folders. Failed staging or commit restores the prior index selection; user file contents remain. Git identity/hook problems show recovery guidance instead of raw Git advice. Main-checkout tasks still share their visible user changes; this is not authorship attribution.
+a commit refuses helper data already staged by another client. Separate-branch integration enumerates changed/untracked user paths and stages them literally, without adding or pathspec-matching ignored helper folders. Failed staging or commit restores the prior index selection; user file contents remain. Git identity/hook problems show recovery guidance instead of raw Git advice. Project-folder tasks still share their visible user changes; this is not authorship attribution.
 
 ## Local settings and Git drafts
 
@@ -151,7 +177,7 @@ On activation, a saved materialized sprint whose members are missing from the se
 
 Retracted worker checks (withdrawn probes or invocation errors) are rederived from the persisted result, exact provisioning and command receipts, not the reviewer-only `current_outcome` field. Valid retractions are omitted from the active result checks and worker overview counts, as in the runtime's own completion gate. They neither block Accept/Ready to merge nor count as passes. Other failures, missing receipts and current runtime verification requirements remain blocking.
 
-Sprint creation first checks that the chosen model exists in the current selectable catalogue. A missing/unavailable model refuses with a connect/select-model explanation, keeps the description in the form and creates no sprint or planning task. A preset name alone is not a connected model. Sprint creation then saves its chosen route and target before starting description-only planning. The service uses a separate bounded read-only/plan-mode auxiliary session in an empty temporary directory, with no project tools or runtime task. It returns a validated dependency plan or an owner question; it must not implement the description or claim project inspection. The planner must ask the owner, not decide itself, when the description explicitly requires an owner question. For a multi-item plan, the planner supplies each task's self-contained scope, acceptance criteria and relevant owner answers in plain text; only minimal shared context belongs there, never sibling work or serialized conversation records. An unanswered owner-question requirement belongs only to its own item. The service does not append the whole sprint to every item. A sole planned task retains the original owner requirements and plain-text follow-ups as a safeguard against a shortened summary; oversized combined descriptions refuse rather than truncate. Scope decomposition remains model-generated, not a filesystem permission boundary. Create tasks materializes the plan as unstarted user tasks. Only Run sprint or an explicit task Start begins execution. The auxiliary turn explicitly requests the task-plan JSON as well as supplying session instructions. Invalid prose, task/dependency validation errors, incomplete output and engine-stage failures produce a service-owned readable explanation beside Resume planning, outside the scrollable conversation; raw model output and engine errors are not displayed. Resume clears the current failure notice while retaining conversation history. Invalid output or interrupted planning never produces a ready state with a null plan. Cancellation fences late output and closes the auxiliary session; older hidden planning runs are stopped through their execution control. Materialized tasks inherit its settings and target; changing a task target makes that target explicit. Sprint-target changes propagate to inherited task targets, not explicit overrides. Once tasks are materialized, change their routes individually rather than silently rewriting them.
+Sprint creation first checks that the chosen model exists in the current selectable catalogue. A missing/unavailable model refuses with a connect/select-model explanation, keeps the description in the form and creates no sprint or planning task. A preset name alone is not a connected model. Sprint creation offers the same **Where it works** choice as a single task: **Project folder** (the currently open local branch) or **Separate worktree**. The machine default fills the form until the owner chooses; unsupported worktrees and non-Git folders use Project folder with an explanation. Creation saves its chosen checkout kind, route and target before starting description-only planning. Planning and Summary show the saved checkout choice. Every task materialized from the plan inherits the sprint checkout kind, overriding per-item plan hints; worktree mode uses the existing per-task worktree preparation on explicit start, not one shared sprint checkout. Manual and automatic starts use those same saved task options. No checkout is created during planning, no existing checkout moves, and machine defaults are not rewritten. Older sprints without a saved choice keep their per-item/default Project folder behavior. The choice is fixed for that sprint; task execution/recovery semantics are unchanged. The service uses a separate bounded read-only/plan-mode auxiliary session in an empty temporary directory, with no project tools or runtime task. It returns a validated dependency plan or an owner question; it must not implement the description or claim project inspection. The planner must ask the owner, not decide itself, when the description explicitly requires an owner question. For a multi-item plan, the planner supplies each task's self-contained scope, acceptance criteria and relevant owner answers in plain text; only minimal shared context belongs there, never sibling work or serialized conversation records. An unanswered owner-question requirement belongs only to its own item. The service does not append the whole sprint to every item. A sole planned task retains the original owner requirements and plain-text follow-ups as a safeguard against a shortened summary; oversized combined descriptions refuse rather than truncate. Scope decomposition remains model-generated, not a filesystem permission boundary. Create tasks materializes the plan as unstarted user tasks. Only Run sprint or an explicit task Start begins execution. The auxiliary turn explicitly requests the task-plan JSON as well as supplying session instructions. Invalid prose, task/dependency validation errors, incomplete output and engine-stage failures produce a service-owned readable explanation beside Resume planning, outside the scrollable conversation; raw model output and engine errors are not displayed. Resume clears the current failure notice while retaining conversation history. Invalid output or interrupted planning never produces a ready state with a null plan. Cancellation fences late output and closes the auxiliary session; older hidden planning runs are stopped through their execution control. Materialized tasks inherit its settings and target; changing a task target makes that target explicit. Sprint-target changes propagate to inherited task targets, not explicit overrides. Once tasks are materialized, change their routes individually rather than silently rewriting them.
 
 The activated service child advances automatic sprints without a window.
 It reads bounded runtime projections, pauses for questions, unknown outcomes,
@@ -280,11 +306,30 @@ No storage migration or wire-version change is required.
 
 ## Attachments
 
-Task creation, the main task composer, direct-worker messages and multiline **Other answer** accept a file picker,
-dragged files and pasted clipboard images. Names appear as removable chips,
-without image previews. Reading failure or excessive input stays visible; no
-part of that selection is silently sent. Each submission permits up to eight
-files and 512 KiB of combined decoded bytes. A question batch shares that bound.
+Every form where the owner writes a message or creates work accepts a file picker,
+dragged files and pasted clipboard images: new task and new sprint, the task
+conversation (including paused resume and review discussion), queued messages,
+direct-worker messages, every answer inside a question card, planning messages, Request
+changes, diff comments and conflict-resolution guidance. Text-only fields such as
+names, branches, searches and commit messages take no attachments. Files appear as
+removable chips with their name and, for images, a small thumbnail. A queued
+message is the exception: its row in the queue shows no chips. The message keeps
+its files; Edit returns them to the composer as chips, and once sent they open
+from the conversation. A rejected file
+(too large, too many, unreadable, an unusable name or type, or a machine without
+attachments) shows its reason beside the form until the next successful action;
+no part of that selection is silently sent.
+
+Saved files stay available where they were sent. A task page reads its creation
+files on demand, sprint descriptions and planning conversations show theirs, and a
+sent conversation message keeps its files in the service's private product state as
+a recorded copy. A chip with its contents opens a preview of an image or, for any
+file, offers **Save a copy** through the system's save dialog; the owner picks the
+destination. A chip with only a name cannot be opened: worker-guidance records carry
+names, and a recorded copy drops its bytes, oldest first, when a newer queued
+message or sprint needs the bounded space. Answers to questions keep their files
+with the delivered answer, without a chip on the answered card. Each submission permits up to eight
+files and 4 MiB of combined decoded bytes. A question batch shares that bound.
 Text is required alongside attachments.
 
 Queue saves both text and bytes in the service's private product state. It
@@ -306,13 +351,18 @@ executed.
 The native window disables Tauri's drag interception so WebKitGTK receives file
 drops. On WebKitGTK versions that expose only URI text for native drops, a GTK
 drop observer snapshots those exact files and offers a one-use, five-second buffer;
-the webview cannot submit a filesystem path. An empty DOM image clipboard uses a
-bounded native PNG-only read on the explicit paste action. Task creation retains
+the webview cannot submit a filesystem path. WebKitGTK does not give the page a
+clipboard image: it reports nothing, or only the copied page's `text/html`. A paste
+with no plain text therefore asks the native clipboard for PNG, then any other image
+GTK can decode, re-encoded as PNG within the same 4 MiB limit. Plain text is pasted
+as usual, and no clipboard text or file path is read natively. Task creation retains
 validated bytes in the private draft options until explicit Start snapshots them.
 Direct-worker files are snapshotted with the identified guidance record and reach
 only that channel at its next successful Cortex tool response. Resource references,
 not filesystem paths, are delivered. Neither saving a draft nor attaching a file
-starts a model call. Sprint-description attachments remain unavailable.
+starts a model call.
+
+The data contract also accepts optional attachments for sprint creation, planning answers/messages, review comments and conflict-resolution guidance. Sprint descriptions and conversation entries expose their saved bytes for listing/opening. Planning uses the same ACP image/resource representation as task inputs, through the existing auxiliary planner (no project tools), and never places base64 in prompt text or diagnostics. A sprint's initial files and all planning follow-ups share eight files/4 MiB in total because a retry resends that input; excess is refused before saving. Omitted attachment fields on older records remain valid. The private product-state response has a bounded aggregate size below the 8-MiB local frame cap; a full state refuses new content rather than saving an unreadable record. Task creation bytes are readable on demand through `readTaskAttachments` on the real port, backed by the owner-only targeted `product.read` selector, rather than copied into every board snapshot.
 
 ## Task Stop and Resume
 
@@ -334,7 +384,7 @@ and owner facts agree. Retry recovery may advance the owner epoch beyond the ori
 retry notice as the task status; a give-up projects as `blocked` with that notice
 and needs the owner. There is no state to pause yet, so Stop cancels that launch
 through the runtime's ordinary task stop and the task becomes stopped; a stopped
-launch no longer keeps the checkout busy. A new service process still treats an
+launch no longer holds owner checkout actions that require stopped tasks. A new service process still treats an
 unconfirmed open launch as unknown.
 
 This is not engine-process suspension. Stop fences old worker channels. Pending
@@ -377,7 +427,7 @@ Ctrl+D or the microphone starts and stops on-device Russian dictation in a
 composer. Partial recognition appears live inside that composer; stopping leaves
 a preview, never a message. Cancel discards only the recording. Insert appends the
 final transcript to the editable draft. Insert and send is a separate explicit
-action where that composer supports sending (including Other answer); new-task
+action where that composer supports sending (including the answer inside a question card); new-task
 dictation never creates or starts a task.
 
 The service captures the default desktop source through PulseAudio's parec

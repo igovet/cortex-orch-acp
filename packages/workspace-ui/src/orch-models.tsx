@@ -5,7 +5,7 @@ import { I } from "./kit";
 import { HELP, PREFERRED_WHEN_HELP } from "./orch-help";
 import { Bar, Shell, slug, SourceStrips, useReadOnly, useRouting, useRoutingOff } from "./orch-shared";
 import { clock } from "./selectors";
-import { Adv, Chk, Err, Hint, Pick, Sw, Tags } from "./settings-kit";
+import { Adv, Chk, Err, Hint, Pick, SetH, Sw, Tags } from "./settings-kit";
 
 type Selected = { engine: EngineKey; model: string };
 const effortRange = (p: ModelPolicy) => p.effortFloor && p.maxEffort ? `${p.effortFloor} to ${p.maxEffort}` : p.maxEffort ? `up to ${p.maxEffort}` : p.effortFloor ? `from ${p.effortFloor}` : "";
@@ -94,12 +94,12 @@ export function Models() {
           const last = () => auto() && v().providers.length === 1;
           const gone = () => notOffered(v(), cat(), e.id);
           return <>
-            <div class="set-h">{e.label}
+            <SetH title={e.label}>
               <Show when={c().observedAt !== null}><span class="cap faint ws-w400 tnum">Observed {clock(c().observedAt)}</span></Show>
               <Show when={c().failed}><span class="cap st-warn ws-w400">List could not be read, previous one kept</span></Show>
-              <span class="r"><label class="sw-l">Use<Sw label={`Use ${e.label}`} checked={used()} disabled={off()} onChange={on => d.set(setEngineUse(v(), e.id, on))} /></label>
-                <label class="sw-l">Automatic routing<Sw label={`${e.label} in automatic routing`} checked={auto()} disabled={off() ?? (last() ? "The last engine stays: automatic routing needs one" : undefined)} onChange={on => d.set(setProvider(v(), e.id, on))} /></label></span>
-            </div>
+              <label class="sw-l">Use<Sw label={`Use ${e.label}`} checked={used()} disabled={off()} onChange={on => d.set(setEngineUse(v(), e.id, on))} /></label>
+              <label class="sw-l">Automatic routing<Sw label={`${e.label} in automatic routing`} checked={auto()} disabled={off() ?? (last() ? "The last engine stays: automatic routing needs one" : undefined)} onChange={on => d.set(setProvider(v(), e.id, on))} /></label>
+            </SetH>
             <Show when={!used()}><div class="cap muted">Hidden from selection, refused when pinned. Connection and login stay.</div></Show>
             <Show when={c().models.length > 0} fallback={<div class="surface ws-empty">{e.id === "opencode" ? "No models. Enable OpenCode in Engine connections first. Its usage is not tracked." : "The engine listed no models."}</div>}>
               <div class="surface"><div class="gt">
@@ -124,7 +124,7 @@ export function Models() {
               <div class="row ws-gap4"><button class="btn btn-sm" aria-disabled={off() ? "true" : undefined} data-why={off()} onClick={() => { if (!off()) bulk(e.id, true); }}>Turn on all shown</button><button class="btn btn-sm" aria-disabled={off() ? "true" : undefined} data-why={off()} onClick={() => { if (!off()) bulk(e.id, false); }}>Turn off all shown</button></div>
             </Show>
             <Show when={gone().length > 0}>
-              <div class="set-h">Not offered now</div>
+              <SetH title="Not offered now" />
               <div class="surface"><For each={gone()}>{id => <div class="srow"><span><span class="t mono">{id}</span><span class="d">Enabled here, but {e.label} does not list it. Nothing is inferred.</span></span><span class="ctl"><button class="btn btn-line btn-sm" aria-disabled={off() ? "true" : undefined} data-why={off()} aria-label={`Remove ${id}`} onClick={() => { if (!off()) d.set(setModelEnabled(v(), e.id, id, false)); }}>Remove</button></span></div>}</For></div>
             </Show>
           </>;

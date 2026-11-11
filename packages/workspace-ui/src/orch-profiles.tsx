@@ -5,7 +5,7 @@ import { A, I, MenuItem, NameEdit, Pop } from "./kit";
 import { HELP } from "./orch-help";
 import { orchTo, Shell, useProjectName, useReadOnly, useSwitchProfile } from "./orch-shared";
 import { clock } from "./selectors";
-import { Chk, Hint, Lock, Srow } from "./settings-kit";
+import { Chk, Hint, Lock, SetH, Srow } from "./settings-kit";
 
 /** The landing page: what is wrong first, then one line per page. */
 export function Overview() {
@@ -29,12 +29,12 @@ export function Overview() {
   ];
   return <Shell title="Orchestration" lead="Everything needed to run tasks on this machine.">
     <Show when={issues().length > 0}>
-      <div class="set-h">Needs attention</div>
+      <SetH title="Needs attention" />
       <div class="surface"><For each={issues()}>{i => <A class="srow ws-link-row" to={orchTo(m().id, i.page, i.server ? { server: i.server, tab: "sandbox" } : {})}><span><span class="t ws-w400">{i.text}</span></span><span class="ctl"><I n="chevron-right" s={14} class="faint" /></span></A>}</For></div>
     </Show>
-    <div class="set-h">Summary</div>
+    <SetH title="Summary" />
     <div class="surface"><For each={rows()}>{([page, t, d]) => <A class="srow ws-link-row" to={orchTo(m().id, page)}><span><span class="t">{t}</span><span class="d">{d}</span></span><span class="ctl"><I n="chevron-right" s={14} class="faint" /></span></A>}</For></div>
-    <div class="set-h">Source</div>
+    <SetH title="Source" />
     <div class="surface"><A class="srow ws-link-row" to={orchTo(m().id, "files")}><span><span class="t">Routing file in use</span><span class="d mono">{source().path}</span><Show when={own().length > 0}><span class="d">Own routing file: {own().join(", ")}</span></Show></span><span class="ctl"><I n="chevron-right" s={14} class="faint" /></span></A></div>
   </Shell>;
 }
@@ -55,7 +55,7 @@ export function Profiles() {
     <Show when={state() === "interrupted"}><div class="note-box"><I n="alert" s={14} /><span>A switch to {active()?.name} was interrupted, so the files may be a mix.</span><span class="ws-push"></span><span class="row ws-gap4">{btn("Activate again", () => run({ type: "activate_profile", machineId: m().id, profileId: c().active!, keep: "discard" }))}{btn("Save current settings to it", () => run({ type: "save_profile", machineId: m().id }))}{btn("Detach", () => run({ type: "deactivate_profile", machineId: m().id }))}</span></div></Show>
     <Show when={state() === "modified"}><div class="surface"><Srow t={`Modified from ${active()?.name}`} d={diffs().map(d => `${PROFILE_SECTION_LABELS[d.section]}: ${d.lines.join(", ")}`).join(". ")}>{btn("Save to profile", () => run({ type: "save_profile", machineId: m().id }))}{btn("Revert to saved", () => run({ type: "revert_profile", machineId: m().id }))}</Srow></div></Show>
     <Show when={state() === "none"}><div class="note-box plain"><I n="pencil" s={14} /><span>No profile is active. Save as new to keep these settings.</span></div></Show>
-    <div class="set-h">Saved<Hint text={HELP.profilesIntro} label="profiles" /></div>
+    <SetH title="Saved"><Hint text={HELP.profilesIntro} label="profiles" /></SetH>
     <div class="surface"><div class="gt">
       <div class="gr ofrow th"><span>Name</span><span>Description</span><span>Stored sections</span><span>Updated</span><span>Matches</span><span></span></div>
       <For each={c().profiles}>{p => {
@@ -79,7 +79,7 @@ export function Profiles() {
       }}</For>
     </div></div>
     <div class="note-box plain"><I n="lock" s={14} /><span>Profiles never hold project settings, MCP commands, arguments, environment or credentials.</span></div>
-    <Show when={routingSource(m(), null).kind === "environment"}><div class="note-box"><I n="alert" s={14} /><span>Routing from a profile is shadowed by $CORTEX_ROUTING here.</span></div></Show>
+    <Show when={routingSource(m(), null).kind === "environment"}><div class="note-box"><I n="alert" s={14} /><span>An environment override takes priority over this profile's routing here.</span></div></Show>
   </Shell>;
 }
 
@@ -89,37 +89,39 @@ export function Files() {
   const [tick, setTick] = createSignal(false);
   const [preview, setPreview] = createSignal(false);
   const run = (command: Parameters<typeof ws.run>[0]) => ws.run(command).then(r => r.ok);
-  const reset = () => ws.open({ kind: "confirm", title: "Reset to the default preset?", danger: true, action: "Reset", note: "Replaces all routing rules, the coordinator default, the language and the owner ceiling, in routing.json and defaults.json. A private backup of each is kept beside it. Project and $CORTEX_ROUTING files are not changed." + (ws.store.mode === "demo" ? " Simulated: nothing is written." : ""), go: () => run({ type: "reset_preset", machineId: m().id, confirmed: true }) });
+  const reset = () => ws.open({ kind: "confirm", title: "Reset to the default preset?", danger: true, action: "Reset", note: "Replaces all routing rules, the coordinator default, the language and the owner ceiling, in routing.json and defaults.json. A private backup of each is kept beside it. Project routing and the environment override are not changed." + (ws.store.mode === "demo" ? " Simulated: nothing is written." : ""), go: () => run({ type: "reset_preset", machineId: m().id, confirmed: true }) });
   const own = () => projectsWithRouting(m()).map(id => name(id));
   const active = () => routingSource(m(), null).kind;
   const sources = () => [
-    { t: "Project routing", path: "<project>/.cortex/routing.json", exists: own().length > 0, sub: own().join(", "), on: false, rev: null as number | null },
-    { t: "Environment", path: f().envRouting ?? "$CORTEX_ROUTING", exists: !!f().envRouting, sub: "Read-only", on: active() === "environment", rev: null },
-    { t: "Machine routing", path: "~/.config/cortex/routing.json", exists: !f().missing.includes("routing.json"), sub: "", on: active() === "machine", rev: c().revisions.routing },
+    // Friendly names on screen; the exact location stays behind an explicit Copy action, never in a label.
+    { t: "Project routing file", path: "<project>/.cortex/routing.json", label: "In each project", exists: own().length > 0, sub: own().join(", "), on: false, rev: null as number | null },
+    { t: "Environment routing file", path: f().envRouting ?? null, label: f().envRouting ? "Set by the environment" : "No environment override", exists: !!f().envRouting, sub: "Read-only", on: active() === "environment", rev: null },
+    { t: "User routing file", path: "~/.config/cortex/routing.json", label: "In your user settings", exists: !f().missing.includes("routing.json"), sub: "", on: active() === "machine", rev: c().revisions.routing },
   ];
   const others = () => [
     { t: "defaults.json", d: "Coordinator default, language and ceiling.", rev: c().revisions.user_defaults }, { t: "mcp-servers.json", d: "External servers. Per machine only.", rev: c().revisions.mcp_servers },
     { t: "connections.json", d: "Registered engine accounts.", rev: null }, { t: "routing-profiles.json", d: "Saved profiles.", rev: null },
   ];
-  const envs = () => [["CORTEX_ENGINE_UPDATE", f().env.engineUpdate ?? "on"], ["CORTEX_ENGINE_FOLLOW", f().env.engineFollow ?? "on"], ["CORTEX_OPENCODE_BINARY", f().env.opencodeBinary]].filter(([, v]) => v) as [string, string][];
+  const envs = () => [["Engine updates", "CORTEX_ENGINE_UPDATE", f().env.engineUpdate ?? "on"], ["Engine version following", "CORTEX_ENGINE_FOLLOW", f().env.engineFollow ?? "on"], ["OpenCode executable", "CORTEX_OPENCODE_BINARY", f().env.opencodeBinary]].filter(([, , v]) => v) as [string, string, string][];
+  const copy = (value: string) => { void navigator.clipboard?.writeText(value).catch(() => undefined); };
   const preserved = () => [...f().preservedRouting, ...f().preservedDefaults, ...c().surfaces.user_defaults.preserved];
   return <Shell wide title="Files and presets" lead={ws.t("filesLead")}>
-    <div class="set-h">Routing sources<span class="cap faint ws-w400">First existing file wins. Files never merge.</span></div>
+    <SetH title="Routing sources"><span class="cap faint ws-w400">First existing file wins. Files never merge.</span></SetH>
     <div class="surface"><div class="gt">
       <div class="gr oyrow th"><span>Source</span><span>Path</span><span>Exists</span><span>Valid</span><span>Revision</span><span></span></div>
-      <For each={sources()}>{s => <div class="gr oyrow"><span class="trunc"><span class="w500">{s.t}</span><Show when={s.sub}><span class="sub trunc">{s.sub}</span></Show></span><span class="cap mono trunc">{s.path}</span><span class="cap">{s.exists ? "Yes" : "No"}</span><span class="cap">{s.exists ? (s.on && f().invalidRouting ? <span class="st-bad">Invalid</span> : "Yes") : ""}</span><span class="cap tnum muted">{s.rev === null ? "" : `rev ${s.rev}`}</span><span class="cap st-ok">{s.on ? "In use" : ""}</span></div>}</For>
+      <For each={sources()}>{s => <div class="gr oyrow"><span class="trunc"><span class="w500">{s.t}</span><Show when={s.sub}><span class="sub trunc">{s.sub}</span></Show></span><span class="cap trunc">{s.label}<Show when={s.path}>{p => <button type="button" class="lnk ws-ml4" aria-label={`Copy file location: ${s.t}`} onClick={() => copy(p())}>Copy file location</button>}</Show></span><span class="cap">{s.exists ? "Yes" : "No"}</span><span class="cap">{s.exists ? (s.on && f().invalidRouting ? <span class="st-bad">Invalid</span> : "Yes") : ""}</span><span class="cap tnum muted">{s.rev === null ? "" : `rev ${s.rev}`}</span><span class="cap st-ok">{s.on ? "In use" : ""}</span></div>}</For>
     </div></div>
-    <div class="set-h">Other files</div>
+    <SetH title="Other files" />
     <div class="surface"><For each={others()}>{o => <Srow t={<span class="mono">{o.t}</span>} d={o.d}><Show when={o.rev !== null}><span class="cap tnum muted">rev {o.rev}</span></Show></Srow>}</For>
       <Srow t={<span class="mono">ssh-askpass.json</span>} d="Written by hand, off by default."><span class="cap">{f().askpass ? "On" : "Off"}</span><Lock text="Read-only" /></Srow></div>
-    <Show when={preserved().length > 0}><div class="set-h">Preserved keys</div><div class="surface"><Srow t={<span class="mono">{preserved().join(", ")}</span>} d="Keys this app does not manage. They are kept on save."><Lock text="Read-only" /></Srow></div></Show>
-    <Show when={envs().length > 0}><div class="set-h">Environment overrides</div><div class="surface"><For each={envs()}>{([k, v]) => <Srow t={<span class="mono">{k}</span>}><span class="cap mono">{v}</span><Lock text="Read-only" /></Srow>}</For></div></Show>
-    <div class="set-h">Default preset<Hint text={HELP.defaultPreset} label="default preset" /></div>
+    <Show when={preserved().length > 0}><SetH title="Preserved keys" /><div class="surface"><Srow t={<span class="mono">{preserved().join(", ")}</span>} d="Keys this app does not manage. They are kept on save."><Lock text="Read-only" /></Srow></div></Show>
+    <Show when={envs().length > 0}><SetH title="Environment overrides" /><div class="surface"><For each={envs()}>{([label, name, v]) => <Srow t={label}><span class="cap mono">{v}</span><button type="button" class="lnk" aria-label={`Copy variable name: ${label}`} onClick={() => copy(name)}>Copy variable name</button><Lock text="Read-only" /></Srow>}</For></div></Show>
+    <SetH title="Default preset"><Hint text={HELP.defaultPreset} label="default preset" /></SetH>
     <div class="surface">
-      <Srow t="Apply" d={f().missing.length ? `Seeds what is absent: ${f().missing.join(", ")}.` : "Every file exists, so there is nothing to seed."}><button class="btn btn-line btn-sm" aria-disabled={f().missing.length && !off() ? undefined : "true"} data-why={off()} onClick={() => { if (f().missing.length && !off()) run({ type: "apply_preset", machineId: m().id }); }}>Apply preset</button></Srow>
+      <Srow t="Apply" d={f().missing.length ? `Seeds what is absent: ${f().missing.join(", ")}.` : "Seeds the files that are absent."}><button class="btn btn-line btn-sm" aria-disabled={f().missing.length && !off() ? undefined : "true"} data-why={off() ?? (f().missing.length ? undefined : "Every file exists, so there is nothing to seed.")} onClick={() => { if (f().missing.length && !off()) run({ type: "apply_preset", machineId: m().id }); }}>Apply preset</button></Srow>
       <Srow t="Reset" d={f().backups ? `${f().backups} private backups kept.` : "Replaces routing.json and defaults.json, with private backups."}><button class="btn btn-line btn-sm" aria-disabled={off() ? "true" : undefined} data-why={off()} onClick={() => { if (!off()) reset(); }}>Reset to default…</button></Srow>
     </div>
-    <div class="set-h">Model policy migration</div>
+    <SetH title="Model policy migration" />
     <div class="surface">
       <Srow t="Older model policy" d={f().migration || c().surfaces.routing.legacyTiers.length ? "This machine needs it. Preview first." : `This machine is on model policy ${c().surfaces.routing.version}.`}><button class="btn btn-line btn-sm" aria-disabled={off() ? "true" : undefined} data-why={off()} onClick={() => { if (!off()) setPreview(!preview()); }}>Preview</button></Srow>
       <Show when={preview()}>

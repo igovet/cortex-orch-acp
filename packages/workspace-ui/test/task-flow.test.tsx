@@ -16,7 +16,11 @@ afterEach(() => { dispose?.(); dispose = undefined; document.body.innerHTML = ""
 const settled = async () => { for (let i = 0; i < 12; i++) await flush(); };
 const $ = <T extends Element = HTMLElement>(selector: string) => document.querySelector<T>(selector);
 const all = <T extends Element = HTMLElement>(selector: string) => [...document.querySelectorAll<T>(selector)];
-const button = (text: string) => all("button").find(b => b.textContent?.trim().startsWith(text))!;
+const button = (text: string) => all("button").find(b => b.textContent?.trim().startsWith(text) || b.getAttribute("aria-label") === text)!;
+/** Chooses an option of the question on view; choosing alone sends nothing. */
+const choose = (label: string) => all('.dc-panel:not([aria-hidden="true"]) .opt').find(o => o.textContent?.includes(label))!.click();
+/** Presses the paper plane of the question on view. */
+const plane = async () => { $<HTMLButtonElement>('.dc-panel:not([aria-hidden="true"]) [aria-label="Send answer"]')!.click(); await settled(); };
 async function mount(port: Parameters<typeof Workspace>[0]["port"], path: string) {
   history.replaceState(null, "", path);
   const root = document.createElement("div");
@@ -87,17 +91,32 @@ describe("several questions at once", () => {
     expect(all(".dc-tab")[2].getAttribute("aria-selected")).toBe("true");
   });
 
+  it("choosing an option only prepares the answer; the plane sends it", async () => {
+    const s = planning({ decisions: questions });
+    await mount(s.port, SPRINT);
+    choose("Home buyers");
+    expect(all(".opt").find(o => o.textContent?.includes("Home buyers"))?.getAttribute("aria-checked")).toBe("true");
+    expect(all('.dc-tab[aria-label$="answered"]')).toEqual([]);
+    expect($('.dc-panel:not([aria-hidden="true"]) .mc-effect')?.textContent).toBe("Answer: Home buyers");
+    // Writing your own answer replaces the chosen option, so the plane sends what the card shows.
+    const field = $<HTMLTextAreaElement>('.dc-panel:not([aria-hidden="true"]) [aria-label="Your answer"]')!;
+    field.value = "Both, really"; field.dispatchEvent(new Event("input", { bubbles: true })); await settled();
+    expect(all(".opt").find(o => o.textContent?.includes("Home buyers"))?.getAttribute("aria-checked")).toBe("false");
+    await plane();
+    expect(all('.dc-tab[aria-label$="answered"]').map(t => t.dataset.ask)).toEqual(["d1"]);
+  });
+
   it("marks each answer on its tab, moves on, and sends the batch once, whatever order they came in", async () => {
     const s = planning({ decisions: questions });
     await mount(s.port, SPRINT);
     all(".dc-tab")[1].click(); await settled();
-    all(".opt").find(o => o.textContent?.includes("Only look"))!.click(); await settled();
+    choose("Only look"); await plane();
     expect(s.calls.filter(c => c.operation === "decisions.answer")).toEqual([]);
     expect(all('.dc-tab[aria-label$="answered"]').map(t => t.dataset.ask)).toEqual(["d2"]);
     expect($(".dc-tabs .r")?.textContent).toBe("1 of 3 answered");
     expect(all('.dc-panel:not([aria-hidden="true"]) .dc-q').map(q => q.textContent)).toEqual(["Who is it for?"]);
-    all(".opt").find(o => o.textContent?.includes("Home buyers"))!.click(); await settled();
-    all(".opt").find(o => o.textContent?.includes("Warm"))!.click(); await settled();
+    choose("Home buyers"); await plane();
+    choose("Warm"); await plane();
     const sent = s.calls.filter(c => c.operation === "decisions.answer").map(c => c.message as { payload: { answers: { decisionId: string; text: string; optionId: string | null }[] } });
     expect(sent).toHaveLength(1);
     expect(sent[0].payload.answers.map(a => [a.decisionId, a.text, a.optionId])).toEqual([["d1", "Home buyers", "o1"], ["d2", "Only look", "o3"], ["d3", "Warm", "o4"]]);
@@ -106,11 +125,11 @@ describe("several questions at once", () => {
   it("keeps an unsent answer changeable until the last one goes", async () => {
     const s = planning({ decisions: questions });
     await mount(s.port, SPRINT);
-    all(".opt").find(o => o.textContent?.includes("Home buyers"))!.click(); await settled();
+    choose("Home buyers"); await plane();
     all(".dc-tab")[0].click(); await settled();
-    expect(all(".opt").find(o => o.textContent?.includes("Home buyers"))?.getAttribute("aria-pressed")).toBe("true");
-    all(".opt").find(o => o.textContent?.includes("Offices"))!.click(); await settled();
-    expect(all(".opt").find(o => o.textContent?.includes("Offices"))?.getAttribute("aria-pressed")).toBe("true");
+    expect(all(".opt").find(o => o.textContent?.includes("Home buyers"))?.getAttribute("aria-checked")).toBe("true");
+    choose("Offices"); await plane();
+    expect(all(".opt").find(o => o.textContent?.includes("Offices"))?.getAttribute("aria-checked")).toBe("true");
     expect(s.calls.filter(c => c.operation === "decisions.answer")).toEqual([]);
   });
 
@@ -188,17 +207,17 @@ describe("the plan under a resting pointer", () => {
   it("keeps a half-written other answer through the same reads", async () => {
     const s = planning({ decisions: questions });
     await mount(s.port, SPRINT);
-    all(".opt").find(o => o.textContent?.includes("Other answer"))!.click(); await settled();
-    const field = $<HTMLTextAreaElement>('[aria-label="Your answer"]')!;
+    const field = $<HTMLTextAreaElement>('.dc-panel:not([aria-hidden="true"]) [aria-label="Your answer"]')!;
     field.value = "Half written"; field.dispatchEvent(new Event("input", { bubbles: true }));
     s.send({ type: "invalidated", projectId: "p" }); await settled();
-    expect($('[aria-label="Your answer"]')).toBe(field);
+    expect($('.dc-panel:not([aria-hidden="true"]) [aria-label="Your answer"]')).toBe(field);
     expect(field.value).toBe("Half written");
   });
 
   it("lists titles only, and Read more opens the full text beside the plan", async () => {
     const s = planning({ decisions: [], plan: items });
-    await mount(s.port, SPRINT);
+    // The plan has its own tab beside the chat.
+    await mount(s.port, SPRINT.replace(/planning$/, "plan"));
     expect($(".sp-plan")?.textContent).not.toContain("several paragraphs");
     expect($(".sp-plan")?.textContent).not.toContain("Acceptance and checks");
     expect($(".ws-read")).toBeNull();
@@ -529,7 +548,7 @@ describe("stamps and rows that said nothing", () => {
     await settled();
     s.emit({ kind: "connection", connection: { state: "disconnected", reason: null, at: Date.now() } });
     await settled();
-    expect($(".planbar")?.textContent).toMatch(/Last confirmed .* old/);
+    expect($(".taskbar")?.textContent).toMatch(/Last confirmed .* old/);
   });
 });
 

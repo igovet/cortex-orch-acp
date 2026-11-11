@@ -1,0 +1,6 @@
+/* The page before any script runs. This is a file, never an inline <style>: Tauri gives every inline style a CSP nonce,
+   and a nonce in style-src switches 'unsafe-inline' off, which blocks the code editor's and the terminal's own styles. */
+html,body{margin:0;background:#181b1a}
+html[data-theme="light"],html[data-theme="light"] body{background:#fff}
+#boot{position:fixed;inset:0;display:grid;place-items:center}
+#boot img{display:block;width:96px;height:96px}

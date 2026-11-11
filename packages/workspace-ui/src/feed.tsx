@@ -1,8 +1,21 @@
-import { createSignal, For, Show, type JSX } from "solid-js";
+import { createMemo, createSignal, For, Show, type JSX } from "solid-js";
 import { useWs } from "./ctx";
 import { I } from "./kit";
 import { taskCheckout } from "./review-model";
-import { displayStep, type DisplayStep, type StepView } from "./tool-names";
+import { displayStep, stepHasContent, type DisplayStep, type StepView } from "./tool-names";
+
+/** Which folds and steps the owner opened. It lives above the rows, so no live update or redraw of a row can close one. */
+export type OpenState = { is: (key: string) => boolean; toggle: (key: string) => void; clear: () => void };
+export function createOpenState(): OpenState {
+  const [open, setOpen] = createSignal<Record<string, boolean>>({});
+  return { is: key => !!open()[key], toggle: key => setOpen(all => ({ ...all, [key]: !all[key] })), clear: () => setOpen({}) };
+}
+
+/** Recorded output exactly as written: a long line scrolls sideways inside this box, never wraps or widens its column. Keys,
+ *  the wheel with Shift and a trackpad all move it, so it is a named stop in the tab order. */
+export function OutputBox(props: { label: string; class?: string; children: JSX.Element }) {
+  return <div class={`ws-out ${props.class ?? "args"}`} tabIndex={0} role="region" aria-label={props.label}>{props.children}</div>;
+}
 
 /** Identical target, command and diff presentation wherever a step opens. */
 export function StepDetail(props: { step: DisplayStep; taskId: string }) {
@@ -27,20 +40,20 @@ export function StepDetail(props: { step: DisplayStep; taskId: string }) {
     <Show when={error()}><div role="alert">{error()}</div></Show>
     <Show when={props.step.query}><div>Search: <code>{props.step.query}</code></div></Show>
     <Show when={props.step.command}><pre><code>{props.step.command}</code></pre>
-      <div class="args">{props.step.output || (props.step.status === "in_progress" || props.step.status === "pending" ? "Waiting for output…" : "No output was recorded.")}</div>
+      <OutputBox label="Command output">{props.step.output || (props.step.status === "in_progress" || props.step.status === "pending" ? "Waiting for output…" : "No output was recorded.")}</OutputBox>
     </Show>
-    <Show when={props.step.newText !== undefined}><details><summary>View edit</summary><div class="diff">
+    <Show when={props.step.newText !== undefined}><details><summary>View edit</summary><OutputBox label="Edit" class="diff">
       <For each={(props.step.oldText ?? "").split("\n").filter((_,i,lines) => lines.length > 1 || lines[0] !== "")}>{line => <div class="d">−{line}</div>}</For>
       <For each={props.step.newText!.split("\n")}>{line => <div class="a">+{line}</div>}</For>
-    </div></details></Show>
+    </OutputBox></details></Show>
   </div></Show>;
 }
 
-/** One tool step: an icon, a plain name and what it worked on. Long commands stay on one line and open with a click. */
-export function StepRow(props: { view: StepView; taskId: string; tone?: string; icon?: string; status?: JSX.Element; extra?: JSX.Element; hasExtra?: boolean }) {
-  const [open, setOpen] = createSignal(false);
+/** One tool step: an icon, a plain name and what it worked on. It opens only when there is something to see; otherwise it is a plain line. */
+export function StepRow(props: { view: StepView; taskId: string; tone?: string; icon?: string; status?: JSX.Element; extra?: JSX.Element; hasExtra?: boolean; state: OpenState; stateKey: string }) {
+  const open = () => props.state.is(props.stateKey);
   const detail = () => props.view.detail;
-  const expandable = () => !!detail() || !!props.hasExtra;
+  const expandable = () => (!!detail() && stepHasContent(detail()!)) || !!props.hasExtra;
   const row = () => <>
     <I n={props.icon ?? props.view.icon} s={14} class={props.tone ?? "faint"} />
     <span class="step-l">{props.view.label}</span>
@@ -49,9 +62,9 @@ export function StepRow(props: { view: StepView; taskId: string; tone?: string; 
   </>;
   return <div class="step">
     <Show when={expandable()} fallback={<div class="step-row">{row()}</div>}>
-      <button class="ev-toggle step-row" aria-expanded={open() ? "true" : "false"} onClick={() => setOpen(!open())}>{row()}</button>
+      <button class="ev-toggle step-row" aria-expanded={open() ? "true" : "false"} onClick={() => props.state.toggle(props.stateKey)}>{row()}</button>
     </Show>
-    <Show when={open()}><div class="step-sub">
+    <Show when={open() && expandable()}><div class="step-sub">
       <Show when={detail()}>{d => <StepDetail step={d()} taskId={props.taskId} />}</Show>
       {props.extra}
     </div></Show>
@@ -74,6 +87,12 @@ export function Fold(props: { text: string; open: boolean; onToggle: () => void;
 }
 
 /** Steps of a Conversation fold, as the feed recorded them. */
-export function TextSteps(props: { steps: string[]; taskId: string; view: (step: string) => StepView }) {
-  return <For each={props.steps}>{step => <StepRow view={props.view(step)} taskId={props.taskId} tone={displayStep(step)?.status === "failed" ? "st-bad" : undefined} />}</For>;
+export function TextSteps(props: { steps: string[]; taskId: string; view: (step: string) => StepView; state: OpenState; scope: string }) {
+  // A step's recorded text changes with every status update; its call id does not.
+  const ids = createMemo(() => props.steps.map((step, i) => displayStep(step)?.callId || `${i}:${step}`), undefined, { equals: (a, b) => a.length === b.length && a.every((id, i) => id === b[i]) });
+  const steps = createMemo(() => new Map(props.steps.map((step, i) => [displayStep(step)?.callId || `${i}:${step}`, step])));
+  return <For each={ids()}>{id => {
+    const step = () => steps().get(id) ?? "";
+    return <StepRow view={props.view(step())} taskId={props.taskId} tone={displayStep(step())?.status === "failed" ? "st-bad" : undefined} state={props.state} stateKey={`${props.scope}:${id}`} />;
+  }}</For>;
 }

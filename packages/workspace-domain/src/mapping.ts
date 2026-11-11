@@ -73,7 +73,7 @@ export function mapTask(task: WireTask, context: { projectId: string }, result?:
   const known = phase !== "unknown" && task.phase !== "recovery";
   const status = STATUS_OF_PHASE[phase] ?? (task.executionId ? "working" : "draft");
   return {
-    id: task.taskId, projectId: context.projectId, sprintId: null, description: task.description,
+    id: task.taskId, projectId: context.projectId, sprintId: null, description: task.description, sourceVersion: task.version,
     title: task.title ?? descriptionLabel(task.description), titleState: task.title === null ? "pending" : "generated",
     checkout: { kind: "main", branch: "" }, targetBranch: null, dependencies: [], status, resumeStatus: "working",
     observedPhase:phase, coordinatorRoute: task.coordinatorRoute ?? null, warnings:task.warnings, issue: task.waitReason, executionId: task.executionId, result: mapped, workspaceDigest: mapped?.digest ?? null, acceptance: null,

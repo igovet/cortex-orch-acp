@@ -92,6 +92,22 @@ def test_limits_and_strict_commands():
         c.validate("Command", command)
 
 
+def test_older_client_limits_and_optional_limit_negotiation(tmp_path):
+    from test_workspace_api import api_for, query
+    c = contract()
+    api = api_for(tmp_path)
+    old = api.handle(query("capabilities.get"))
+    assert old["limits"]["frameBytes"] == 1024 * 1024
+    current_query = dict(query("capabilities.get"), protocol=dict(c.PROTOCOL))
+    current = api.handle(current_query)
+    assert current["limits"]["frameBytes"] == c.LIMITS["frameBytes"]
+    old["limits"].pop("attachmentBytes")
+    old["limits"].pop("attachmentFiles")
+    result = c.negotiate(current, old)
+    assert result["limits"]["frameBytes"] == 1024 * 1024
+    assert "attachmentBytes" not in result["limits"]
+
+
 def test_local_frame_limits_and_corruption():
     c = contract()
     value = {"message": "line\n😀"}
@@ -103,7 +119,7 @@ def test_local_frame_limits_and_corruption():
         with pytest.raises(c.ContractError):
             c.decode_frame(bad)
     with pytest.raises(c.ContractError):
-        c.encode_frame({"text": "x" * 1048576})
+        c.encode_frame({"text": "x" * c.LIMITS["frameBytes"]})
     nested = None
     for _ in range(65):
         nested = [nested]
@@ -167,7 +183,7 @@ def test_typescript_fixtures_and_runtime():
     result = subprocess.run(["node", "packages/workspace-contract/test.mjs"],
                             cwd=ROOT, capture_output=True, text=True, timeout=30)
     assert result.returncode == 0, result.stdout + result.stderr
-    tsc = ROOT / "prototypes/cortex-workspace/desktop/node_modules/.bin/tsc"
+    tsc = ROOT / "packages/workspace-ui/node_modules/.bin/tsc"
     assert tsc.is_file(), "existing checkout TypeScript compiler unavailable"
     result = subprocess.run([str(tsc), "--noEmit", "--strict", "--skipLibCheck",
                              "--target", "ES2022", "--module", "NodeNext",

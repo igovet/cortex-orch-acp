@@ -56,7 +56,7 @@ describe("a project whose Cortex is away", () => {
     expect(update).toHaveLength(1);
     expect(s.calls.filter(c => c.operation === "project.snapshot")).toEqual([]);
     await mount(s);
-    expect(document.querySelector(".ws-conn[role=alert]")?.textContent).toContain("folder is not there");
+    expect(document.querySelector(".l-strip[role=alert]")?.textContent).toContain("folder is not there");
     expect(document.body.textContent).not.toContain("Not connected");
     expect(all(".st").map(e => e.textContent)).toContain("Connected");
     button("Try again").click(); await settle();

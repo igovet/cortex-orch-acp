@@ -109,18 +109,6 @@ def bootstrap_task(store, source_event, user_input, owner_ref, *, blocks=None, m
                 db.commit()
                 if blocks: replay_store.cleanup_staged(blocks)
                 return BootstrapResult(task_id=existing["task_id"], channel_id=None, secret=None, replayed=True, owner_epoch=owner_epoch)
-            # A pending Workspace dispatch reserves this checkout, including
-            # against ordinary ACP first prompts racing its capture.
-            if capture_tx is None and db.execute(
-                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='workspace_starts'").fetchone():
-                busy = db.execute(
-                    "SELECT 1 FROM workspace_starts s JOIN workspace_projects p USING(project_id) "
-                    "LEFT JOIN workspace_executions e USING(execution_id) "
-                    "LEFT JOIN runtime_tasks r ON r.task_id=e.runtime_task_id "
-                    "WHERE p.project_root=? AND (s.state='unknown' OR r.state IS NULL "
-                    "OR r.state NOT IN ('COMPLETED','FAILED','CANCELLED')) LIMIT 1", (project,)).fetchone()
-                if busy:
-                    raise StoreError("workspace_checkout_busy")
             project_draft_directory(project, "report")
             project_draft_directory(project, "pipeline")
             task = unique_identifier(db, "t_")

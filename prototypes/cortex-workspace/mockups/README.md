@@ -26,6 +26,7 @@ Other states are also URL parameters, and `index.html` links each one. For examp
 | `conflict.html` | Merge conflict: Resolve yourself or Let Cortex resolve, with running, finished and failed states |
 | `new-task.html` | New task and new sprint |
 | `sprint.html` | Sprint planning, dependencies, created tasks |
+| `sprint-graph.html` | Approved: sprint planning for a large plan of 64 tasks |
 | `sprint-summary.html` | Sprint summary |
 | `code.html` | Code view, inline and side by side diffs, search |
 | `git.html` | Git status, history, branches and worktrees, conflict |
@@ -34,3 +35,13 @@ Other states are also URL parameters, and `index.html` links each one. For examp
 | `settings.html` | Appearance, voice, shortcuts, machines, orchestration, engine connections and limits, storage, diagnostics, remote access |
 
 `styles.css` is the one stylesheet shared by every page.
+
+## Approved large-plan layout
+
+`sprint-graph.html` shows the layout for sprint plans too large for the small graph under the list. The owner approved it on 2026-11-10 with the graph inside the plan pane plus Full view, and the minimap inset in a corner of the canvas, shown only while part of the graph is off screen. The Workspace builds it; [SCREENS.md](../../../docs/cortex-workspace/SCREENS.md#sprint-plan-list-graph-and-full-view-desktop) describes the built screen. It is the only page here that adds behaviour rather than moving between states.
+
+The page opens on the Graph view. Try the switch in the plan header, Full view, the panel toggles and the graph controls with the mouse, or use the keys listed under the **Approved layout** chip in the title band. Ctrl+wheel zooms, wheel and drag pan.
+
+States are URL parameters and can be combined, for example `sprint-graph.html?full=1&q=export`: `view=list`, `full=1`, `q=`, `status=`, `select=` and `details=` (task numbers), `collapse=` (layer numbers, comma separated), `zoom=` (percent), `conv=0`, `sb=0`, `warn=1`, `state=planning|past|draft`, `plan=small|one|empty`.
+
+The page also carries a regression check for two interactions. Add `selftest=request&select=12&expect=room` at a window at least 980 px wide, with `&zoom=80` for a moved view, or `expect=noroom` below that width, to try Request changes from Full view. Add `selftest=map&zoom=100&expect=narrow` when the graph canvas is under 760 px, or `expect=wide` otherwise, to try the first minimap toggle by key, and `selftest=mapmenu` for the same through the More menu. The result is in the tab title and in `data-selftest` on the `html` element, and `chrome --headless --window-size=1280,720 --virtual-time-budget=3000 --dump-dom <address>` prints it.

@@ -114,12 +114,13 @@ def test_configured_route_and_bounded_fake_engine(tmp_path, monkeypatch):
         def negotiate(self, caps):
             assert caps == ()
         def create_session(self, *args, **kw):
-            assert "same language" in kw["session_new_meta"]["systemPrompt"]
+            assert kw["session_new_meta"]["systemPrompt"]
             return "session"
         def configure(self, session, revision):
             assert revision.route.model == "model"
             assert dict(revision.route.supported_parameters) == {"mode": "read-only"}
-        def prompt_turn(self, session, prompt):
+        def prompt_turn(self, session, prompt, prompt_blocks=None):
+            self.prompt_blocks = prompt_blocks
             assert "Do the work" in prompt
             if self.silent:
                 assert self.closed.wait(1), "deadline did not close a silent engine"
@@ -132,6 +133,12 @@ def test_configured_route_and_bounded_fake_engine(tmp_path, monkeypatch):
                                manager_factory=FakeEngine)
     assert generate() == "A concise title"
     assert made[-1].closed.is_set()
+    from planning_jobs import INSTRUCTIONS as PLAN
+    files = [dict(name="screen.png", mimeType="image/png", data="eA==")]
+    assert titles.generate(agent, "template", "Do the work", {"attachments": files}, time.monotonic() + 2,
+                           manager_factory=FakeEngine, instructions=PLAN) == "A concise title"
+    assert made[-1].prompt_blocks[1] == dict(type="image", mimeType="image/png", data="eA==")
+    assert "eA==" not in made[-1].prompt_blocks[0]["text"]
     FakeEngine.output = "x" * (titles.MAX_OUTPUT + 1)
     assert generate() is None
     FakeEngine.silent = True

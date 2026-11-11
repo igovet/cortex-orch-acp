@@ -50,13 +50,16 @@ describe("result review", () => {
     await mount(TASK(C.review));
     const card = $(".rcard");
     expect(card.textContent).toContain("Result v2");
-    const cells = all(".outc > div").map(c => c.textContent);
-    expect(cells).toEqual(["5Passed", "1Failed", "2Not run", "1Unverified"]);
-    expect(all(".outc .st-ok")).toHaveLength(1);
-    expect(all(".outc > div")[2].querySelector(".st-ok")).toBeNull();
-    expect(all(".outc > div")[3].querySelector(".st-ok")).toBeNull();
-    expect(all(".rcard .nv").map(n => n.textContent)).toEqual(expect.arrayContaining([expect.stringContaining("Not run: test database was busy"), expect.stringContaining("Unverified: worker says it passed, no command receipt")]));
-    expect(all(".rcard .nv")[0].textContent).toContain("p95 was 410 ms");
+    // The counts are one line; only reported outcomes are named.
+    const cells = all(".rcard .rv-outc > .st");
+    expect(cells.map(c => c.textContent)).toEqual(["5 passed", "1 failed", "2 not run", "1 unverified"]);
+    expect(all(".rcard .rv-outc .st-ok")).toHaveLength(1);
+    expect(cells[0].classList.contains("st-ok")).toBe(true);
+    expect(cells[2].classList.contains("st-ok")).toBe(false);
+    expect(cells[3].classList.contains("st-ok")).toBe(false);
+    const open = all('.rcard section[aria-label="Not passed"] .l-row');
+    expect(open.map(n => n.textContent)).toEqual(expect.arrayContaining([expect.stringContaining("Not run: test database was busy"), expect.stringContaining("Unverified: worker says it passed, no command receipt")]));
+    expect(open[0].textContent).toContain("p95 was 410 ms");
     expect($(".phases").textContent).toContain("Result v2");
     expect(named('[role="tab"]', "Workers").textContent).toContain("4 finished, 1 cancelled");
   });
@@ -141,7 +144,7 @@ describe("changes", () => {
     await mount(CHANGES);
     const groups = all(".chg-foot .grp").map(g => g.textContent);
     expect(groups).toEqual(["Accept v2", "Commit…", "Merge…"]);
-    const merge = named(".chg-foot .btn", "Merge…");
+    const merge = named(":is(.chg-foot, .rv-foot) .btn", "Merge…");
     expect(merge.getAttribute("aria-disabled")).toBe("true");
     expect(merge.title).toContain("Accepting is your decision, merging is a Git action");
   });
@@ -151,7 +154,7 @@ describe("changes", () => {
     await click(named("#m-diff-scope .mi", "Last turn"));
     expect(all(".fitem")).toHaveLength(1);
     await click(named("#m-diff-scope .mi", "Uncommitted"));
-    expect($(".note-panel").textContent).toContain("No changes in this view");
+    expect($(":is(.note-panel, .rv-note)").textContent).toContain("No changes in this view");
     await click(named("#m-diff-scope .mi", "Result v2"));
     await click(named('.seg[aria-label="Diff layout"] button', "Split"));
     expect($(".sbs")).toBeTruthy();
@@ -161,12 +164,12 @@ describe("changes", () => {
 
   it("gathers line comments into one message that reopens the task", async () => {
     await mount(CHANGES);
-    expect($(".chg-foot .cap").textContent).toBe("1 comment");
+    expect($(":is(.chg-foot, .rv-foot) .cap").textContent).toBe("1 comment");
     await click(named(".ws-plus", "Comment on line 21"));
     await type($(".cmt textarea"), "Say why it is blocked");
     await click(named(".cmt .btn", "Save comment"));
-    expect($(".chg-foot .cap").textContent).toBe("2 comments");
-    await click(named(".chg-foot .btn", "Send"));
+    expect($(":is(.chg-foot, .rv-foot) .cap").textContent).toBe("2 comments");
+    await click(named(":is(.chg-foot, .rv-foot) .btn", "Send"));
     expect(chip()).toContain("Working");
     expect(titleBtn("Stop")).toBeTruthy();
   });
@@ -189,7 +192,13 @@ describe("changes", () => {
     expect(all(".fhead")[1].textContent).toContain("Unstage");
     dispose?.(); dispose = undefined; document.body.innerHTML = "";
     await mount(CHANGES);
-    expect(named(".fhead .btn", "Stage").getAttribute("aria-disabled")).toBe("true");
+    // Files committed in the result say so instead of offering Stage or Revert.
+    const heads = all(".fhead");
+    expect(heads.length).toBeGreaterThan(0);
+    for (const head of heads) {
+      expect(head.textContent).toContain("Committed in this result");
+      expect([...head.querySelectorAll(".btn")].map(b => b.textContent)).toEqual(["Open in editor"]);
+    }
   });
 });
 
@@ -202,7 +211,7 @@ describe("ready to merge", () => {
     expect($(".flow").textContent).toContain("cw/usage-events");
     expect($(".flow").textContent).toContain("3 behind");
     expect($(".ready-in").textContent).toContain("Every task stops here");
-    await click(named(".rcard-f .btn", "Merge…"));
+    await click(named(":is(.rcard-f, .rv-card-f) .btn", "Merge…"));
     const pre = all(".pre .chk").map(c => c.textContent);
     expect(pre[0]).toContain("Result v1 accepted by you, with open checks");
     expect(pre[1]).toContain("Behind main by 3 commits");
@@ -213,7 +222,7 @@ describe("ready to merge", () => {
 
   it("merges nothing until the owner confirms", async () => {
     await mount(READY);
-    await click(named(".rcard-f .btn", "Merge…"));
+    await click(named(":is(.rcard-f, .rv-card-f) .btn", "Merge…"));
     await click(inDialog("Cancel"));
     expect(document.querySelector("dialog[open]")).toBeNull();
     expect(chip()).toContain("Ready to merge");
@@ -222,7 +231,7 @@ describe("ready to merge", () => {
 
   it("defaults to the Git default branch, and a changed target is what gets merged", async () => {
     await mount(READY);
-    await click(named(".rcard-f .btn", "Merge…"));
+    await click(named(":is(.rcard-f, .rv-card-f) .btn", "Merge…"));
     const label = () => named("dialog[open] .lab", "Merge into").textContent;
     expect(label()).toContain("Git default branch");
     expect(inDialog("Confirm merge into main")).toBeTruthy();
@@ -239,7 +248,7 @@ describe("ready to merge", () => {
 
   it("takes an other branch by name, and says when it was never compared", async () => {
     await mount(READY);
-    await click(named(".rcard-f .btn", "Merge…"));
+    await click(named(":is(.rcard-f, .rv-card-f) .btn", "Merge…"));
     await click(named("#m-merge-target .mi", "Other branch…"));
     const field = $<HTMLInputElement>('input[aria-label="Other target branch"]');
     await type(field, "hotfix/usage");
@@ -250,18 +259,18 @@ describe("ready to merge", () => {
 
   it("creating a pull request does not merge, and the task stays in Ready to merge", async () => {
     await mount(READY);
-    await click(named(".rcard-f .btn", "Create PR…"));
+    await click(named(":is(.rcard-f, .rv-card-f) .btn", "Create PR…"));
     expect(inDialog("Push and create PR")).toBeTruthy();
     expect(dialog().textContent).toContain("Pushes cw/usage-events");
     await click(inDialog("Push and create PR"));
     expect(chip()).toContain("Ready to merge");
     expect($(".rcard").textContent).toContain("It is not merged");
-    expect(named(".rcard-f .btn", "Create PR…").getAttribute("aria-disabled")).toBe("true");
+    expect(named(":is(.rcard-f, .rv-card-f) .btn", "Create PR…").getAttribute("aria-disabled")).toBe("true");
   });
 
   it("a merge with the delete box on removes the worktree, and only when it is clean", async () => {
     await mount(READY);
-    await click(named(".rcard-f .btn", "Merge…"));
+    await click(named(":is(.rcard-f, .rv-card-f) .btn", "Merge…"));
     expect(dialog().textContent).toContain("Never removes unmerged or uncommitted work");
     await click(inDialog("Confirm merge into main"));
     await click($(".crumbs a"));
@@ -276,16 +285,16 @@ describe("conflict", () => {
   it("shows both ways out, the three sides and an Abort that is always there", async () => {
     await mount(CONFLICT);
     expect(chip()).toContain("Conflict");
-    expect($(".strip.bad").textContent).toContain("Merging main into cw/usage-rollups stopped at 2 conflicts. Nothing was stashed or reset.");
+    expect($(":is(.strip.bad, .l-strip[data-tone=fail])").textContent).toContain("Merging main into cw/usage-rollups stopped at 2 conflicts. Nothing was stashed or reset.");
     expect(all(".cf-way .t").map(t => t.textContent)).toEqual(["Resolve it yourself", "Resolve automatically"]);
     expect(all(".cf-col b").map(b => b.textContent)).toEqual(["Base", "Ours", "Theirs", "Result"]);
     expect(all(".flist .fitem").map(f => f.textContent)).toEqual(["Cusage_rollups.py1 left", "Cschema.sqlResolved", "Mrollup_jobs.py", "Musage_api.py", "Atest_rollups.py", "Msettings.py"]);
-    expect(named(".strip .btn", "Abort merge")).toBeTruthy();
+    expect(named(":is(.strip, .l-strip) .btn", "Abort merge")).toBeTruthy();
   });
 
   it("Resolve yourself: Finish merge waits for the last block, then the result goes through Ready to merge", async () => {
     await mount(CONFLICT);
-    const finish = () => named(".chg-foot .btn", "Finish merge");
+    const finish = () => named(":is(.chg-foot, .rv-foot) .btn", "Finish merge");
     expect(finish().getAttribute("aria-disabled")).toBe("true");
     await click(finish());
     expect(chip()).toContain("Conflict");
@@ -293,12 +302,12 @@ describe("conflict", () => {
     expect($(".cf-result").textContent).toContain("load(day, tz, n=500)");
     expect(finish().getAttribute("aria-disabled")).toBeNull();
     await click(finish());
-    expect($(".strip.ok").textContent).toContain("You finished the merge");
+    expect($(":is(.strip.ok, .l-strip[data-tone=ok])").textContent).toContain("You finished the merge");
     expect(chip()).toContain("Ready to merge");
-    await click(named(".chg-foot .btn", "Review in Ready to merge"));
+    await click(named(":is(.chg-foot, .rv-foot) .btn", "Review in Ready to merge"));
     expect(location.pathname).toBe(TASK(C.rollups, "/changes"));
     expect($(".rcard-h").textContent).toContain("resolved by you");
-    expect(named(".rcard-f .btn", "Merge…").getAttribute("aria-disabled")).toBe("true");
+    expect(named(":is(.rcard-f, .rv-card-f) .btn", "Merge…").getAttribute("aria-disabled")).toBe("true");
   });
 
   it("Resolve automatically: says what it will do, runs, and comes back unmerged for review", async () => {
@@ -312,30 +321,30 @@ describe("conflict", () => {
     expect(chip()).toContain("Resolving");
     expect(steps()[0]).toContain("Read both sides");
     expect($(".cf-block").textContent).toContain("Your choices are paused");
-    expect(named(".strip .btn", "Abort merge")).toBeTruthy();
+    expect(named(":is(.strip, .l-strip) .btn", "Abort merge")).toBeTruthy();
     expect(document.querySelectorAll(".cf-block .btn")).toHaveLength(0);
     await mock("Simulate the next step");
     expect($(".cx-step.now").textContent).toContain("Resolving usage_rollups.py");
     await mock("Simulate the next step");
     expect($(".cx-step.now").textContent).toContain("Run the checks");
     await mock("Simulate the next step");
-    expect($(".strip.ok").textContent).toContain("Nothing is merged until you confirm it in Ready to merge");
+    expect($(":is(.strip.ok, .l-strip[data-tone=ok])").textContent).toContain("Nothing is merged until you confirm it in Ready to merge");
     expect(chip()).toContain("Ready to merge");
     expect($(".cf-block.ok").textContent).toContain("kept tz from main and n=500 from this branch");
     expect(steps().join(" ")).toContain("Checks: 5 passed, 1 not passed");
-    await click(named(".chg-foot .btn", "Review in Ready to merge"));
+    await click(named(":is(.chg-foot, .rv-foot) .btn", "Review in Ready to merge"));
     expect($(".rcard-h").textContent).toContain("resolved automatically");
     expect($(".rcard-b").textContent).toContain("This is result v2");
-    const merge = named(".rcard-f .btn", "Merge…");
+    const merge = named(":is(.rcard-f, .rv-card-f) .btn", "Merge…");
     expect(merge.getAttribute("aria-disabled")).toBe("true");
     expect(merge.title).toBe("Review result v2 first");
     await click(merge);
     expect(document.querySelector("dialog[open]")).toBeNull();
-    await click(named(".rcard-f .btn", "Accept v2"));
+    await click(named(":is(.rcard-f, .rv-card-f) .btn", "Accept v2"));
     await check('dialog[open] input[type="checkbox"]');
     await click(inDialog("Accept v2"));
     expect($(".rcard-h").textContent).toContain("Accepted v2 by you");
-    await click(named(".rcard-f .btn", "Merge…"));
+    await click(named(":is(.rcard-f, .rv-card-f) .btn", "Merge…"));
     await click(inDialog("Confirm merge into main"));
     expect($(".rcard-h").textContent).toContain("Merged into main");
   });
@@ -346,7 +355,7 @@ describe("conflict", () => {
     await click(inDialog("Resolve automatically"));
     await mock("Next automatic resolution fails");
     for (let i = 0; i < 3; i++) await mock("Simulate the next step");
-    expect($(".strip.warn").textContent).toContain("usage_rollups.py could not be resolved and nothing changed");
+    expect($(":is(.strip.warn, .l-strip[data-tone=warn])").textContent).toContain("usage_rollups.py could not be resolved and nothing changed");
     expect(chip()).toContain("Conflict");
     expect(all(".cf-way")).toHaveLength(2);
     expect(named(".cf-block .btn", "Accept ours")).toBeTruthy();
@@ -360,7 +369,7 @@ describe("conflict", () => {
     await click(named(".cx-run .btn", "Stop and resolve myself"));
     expect(chip()).toContain("Conflict");
     expect(all(".cf-way")).toHaveLength(2);
-    await click(named(".strip .btn", "Abort merge"));
+    await click(named(":is(.strip, .l-strip) .btn", "Abort merge"));
     expect($(".note-panel").textContent).toContain("No merge in progress");
     expect(chip()).toContain("Review");
   });
@@ -379,7 +388,7 @@ describe("conflict", () => {
 
   it("updating a branch that conflicts lands on the conflict, not a silent merge", async () => {
     await mount(TASK(C.merge, "/changes"));
-    await click(named(".rcard-f .btn", "Merge…"));
+    await click(named(":is(.rcard-f, .rv-card-f) .btn", "Merge…"));
     await click(inDialog("Update from main"));
     expect($(".rcard-h").textContent).toContain("Conflict with main");
     expect(chip()).toContain("Conflict");
@@ -397,7 +406,7 @@ describe("conflict", () => {
     await mount(TASK(C.conflict, "/changes/conflict"));
     expect($(".fhead").textContent).toContain("synthetic/layout.ts");
     await click(named(".cf-block .btn", "Accept ours"));
-    expect(named(".chg-foot .btn", "Finish merge").getAttribute("aria-disabled")).toBeNull();
+    expect(named(":is(.chg-foot, .rv-foot) .btn", "Finish merge").getAttribute("aria-disabled")).toBeNull();
   });
 });
 
@@ -421,9 +430,9 @@ describe("code", () => {
 
   it("warns before changes in a checkout Cortex is working in", async () => {
     await mount(CODE);
-    expect($(".strip.warn").textContent).toContain("A task is working in this checkout");
-    await click(named(".strip .btn", "Edit anyway"));
-    expect($(".strip.warn").textContent).toContain("Verification may be blocked");
+    expect($(":is(.strip.warn, .l-strip[data-tone=warn])").textContent).toContain("A task is working in this checkout");
+    await click(named(":is(.strip, .l-strip) .btn", "Edit anyway"));
+    expect($(":is(.strip.warn, .l-strip[data-tone=warn])").textContent).toContain("Verification may be blocked");
   });
 
   it("shows a preview tab until the file is kept, and closing moves to the next tab", async () => {
@@ -492,7 +501,7 @@ describe("code", () => {
 describe("git", () => {
   const WORKTREE = "mock-checkout-00001";
   const GIT = PROJECT(`git?checkout=${WORKTREE}`);
-  const groups = () => all(".gg").map(g => g.textContent);
+  const groups = () => all(".git-g").map(g => g.textContent);
   it("shows status groups, ahead and behind, and the default checkout", async () => {
     await mount(PROJECT("git"));
     expect($(".scope-btn").textContent).toContain("cw/fix-token-refresh");
@@ -550,13 +559,13 @@ describe("git", () => {
 
   it("shows the conflict state of a checkout, with Commit held back", async () => {
     await mount(PROJECT("git?checkout=mock-checkout-00004"));
-    expect($(".strip.bad").textContent).toContain("Merging main into cw/usage-rollups: 1 file with conflicts");
+    expect($(":is(.strip.bad, .l-strip[data-tone=fail])").textContent).toContain("Merging main into cw/usage-rollups: 1 file with conflicts");
     expect(groups()).toEqual(["Conflicts1", "Staged5"]);
-    expect(named(".strip .btn", "Resolve automatically")).toBeTruthy();
+    expect(named(":is(.strip, .l-strip) .btn", "Resolve automatically")).toBeTruthy();
     const commit = named(".commit-box .btn", "Commit");
     expect(commit.getAttribute("aria-disabled")).toBe("true");
     expect(commit.title).toBe("Resolve the conflict first");
-    await click(named(".strip .btn", "Resolve"));
+    await click(named(":is(.strip, .l-strip) .btn", "Resolve"));
     expect(location.pathname).toBe(TASK(C.rollups, "/changes/conflict"));
   });
 

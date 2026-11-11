@@ -173,7 +173,8 @@ describe("a change that did not come from this editor", () => {
     vi.advanceTimersByTime(3000);
     await settled();
     expect(doc()).toBe("worker\n");
-    expect(status()).toBe("");
+    // A clean file says so beside Save, which is why Save is off.
+    expect(status()).toBe("No changes");
     type("mine");
     await settled();
     d.put("a.txt", "worker again\n");

@@ -126,8 +126,10 @@ def test_real_tool_updates_keep_inputs_and_fold_by_call_identity(history):
     payloads = [
         dict(kind="worker_activity", activity_ref="tool:claude-1", tool_kind="execute",
              title="Bash", status="in_progress", raw_input={"command": "printf hello"}),
-        dict(kind="worker_activity", activity_ref="tool:claude-1", tool_kind="execute",
+        dict(kind="worker_activity", activity_ref="tool:claude-1",
              title="Bash", status="completed", raw_input={}, raw_output=[{"type": "text", "text": "hello"}]),
+        dict(kind="worker_activity", activity_ref="tool:claude-1",
+             title="", status="", raw_input={}, raw_output=[]),
         dict(kind="worker_activity", activity_ref="tool:codex-1", tool_kind="read",
              title="Read", status="completed", raw_input={"input": {"path": "src/main.ts"}}),
         dict(kind="worker_activity", activity_ref="tool:edit-1", tool_kind="edit", title="Edit",
@@ -149,13 +151,75 @@ def test_real_tool_updates_keep_inputs_and_fold_by_call_identity(history):
     assert edit["diff"]["lines"] == ["-before", "+after"]
 
 
+
+@pytest.mark.parametrize("shape", ["claude", "codex", "reviewer", "error"])
+def test_sparse_tool_updates_preserve_one_row_and_late_details(history, shape):
+    db, _ = history
+    db.execute("DELETE FROM task_events")
+    db.execute("DELETE FROM runtime_events")
+    initial = dict(kind="worker_activity", activity_ref="tool:read-1", tool_kind="read",
+                   title="Read", status="pending",
+                   raw_input={"path": "src/example.py"} if shape == "codex" else {})
+    updates = [initial]
+    if shape == "claude":
+        updates.append(dict(kind="worker_activity", activity_ref="tool:read-1",
+                            status="in_progress", raw_input={"path": "src/example.py"}))
+    updates.append(dict(kind="worker_activity",
+                        activity_ref="tool-error:read-1" if shape == "error" else "tool:read-1",
+                        status="failed" if shape == "error" else "completed",
+                        raw_input={"path": "src/example.py"} if shape in ("reviewer", "error") else {},
+                        raw_output=[]))
+    rows = []
+    for n, payload in enumerate(updates, 1):
+        row = dict(id=n, event_type="progress", created_at="2026-11-08T00:00:00Z",
+                   payload_json=json.dumps(payload))
+        rows.append(row)
+        db.execute("INSERT INTO task_events VALUES(?,?,?,?,?,?)",
+                   (n, "runtime", "attempt", row["event_type"], row["created_at"], row["payload_json"]))
+    for activity in (helper.worker_activity(rows), page(db, budget=20000)["activity"]):
+        assert len(activity) == 1
+        item = activity[0]
+        assert item["sequence"] == 2
+        assert item["toolCallRef"] == "tool:read-1"
+        assert json.loads(item["args"])["path"] == "src/example.py"
+        assert json.loads(item["args"])["status"] == ("failed" if shape == "error" else "completed")
+        assert item["error"] == (shape == "error")
+
+
+def test_hidden_kinds_do_not_consume_worker_window(history):
+    from cortex_runtime.workspace_api.history import HIDDEN_STEPS
+    db, _ = history
+    db.execute("DELETE FROM task_events")
+    db.execute("DELETE FROM runtime_events")
+    payloads = [dict(kind="worker_activity", activity_ref="tool:read-1", tool_kind="read",
+                     title="Read", raw_input={"path": "src/example.py"})]
+    hidden = sorted(HIDDEN_STEPS)
+    payloads += [dict(kind="worker_activity", tool_kind=hidden[n % len(hidden)],
+                      activity_ref=f"tool:hidden-{n}", title="Internal update") for n in range(220)]
+    payloads.append(dict(kind="worker_activity", text="Visible note"))
+    rows = []
+    for n, payload in enumerate(payloads, 1):
+        row = dict(id=n, event_type="progress", created_at="2026-11-08T00:00:00Z",
+                   payload_json=json.dumps(payload))
+        rows.append(row)
+        db.execute("INSERT INTO task_events VALUES(?,?,?,?,?,?)",
+                   (n, "runtime", "attempt", row["event_type"], row["created_at"], row["payload_json"]))
+    current = page(db, budget=20000)
+    assert not current["activityPartial"] and current["activityCursor"] is None
+    for activity in (helper.worker_activity(rows), current["activity"]):
+        assert [item["sequence"] for item in activity] == [2, len(payloads) * 2]
+        assert json.loads(activity[0]["args"])["path"] == "src/example.py"
+
+
 def test_long_native_call_keeps_initial_command_and_stable_identity(history):
     db, _ = history
     db.execute("DELETE FROM task_events")
     db.execute("DELETE FROM runtime_events")
     for n in range(1, 206):
-        payload = dict(kind="worker_activity", activity_ref="tool:long-call", tool_kind="execute",
+        payload = dict(kind="worker_activity", activity_ref="tool:long-call",
                        title="Bash", status="in_progress", raw_input={"command": "printf hello"} if n == 1 else {})
+        if n == 1:
+            payload["tool_kind"] = "execute"
         db.execute("INSERT INTO task_events VALUES(?,?,?,?,?,?)",
                    (n, "runtime", "attempt", "progress", "2026-11-08T00:00:00Z", json.dumps(payload)))
     current = page(db, budget=20000)

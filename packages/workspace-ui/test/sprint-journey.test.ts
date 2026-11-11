@@ -55,11 +55,13 @@ it.skipIf(!socket||!project)("manual and automatic sprint planning, questions, d
   try{
     await p.query("capabilities.get",{});await p.query("project.snapshot",{});await p.query("project.facts",{});await p.query("machine.facts",{});
     for(const runMode of ["manual","automatic"] as const){
-      const created=await command({type:"create_sprint",projectId:project!,description:"Plan this isolated fixture",runMode,settings:{model:"fixture-route",effort:"",mode:"auto",language:"en"}});
+      const kind = runMode === "manual" ? "main" : "worktree";
+      const created=await command({type:"create_sprint",projectId:project!,description:"Plan this isolated fixture",runMode,checkout:{kind},settings:{model:"fixture-route",effort:"",mode:"auto",language:"en"}});
       expect(created.ok,JSON.stringify(created)).toBe(true);
       const id=created.entityId!;
       const sprint=async()=> (await product()).sprints.find((s:any)=>s.id===id);
       expect((await sprint()).planningTaskId).toBeUndefined();
+      expect((await sprint()).checkout).toEqual({kind});
       await wait(async()=>(await sprint()).planning==="question");
       expect((await command({type:"answer_planning",sprintId:id,answer:"Continue"})).ok).toBe(true);
       await wait(async()=>(await sprint()).planning==="ready");
@@ -68,6 +70,7 @@ it.skipIf(!socket||!project)("manual and automatic sprint planning, questions, d
       expect(materialized.ok,JSON.stringify(materialized)).toBe(true);
       const tasks=(await sprint()).taskIds;
       expect(tasks).toHaveLength(2);
+      for (const task of tasks) expect((await product()).tasks[task].checkout.kind).toBe(kind);
       expect((await product()).tasks[tasks[1]].dependencies).toEqual([tasks[0]]);
       expect((await query("tasks.get",tasks[1])).executionId).toBeNull();
       if(runMode==="manual"){
@@ -84,6 +87,12 @@ it.skipIf(!socket||!project)("manual and automatic sprint planning, questions, d
       }
       await wait(async()=>(await product()).tasks[tasks[1]].status==="ready_to_merge");
       if(runMode==="automatic")await wait(async()=>(await sprint()).queueState==="complete");
+      // Execution identity and actual runtime workspace must agree with the saved choice.
+      for (const task of tasks) {
+        const execution = await query("executions.get", (await query("tasks.get", task)).executionId);
+        expect(execution.state).toBe("result");
+        expect((await product()).tasks[task].checkout.kind).toBe(kind);
+      }
     }
   }finally{for(const stream of streams)stream.destroy();}
 },55000);

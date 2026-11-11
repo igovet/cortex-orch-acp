@@ -1,15 +1,27 @@
 import { createMemo, createSignal, For, Match, Show, Switch, type JSX } from "solid-js";
 import type { Problem } from "@cortex/workspace-domain";
 import { useWs } from "./ctx";
+import { onScreen } from "./freshness";
 import { A, I, MenuItem, Pop } from "./kit";
+import { ActionBar, ReasonSlot, SectionHead } from "./layout";
 import type { HelpText } from "./orch-help";
 import type { Route } from "./router";
 import type { Draft } from "./settings-state";
 
-export const Srow = (props: { t: JSX.Element; d?: JSX.Element; children?: JSX.Element }) => <div class="srow">
-  <span><span class="t">{props.t}</span><Show when={props.d}><span class="d">{props.d}</span></Show></span>
-  <span class="ctl">{props.children}</span>
-</div>;
+/** A setting: its name and what it does, its control at the end. A control that cannot be used says why on the row's own next line. */
+export function Srow(props: { t: JSX.Element; d?: JSX.Element; children?: JSX.Element }) {
+  let row: HTMLDivElement | undefined;
+  return <div class="srow" ref={row}>
+    <span><span class="t">{props.t}</span><Show when={props.d}><span class="d">{props.d}</span></Show><ReasonSlot bar={() => row} /></span>
+    <span class="ctl">{props.children}</span>
+  </div>;
+}
+
+/** A settings section's heading, with its help and actions at the end. A heading action that cannot be used says why right under it. */
+export function SetH(props: { title: JSX.Element; count?: number; children?: JSX.Element }) {
+  let box: HTMLDivElement | undefined;
+  return <div class="set-h" ref={box}><SectionHead title={props.title} count={props.count}>{props.children}</SectionHead><ReasonSlot bar={() => box} /></div>;
+}
 
 export function Seg<T extends string>(props: { label: string; value: T; options: readonly { id: T; label: string; icon?: string; off?: string }[]; onChange: (id: T) => void; disabled?: string }) {
   return <div class="seg tall" role="group" aria-label={props.label}><For each={props.options}>{o => {
@@ -34,10 +46,14 @@ export function Stepper(props: { label: string; value: number; suffix?: string; 
     <button aria-label={`More: ${props.label}`} aria-disabled={props.disabled || props.value >= props.max ? "true" : undefined} data-why={props.disabled} onClick={() => step(1)}><I n="plus" s={14} /></button>
   </span>;
 }
-export function Pick(props: { id: string; label: string; value: string; options: readonly { id: string; label: string; sub?: string; off?: string }[]; onPick: (id: string) => void; width?: string; disabled?: string }) {
-  const text = () => props.options.find(o => o.id === props.value)?.label ?? props.value;
+/**
+ * `describedBy` names what says why the pick is off when it stands where there is no room for the words. `empty` is what it
+ * reads while nothing is chosen, so it is never a blank box.
+ */
+export function Pick(props: { id: string; label: string; value: string; options: readonly { id: string; label: string; sub?: string; off?: string }[]; onPick: (id: string) => void; width?: string; disabled?: string; describedBy?: string; empty?: string }) {
+  const text = () => props.options.find(o => o.id === props.value)?.label ?? (props.value || props.empty || props.value);
   return <>
-    <button class="pick" style={props.width ? { "min-width": props.width } : undefined} popovertarget={props.disabled ? undefined : props.id} aria-disabled={props.disabled ? "true" : undefined} data-why={props.disabled} aria-label={`${props.label}: ${text()}`}>
+    <button class="pick" style={props.width ? { "min-width": props.width } : undefined} popovertarget={props.disabled ? undefined : props.id} aria-disabled={props.disabled ? "true" : undefined} data-why={props.disabled} aria-describedby={props.describedBy} aria-label={`${props.label}: ${text()}`}>
       <span class="trunc">{text()}</span><I n="chevron-down" s={12} />
     </button>
     <Pop id={props.id} class="pop-right" align="right" label={props.label}>
@@ -134,40 +150,43 @@ export function SaveBar<T>(props: { d: Draft<T>; onProfile?: () => void; source?
   const d = props.d;
   const n = () => d.count();
   const errors = () => d.problems().length;
-  const jump = () => { const el = document.querySelector<HTMLElement>("[data-problem]"); el?.scrollIntoView?.({ block: "center" }); el?.closest(".srow, .gr, .ws-line, .ws-adv-b")?.querySelector<HTMLElement>("input, textarea, button")?.focus?.(); };
+  const jump = () => { const el = onScreen().querySelector<HTMLElement>("[data-problem]"); el?.scrollIntoView?.({ block: "center" }); el?.closest(".srow, .gr, .ws-line, .ws-adv-b")?.querySelector<HTMLElement>("input, textarea, button")?.focus?.(); };
   return <Show when={d.dirty() || d.note() || d.state()}>
     <Show when={d.state() === "review"}><Review d={d} /></Show>
     <Show when={d.failure()}><div class="note-box" role="alert"><I n="alert" s={14} /><span>{d.failure()}</span></div></Show>
-    <div class="savebar">
-      <Switch>
-        <Match when={d.state() === "conflict"}>
-          <I n="alert" s={14} class="st-warn" /><span role="alert">Changed elsewhere since you opened it. Nothing was written.</span>
-          <span class="r"><button class="btn btn-line" onClick={() => d.discard()}>Discard mine</button><button class="btn btn-primary" onClick={() => d.review()}>Review changes</button></span>
-        </Match>
-        <Match when={d.state() === "review"}>
-          <I n="alert" s={14} class="st-warn" /><span>Reapplying writes your keys on top of what is there now.</span>
-          <span class="r"><button class="btn btn-line" onClick={() => d.discard()}>Discard mine</button><button class="btn btn-primary" onClick={() => d.reapply()}>Reapply mine</button></span>
-        </Match>
-        <Match when={d.state() === "unknown"}>
-          <I n="help" s={14} class="st-warn" /><span role="alert">No answer. It may have been saved.</span>
-          <span class="r"><button class="btn btn-primary" onClick={() => d.reread()}>Read again</button></span>
-        </Match>
-        <Match when={d.dirty() && errors() > 0}>
-          <I n="alert" s={14} class="st-bad" /><span role="status">Fix {errors()} field{errors() === 1 ? "" : "s"}</span>
-          <span class="r"><button class="btn btn-line" onClick={() => d.discard()}>Discard</button><button class="btn btn-line" onClick={jump}>Go to the first</button><button class="btn btn-primary" aria-disabled="true" data-why="Fix the fields first">Save {d.name()} on {d.where()}</button></span>
-        </Match>
-        <Match when={d.dirty()}>
-          <I n="pencil" s={14} class="faint" /><span>{n()} unsaved change{n() === 1 ? "" : "s"} in {d.name()}</span><span class="cap faint">Running tasks keep their configuration.</span>
-          <span class="r"><button class="btn btn-line" onClick={() => d.discard()}>Discard</button><button class="btn btn-primary" onClick={() => d.save()}>Save {d.name()} on {d.where()}</button></span>
-        </Match>
-        <Match when={d.note()}>
-          <I n="check" s={14} class="st-ok" /><span>{d.note()}</span>
-          <span class="r">
-            <Show when={props.source}><button class="btn btn-line" onClick={() => props.source!()}>Open source</button></Show>
-            <Show when={props.onProfile}><button class="btn btn-line" onClick={() => { props.onProfile!(); d.clearNote(); }}>Save to profile</button></Show>
-          </span>
-        </Match>
-      </Switch>
-    </div>
+    {/* One bar: what state the draft is in, in its words slot, and the actions for that state. It never changes height. */}
+    <Switch>
+      <Match when={d.state() === "conflict"}>
+        <ActionBar class="savebar" start={<I n="alert" s={14} class="st-warn" />} hint={<span role="alert">Changed elsewhere since you opened it. Nothing was written.</span>}>
+          <button class="btn btn-line" onClick={() => d.discard()}>Discard mine</button><button class="btn btn-primary" onClick={() => d.review()}>Review changes</button>
+        </ActionBar>
+      </Match>
+      <Match when={d.state() === "review"}>
+        <ActionBar class="savebar" start={<I n="alert" s={14} class="st-warn" />} hint="Reapplying writes your keys on top of what is there now.">
+          <button class="btn btn-line" onClick={() => d.discard()}>Discard mine</button><button class="btn btn-primary" onClick={() => d.reapply()}>Reapply mine</button>
+        </ActionBar>
+      </Match>
+      <Match when={d.state() === "unknown"}>
+        <ActionBar class="savebar" start={<I n="help" s={14} class="st-warn" />} hint={<span role="alert">No answer. It may have been saved.</span>}>
+          <button class="btn btn-primary" onClick={() => d.reread()}>Read again</button>
+        </ActionBar>
+      </Match>
+      <Match when={d.dirty() && errors() > 0}>
+        <ActionBar class="savebar" start={<I n="alert" s={14} class="st-bad" />}>
+          <button class="btn btn-line" onClick={() => d.discard()}>Discard</button><button class="btn btn-line" onClick={jump}>Go to the first</button><button class="btn btn-primary" aria-disabled="true" data-why={`Fix ${errors()} field${errors() === 1 ? "" : "s"}`}>Save {d.name()} on {d.where()}</button>
+        </ActionBar>
+      </Match>
+      <Match when={d.dirty()}>
+        <ActionBar class="savebar" start={<I n="pencil" s={14} class="faint" />} hint={`${n()} unsaved change${n() === 1 ? "" : "s"} in ${d.name()}. Running tasks keep their configuration.`}>
+          <button class="btn btn-line" onClick={() => d.discard()}>Discard</button><button class="btn btn-primary" onClick={() => d.save()}>Save {d.name()} on {d.where()}</button>
+        </ActionBar>
+      </Match>
+      <Match when={d.note()}>
+        <ActionBar class="savebar" start={<I n="check" s={14} class="st-ok" />} hint={d.note()}>
+          <Show when={props.source}><button class="btn btn-line" onClick={() => props.source!()}>Open source</button></Show>
+          <Show when={props.onProfile}><button class="btn btn-line" onClick={() => { props.onProfile!(); d.clearNote(); }}>Save to profile</button></Show>
+        </ActionBar>
+      </Match>
+    </Switch>
   </Show>;
 }

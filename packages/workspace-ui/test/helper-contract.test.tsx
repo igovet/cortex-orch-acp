@@ -113,7 +113,7 @@ it.skipIf(!socket)("Accept binds the real source version, rejects stale review, 
   if (fixture.technical) {
     await until(() => text().includes("knowing these checks did not pass"));
     const dialog = document.querySelector('dialog[aria-label="Accept with open checks"]')!;
-    const confirm = dialog.querySelector<HTMLButtonElement>(".dlg-f .btn-primary")!;
+    const confirm = dialog.querySelector<HTMLButtonElement>("[data-bar=\"dialog\"] .btn-primary")!;
     expect(confirm.getAttribute("aria-disabled")).toBe("true");
     confirm.click();
     expect((await rpc("machine.call", { op: "product.read", projectId: fixture.projectId })).result.tasks[fixture.taskId].acceptance).toBeUndefined();

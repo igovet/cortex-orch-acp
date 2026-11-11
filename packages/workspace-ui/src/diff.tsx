@@ -1,6 +1,8 @@
 import { createMemo, createSignal, For, Show } from "solid-js";
-import type { DiffHunk, DiffLine, FileDiff, ReviewComment } from "@cortex/workspace-domain";
+import type { AttachmentInput, DiffHunk, DiffLine, FileDiff, ReviewComment } from "@cortex/workspace-domain";
+import { AttachChips, createAttachments, createDictation, MessageComposer } from "./composer";
 import { useWs } from "./ctx";
+import { createUnsent } from "./freshness";
 import { highlight } from "./highlight";
 import { ResultText } from "./result-text";
 import { partialDiff, splitRows, withoutSpace } from "./review-model";
@@ -12,20 +14,25 @@ export const Counts = (props: { add: number; del: number }) => <span class="tnum
 export const STATUS_WORD: Record<string, string> = { M: "Modified", A: "Added", D: "Deleted", U: "Untracked", C: "Conflict" };
 export const GitLetter = (props: { status: string }) => <span class={`gs gs-${props.status.toLowerCase()}`}>{props.status}</span>;
 
-function CommentForm(props: { value: string; onSave: (text: string) => void; onCancel: () => void }) {
+function CommentForm(props: { value: string; files?: AttachmentInput[]; onSave: (text: string, attachments: AttachmentInput[]) => void; onCancel: () => void }) {
   const [text, setText] = createSignal(props.value);
-  return <div class="cmt"><textarea class="inp ws-cmt-in" rows="2" aria-label="Comment" value={text()} onInput={e => setText(e.currentTarget.value)} ref={el => queueMicrotask(() => el.focus())}
-    onKeyDown={e => { if (e.key === "Escape") { e.stopPropagation(); props.onCancel(); } }} />
-    <div class="cmt-f"><span class="grow"></span><button class="btn btn-sm" onClick={() => props.onCancel()}>Cancel</button><button class="btn btn-line btn-sm" aria-disabled={text().trim() ? undefined : "true"} data-why={text().trim() ? undefined : "Type a comment first"} onClick={() => { if (text().trim()) props.onSave(text()); }}>Save comment</button></div></div>;
+  const files = createAttachments(), mic = createDictation();
+  files.set(props.files ?? []);
+  createUnsent(() => text().trim() !== props.value.trim());
+  const save = () => { if (text().trim() && !files.busy()) props.onSave(text(), files.files()); };
+  // A saved comment calls no model, so it has no model or effort choice.
+  return <div class="cmt cmt-edit"><MessageComposer class="mc-inline" label="Comment" placeholder="Write a comment…" text={text()} onText={setText} files={files} mic={mic} autofocus onEscape={() => props.onCancel()}
+    extra={<button type="button" class="btn" onClick={() => props.onCancel()}>Cancel</button>}
+    send={{ label: "Save comment", why: files.busy() ? "Attachments are still loading" : text().trim() ? undefined : "Write a comment first", go: save }} /></div>;
 }
 
 function Comment(props: { taskId: string; c: ReviewComment }) {
   const ws = useWs();
   const [editing, setEditing] = createSignal(false);
-  return <Show when={editing()} fallback={<div class="cmt"><div class="cmt-b"><ResultText breaks text={props.c.text} /></div>
+  return <Show when={editing()} fallback={<div class="cmt"><div class="cmt-b"><ResultText breaks text={props.c.text} /><AttachChips files={props.c.attachments} open /></div>
     <div class="cmt-f">{props.c.sent ? "Sent" : "Your draft comment"} on line {props.c.line}<span class="grow"></span>
       <Show when={!props.c.sent}><button class="btn btn-sm" onClick={() => setEditing(true)}>Edit</button><button class="btn btn-sm" {...ws.needs("remove_comment")} onClick={() => ws.run({ type: "remove_comment", taskId: props.taskId, commentId: props.c.id })}>Delete</button></Show></div></div>}>
-    <CommentForm value={props.c.text} onCancel={() => setEditing(false)} onSave={text => { ws.ok({ type: "edit_comment", taskId: props.taskId, commentId: props.c.id, text }, () => { setEditing(false); }); }} />
+    <CommentForm value={props.c.text} files={props.c.attachments} onCancel={() => setEditing(false)} onSave={(text, attachments) => { ws.ok({ type: "edit_comment", taskId: props.taskId, commentId: props.c.id, text, attachments }, () => { setEditing(false); }); }} />
   </Show>;
 }
 
@@ -42,10 +49,10 @@ export function Diff(props: { file: FileDiff; layout: "unified" | "split"; hideS
     <Show when={props.actions}>{a => <span class="hact">
       <button class="btn btn-sm" aria-disabled={a().reason ? "true" : undefined} data-why={a().reason} aria-pressed={a().staged(i)} onClick={() => { if (!a().reason) a().stage(i); }}>{a().staged(i) ? "Unstage hunk" : "Stage hunk"}</button>
       <button class="btn btn-sm" aria-disabled={a().reason ? "true" : undefined} data-why={a().reason} onClick={() => { if (!a().reason) a().revert(i); }}>Revert hunk</button></span>}</Show></div>;
-  const save = (text: string, line: number) => { if (props.taskId) ws.ok({ type: "add_comment", taskId: props.taskId, path: props.file.path, line, text }, () => { setAdding(null); }); };
+  const save = (text: string, attachments: AttachmentInput[], line: number) => { if (props.taskId) ws.ok({ type: "add_comment", taskId: props.taskId, path: props.file.path, line, text, attachments }, () => { setAdding(null); }); };
   const below = (l: DiffLine) => <Show when={props.taskId}>
     <For each={at(lineOf(l))}>{c => <Comment taskId={props.taskId!} c={c} />}</For>
-    <Show when={adding() === lineOf(l)}><CommentForm value="" onCancel={() => setAdding(null)} onSave={text => save(text, lineOf(l))} /></Show>
+    <Show when={adding() === lineOf(l)}><CommentForm value="" onCancel={() => setAdding(null)} onSave={(text, attachments) => save(text, attachments, lineOf(l))} /></Show>
   </Show>;
   const mark = (l: DiffLine) => l.kind === "add" ? "+" : l.kind === "del" ? "−" : "";
   return <>

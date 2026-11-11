@@ -14,6 +14,23 @@ def conversation(tmp_path):
     return api, task
 
 
+def test_history_validation_work_is_linear(tmp_path, monkeypatch):
+    from cortex_runtime.workspace_api import history
+    api, task = conversation(tmp_path)
+    api.store.immediate_write(lambda db: db.executemany(
+        "INSERT INTO host_transcript(session_id,seq,kind,text,created_at) VALUES('session-1',?,'agent_message','hello','now')",
+        [(i,) for i in range(40)]))
+    validate = history.validate
+    visited = []
+    def counted(kind, value):
+        if kind == "HistoryPage":
+            visited.append(len(value["items"]))
+        return validate(kind, value)
+    monkeypatch.setattr(history, "validate", counted)
+    assert len(api.handle(query("history.page", task))["items"]) == 40
+    assert sum(visited) <= 80  # Each row once, then the complete page; not every growing prefix.
+
+
 def test_history_order_snapshot_cursor_reopen_and_binding(tmp_path):
     api, task = conversation(tmp_path)
     append_host_transcript(api.store, "session-1", "user_message", "Owner first")
@@ -165,10 +182,10 @@ def test_coordinator_activity_is_durable_paged_and_shared_with_helper(tmp_path, 
     while page["nextCursor"]:
         page = api.handle(query("history.page", task, limit=2, cursor=page["nextCursor"]))
         items.extend(page["items"])
-    assert [i["kind"] for i in items] == ["user", "assistant", "tool", "tool"]
-    assert "PRIVATE REPORT" not in str(items) and "result_submit" not in str(items)
+    assert [i["kind"] for i in items] == ["user", "tool", "assistant", "tool", "tool"]
+    assert "PRIVATE REPORT" not in str(items)
     assert items[0]["activity"]["kind"] == "message"
-    assert items[1]["activity"]["text"] == "Inspecting the source"
+    assert items[2]["activity"]["text"] == "Inspecting the source"
     assert items[-1]["activity"]["command"]["tail"] == "hello"
     assert items[-1]["activity"]["text"] == "printf hello"
     reopened = WorkspaceAPI(Store(tmp_path / ".cortex", project_root=tmp_path),
@@ -226,7 +243,7 @@ def test_task_route_is_absent_until_confirmed_and_never_a_selected_default(tmp_p
 def test_hidden_only_history_pages_advance_and_sparse_updates_stay_hidden(tmp_path):
     api, task = conversation(tmp_path)
     append_host_update(api.store, "session-1", dict(sessionUpdate="tool_call",
-        toolCallId="bookkeeping", title="mcp__cortex__result_submit", kind="other"))
+        toolCallId="bookkeeping", title="mcp__cortex__wait_agent", kind="other"))
     append_host_update(api.store, "session-1", dict(sessionUpdate="tool_call_update",
         toolCallId="bookkeeping", status="completed"))
     append_host_transcript(api.store, "session-1", "agent_message", "Visible reply")

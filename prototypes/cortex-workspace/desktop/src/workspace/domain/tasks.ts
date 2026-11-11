@@ -1,7 +1,7 @@
 import type { NewTask, Task, WorkspaceState, WorkspaceCommand } from "./types";
 import { editable, entity, nextId, nonempty, online, pauseSprint, requireFact, taskEvent, validateChecks, validTime } from "./core";
 import { afterMerge, stopResolution } from "./git";
-import { checkAcceptanceBlocker, checksPassed, dependencyReady, targetBranch } from "@cortex/workspace-domain";
+import { checkAcceptanceBlocker, checksPassed, dependencyReady, targetBranch, taskEditable } from "@cortex/workspace-domain";
 import { generateMockTitle } from "./projections";
 import { addEntry, addLine, cutCommands, DEFAULT_SETTINGS, isOpen, newWorker, pushActivity, sessionFor, startClock, stopClock, validateSettings } from "./timeline";
 
@@ -9,10 +9,15 @@ export function createTask(state: WorkspaceState, input: NewTask, id = nextId(st
   const project = entity(state.projects, input.projectId);
   requireFact(!state.tasks.some(t => t.id === id), "Duplicate task identity");
   const description = nonempty(input.description, "Description");
-  if (input.sprintId) requireFact(entity(state.sprints, input.sprintId).projectId === project.id, "Sprint belongs to another project");
+  if (input.sprintId) {
+    const sprint = entity(state.sprints, input.sprintId);
+    requireFact(sprint.projectId === project.id, "Sprint belongs to another project");
+    requireFact(!sprint.archivedAt, "Sprint is closed");
+    if (sprint.checkout) input = {...input,checkout:sprint.checkout.kind === "main" ? sprint.checkout : {kind:"worktree",branch:input.checkout.kind === "worktree" ? input.checkout.branch ?? `cw/${id}` : `cw/${id}`,path:input.checkout.kind === "worktree" ? input.checkout.path ?? `worktrees/${id}` : `worktrees/${id}`}};
+  }
   const checkout = input.checkout.kind === "main"
     ? { kind: "main" as const, branch: project.openBranch }
-    : { ...input.checkout, branch: nonempty(input.checkout.branch, "Worktree branch"), path: nonempty(input.checkout.path, "Worktree path") };
+    : { ...input.checkout, branch: nonempty(input.checkout.branch ?? "", "Worktree branch"), path: nonempty(input.checkout.path ?? "", "Worktree path") };
   if (checkout.kind === "worktree") {
     requireFact(!checkout.path.startsWith("/") && !checkout.path.split(/[\\/]/).includes(".."), "Mock worktree paths must be project-relative");
     requireFact(!state.tasks.some(t => t.projectId === project.id && t.checkout.kind === "worktree" && t.checkout.path === checkout.path), "Worktree already bound to a task");
@@ -68,11 +73,21 @@ export function continueTask(state: WorkspaceState, task: Task, now?: number) {
 }
 export function handleTask(state: WorkspaceState, command: WorkspaceCommand): boolean {
   if (!("taskId" in command) || !command.taskId) return false;
-  const handled = ["rename_task", "generate_title", "start_task", "stop_task", "confirm_stop", "continue_task", "close_task", "task_issue", "clear_issue", "publish_result", "rerun_check", "finish_check", "accept_result", "workspace_changed", "integrate"];
+  const handled = ["edit_task", "rename_task", "generate_title", "start_task", "stop_task", "confirm_stop", "continue_task", "close_task", "task_issue", "clear_issue", "publish_result", "rerun_check", "finish_check", "accept_result", "workspace_changed", "integrate"];
   if (!handled.includes(command.type)) return false;
   const task = entity(state.tasks, command.taskId);
   editable(task); online(state, task);
   switch (command.type) {
+    case "edit_task":
+      requireFact(taskEditable(task), "A started task's saved request is read-only");
+      requireFact(command.expectedVersion === (task.sourceVersion ?? "1"), "Task changed; reopen the editor");
+      task.description = nonempty(command.description, "Description");
+      task.title = nonempty(command.title, "Title"); task.titleState = "user";
+      task.settings = validateSettings(command.settings);
+      task.checkout = command.checkout.kind === "main" ? {kind:"main",branch:entity(state.projects, task.projectId).openBranch}
+        : task.checkout.kind === "worktree" ? task.checkout : {kind:"worktree",branch:`cw/${task.id}`,path:`worktrees/${task.id}`};
+      task.sourceVersion = String(Number(task.sourceVersion ?? "1") + 1);
+      break;
     case "rename_task": task.title = nonempty(command.title, "Title"); task.titleState = "user"; break;
     case "generate_title":
       if (task.titleState !== "user") {
@@ -104,6 +119,7 @@ export function handleTask(state: WorkspaceState, command: WorkspaceCommand): bo
     case "continue_task": continueTask(state, task, command.now); break;
     case "close_task": {
       validTime(command.now);
+      requireFact(command.choice !== "already_in_target", "Contained-work closure is available on the real service only");
       requireFact(command.confirmed, "Owner confirmation required");
       requireFact(task.status !== "stopping" && task.process !== "unknown", "Engine stop is not confirmed");
       requireFact(!task.integration || task.integration.method !== "squash", "Task is already merged");

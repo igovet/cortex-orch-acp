@@ -80,7 +80,11 @@ it("running cards explain Stop first instead of closing or pretending to pass ch
   const s = withTask(emptyWorkspace(), "Running"); s.tasks[0].status = "working"; s.tasks[0].process = "live";
   const p = await mount(s); drag("done"); await settle();
   expect(document.querySelector("dialog[open]")?.textContent).toContain("Stop the task");
-  expect([...document.querySelectorAll("dialog button")].some(b => b.textContent === "Close task")).toBe(false);
+  // Close task stays a real button, off, with its reason in the dialog's footer; a press does nothing.
+  const close = [...document.querySelectorAll<HTMLButtonElement>("dialog button")].find(b => b.textContent === "Close task")!;
+  expect(close.getAttribute("aria-disabled")).toBe("true");
+  expect(document.querySelector("dialog[open] .l-reason")?.textContent).toContain("Stop the task");
+  close.click(); await settle();
   expect(p.commands).toHaveLength(0);
 });
 for (const remote of [false, true]) it(`content already in the branch offers confirmed closure (remote=${remote})`, async () => {

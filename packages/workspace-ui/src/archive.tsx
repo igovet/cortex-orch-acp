@@ -2,8 +2,9 @@ import { createMemo, createSignal, For, Show } from "solid-js";
 import { previewPurge } from "@cortex/workspace-domain";
 import { archiveRow, archiveView, daysLeft, nextCleanup, NO_FILTER, OUTCOME_FILTERS, sizeText, type ArchiveFilter, type ArchiveRow } from "./archive-model";
 import { useWs } from "./ctx";
-import { A, Count, I, MenuItem, Modal, Pop } from "./kit";
-import type { TaskView } from "./selectors";
+import { A, I, MenuItem, Modal, Pop } from "./kit";
+import { ActionBar, SectionHead, Toolbar } from "./layout";
+import { sprintTitle, type TaskView } from "./selectors";
 
 const Row = (props: { row: ArchiveRow; checked: boolean; onCheck: (on: boolean) => void; onMenu: (el: HTMLElement) => void; onRestore: () => void }) => {
   const ws = useWs();
@@ -51,10 +52,9 @@ export function UnmergedDialog(props: { taskId: string; onClose: () => void }) {
         <label class="rc danger"><input type="radio" name="unmerged" checked={choice() === "drop"} onChange={() => setChoice("drop")} /><span><span class="t">Delete the work and archive</span><span class="d">Discards {what()} at cleanup. This cannot be undone after that.</span></span></label>
       </div>
     </div>
-    <div class="dlg-f">
-      <A class="btn btn-sm ws-push" to={{ name: "task", machine: view().machine.id, task: props.taskId }} onClick={() => props.onClose()}>Open the task</A>
+    <ActionBar place="dialog" start={<A class="lnk" to={{ name: "task", machine: view().machine.id, task: props.taskId }} onClick={() => props.onClose()}>Open the task</A>}>
       <Show when={choice() === "keep"} fallback={<button class="btn btn-danger btn-lg" {...ws.needs("answer_archive")} onClick={() => answer(true)}>Delete {what()}</button>}><button class="btn btn-primary btn-lg" data-autofocus {...ws.needs("answer_archive")} onClick={() => answer(false)}>Keep the work</button></Show>
-    </div>
+    </ActionBar>
   </>;
 }
 
@@ -73,8 +73,8 @@ export function PurgeDialog(props: { ids: string[]; onClose: () => void; onDone?
       <For each={preview().skipped}>{s => <li><I n="alert" s={14} /><span>Skipped: {s.title}. {s.reason}</span></li>}</For>
       <li><I n="branch" s={14} /><span>Merged commits, remote branches and pull requests stay in Git</span></li>
     </ul></div>
-    <div class="dlg-f"><button class="btn btn-line btn-lg" data-autofocus onClick={() => props.onClose()}>Keep them</button>
-      <button class="btn btn-danger btn-lg" aria-disabled={n() ? undefined : "true"} data-why={n() ? undefined : "Nothing here can be deleted"} {...ws.needs("purge_many")} onClick={go}>Delete {noun()} permanently</button></div>
+    <ActionBar place="dialog"><button class="btn btn-line btn-lg" data-autofocus onClick={() => props.onClose()}>Keep them</button>
+      <button class="btn btn-danger btn-lg" aria-disabled={n() ? undefined : "true"} data-why={n() ? undefined : "Nothing here can be deleted"} {...ws.needs("purge_many")} onClick={go}>Delete {noun()} permanently</button></ActionBar>
   </>;
 }
 
@@ -86,15 +86,15 @@ function BlockedDialog(props: { row: ArchiveRow; onClose: () => void }) {
   return <>
     <div class="dlg-h"><h2>Cleanup of {t().title} is blocked</h2><button class="ib" aria-label="Decide later" onClick={() => props.onClose()}><I n="x" /></button></div>
     <div class="dlg-b"><div>{props.row.sub}.</div><div class="cap muted">It stays in the Archive until you decide. Nothing is deleted on its own.</div></div>
-    <div class="dlg-f"><button class="btn btn-line btn-lg" data-autofocus onClick={() => props.onClose()}>Decide later</button>
+    <ActionBar place="dialog"><button class="btn btn-line btn-lg" data-autofocus onClick={() => props.onClose()}>Decide later</button>
       <button class="btn btn-line btn-lg" {...ws.needs("restore_task")} onClick={() => { ws.ok({ type: "restore_task", taskId: t().id, now: ws.store.clock() }, () => { props.onClose(); }); }}>Restore to Done</button>
-      <Show when={clearable()}><button class="btn btn-danger btn-lg" {...ws.needs("clear_purge_block")} onClick={() => { ws.ok({ type: "clear_purge_block", taskId: t().id, confirmed: true }, () => { props.onClose(); }); }}>Discard the new files</button></Show></div>
+      <Show when={clearable()}><button class="btn btn-danger btn-lg" {...ws.needs("clear_purge_block")} onClick={() => { ws.ok({ type: "clear_purge_block", taskId: t().id, confirmed: true }, () => { props.onClose(); }); }}>Discard the new files</button></Show></ActionBar>
   </>;
 }
 
 function Picker(props: { id: string; label: string; value: string; options: { id: string; label: string }[]; onPick: (id: string | null) => void }) {
   return <>
-    <button class="pick ws-pick" popovertarget={props.id}><span class="faint">{props.label}</span>{props.value}<I n="chevron-down" s={12} /></button>
+    <button class="pick ws-pick" popovertarget={props.id} aria-label={`${props.label}: ${props.value}`}><span class="faint">{props.label}</span><span class="trunc">{props.value}</span><I n="chevron-down" s={12} /></button>
     <Pop id={props.id} class="pop-anchor" align="left" label={props.label}>
       <MenuItem label="All" check={props.value === "All"} onSelect={() => props.onPick(null)} />
       <For each={props.options}>{o => <MenuItem label={o.label} check={o.label === props.value} onSelect={() => props.onPick(o.id)} />}</For>
@@ -114,6 +114,11 @@ export function Archive() {
   const [more, setMore] = createSignal(false);
   let menuEl: HTMLDivElement | undefined;
   const view = createMemo(() => archiveView(ws.store.index(), filter()));
+  const closedSprints = createMemo(() => ws.store.state().sprints.filter(s => {
+    const project = ws.store.state().projects.find(p => p.id === s.projectId), f = filter();
+    return s.archivedAt && project && (!f.machine || project.machineId === f.machine) && (!f.project || s.projectId === f.project)
+      && !f.outcome && (!f.text.trim() || sprintTitle(s).toLowerCase().includes(f.text.trim().toLowerCase()));
+  }));
   const later = () => more() ? view().later : view().later.slice(0, LATER_LIMIT);
   const filtered = () => filter().text.trim() !== "" || filter().machine !== null || filter().project !== null || filter().outcome !== null;
   const check = (id: string, on: boolean) => { const next = new Set(selected()); if (on) next.add(id); else next.delete(id); setSelected(next); };
@@ -133,7 +138,7 @@ export function Archive() {
   };
   const section = (id: string, title: string, rows: ArchiveRow[], tail?: () => unknown) => <Show when={rows.length > 0}>
     <section aria-labelledby={id}>
-      <h2 class="sec-h" id={id}>{title} <Count n={rows.length} /></h2>
+      <SectionHead id={id} title={title} count={rows.length} />
       <div class="surface"><div class="gt">
         <Head />
         <For each={title === "Later" ? later() : rows}>{r => <Row row={r} checked={selected().has(r.view.id)} onCheck={on => check(r.view.id, on)} onMenu={el => openMenu(r.view.id, el)} onRestore={() => { if (r.view.machine.connection === "connected") restore(r.view.id); }} />}</For>
@@ -144,31 +149,37 @@ export function Archive() {
   const asked = (v: TaskView) => { const f = v.task.workFacts; return `${v.project.name}, unmerged work${f ? `: ${f.commits} commits and ${f.files} uncommitted files on ` : " on "}`; };
   return <div class="page"><div class="page-in">
     <div class="page-h"><div><p>Kept for {ws.machine().retentionDays} days after archiving by default. <A class="lnk" to={{ name: "settings", section: "storage", machine: ws.machine().id }}>Change it for each machine.</A> Merged commits stay in Git.</p></div></div>
-    <Show when={ids().length > 0} fallback={<div class="tbar">
+    <Show when={ids().length > 0} fallback={<Toolbar class="tbar" label="Filter the Archive" start={<>
       <input class="inp ws-filter-wide" placeholder="Filter archived tasks" aria-label="Filter archived tasks" value={filter().text} onInput={e => setFilter({ ...filter(), text: e.currentTarget.value })} />
       <Picker id="m-ar-machine" label="Machine" value={machines().find(m => m.id === filter().machine)?.label ?? "All"} options={machines()} onPick={machine => setFilter({ ...filter(), machine })} />
       <Picker id="m-ar-project" label="Project" value={projects().find(p => p.id === filter().project)?.label ?? "All"} options={projects()} onPick={project => setFilter({ ...filter(), project })} />
       <Picker id="m-ar-outcome" label="Outcome" value={OUTCOME_FILTERS.find(o => o.id === filter().outcome)?.label ?? "All"} options={OUTCOME_FILTERS} onPick={outcome => setFilter({ ...filter(), outcome: outcome as ArchiveFilter["outcome"] })} />
-      <span class="grow"></span>
-      <span class="cap faint">{nextCleanup(ws.machine(), ws.store.now)}</span>
-    </div>}>
-      <div class="sel-bar"><span class="w500">{ids().length} selected</span><span class="grow"></span><button class="btn btn-sm" onClick={() => setSelected(new Set<string>())}>Clear</button>
+    </>} mid={<span class="cap faint trunc" data-whole="">{nextCleanup(ws.machine(), ws.store.now)}</span>} />}>
+      <Toolbar class="sel-bar" label="Selected tasks" start={<span class="w500">{ids().length} selected</span>} end={<>
+        <button class="btn btn-sm" onClick={() => setSelected(new Set<string>())}>Clear</button>
         <button class="btn btn-line btn-sm" {...ws.needs("restore_task")} onClick={restoreAll}><I n="undo" s={12} />Restore {ids().length}</button>
-        <button class="btn btn-line btn-sm" onClick={() => setPurging(ids())}>Delete now…</button></div>
+        <button class="btn btn-line btn-sm" onClick={() => setPurging(ids())}>Delete now…</button></>} />
     </Show>
     <Show when={view().waiting.length > 0}>
       <section aria-labelledby="ar-wait">
-        <h2 class="sec-h" id="ar-wait"><I n="question" s={14} class="st-warn" />Waiting for your decision <Count n={view().waiting.length} /></h2>
+        <SectionHead id="ar-wait" title={<><I n="question" s={14} class="st-warn" /> Waiting for your decision</>} count={view().waiting.length} />
         <div class="surface ws-warn"><For each={view().waiting}>{v => <div class="srow">
           <span><span class="t">{v.task.title}</span><span class="d">{asked(v)}<span class="mono">{v.task.checkout.branch}</span>. It stays out of the Archive until you decide.</span></span>
           <span class="ctl"><button class="btn btn-primary btn-sm" onClick={() => setAsking(v.id)}>Decide…</button></span>
         </div>}</For></div>
       </section>
     </Show>
+    <Show when={closedSprints().length}><section aria-label="Closed sprints">
+      <SectionHead title="Closed sprints" count={closedSprints().length} />
+      <div class="surface"><For each={closedSprints()}>{s => <div class="srow">
+        <span><span class="t">{sprintTitle(s)}</span><span class="d">{s.taskIds.length} tasks retained. Unfinished tasks remain in the project.</span></span>
+        <A class="btn btn-line btn-sm" to={{name:"sprint",machine:ws.store.state().projects.find(p => p.id === s.projectId)!.machineId,project:s.projectId,sprint:s.id,tab:"summary"}}>Open summary</A>
+      </div>}</For></div>
+    </section></Show>
     {section("ar-soon", "Cleanup within 3 days", view().soon)}
     {section("ar-later", "Later", view().later, () => <Show when={view().later.length > LATER_LIMIT && !more()}><button class="gr ws-more" onClick={() => setMore(true)}><span class="cap muted">Show {view().later.length - LATER_LIMIT} more</span></button></Show>)}
     {section("ar-block", "Cleanup blocked", view().blocked)}
-    <Show when={view().rows.length === 0 && view().waiting.length === 0}>
+    <Show when={view().rows.length === 0 && view().waiting.length === 0 && closedSprints().length === 0}>
       <div class="surface ws-empty">{filtered() ? "No archived task matches this filter." : `Nothing archived. Tasks move here after ${ws.machine().autoArchiveDays} days in Done.`}</div>
     </Show>
     <Pop id="m-arrow" class="pop-right" label="Archived task" ref={el => { menuEl = el; }}>

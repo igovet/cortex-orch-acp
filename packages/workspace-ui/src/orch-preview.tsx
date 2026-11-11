@@ -3,7 +3,7 @@ import { EFFORT_BY_TIER, effortLabel, FALLBACK_ORDER, kindLabel, previewContext,
 import { useWs } from "./ctx";
 import { I } from "./kit";
 import { Bar, Shell, SourceStrips, useRouting } from "./orch-shared";
-import { Adv, Lock, Pick, Seg, Srow } from "./settings-kit";
+import { Adv, Lock, Pick, Seg, SetH, Srow } from "./settings-kit";
 
 const COMPLEXITIES = [{ id: "low", label: "Low" }, { id: "normal", label: "Normal" }, { id: "high", label: "High" }] as const;
 /** Answers "what would run this?" from the rules alone, for saved rules or the draft before it is saved. */
@@ -51,7 +51,7 @@ export function RoutePreview() {
         </div></div>
       </Show>
       <Show when={result().excluded.length > 0}>
-        <div class="set-h">Excluded<span class="cap faint ws-w400 tnum">{result().excluded.length}</span></div>
+        <SetH title="Excluded"><span class="cap faint ws-w400 tnum">{result().excluded.length}</span></SetH>
         <div class="surface"><div class="gt"><For each={result().excluded}>{x => <div class="gr oxrow"><span class="trunc">{x.label}</span><span class="cap muted trunc">{x.reason}</span></div>}</For></div></div>
       </Show>
     </Show>

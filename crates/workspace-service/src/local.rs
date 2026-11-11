@@ -13,7 +13,7 @@ use tokio::{
     net::{UnixListener, UnixStream},
 };
 
-pub const FRAME_BYTES: usize = 1024 * 1024;
+pub use workspace_protocol::FRAME_BYTES;
 pub fn failure(code: &'static str) -> io::Error {
     io::Error::other(code)
 }
@@ -75,6 +75,13 @@ pub struct Endpoint {
     pub listener: UnixListener,
     pub path: PathBuf,
     _lock: File,
+}
+impl Drop for Endpoint {
+    fn drop(&mut self) {
+        // CLOEXEC does not close descriptors inherited by a concurrent fork until
+        // exec. Release the shared flock when its owner ends, not that later close.
+        unsafe { libc::flock(self._lock.as_raw_fd(), libc::LOCK_UN) };
+    }
 }
 impl Endpoint {
     pub fn bind(runtime: &Path) -> io::Result<Self> {

@@ -1,5 +1,6 @@
 import { createEffect, createSignal, Show } from "solid-js";
 import { useWs } from "./ctx";
+import { Strip } from "./layout";
 
 /** Observe exact pending question identities, not polling cycles or lifecycle guesses. */
 export function QuestionNotifications() {
@@ -11,7 +12,7 @@ export function QuestionNotifications() {
     const labels = new Set<string>();
     for (const session of state.sessions) {
       const task = state.tasks.find(t => t.id === session.taskId);
-      const sprint = state.sprints.find(s => s.planningTaskId === session.taskId);
+      const sprint = state.sprints.find(s => !s.archivedAt && s.planningTaskId === session.taskId);
       if (!task && !sprint) continue;
       const machineId = state.projects.find(p => p.id === (task?.projectId ?? sprint?.projectId))?.machineId;
       if (!state.machines.some(m => m.id === machineId && m.connection === "connected")) continue;
@@ -28,5 +29,5 @@ export function QuestionNotifications() {
     for (const label of labels) void ws.notify!(label).catch(() =>
       setError("Desktop notification could not be delivered. Questions remain in Inbox."));
   });
-  return <Show when={error()}><div class="strip ws-conn" role="alert">{error()}<button class="btn btn-sm" onClick={() => setError("")}>Dismiss</button></div></Show>;
+  return <Show when={error()}><Strip class="ws-conn" role="alert" tone="warn" action={<button class="btn btn-sm" onClick={() => setError("")}>Dismiss</button>}>{error()}</Strip></Show>;
 }

@@ -47,24 +47,29 @@ async fn workspace_request(
             _ => Ok(serde_json::json!([])),
         };
     }
+    if call.operation == "native.save_attachment" {
+        return save_attachment(&window, call.message).await;
+    }
     if call.operation == "native.clipboard_image" {
-        // WebKitGTK may provide an empty DOM clipboard for PNG. Request only that
-        // target, on GTK's main thread; never read arbitrary clipboard text/files.
-        use base64::Engine;
+        // WebKitGTK does not expose a clipboard image to the page. Ask for PNG, then
+        // any other image GTK can decode, on GTK's main thread; never read text or files.
         let (send, receive) = tokio::sync::oneshot::channel();
         window.run_on_main_thread(move || {
             let clipboard = gtk::Clipboard::get(&gtk::gdk::SELECTION_CLIPBOARD);
-            clipboard.request_contents(&gtk::gdk::Atom::intern("image/png"), move |_, selection| {
+            clipboard.request_contents(&gtk::gdk::Atom::intern("image/png"), move |clipboard, selection| {
                 let bytes = selection.data();
-                let result = if bytes.len() > 512 * 1024 {
-                    Err("Clipboard image exceeds 512 KiB.")
-                } else if bytes.is_empty() {
-                    Ok(serde_json::json!([]))
-                } else {
-                    Ok(serde_json::json!([{"name":"clipboard.png","mimeType":"image/png",
-                        "data":base64::engine::general_purpose::STANDARD.encode(bytes)}]))
-                };
-                let _ = send.send(result);
+                if !bytes.is_empty() {
+                    let _ = send.send(crate::attachments::clipboard_png(&bytes));
+                    return;
+                }
+                clipboard.request_image(move |_, image| {
+                    let result = match image.map(|image| image.save_to_bufferv("png", &[])) {
+                        None => Ok(serde_json::json!([])),
+                        Some(Ok(bytes)) => crate::attachments::clipboard_png(&bytes),
+                        Some(Err(_)) => Err("This clipboard image could not be read."),
+                    };
+                    let _ = send.send(result);
+                });
             });
         }).map_err(|_| "Clipboard is unavailable.")?;
         return tokio::time::timeout(std::time::Duration::from_secs(5), receive).await
@@ -107,6 +112,42 @@ async fn pick_folder(window: &WebviewWindow) -> Result<Value, String> {
     }).map_err(|_| "The folder chooser is unavailable.")?;
     let chosen = receive.await.map_err(|_| "The folder chooser closed unexpectedly.")?;
     Ok(serde_json::json!({"path":chosen.map(|path: std::path::PathBuf| path.to_string_lossy().into_owned())}))
+}
+
+/// Writes one saved attachment to the file the owner picks in the system's save dialog. The webview only
+/// supplies the name and bytes, never a path; policy has already bounded both. Null means the owner cancelled.
+async fn save_attachment(window: &WebviewWindow, message: Value) -> Result<Value, String> {
+    use base64::Engine;
+    let name = message["name"].as_str().ok_or("This file name is unavailable.")?.to_owned();
+    let bytes = base64::engine::general_purpose::STANDARD.decode(message["data"].as_str().ok_or("This attachment could not be read.")?)
+        .map_err(|_| "This attachment could not be read.")?;
+    let (send, receive) = tokio::sync::oneshot::channel();
+    let owner = window.clone();
+    window.run_on_main_thread(move || {
+        use gtk::prelude::{FileChooserExt, NativeDialogExt};
+        let parent = owner.gtk_window().ok();
+        let dialog = gtk::FileChooserNative::new(Some("Save a copy"), parent.as_ref(), gtk::FileChooserAction::Save, Some("Save"), Some("Cancel"));
+        dialog.set_do_overwrite_confirmation(true);
+        dialog.set_modal(true);
+        dialog.set_current_name(&name);
+        if let Some(home) = std::env::var_os("HOME") {
+            dialog.set_current_folder(home);
+        }
+        let held = std::rc::Rc::new(std::cell::RefCell::new(Some((dialog.clone(), send))));
+        dialog.connect_response(move |chooser, response| {
+            let chosen = (response == gtk::ResponseType::Accept).then(|| chooser.filename()).flatten();
+            chooser.hide();
+            if let Some((_, send)) = held.borrow_mut().take() {
+                let _ = send.send(chosen);
+            }
+        });
+        dialog.show();
+    }).map_err(|_| "The save dialog is unavailable.")?;
+    let Some(path) = receive.await.map_err(|_| "The save dialog closed unexpectedly.")? else {
+        return Ok(serde_json::json!({"path":null}));
+    };
+    std::fs::write(&path, bytes).map_err(|_| "The file could not be saved there.")?;
+    Ok(serde_json::json!({"path":path.to_string_lossy()}))
 }
 
 #[tauri::command]

@@ -5,6 +5,8 @@ import { DomainError, entity, machineFor, nonempty, projectFor, requireFact } fr
  * Pure presentation invariants: what a screen may offer and how it words a blocker. They read a projection and change nothing.
  * The machine decides. A rule here never authorises anything, it only keeps a control honest about what it can do.
  */
+/** Editing the saved request is distinct from messaging or changing a live session. */
+export const taskEditable = (task: Task) => task.executionId === null && task.status === "draft" && task.process === "stopped" && !task.archive && !task.closedAs;
 export const repoOf = (state: WorkspaceState, projectId: string) => state.repos.find(r => r.projectId === projectId) ?? null;
 export function checkoutOf(state: WorkspaceState, id: string): { repo: ProjectRepo; checkout: RepoCheckout } {
   for (const repo of state.repos) {
@@ -48,6 +50,10 @@ export function previewClear(state: WorkspaceState, machineId: string, cutoff: n
   const merged = old.filter(t => t.work !== "unmerged"), risky = merged.filter(t => t.process !== "stopped");
   return { remove: merged.filter(t => force || t.process === "stopped").map(t => t.id), guarded: force ? 0 : risky.length, kept: old.length - merged.length };
 }
+/** A sprint-wide owner choice wins over plan hints. Older sprints keep their per-item choices. */
+export const sprintTaskCheckout = (sprint: Pick<Sprint, "checkout">, item?: Pick<PlanItem, "checkout">): NonNullable<PlanItem["checkout"]> =>
+  sprint.checkout ?? item?.checkout ?? { kind: "main" };
+
 export function validatePlan(items: PlanItem[]) {
   requireFact(items.length > 0, "Plan must contain tasks");
   const byKey = new Map(items.map(item => [nonempty(item.key, "Plan key"), item]));

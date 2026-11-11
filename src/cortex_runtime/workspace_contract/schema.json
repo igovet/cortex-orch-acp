@@ -1,10 +1,10 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://cortex.local/workspace/wire-1.6.schema.json",
+  "$id": "https://cortex.local/workspace/wire-1.8.schema.json",
   "title": "Cortex Workspace wire subset",
   "x-wire-version": {
     "major": 1,
-    "minor": 6
+    "minor": 8
   },
   "x-mapping-version": "1",
   "x-limits": {
@@ -12,7 +12,9 @@
     "eventsPerPage": 100,
     "historyPerPage": 100,
     "pageContentBytes": 65536,
-    "frameBytes": 1048576,
+    "frameBytes": 8388608,
+    "attachmentBytes": 4194304,
+    "attachmentFiles": 8,
     "textCharacters": 32000,
     "requestIdCharacters": 128
   },
@@ -98,7 +100,7 @@
           "const": 65536
         },
         "frameBytes": {
-          "const": 1048576
+          "type": "integer", "minimum": 1048576, "maximum": 8388608
         },
         "textCharacters": {
           "const": 32000
@@ -291,7 +293,7 @@
       "properties": {
         "name": {"type": "string", "minLength": 1, "maxLength": 255},
         "mimeType": {"type": "string", "minLength": 1, "maxLength": 100},
-        "data": {"type": "string", "maxLength": 699052}
+        "data": {"type": "string", "maxLength": 5592408}
       },
       "required": ["name", "mimeType", "data"],
       "additionalProperties": false
@@ -1662,7 +1664,7 @@
           "eventsPerPage": 100,
           "historyPerPage": 100,
           "pageContentBytes": 65536,
-          "frameBytes": 1048576,
+          "frameBytes": 8388608,
           "textCharacters": 32000,
           "requestIdCharacters": 128
         },
@@ -2938,7 +2940,7 @@
           "eventsPerPage": 100,
           "historyPerPage": 100,
           "pageContentBytes": 65536,
-          "frameBytes": 1048576,
+          "frameBytes": 8388608,
           "textCharacters": 32000,
           "requestIdCharacters": 128
         },

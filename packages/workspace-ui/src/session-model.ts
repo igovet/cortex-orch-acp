@@ -25,14 +25,15 @@ const ACTIVE: WorkerStatus[] = ["working", "waiting_you", "paused", "unknown"];
 const FINISHED: WorkerStatus[] = ["completed", "failed", "cancelled"];
 export const isFinished = (w: Worker) => FINISHED.includes(w.status);
 
-export type ComposerMode = "live" | "paused" | "stopping" | "draft" | "review" | "closed" | "ended" | "archived" | "offline";
+export type ComposerMode = "live" | "paused" | "stopping" | "draft" | "review" | "closed" | "ended" | "archived" | "offline" | "unconfirmed";
 export type SessionModel = {
   view: TaskView; session: TaskSession; workers: Worker[]; active: Worker[]; finished: Worker[]; running: Worker[];
   messages: Message[]; queue: Message[]; open: Decision[]; mode: ComposerMode; planDone: number; planTotal: number;
 };
 function composerMode(v: TaskView): ComposerMode {
   if (v.column === "archive") return "archived";
-  if (v.machine.connection !== "connected" || (v.unknown && v.task.status !== "stopping")) return "offline";
+  if (v.machine.connection !== "connected") return "offline";
+  if (v.unknown && v.task.status !== "stopping") return "unconfirmed";
   switch (v.task.status) {
     case "working": case "needs_you": return "live";
     case "paused": return "paused";
@@ -67,7 +68,7 @@ export type Chip = { icon: string; tone: string; spin?: boolean; text: string; w
 /** The current state and the next step, for the title band. */
 export function stateChip(m: SessionModel): Chip {
   const { task } = m.view;
-  if (m.view.unknown && task.status !== "stopping") return { icon: "help", tone: "st-idle", text: m.view.fact.text };
+  if (m.view.unknown && task.status !== "stopping") return { icon: "alert", tone: "st-idle", text: m.mode === "unconfirmed" ? "Not confirmed" : m.view.fact.text };
   if (task.conflict === "resolving") return { icon: "loader", tone: "st-run", spin: true, text: "Resolving" };
   if (task.conflict !== "none") return { icon: "alert", tone: "st-bad", text: "Conflict" };
   switch (task.status) {
@@ -189,14 +190,14 @@ export function closeConsequences(m: SessionModel) {
   const t = m.view.task;
   if (checkedResult(m)) lines.push({ icon: "check-circle", text: `Result v${t.result!.version}${t.acceptance ? ", accepted by you," : ""} stays on record with its checks` });
   else lines.push({ icon: "eye", text: "Review and verification did not finish, so the result is marked not verified" });
-  const c = m.session.changes, where = m.view.project.hasGit === false ? "project folder" : m.view.task.checkout.kind === "worktree" ? "worktree" : "main checkout";
+  const c = m.session.changes, where = m.view.project.hasGit === false ? "project folder" : m.view.task.checkout.kind === "worktree" ? "worktree" : "project folder";
   lines.push({ icon: "file", text: c ? `Changes stay in the ${where}: ${count(c.files, "file")}, +${c.add} −${c.del}` : `Changes stay in the ${where}` });
   return lines;
 }
 /** The rule that decides Stop, Close and the composer, in one place. */
 export const closeBlocked = (m: SessionModel) =>
   m.mode === "stopping" ? "Available once every worker is confirmed as stopped"
-    : m.mode === "offline" ? "Unavailable until this task's state is confirmed"
+    : m.mode === "offline" || m.mode === "unconfirmed" ? "Unavailable until this task's state is confirmed"
     : m.mode === "archived" ? "Restore the task first"
     : m.mode === "closed" ? "This task is already closed" : m.view.task.integration?.method === "squash" ? "This task is already merged"
     : m.view.task.conflict !== "none" ? "A merge is in progress. Abort it first" : null;

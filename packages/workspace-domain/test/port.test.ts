@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { applyProjection, compareVersions, emptyWorkspace, LOCAL_MACHINE_ID, overlayTask, projectionKey, type Project, type ProjectionUpdate, type Task } from "../src";
+import { applyFacts, applyProjection, compareVersions, emptyWorkspace, LOCAL_MACHINE_ID, overlayTask, projectionKey, type Project, type ProjectFacts, type ProjectionUpdate, type Sprint, type Task } from "../src";
 import { canRun, capabilityOf, noCapabilities, WIRE_OPERATIONS } from "../src/capabilities";
 
 const project: Project = { id: "p", machineId: LOCAL_MACHINE_ID, name: "P", repository: "/p", openBranch: "", defaultBranch: "" };
@@ -44,6 +44,16 @@ describe("projections", () => {
     const state = emptyWorkspace();
     expect(applyProjection(emptyWorkspace(), { kind: "projection", version: "1", scope: "workspace", state })).toBe(state);
     expect(projectionKey({ kind: "projection", version: "1", scope: "workspace", state })).toBe("workspace");
+  });
+  // The screens compare lists by position: a reordered list is a changed one, and redraws everything that shows it.
+  it("reading a project's unchanged facts again leaves every list in its order", () => {
+    const sprint = (id: string, projectId: string) => ({ id, projectId }) as Sprint;
+    const facts = (projectId: string, sprints = [sprint(`s-${projectId}`, projectId)]) => ({ projectId, openBranch: "main", defaultBranch: "main", repo: null, workers: [], reviews: [], overlays: {}, sprints }) as unknown as ProjectFacts;
+    let state = emptyWorkspace();
+    for (const id of ["a", "b", "c"]) state = applyFacts(state, facts(id));
+    expect(applyFacts(state, facts("a")).sprints.map(s => s.id)).toEqual(["s-a", "s-b", "s-c"]);
+    // Records that changed still arrive at the end.
+    expect(applyFacts(state, facts("a", [sprint("s-a", "a"), sprint("s-a2", "a")])).sprints.map(s => s.id)).toEqual(["s-b", "s-c", "s-a", "s-a2"]);
   });
 });
 

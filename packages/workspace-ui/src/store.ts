@@ -1,6 +1,7 @@
 import { batch, createMemo, createSignal, onCleanup } from "solid-js";
 import { applyFacts, applyMachineFacts, applyProjection, capabilityOf, compareVersions, emptyWorkspace, FEATURES, hasCapability, noCapabilities, projectionKey } from "@cortex/workspace-domain";
-import type { CommandEnvelope, CommandReceipt, FileRead, FileSaveResult, MachineFacts, PortCapabilities, PortConnection, PortUpdate, ProjectFacts, ProjectionUpdate, WorkspaceCommand, WorkspacePort, WorkspaceState } from "@cortex/workspace-domain";
+import type { Attachment, CommandEnvelope, CommandReceipt, FileRead, FileSaveResult, MachineFacts, PortCapabilities, PortConnection, PortUpdate, ProjectFacts, ProjectionUpdate, WorkspaceCommand, WorkspacePort, WorkspaceState } from "@cortex/workspace-domain";
+import { downloadAttachment } from "./attachments";
 import { COPY } from "./copy";
 import { buildIndex } from "./selectors";
 import { share } from "./stable";
@@ -19,6 +20,9 @@ const UNKNOWN_OUTCOME = "The result of this action is not known. It was not sent
 /** The same command, whenever it was pressed. Its clock reading is not part of what it asks for. */
 const commandKey = (command: WorkspaceCommand) => JSON.stringify({ ...command, now: undefined });
 const RETRY_MS = 3000;
+/** The shortest gap between refreshes a stream of machine events can cause. A hidden window needs them even less often. */
+export const PUSH_GAP_MS = 2000, HIDDEN_PUSH_GAP_MS = 15_000;
+const sameConnection = (a: PortConnection, b: PortConnection) => a.state === b.state && a.reason === b.reason;
 const transientRead = (error: unknown) => /^(machine_busy|machine_tool_timeout|service_request_failed|bridge_request_refused|resync_required)$/.test(String((error as { code?: unknown })?.code ?? reasonOf(error)).replace(/^refused:/, ""));
 
 /** The machine this app runs on is connected exactly when its service is. */
@@ -47,8 +51,9 @@ export function createWorkspaceStore(port: WorkspacePort, options: StoreOptions 
   const setProjected = (change: (current: WorkspaceState) => WorkspaceState) => setHeld(current => share(current, change(current)));
   const track = options.track ?? (<T,>(work: Promise<T>) => work);
   const running = new Map<string, Promise<CommandReceipt>>();
-  const [connection, setConnection] = createSignal<PortConnection>({ state: options.initial ? "connected" : "connecting", reason: null, at: null });
-  const [capabilities, setCapabilities] = createSignal(options.initial?.capabilities ?? noCapabilities());
+  // A read that changed nothing leaves these alone: every screen and the whole index hang off them.
+  const [connection, setConnection] = createSignal<PortConnection>({ state: options.initial ? "connected" : "connecting", reason: null, at: null }, { equals: sameConnection });
+  const [capabilities, setCapabilities] = createSignal(options.initial?.capabilities ?? noCapabilities(), { equals: (a, b) => JSON.stringify(a) === JSON.stringify(b) });
   const [ready, setReady] = createSignal(!!options.initial);
   const [readIssue, setReadIssue] = createSignal<string | null>(null);
   const [rejected, setRejected] = createSignal(0);
@@ -137,7 +142,16 @@ export function createWorkspaceStore(port: WorkspacePort, options: StoreOptions 
     }).catch(() => {}).finally(() => { machineReading = undefined; });
   };
   let active = true, again: ReturnType<typeof setTimeout> | undefined, lastRead: number | null = null;
-  onCleanup(() => { active = false; clearTimeout(again); });
+  // Coalesces a burst of machine events: the first refreshes at once, the rest arrive together after the gap.
+  let pushAt = 0, pushTimer: ReturnType<typeof setTimeout> | undefined;
+  const pushRefresh = () => {
+    if (pushTimer !== undefined) return;
+    const gap = typeof document !== "undefined" && document.hidden ? HIDDEN_PUSH_GAP_MS : PUSH_GAP_MS;
+    const wait = pushAt + gap - Date.now();
+    if (wait <= 0) { pushAt = Date.now(); void refresh(); return; }
+    pushTimer = setTimeout(() => { pushTimer = undefined; pushAt = Date.now(); if (active) void refresh(); }, wait);
+  };
+  onCleanup(() => { active = false; clearTimeout(again); clearTimeout(pushTimer); });
   const reload = () => { if (!ready()) setConnection({ state: "connecting", reason: null, at: null }); return refresh(); };
   const onUpdate = (update: PortUpdate) => {
     if (update.kind === "registry") {
@@ -160,7 +174,7 @@ export function createWorkspaceStore(port: WorkspacePort, options: StoreOptions 
     if (update.kind === "projection") { if (!refreshing) install(update); return; }
     if (update.kind === "facts") { if (!refreshing) installFacts(update.facts); return; }
     if (update.kind === "machine") { installMachine(update.facts); return; }
-    if (update.kind === "refresh") { void refresh(); return; }
+    if (update.kind === "refresh") { pushRefresh(); return; }
     const back = update.connection.state === "connected" && connection().state !== "connected";
     setConnection(update.connection);
     // What happened while it was away arrives as a fresh snapshot, never as a guess.
@@ -181,6 +195,9 @@ export function createWorkspaceStore(port: WorkspacePort, options: StoreOptions 
     lastRead: () => lastRead,
     takeDroppedFiles: () => port.takeDroppedFiles?.() ?? Promise.resolve([]),
     readClipboardImage: () => port.readClipboardImage?.() ?? Promise.resolve([]),
+    /** The files of a saved task, read when its page opens. Nothing here when this backend keeps none. */
+    readTaskAttachments: (taskId: string) => port.readTaskAttachments?.(taskId) ?? Promise.resolve([]),
+    saveAttachment: (file: Attachment) => { if (port.saveAttachment) return track(port.saveAttachment(file)); downloadAttachment(file); return Promise.resolve({ path: null }); },
     pickFolder: () => track(port.pickFolder?.() ?? Promise.resolve(null)),
     /** Null when this backend has no folder search. */
     searchDirectories: (request: Parameters<NonNullable<WorkspacePort["searchDirectories"]>>[0]) => port.searchDirectories?.(request) ?? Promise.resolve(null),

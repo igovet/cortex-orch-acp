@@ -4,7 +4,7 @@ import { useWs } from "./ctx";
 import { A, I, MenuItem, Pop } from "./kit";
 import { HELP } from "./orch-help";
 import { Bar, orchTo, Shell, slug, SourceStrips, useRouting, useRoutingOff } from "./orch-shared";
-import { Err, Hint, Lock, Pick, Seg, Tabs, Tags } from "./settings-kit";
+import { Err, Hint, Lock, Pick, Seg, SetH, Tabs, Tags } from "./settings-kit";
 
 type Ctx = { rules: () => RoutingRules; set: (r: RoutingRules) => void; off: () => string | undefined; problems: () => { path: string; message: string }[] };
 const pinText = (p: RoutePin, label: string) => [engineLabel(p.engine), label, p.effort ? effortLabel(p.effort) : null].filter(Boolean).join(" · ");
@@ -114,7 +114,7 @@ function Quota(props: { c: Ctx }) {
     <For each={ENGINES.filter(e => e.usage)}>{e => {
       const rows = () => r().engines[e.id].quota, unmapped = () => unmappedWindows(m(), e.id, r());
       return <>
-        <div class="set-h">{e.label}<Hint text={HELP.quotaWindows} label="quota windows" /><span class="r"><button class="btn btn-line btn-sm" aria-disabled={props.c.off() ? "true" : undefined} data-why={props.c.off()} onClick={() => { if (!props.c.off()) edit(e.id, q => [...q, { window: "", models: null }]); }}><I n="plus" s={12} />Add window</button></span></div>
+        <SetH title={<>{e.label}</>}><Hint text={HELP.quotaWindows} label="quota windows" /><button class="btn btn-line btn-sm" aria-disabled={props.c.off() ? "true" : undefined} data-why={props.c.off()} onClick={() => { if (!props.c.off()) edit(e.id, q => [...q, { window: "", models: null }]); }}><I n="plus" s={12} />Add window</button></SetH>
         <Show when={rows().length > 0} fallback={<div class="surface ws-empty">No windows mapped. Every reported window counts for every model.</div>}>
           <div class="surface"><div class="gt">
             <div class="gr oqrow th"><span>Window</span><span>Applies to</span><span>Used now</span><span></span></div>
@@ -131,7 +131,7 @@ function Quota(props: { c: Ctx }) {
           </div></div>
         </Show>
         <Show when={unmapped().length > 0}>
-          <div class="set-h">Reported, not mapped</div>
+          <SetH title="Reported, not mapped" />
           <div class="surface"><For each={unmapped()}>{w => <div class="srow"><span><span class="t mono">{w.window}</span><span class="d">Counts for every model of this engine. {w.percent}% used.</span></span><span class="ctl"><button class="btn btn-line btn-sm" aria-disabled={props.c.off() ? "true" : undefined} data-why={props.c.off()} onClick={() => { if (!props.c.off()) edit(e.id, q => [...q, { window: w.window, models: null }]); }}>Map…</button></span></div>}</For></div>
         </Show>
       </>;
@@ -147,18 +147,18 @@ function Rules(props: { c: Ctx }) {
   const [bad, setBad] = createSignal<string | null>(null);
   const setTokens = (deny: string[]) => { const wrong = deny.find(t => !TOKEN.test(t)); setBad(wrong ? `"${wrong}": use a model id, engine/model or engine/*. A wildcard needs an engine.` : null); if (!wrong) props.c.set(setDeny(r(), deny)); };
   return <>
-    <div class="set-h">Deny<Hint text={HELP.deny} label="deny rules" /></div>
+    <SetH title="Deny"><Hint text={HELP.deny} label="deny rules" /></SetH>
     <div class="surface ws-pad"><Tags label="Deny token" mono hint="model, engine/model or engine/*" items={r().deny} disabled={props.c.off()} onChange={setTokens} /><Show when={bad()}><span class="ws-err" data-problem="">{bad()}</span></Show></div>
     <Show when={orphans().length > 0}>
-      <div class="set-h">Other entries</div>
+      <SetH title="Other entries" />
       <div class="surface"><For each={orphans()}>{t => <div class="srow"><span><span class="t mono">{t}</span><span class="d">Matches no model this machine knows.</span></span><span class="ctl"><button class="btn btn-line btn-sm" aria-label={`Remove ${t}`} aria-disabled={props.c.off() ? "true" : undefined} data-why={props.c.off()} onClick={() => { if (!props.c.off()) props.c.set(setDeny(r(), r().deny.filter(x => x !== t))); }}>Remove</button></span></div>}</For></div>
     </Show>
     <Show when={r().autoAllow.length > 0}>
-      <div class="set-h">Auto-allow<Hint text={HELP.autoAllow} label="auto-allow" /></div>
+      <SetH title="Auto-allow"><Hint text={HELP.autoAllow} label="auto-allow" /></SetH>
       <div class="surface ws-pad"><p class="cap muted">Stored, has no effect under current routing. Use Auto in Models.</p><Tags label="Auto-allow token" mono items={r().autoAllow} disabled={props.c.off()} onChange={autoAllow => props.c.set({ ...r(), autoAllow })} /></div>
     </Show>
     <Show when={r().legacyTiers.length > 0}>
-      <div class="set-h">Legacy tiers<Hint text={HELP.tiers} label="legacy tiers" /></div>
+      <SetH title="Legacy tiers"><Hint text={HELP.tiers} label="legacy tiers" /></SetH>
       <div class="surface"><div class="srow"><span><span class="t mono">{r().legacyTiers.join(", ")}</span><span class="d">Refused under model policy 2. Migrate to move them into Models.</span></span><span class="ctl"><A class="btn btn-line btn-sm" to={orchTo(m().id, "files")}>Migrate…</A></span></div></div>
     </Show>
   </>;

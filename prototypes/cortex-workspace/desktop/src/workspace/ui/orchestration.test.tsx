@@ -169,7 +169,7 @@ describe("every field of the inventory is reachable", () => {
     expect(pageText()).toContain("Engines: download and connect");
     expect(named(".srow", "OpenCode").textContent).toContain("OpenCode is never set up automatically");
     await click(named(".srow .btn", "Enable OpenCode"));
-    await click(named(".dlg-f .btn-primary", "Enable"));
+    await click(named("[data-bar=dialog] .btn-primary", "Enable"));
     expect(named(".srow", "OpenCode").textContent).toContain("Connected");
     expect(all("#m-conn-codex-acp .mi").map(m => m.textContent)).not.toContain("Rename…");
     await click(all(".crow .ws-edit").find(b => /codex/i.test(b.textContent ?? ""))!);
@@ -195,7 +195,7 @@ describe("every field of the inventory is reachable", () => {
     expect(named(".srow .btn", "Apply preset").getAttribute("aria-disabled")).toBe("true");
     await click(named(".srow .btn", "Reset to default"));
     expect($("dialog[open]").textContent).toContain("A private backup of each is kept");
-    await click(named(".dlg-f .btn-danger", "Reset"));
+    await click(named("[data-bar=dialog] .btn-danger", "Reset"));
     expect(pageText()).toContain("2 private backups kept.");
   });
   it("Help is in English only", async () => {
@@ -337,7 +337,7 @@ describe("project scope", () => {
     expect(named(".btn", "Remove project ceiling")).toBeTruthy();
     expect(all(".olrow")[1].textContent).toContain("3");
     await click(named(".btn", "Remove project ceiling"));
-    await click(named(".dlg-f .btn-danger", "Remove"));
+    await click(named("[data-bar=dialog] .btn-danger", "Remove"));
     expect(pageText()).toContain("This project has no ceiling of its own.");
   });
   it("$CORTEX_ROUTING turns every routing control off with the reason", async () => {
@@ -403,10 +403,10 @@ describe("MCP list", () => {
     expect(label("vivaldi enabled").checked).toBe(true);
     await click(named("#m-srv-vivaldi .mi", "Duplicate"));
     await type($<HTMLInputElement>("dialog[open] input"), "vivaldi-codex");
-    await click(named(".dlg-f .btn-primary", "Duplicate"));
+    await click(named("[data-bar=dialog] .btn-primary", "Duplicate"));
     expect(all(".osrow:not(.th)").length).toBe(7);
     await click(named("#m-srv-broken-exporter .mi", "Remove"));
-    await click(named(".dlg-f .btn-danger", "Remove"));
+    await click(named("[data-bar=dialog] .btn-danger", "Remove"));
     expect(all(".osrow:not(.th)").length).toBe(6);
     expect($(".savebar").textContent).toContain("unsaved changes in MCP servers");
     await save();
@@ -645,7 +645,7 @@ describe("MCP edit", () => {
   });
   it("an offline machine shows everything and changes nothing", async () => {
     await mount(`/settings/machine/${REMOTE}/orchestration/tools/playwright?tab=tools`);
-    expect($(".strip.info").textContent).toContain("Nothing is queued");
+    expect($(":is(.strip.info, .l-strip[data-tone=info])").textContent).toContain("Nothing is queued");
     expect($<HTMLInputElement>('[aria-label^="browser_click, writing workers,"]').disabled).toBe(true);
     await click(named(".snav.sub", "Models"));
     expect(label("Opus enabled").disabled).toBe(true);
@@ -755,10 +755,10 @@ describe("profiles", () => {
     const dialog = $("dialog[open]");
     expect(dialog.textContent).toContain("routing");
     expect(dialog.textContent).toContain("1 unsaved draft is dropped either way.");
-    await click(named(".dlg-f .btn", "Cancel"));
+    await click(named("[data-bar=dialog] .btn", "Cancel"));
     expect($(".savebar")).toBeTruthy();
     await click(named("#m-ctx-profile .mi", "night-runs"));
-    await click(named(".dlg-f .btn-danger", "Discard and switch"));
+    await click(named("[data-bar=dialog] .btn-danger", "Discard and switch"));
     expect($(".savebar")).toBeNull();
     expect($('[aria-label^="Profile:"]').textContent).toContain("night-runs");
   });
@@ -766,14 +766,14 @@ describe("profiles", () => {
     await orch("profiles");
     await click(named(".btn", "Save as new"));
     await type($<HTMLInputElement>("dialog[open] input"), "Bad Name");
-    await click(named(".dlg-f .btn-primary", "Save as new"));
+    await click(named("[data-bar=dialog] .btn-primary", "Save as new"));
     expect($("dialog[open]")).toBeTruthy();
     await type($<HTMLInputElement>("dialog[open] input"), "weekend-1");
-    await click(named(".dlg-f .btn-primary", "Save as new"));
+    await click(named("[data-bar=dialog] .btn-primary", "Save as new"));
     expect(named(".ofrow", "weekend-1").textContent).toContain("Active");
     expect(named("#m-prof-profile-weekend-1 .mi", "Delete").getAttribute("aria-disabled")).toBe("true");
     await click(named("#m-prof-default .mi", "Delete"));
-    await click(named(".dlg-f .btn-danger", "Delete"));
+    await click(named("[data-bar=dialog] .btn-danger", "Delete"));
     expect(all(".ofrow:not(.th)").length).toBe(2);
   });
   it("an interrupted switch offers the three ways out", async () => {

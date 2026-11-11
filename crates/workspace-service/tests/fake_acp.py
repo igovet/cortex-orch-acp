@@ -7,8 +7,14 @@ import time
 mode = sys.argv[1]
 held = []
 journal_sent = False
+host_requests = {}
 for line in sys.stdin:
     request = json.loads(line)
+    if "method" not in request:
+        task_id = host_requests.pop(request["id"])
+        result = {"refused": request.get("error", {}).get("code") == -32601}
+        print(json.dumps(dict(jsonrpc="2.0", id=task_id, result=result)), flush=True)
+        continue
     method, params = request["method"], request.get("params", {})
     with open("fake.trace", "a") as trace:
         trace.write(params.get("operation", method) + "\n")
@@ -56,9 +62,10 @@ for line in sys.stdin:
             held = []
             continue
         elif operation == "tasks.get" and mode == "host":
-            print(json.dumps(dict(jsonrpc="2.0", id="permission", method="session/request_permission", params={})), flush=True)
-            response = json.loads(sys.stdin.readline())
-            result = {"refused": response["id"] == "permission" and response.get("error", {}).get("code") == -32601}
+            host_id = f"permission-{request['id']}"
+            host_requests[host_id] = request["id"]
+            print(json.dumps(dict(jsonrpc="2.0", id=host_id, method="session/request_permission", params={})), flush=True)
+            continue
         elif operation == "tasks.get" and mode == "oversized":
             sys.stdout.write("x" * 2100000 + "\n")
             sys.stdout.flush()

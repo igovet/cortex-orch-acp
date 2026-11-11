@@ -124,7 +124,7 @@ are intent mappings, not an arbitrary command console.
 | cortex-kill | Worker activity → Stop command, with a reason and retained Cortex tool-call identity |
 | cortex-stop | Close task → Cancel task cancels runtime work; the ordinary Stop task button is deliberately resumable Pause, not this irreversible command |
 | cortex-finish | Close task → Close as is: runtime cancellation plus explicit not-verified outcome; never fabricated review/check completion |
-| cortex-answer | Each pending question card, bound to its decision/execution/batch; Other answer supports multiline text and attachments |
+| cortex-answer | Each pending question card, bound to its decision/execution/batch; its answer composer, inside the card, supports multiline text and attachments; choosing an option only prepares the answer and the plane sends it |
 | cortex-language | Task composer Language; Orchestration → Coordinator sets new-task language |
 | harvest | Project → Knowledge → Collect knowledge |
 | harvest-refresh | Project → Knowledge → Refresh knowledge |
@@ -162,7 +162,7 @@ checkout-bound PTY. New pending questions notify through the Linux desktop sessi
 
 Diagnostics lists the individual checks, their observed availability, a readable failure reason and a recovery step. Copy report includes those details rather than only the overall degraded status. Older saved runs without details ask for a fresh run; missing npm in the desktop service does not imply it is absent from an interactive terminal. Diagnostics never installs tools or changes service configuration.
 
-The task menu opens the task’s main checkout or separate worktree using the native editor action. The same menu links directly to machine Diagnostics. An unavailable opener or missing worktree has a visible reason, never an unexplained grey item. VS Code discovery checks the process search path, usual system locations and per-user `.local/bin` and `.local/share/code/bin`; the default application remains the existing fallback. No editor is launched as a side effect of discovery.
+The task menu opens the task’s project folder or separate worktree using the native editor action. The same menu links directly to machine Diagnostics. An unavailable opener or missing worktree has a visible reason, never an unexplained grey item. VS Code discovery checks the process search path, usual system locations and per-user `.local/bin` and `.local/share/code/bin`; the default application remains the existing fallback. No editor is launched as a side effect of discovery.
 
 Worktree settings save only the new default root. A failed save retains the draft and a persistent readable refusal; retry or discard remains explicit. A writable external folder with a `.cortex` name is allowed, while project checkouts are not. Existing worktrees remain where they are.
 

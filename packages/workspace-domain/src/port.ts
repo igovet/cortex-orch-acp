@@ -63,7 +63,11 @@ export interface WorkspacePort {
   /** One file of a checkout, read when it is opened. A port with no files has none. */
   discoverMcp?(server: McpServer): Promise<ConnectResult>;
   takeDroppedFiles?(): Promise<import("./types").Attachment[]>;
+  /** Saved creation bytes for one task, fetched on demand rather than duplicated in every board snapshot. */
+  readTaskAttachments?(taskId: string): Promise<import("./types").Attachment[]>;
   readClipboardImage?(): Promise<import("./types").Attachment[]>;
+  /** Saves one attachment where the owner picks, through the system's save dialog. A path of null means the owner cancelled. */
+  saveAttachment?(file: import("./types").Attachment): Promise<{ path: string | null }>;
   /** The system's folder chooser. Null when the owner cancelled. */
   pickFolder?(): Promise<string | null>;
   /** Folders on one machine for the text the owner typed. A newer search in the same session replaces the one before it. */
@@ -131,6 +135,15 @@ function withFactEntries(session: TaskSession, facts: ProjectFacts): TaskSession
   return { ...session, decisions, timeline: [...kept, ...entries] };
 }
 
+/** One project's records replaced by what its facts say now. When they are the same records in the same order, each stays
+ *  where it stood, so reading unchanged facts again leaves every list as it was and nothing on screen redraws; otherwise the
+ *  project's records move to the end, as they arrive. */
+function reinstall<T>(list: T[], owned: (item: T) => boolean, next: T[], keyOf: (item: T) => string): T[] {
+  const old = list.filter(owned);
+  if (old.length === next.length && old.every((item, i) => keyOf(item) === keyOf(next[i]))) { let i = 0; return list.map(item => owned(item) ? next[i++] : item); }
+  return [...list.filter(item => !owned(item)), ...next];
+}
+
 export function applyFacts(state: WorkspaceState, facts: ProjectFacts): WorkspaceState {
   const own = (t: Task) => t.projectId === facts.projectId;
   const ids = new Set(state.tasks.filter(own).map(t => t.id));
@@ -141,11 +154,11 @@ export function applyFacts(state: WorkspaceState, facts: ProjectFacts): Workspac
     ...state,
     projects: state.projects.map(p => p.id === facts.projectId ? { ...p, openBranch: facts.openBranch, defaultBranch: facts.defaultBranch, issue: facts.issue ?? null, hasGit: facts.repo?.hasGit ?? facts.repo !== null } : p),
     tasks: state.tasks.filter(t => !own(t) || !gone(t.id)).map(t => own(t) ? overlayTask(t, facts.overlays[t.id], facts.openBranch) : t),
-    workers: [...state.workers.filter(w => !ids.has(w.taskId)), ...facts.workers],
-    repos: [...state.repos.filter(r => r.projectId !== facts.projectId), ...(facts.repo ? [facts.repo] : [])],
-    reviews: [...state.reviews.filter(r => !ids.has(r.taskId)), ...facts.reviews],
-    sprints: [...state.sprints.filter(s => s.projectId !== facts.projectId), ...facts.sprints],
-    messages: [...state.messages.filter(m => !ids.has(m.taskId)), ...(facts.messages ?? [])],
+    workers: reinstall(state.workers, w => ids.has(w.taskId), facts.workers, w => w.id),
+    repos: reinstall(state.repos, r => r.projectId === facts.projectId, facts.repo ? [facts.repo] : [], r => r.projectId),
+    reviews: reinstall(state.reviews, r => ids.has(r.taskId), facts.reviews, r => r.taskId),
+    sprints: reinstall(state.sprints, s => s.projectId === facts.projectId, facts.sprints, s => s.id),
+    messages: reinstall(state.messages, m => ids.has(m.taskId), facts.messages ?? [], m => m.id),
     sessions: state.sessions.map(s => ids.has(s.taskId) || planning.has(s.taskId) ? withFactEntries(s, facts) : s),
   };
 }

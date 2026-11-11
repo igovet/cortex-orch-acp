@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest";
-import { validate } from "@cortex/workspace-contract";
+import { describe, expect, it, vi } from "vitest";
+import { LIMITS, validate } from "@cortex/workspace-contract";
 import type { CommandEnvelope, PortUpdate, ProjectionUpdate, WorkspaceCommand } from "@cortex/workspace-domain";
 import { createRealPort, planFrom, unavailableTransport, type ProjectLocator } from "../src/port/real";
 import { capabilitiesWire, flush, scriptedTransport, snapshot, wireDecision, wireTask } from "./support";
@@ -20,6 +20,33 @@ const port = (s: ReturnType<typeof service>) => createRealPort({ transport: s.tr
 const loaded = async (s: ReturnType<typeof service>) => { const p = port(s); await p.query("capabilities.get", {}); await p.query("project.snapshot", {}); return p; };
 
 describe("real port", () => {
+  it("does not replay unchanged task history on another project's or Git refresh", async () => {
+    let version = "1", executionId = "e", reads = 0, watermark = "4", appended = false;
+    const s = scriptedTransport({
+      "capabilities.get": () => capabilitiesWire(["capabilities.get", "project.snapshot", "history.page"]),
+      "project.snapshot": () => ({...snapshot("4", [wireTask({version, executionId, phase:"working", executionState:"executing", runtimeState:"EXECUTING"})]), highWatermark:watermark}),
+      "history.page": () => { reads++; return {items:[{historyId:"h",sequence:"1",revision:"1",kind:"assistant",text:appended ? "New message" : "Retained message",toolStatus:null,recordedAt:"2026-11-05T00:00:00Z",availability:"available"}], nextCursor:null, highWatermark:watermark}; },
+    });
+    const p = port(s as ReturnType<typeof service>);
+    await p.query("capabilities.get", {});
+    await p.query("project.snapshot", {});
+    const [reused] = await p.query("project.snapshot", {}) as Extract<ProjectionUpdate,{scope:"project"}>[];
+    expect(reused.slice.sessions[0].timeline).toContainEqual(expect.objectContaining({text:"Retained message"}));
+    expect(reads).toBe(1);
+    appended = true; watermark = "5";
+    const [changed] = await p.query("project.snapshot", {}) as Extract<ProjectionUpdate,{scope:"project"}>[];
+    expect(changed.slice.sessions[0].timeline).toContainEqual(expect.objectContaining({text:"New message"}));
+    expect(reads).toBe(2);
+    await p.query("project.snapshot", {});
+    expect(reads).toBe(2);
+    version = "2";
+    await p.query("project.snapshot", {});
+    expect(reads).toBe(3);
+    executionId = "replacement";
+    await p.query("project.snapshot", {});
+    expect(reads).toBe(4);
+  });
+
   it("keeps recorded task and project times through repeated reads", async () => {
     const at = "2026-11-05T00:00:00Z";
     const s = service([wireTask({lastConfirmedAt:at})]);
@@ -251,6 +278,29 @@ describe("real port", () => {
       return { s, p, asked, ready: async () => { await p.query("capabilities.get", {}); await p.query("project.snapshot", {}); await p.query("project.facts", {}); await p.query("machine.facts", {}); } };
     };
 
+    it("publishes slow Git facts without triggering a full-read feedback loop", async () => {
+      vi.useFakeTimers();
+      let stop = () => {};
+      try {
+        const {s,p} = helper();
+        const answer = s.answers["machine.call"]!;
+        let finish!: (v: unknown) => void;
+        s.answers["machine.call"] = message => (message as {op:string}).op === "repo.snapshot"
+          ? new Promise(resolve => {finish = resolve;}) : answer(message);
+        await p.query("capabilities.get", {});
+        await p.query("project.snapshot", {});
+        const reading = p.query("project.facts", {});
+        await vi.advanceTimersByTimeAsync(51);
+        await reading;
+        const updates: PortUpdate[] = [];
+        stop = p.subscribe(update => updates.push(update));
+        finish({ok:true,result:repo});
+        await vi.advanceTimersByTimeAsync(0);
+        expect(updates.some(u=>u.kind === "refresh")).toBe(false);
+        expect(updates).toContainEqual(expect.objectContaining({kind:"facts",facts:expect.objectContaining({repo})}));
+      } finally { stop(); vi.useRealTimers(); }
+    });
+
     it("offers the machine's commands once the service says the helper is there", async () => {
       const { p } = helper();
       const caps = await p.query("capabilities.get", {});
@@ -297,6 +347,73 @@ describe("real port", () => {
       expect(s.calls.filter(c => c.operation === "executions.prompt").at(-1)!.message).toMatchObject({text:"Queued",requestId:"q1",attachments});
     });
 
+    it("carries sprint creation and every planner note as bytes, including legacy planning prompts", async () => {
+      const attachments = [{name:"screen.png",mimeType:"image/png",data:btoa("screenshot")}];
+      const sprint = {id:"sp",projectId:"p",planning:"question",conversation:[],attachments};
+      const {s,p,asked,ready} = helper({sprints:[sprint]});
+      await ready();
+      const original = s.answers["machine.call"]!;
+      s.answers["machine.call"] = message => {
+        const call = message as {op:string;params?:Record<string,unknown>};
+        if (call.op === "config.read") return {ok:true,result:{config:{catalogue:{"codex-acp":{models:[{id:"model"}]},"claude-agent-acp":{models:[]},opencode:{models:[]}}}}};
+        if (call.op === "product.sprint" && call.params?.action === "create") {
+          asked.push(call); return {ok:true,result:{sprintId:"sp"}};
+        }
+        return original(message);
+      };
+      expect(await p.command(envelope({type:"create_sprint",projectId:"p",description:"Plan",attachments,runMode:"manual",checkout:{kind:"worktree"},settings:{model:"model",effort:"",mode:"guarded",language:"en"}}))).toMatchObject({ok:true,entityId:"sp"});
+      expect(asked.find(c => c.op === "product.sprint" && c.params?.action === "create")?.params).toMatchObject({attachments,checkout:{kind:"worktree"}});
+      for (const payload of [{type:"plan_message",sprintId:"sp",text:"Look",attachments},{type:"answer_planning",sprintId:"sp",answer:"Use it",attachments}] as WorkspaceCommand[]) {
+        expect(await p.command(envelope(payload))).toMatchObject({ok:true});
+      }
+      expect(asked.filter(c => c.op === "product.sprint" && c.params?.action === "note").every(c => c.params?.attachments === attachments || JSON.stringify(c.params?.attachments) === JSON.stringify(attachments))).toBe(true);
+      (sprint as typeof sprint & {planningTaskId?:string}).planningTaskId = "task-1";
+      expect(await p.command(envelope({type:"plan_message",sprintId:"sp",text:"Legacy",attachments}))).toMatchObject({ok:true});
+      expect(s.calls.filter(c => c.operation === "executions.prompt").at(-1)?.message).toMatchObject({text:"Legacy",attachments});
+      const [facts] = await p.query("project.facts", {});
+      expect(facts.sprints[0].attachments).toEqual(attachments);
+    });
+
+    it("carries review comments, edits, queue edits and resolution guidance without losing bytes", async () => {
+      const attachments = [{name:"screen.png",mimeType:"image/png",data:btoa("fixture")}];
+      const comment = {id:"c",path:"a.txt",line:1,text:"Fix",sent:false,attachments};
+      const message = {id:"q",taskId:"task-1",workerId:null,text:"Queued",mode:"queue",delivery:"queued",at:1,deliveredAt:null,failure:null,attachments};
+      const {s,p,asked,ready} = helper({comments:{"task-1":[comment]},messages:[message]});
+      await ready();
+      for (const payload of [
+        {type:"add_comment",taskId:"task-1",path:"a.txt",line:1,text:"Look",attachments},
+        {type:"edit_comment",taskId:"task-1",commentId:"c",text:"Changed",attachments},
+        {type:"edit_queued",messageId:"q",text:"Changed",attachments},
+        {type:"send_comments",taskId:"task-1"},
+        {type:"resolve_with_cortex",taskId:"task-1",guidance:"Keep this",attachments},
+      ] as WorkspaceCommand[]) expect(await p.command(envelope(payload))).toMatchObject({ok:true});
+      expect(asked.find(c => c.op === "product.comment" && c.params?.action === "add")?.params).toMatchObject({comment:{attachments}});
+      expect(asked.find(c => c.op === "product.comment" && c.params?.action === "edit")?.params).toMatchObject({attachments});
+      expect(asked.find(c => c.op === "product.message" && c.params?.action === "edit")?.params).toMatchObject({attachments});
+      expect(s.calls.filter(c => c.operation === "executions.prompt").every(c => JSON.stringify((c.message as {attachments?:unknown}).attachments) === JSON.stringify(attachments))).toBe(true);
+      const before = s.calls.length;
+      for (const payload of [
+        {type:"add_comment",taskId:"task-1",path:"a.txt",line:1,text:"Invalid"},
+        {type:"edit_comment",taskId:"task-1",commentId:"c",text:"Invalid"},
+        {type:"edit_queued",messageId:"q",text:"Invalid"},
+        {type:"resolve_with_cortex",taskId:"task-1",guidance:"Invalid"},
+        {type:"plan_message",sprintId:"missing",text:"Invalid"},
+      ]) expect(await p.command(envelope({...payload,attachments:["name only"]} as WorkspaceCommand))).toMatchObject({ok:false});
+      // Local validation of message-bearing intents never emits a prompt with bad bytes.
+      expect(s.calls.slice(before).some(c => c.operation === "executions.prompt")).toBe(false);
+    });
+
+    it("reads one task\u0027s saved creation bytes on demand", async () => {
+      const {s,p,ready} = helper();
+      await ready();
+      const attachments = [{name:"screen.png",mimeType:"image/png",data:"eA=="}];
+      const original = s.answers["machine.call"]!;
+      s.answers["machine.call"] = message => (message as {params?:{attachments?:boolean}}).params?.attachments
+        ? {ok:true,result:attachments} : original(message);
+      expect(await p.readTaskAttachments!("task-1")).toEqual(attachments);
+      await expect(p.readTaskAttachments!("not-a-task")).rejects.toThrow("Unknown task");
+    });
+
     it("does not silently turn a stale attached planning answer into plain steering", async () => {
       const {s,p,asked,ready} = helper({sprints:[{id:"sp",projectId:"p",planningTaskId:"task-1",planning:"question",conversation:[]}]});
       await ready();
@@ -308,7 +425,7 @@ describe("real port", () => {
     it("rejects name-only or oversized attachments before prompt delivery", async () => {
       const {s,p,ready} = helper();
       await ready();
-      for (const attachments of [["legacy.txt"], [{name:"big",mimeType:"text/plain",data:btoa("x".repeat(524289))}]]) {
+      for (const attachments of [["legacy.txt"], [{name:"big",mimeType:"text/plain",data:btoa("x".repeat(LIMITS.attachmentBytes + 1))}]]) {
         expect(await p.command(envelope({type:"send_message",taskId:"task-1",text:"Keep me",mode:"send_now",attachments}))).toMatchObject({ok:false});
       }
       expect(s.calls.some(c => c.operation === "executions.prompt")).toBe(false);
@@ -410,16 +527,16 @@ describe("real port", () => {
       expect(result).toMatchObject({ok:true,observation:{tools:[{name:"read"}]}});
     });
 
-    it("materialized tasks inherit the sprint route before any start", async () => {
+    it.each(["main", "worktree"] as const)("materialized tasks inherit sprint route and %s checkout before any start", async kind => {
       const settings = {model:"connection-two:model",effort:"high",mode:"guarded",language:"en"} as const;
-      const sprint = {id:"sp",projectId:"p",description:"Sprint",runMode:"automatic",targetBranch:"release",settings,planning:"ready",conversation:[],plan:{version:1,items:[{key:"a",title:"Planned name",description:"First",dependsOn:[]},{key:"b",description:"Next",dependsOn:["a"]}]},materializedVersion:null,taskIds:[],queueState:"idle",pauseReason:null};
+      const sprint = {id:"sp",projectId:"p",description:"Sprint",runMode:"automatic",checkout:{kind},targetBranch:"release",settings,planning:"ready",conversation:[],plan:{version:1,items:[{key:"a",title:"Planned name",description:"First",dependsOn:[]},{key:"b",description:"Next",dependsOn:["a"]}]},materializedVersion:null,taskIds:[],queueState:"idle",pauseReason:null};
       const {s,p,ready} = helper({sprints:[sprint]});
       await ready();
       s.answers["tasks.create"] = message => receipt(message,"recorded",(message as {requestId:string}).requestId);
       expect(await p.command(envelope({type:"materialize_plan",sprintId:"sp",version:1}))).toMatchObject({ok:true});
       const creates = s.calls.filter(c => c.operation === "tasks.create");
       expect(creates).toHaveLength(2);
-      for (const call of creates) expect(call.message).toMatchObject({payload:{settings}});
+      for (const call of creates) expect(call.message).toMatchObject({payload:{settings,checkout:{kind}}});
       expect(s.calls.some(c => (c.message as {params?:{action?:string}}).params?.action === "rename")).toBe(false);
       expect(s.calls.some(c => c.operation === "tasks.start")).toBe(false);
     });

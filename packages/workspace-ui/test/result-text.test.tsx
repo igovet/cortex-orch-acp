@@ -63,6 +63,6 @@ it("keeps result nodes through equal-content background reads", () => {
 
 it("does not show three empty check outcomes beside a passing check", () => {
   mount(() => <Outcomes checks={[{ name: "Local verification", outcome: "passed", detail: "Recorded" }]} />);
-  expect(document.querySelectorAll(".outc > div")).toHaveLength(1);
-  expect(document.querySelector(".outc")?.textContent).toBe("1Passed");
+  expect(document.querySelectorAll(".rv-outc > span")).toHaveLength(1);
+  expect(document.querySelector(".rv-outc")?.textContent).toBe("1 passed");
 });

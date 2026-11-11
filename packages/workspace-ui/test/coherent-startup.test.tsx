@@ -42,14 +42,14 @@ it("keeps the last coherent view when a required facts read fails", async () => 
   expect(store.connection().state).toBe("connected");
   expect(store.readIssue()).toBe("Facts unavailable");
 });
-it("shows loading rather than an empty project list or a wrong-page error",async()=>{
+it("shows only the startup screen rather than an empty project list or a wrong-page error",async()=>{
   const s=scriptedPort(), pending=deferred<any>();
   s.port.query=(async()=>pending.promise) as typeof s.port.query;
   const root=document.createElement("div");document.body.append(root);
   history.replaceState(null,"","/m/local/t/t");
   dispose=render(()=><Workspace port={s.port}/>,root);
   await flush();
-  expect(root.querySelector('[role=status]')?.textContent).toContain("Loading workspace");
-  expect(root.textContent).not.toMatch(/No projects on this machine|This task is not on this machine|Offline/);
-  expect(root.textContent).toContain("Connecting");
+  expect(root.querySelector(".l-startup")).toBeTruthy();
+  expect(root.querySelector(".titlebar, .sidebar, .ws-tabstrip")).toBeNull();
+  expect(root.textContent).not.toMatch(/No projects on this machine|This task is not on this machine|Offline|Connecting/);
 });

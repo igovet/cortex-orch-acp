@@ -851,3 +851,21 @@ host history. See
   card ignored Space in a recorded run while Enter worked. The card handles
   Space for its own element (`client/card-keyboard.ts`); other buttons in the
   plugin are not covered by that fix.
+
+## Reason text inside a control's box (2026-11-10)
+
+A disabled control's reason drawn inside the control changes that control. The
+text wraps, the box grows and its neighbours move. Four toolbars had been patched
+one by one, so the other screens still moved. The layout primitives now carry the
+rule: the reason goes to the bar's reason slot (`ReasonSlot` in
+`packages/workspace-ui/src/layout.tsx`), or, for a control with no slot, to a box
+that a press or keyboard focus opens beside it (`ReasonTip`).
+
+Do not put a reason into a control's text, into `::after` or `attr()` content,
+or into a `title`. `packages/workspace-ui/test/interface-rules.test.ts` fails when
+a stylesheet selects by `data-why`, prints it with `content: attr()`, or when an
+`aria-disabled` control has neither `data-why` nor a `ws.needs(...)` declaration.
+The rendered gate (`packages/workspace-ui/test/layout-fit.mjs`, described in
+[verification](verification.md#cortex-workspace-local-slice-checks-no-paid-plus-container))
+catches a control that moves when it becomes enabled, but only on the screens it
+lists.
