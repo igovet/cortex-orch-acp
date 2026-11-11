@@ -521,6 +521,20 @@ describe("real port", () => {
       expect(result).toMatchObject({ ok: false, outcome: "git_failed", message: "nothing to commit" });
     });
 
+    it("forwards the push dialog URL exactly once, while fetch and pull need no remote field", async () => {
+      const { p, asked, ready } = helper();
+      await ready();
+      const remote = "git@github.com:igovet/cortex-orch-acp.git";
+      expect(await p.command(envelope({type:"git_push",checkoutId:"p:main",remote,branch:"dev",confirmed:true}))).toMatchObject({ok:true});
+      await p.command(envelope({type:"git_fetch",projectId:"p",now:1}));
+      await p.command(envelope({type:"git_pull",checkoutId:"p:main",now:1}));
+      expect(asked.filter(a => a.op === "git")).toEqual([
+        {op:"git",projectId:"p",params:{action:"push",checkoutId:"p:main",remote,branch:"dev",confirmed:true}},
+        {op:"git",projectId:"p",params:{action:"fetch"}},
+        {op:"git",projectId:"p",params:{action:"pull",checkoutId:"p:main"}},
+      ]);
+    });
+
     it("keeps a commit message draft local, so typing never reaches the machine", async () => {
       const { p, asked, ready } = helper();
       await ready();

@@ -142,6 +142,11 @@ function TabBody(props: { make: () => Ws; shown: Accessor<boolean>; unsent: (che
     if (r.name === "root") ws.go({ name: "home", machine: ws.machine().id }, { replace: true });
     else if (r.name === "project" && r.view === null) ws.go({ ...r, view: "board" }, { replace: true });
   });
+  // A parked Git tab must reread when shown again, not only when its component first mounts.
+  createEffect(on(() => {
+    const r = ws.router.route();
+    return props.shown() && r.name === "project" && (r.view === "git" || r.view === "worktrees") ? r.project : null;
+  }, projectId => { if (projectId) void ws.store.refreshProjectFacts(projectId); }));
   // A preview belongs to the view it was made in.
   createEffect(on(() => ws.router.path(), () => ws.select(null), { defer: true }));
   return <WsContext.Provider value={ws}><ScreenActive.Provider value={props.shown}><UnsentRegistry.Provider value={props.unsent}>

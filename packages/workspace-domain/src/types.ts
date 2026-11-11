@@ -242,7 +242,7 @@ export type RepoCheckout = {
   base: string; upstream?: string; ahead: number; behind: number; behindOf: Record<string, number>; files: GitFile[]; draft: string;
   sources: Record<string, string>; updateConflict: MergeSeed | null;
 };
-/** The Git facts of one project, as a projection reports them. */
+/** The Git facts of one project. `remote` is the credential-redacted display URL, not a Git remote name. */
 export type ProjectRepo = { projectId: string; hasGit?: boolean; remote: string; tree: string[]; sources: Record<string, string>; commits: Commit[]; branches: Branch[]; checkouts: RepoCheckout[]; fetchedAt: number | null; mock?: true };
 export type ChangeScope = { id: string; label: string; sub?: string; paths: string[] };
 export type ReviewComment = { attachments?: AttachmentInput[]; id: string; path: string; line: number; text: string; sent: boolean; mock?: true };

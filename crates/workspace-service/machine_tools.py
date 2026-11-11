@@ -219,6 +219,26 @@ def clean_remote(url):
     return re.sub(r"//[^/@]+@", "//", url.strip())
 
 
+def configured_remote(path, selected):
+    """Resolve the dialog's display URL or an explicit name against live Git config."""
+    names = out(path, "remote").splitlines()
+    if isinstance(selected, str) and selected and selected in names and not selected.startswith("-"):
+        return selected
+    # ProjectRepo.remote is a credential-redacted URL, not the name "origin".
+    # Never hand that URL straight to push: it must still identify one configured remote.
+    matches = []
+    if isinstance(selected, str) and selected:
+        for name in names:
+            url = out(path, "remote", "get-url", "--", name)
+            if clean_remote(url) == selected:
+                matches.append(name)
+    if len(matches) > 1:
+        raise Refused("ambiguous_remote", "More than one remote has that URL. Push by remote name in a terminal.")
+    if not matches or matches[0].startswith("-"):
+        raise Refused("unknown_remote", "That remote is not configured.")
+    return matches[0]
+
+
 def default_branch(root):
     head = git(root, "symbolic-ref", "--short", "refs/remotes/origin/HEAD", check=False).stdout.decode().strip()
     if head:
@@ -323,8 +343,9 @@ def listed_files(path, *, untracked_only=False):
     args = ["ls-files", "-z", "--others", "--exclude-standard"]
     if not untracked_only:
         args.append("--cached")
-    # Git prunes these directories before traversing them. Tracked files stay visible.
-    args.extend(f"--exclude={name}/" for name in (*UNTRACKED_SKIP, *sorted(RESERVED)))
+    # Only private helper state is hidden. Dependency/cache names are not ignore rules:
+    # if Git reports them, the owner must see and be able to select them too.
+    args.extend(f"--exclude={name}/" for name in sorted(RESERVED))
     return [name for name in out(path, *args).split("\0") if name]
 
 
@@ -838,9 +859,8 @@ def git_action(root, project, state, params):
         remote, branch = params.get("remote"), params.get("branch")
         if params.get("confirmed") is not True or not isinstance(branch, str) or not BRANCH.fullmatch(branch):
             raise Refused("confirmation_required", "Confirm the remote and branch first.")
-        if remote not in out(path, "remote").split():
-            raise Refused("unknown_remote", "That remote is not configured.")
-        git(path, "push", remote, branch)
+        remote = configured_remote(path, remote)
+        git(path, "push", "--", remote, branch)
         return {"done": True}
     if action == "revert_commit":
         sha = params.get("sha")

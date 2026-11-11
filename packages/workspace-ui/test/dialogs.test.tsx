@@ -24,12 +24,12 @@ const type = (selector: string, text: string) => {
 };
 const settle = async () => { await flush(); await flush(); };
 
-function mount(accepted = true) {
+function mount(accepted = true, remote = "origin") {
   const state = emptyWorkspace(), cap = { everything: true, operations: [] };
   state.machines[0].connection = "connected";
   state.projects.push({ id: "p", machineId: state.machines[0].id, name: "Project", repository: "/p", openBranch: "dev", defaultBranch: "main" });
   state.tasks.push({ ...draftTask(), checkout: { kind: "main", branch: "dev" }, status: "review", result: { version: 1, digest: "digest", summary: "Result", checks: [{ name: "Check", outcome: "not_run", detail: "", technicalReason: "Executable unavailable" }] }, workspaceDigest: "digest", acceptance: accepted ? { version: 1, digest: "digest" } : null });
-  state.repos.push({ projectId: "p", remote: "origin", tree: [], sources: {}, commits: [], branches: [], fetchedAt: null,
+  state.repos.push({ projectId: "p", remote, tree: [], sources: {}, commits: [], branches: [], fetchedAt: null,
     checkouts: [{ id: "p:main", projectId: "p", kind: "main", branch: "dev", path: "/p", taskId: null, label: null, base: "main", ahead: 0, behind: 0, behindOf: {}, files: [], draft: "", sources: {}, updateConflict: null }] });
   const script = scriptedPort({ capabilities: cap });
   const actions: {op: string; params: Record<string, unknown>; resolve: (v: Record<string, unknown>) => void; reject: (e: Error) => void}[] = [];
@@ -91,6 +91,19 @@ it.each(cases)("$name stays open pending/refused, then closes and returns focus 
   expect(active()).toBeNull();
   expect(document.activeElement).toBe(h.trigger());
   if (c.name === "profile") expect(h.ws.settings.draftsOn(h.state.machines[0].id)).toBe(0);
+});
+
+it("confirms the displayed SSH URL and sends one push request for the current branch", async () => {
+  const remote = "git@github.com:igovet/cortex-orch-acp.git";
+  const h = mount(true, remote);
+  h.open({ kind: "push", checkoutId: "p:main" });
+  expect(active()?.textContent).toContain(`Push dev to ${remote}?`);
+  button("Push").click();
+  expect(h.script.commands).toHaveLength(1);
+  expect(h.script.commands[0].payload).toEqual({ type: "git_push", checkoutId: "p:main", remote, branch: "dev", confirmed: true });
+  h.script.receipt(true);
+  await settle();
+  expect(active()).toBeNull();
 });
 
 it.each(["native", "key"])("connection (%s) stays open pending/refused, then closes and returns focus only on success", async auth => {

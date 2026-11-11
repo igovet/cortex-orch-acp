@@ -49,7 +49,8 @@ export type DirectoryEntry = { path: string; git: boolean };
 /** What a machine found for the text typed. `complete` is false when a limit ended the walk, and `cancelled` when a newer search took over. */
 export type DirectorySearch = { query: string; home: string; entries: DirectoryEntry[]; complete: boolean; cancelled?: boolean };
 
-export type QueryParameters = { "capabilities.get": Record<string, never>; "project.snapshot": { projectId?: string }; "project.facts": { projectId?: string }; "machine.facts": Record<string, never> };
+/** `fresh` bypasses the repository cache age on open/focus, retaining its value and sharing any in-flight read. */
+export type QueryParameters = { "capabilities.get": Record<string, never>; "project.snapshot": { projectId?: string }; "project.facts": { projectId?: string; fresh?: boolean }; "machine.facts": Record<string, never> };
 export type QueryResults = { "capabilities.get": PortCapabilities; "project.snapshot": ProjectionUpdate[]; "project.facts": ProjectFacts[]; "machine.facts": MachineFacts[] };
 export type QueryOperation = keyof QueryResults;
 

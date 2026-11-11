@@ -94,6 +94,32 @@ def test_status_diff_and_history_read_the_real_repository(machine):
     assert [(line["kind"], line["text"]) for line in edited["hunks"][0]["lines"]] == [("ctx", "one"), ("del", "two"), ("add", "changed")]
 
 
+def test_status_includes_nested_untracked_cache_paths_unless_git_ignores_them(machine):
+    paths = [
+        "new/deep/file.txt",
+        "prototypes/app/node_modules/.vite/vitest/hash/results.json",
+        "prototypes/app/node_modules/.vite/vitest/CACHEDIR.TAG",
+        "prototypes/app/node_modules/.vitest-cache/_metadata.json",
+        ".venv/new.txt",
+        "nested/__pycache__/new.txt",
+    ]
+    for name in paths + ["ignored/cache.txt", ".cortex/private.txt"]:
+        file = machine.repo / name
+        file.parent.mkdir(parents=True, exist_ok=True)
+        file.write_text("new\n")
+    (machine.repo / ".gitignore").write_text("ignored/\n")
+    machine.git("add", ".gitignore")
+    (machine.repo / "a.txt").unlink()
+    snapshot = ok(machine("repo.snapshot"))
+    files = snapshot["checkouts"][0]["files"]
+    untracked = {f["path"] for f in files if f["stage"] == "untracked"}
+    assert untracked == set(paths)
+    assert set(paths) <= set(snapshot["tree"])
+    assert any(f["path"] == "a.txt" and f["status"] == "D" and f["stage"] == "unstaged" for f in files)
+    assert any(f["path"] == ".gitignore" and f["stage"] == "staged" for f in files)
+    assert all(f["status"] == "U" and f["add"] == 1 for f in files if f["stage"] == "untracked")
+
+
 def test_stage_commit_and_revert_change_the_repository(machine):
     (machine.repo / "a.txt").write_text("one\nchanged\n")
     ok(machine("git", {"action": "stage", "path": "a.txt", "staged": True}))
@@ -117,6 +143,104 @@ def test_commit_without_remote_stages_listed_changes_only(machine):
     assert machine("git", {"action": "push", "remote": "origin", "branch": "main",
                             "confirmed": True})["code"] == "unknown_remote"
     assert machine("git", {"action": "pull"})["code"] == "upstream_required"
+
+
+@pytest.mark.parametrize("selection", ["name", "display_url"])
+def test_push_configured_remote_on_first_request(machine, tmp_path, selection):
+    remote = tmp_path / "remote.git"
+    machine.git("init", "--bare", str(remote))
+    machine.git("remote", "add", "origin", str(remote))
+    machine.git("branch", "-m", "dev")
+    machine.git("push", "-u", "origin", "dev")
+    (machine.repo / "a.txt").write_text("second\n")
+    machine.git("commit", "-am", "second")
+    snapshot = ok(machine("repo.snapshot"))
+    checkout = snapshot["checkouts"][0]
+    assert (checkout["upstream"], checkout["ahead"], checkout["behind"]) == ("origin/dev", 1, 0)
+    # The dialog sends ProjectRepo.remote (a URL), not the name "origin".
+    request = {"action": "push", "checkoutId": checkout["id"], "confirmed": True,
+               "remote": snapshot["remote"] if selection == "display_url" else "origin", "branch": "dev"}
+    ok(machine("git", request))
+    assert ok(machine("repo.snapshot"))["checkouts"][0]["ahead"] == 0
+    pushed = subprocess.run(["git", "--git-dir", str(remote), "log", "-1", "--format=%s", "dev"],
+                            check=True, capture_output=True, text=True)
+    assert pushed.stdout.strip() == "second"
+
+
+def test_push_rejects_stale_unconfigured_and_ambiguous_display_urls(machine, tmp_path):
+    remote = tmp_path / "remote.git"
+    machine.git("init", "--bare", str(remote))
+    machine.git("remote", "add", "origin", str(remote))
+    displayed = ok(machine("repo.snapshot"))["remote"]
+    request = {"action": "push", "remote": displayed, "branch": "main", "confirmed": True}
+    assert machine("git", dict(request, confirmed=False))["code"] == "confirmation_required"
+    machine.git("remote", "set-url", "origin", str(tmp_path / "changed.git"))
+    assert machine("git", request)["code"] == "unknown_remote"
+    machine.git("remote", "set-url", "origin", displayed)
+    machine.git("remote", "add", "duplicate", displayed)
+    assert machine("git", request)["code"] == "ambiguous_remote"
+    assert machine("git", dict(request, remote=str(tmp_path / "unconfigured.git")))["code"] == "unknown_remote"
+
+
+def test_ssh_display_url_resolves_to_name_without_network_or_retry(machine, monkeypatch):
+    machine.git("branch", "-m", "dev")
+    machine.git("remote", "add", "origin", "git@github.com:igovet/cortex-orch-acp.git")
+    spec = importlib.util.spec_from_file_location("push_machine", TOOLS)
+    tools = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(tools)
+    original_git, pushes = tools.git, []
+
+    def no_network(path, *args, **kwargs):
+        if args[0] == "push":
+            pushes.append(args)
+            raise tools.Refused("git_timeout", "Git did not answer in time.")
+        return original_git(path, *args, **kwargs)
+
+    monkeypatch.setattr(tools, "git", no_network)
+    request = {"action": "push", "checkoutId": "wp_1:main", "confirmed": True, "branch": "dev",
+               "remote": "git@github.com:igovet/cortex-orch-acp.git"}
+    with pytest.raises(tools.Refused) as failure:
+        tools.git_action(machine.repo, "wp_1", machine.repo.parent / "state", request)
+    assert failure.value.code == "git_timeout"
+    assert pushes == [("push", "--", "origin", "dev")]
+
+
+@pytest.mark.parametrize("branch", ["main", "--force"])
+def test_push_never_forces_a_non_fast_forward(machine, tmp_path, branch):
+    remote = tmp_path / "remote.git"
+    machine.git("init", "--bare", str(remote))
+    machine.git("remote", "add", "origin", str(remote))
+    machine.git("push", "-u", "origin", "main")
+    machine.git("checkout", "-b", "incoming")
+    (machine.repo / "a.txt").write_text("incoming\n")
+    machine.git("commit", "-am", "incoming")
+    machine.git("push", "origin", "incoming:main")
+    machine.git("checkout", "main")
+    (machine.repo / "a.txt").write_text("divergent\n")
+    machine.git("commit", "-am", "divergent")
+    request = {"action": "push", "checkoutId": "wp_1:main", "confirmed": True,
+               "remote": ok(machine("repo.snapshot"))["remote"], "branch": branch}
+    assert machine("git", request)["code"] == "git_failed"
+    pushed = subprocess.run(["git", "--git-dir", str(remote), "log", "-1", "--format=%s", "main"],
+                            check=True, capture_output=True, text=True)
+    assert pushed.stdout.strip() == "incoming"
+
+
+def test_fetch_and_pull_use_git_tracking_without_a_remote_parameter(machine, tmp_path):
+    remote = tmp_path / "remote.git"
+    machine.git("init", "--bare", str(remote))
+    machine.git("remote", "add", "origin", str(remote))
+    machine.git("push", "-u", "origin", "main")
+    machine.git("checkout", "-b", "incoming")
+    (machine.repo / "a.txt").write_text("incoming\n")
+    machine.git("commit", "-am", "incoming")
+    machine.git("push", "origin", "incoming:main")
+    machine.git("checkout", "main")
+    ok(machine("git", {"action": "fetch"}))
+    assert ok(machine("repo.snapshot"))["checkouts"][0]["behind"] == 1
+    ok(machine("git", {"action": "pull", "checkoutId": "wp_1:main"}))
+    assert (machine.repo / "a.txt").read_text() == "incoming\n"
+    assert ok(machine("repo.snapshot"))["checkouts"][0]["behind"] == 0
 
 
 def test_commit_preserves_explicit_staging_selection(machine):

@@ -191,6 +191,19 @@ export function createWorkspaceStore(port: WorkspacePort, options: StoreOptions 
   };
   return {
     mode: port.mode, state, index, ready, readIssue, now, receipt, acceptanceIssue, connection, rejected, can, reload: () => track(reload()),
+    /** Opening Git keeps the confirmed display and asks only for this project's moving facts. */
+    refreshProjectFacts: async (projectId: string) => {
+      if (port.mode !== "real") return;
+      await refreshing;
+      if (!active) return;
+      const issue = "The project's latest facts could not be read. The last confirmed state is still shown; it will retry automatically.";
+      try {
+        for (const update of await port.query("project.facts", { projectId, fresh: true })) if (active) installFacts(update);
+        if (active) setReadIssue(current => current === issue ? null : current);
+      } catch {
+        if (active) setReadIssue(issue);
+      }
+    },
     /** When this app last heard from the machine, for a record with no stamp of its own. */
     lastRead: () => lastRead,
     takeDroppedFiles: () => port.takeDroppedFiles?.() ?? Promise.resolve([]),

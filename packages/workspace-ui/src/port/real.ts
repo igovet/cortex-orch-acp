@@ -60,7 +60,7 @@ const unsupported = (requestId: string): CommandReceipt => ({ requestId, ok: fal
  * How often a visible app rereads what moves without telling it. Task progress and the service's own writes are pushed.
  * What is left is outside Git and config: a quiet round waits longer, and returning to the window reads at once.
  */
-export const FACTS_POLL_MS = 30_000, FACTS_POLL_MAX_MS = 120_000, FACTS_FOCUS_MIN_MS = 5_000, MACHINE_POLL_MS = 300_000;
+export const FACTS_POLL_MS = 30_000, FACTS_POLL_MAX_MS = 120_000, MACHINE_POLL_MS = 300_000;
 type Product = { hasGit?: boolean; tasks: Record<string, TaskOverlay>; sprints: (Sprint & { planningTaskId?: string })[]; drafts?: Record<string, string>; messages?: Message[]; comments?: Record<string, TaskChanges["comments"]> };
 type MachineRead = Partial<Machine> & { name: string };
 type ConfigRead = { config: MachineConfig; connections: EngineConnection[]; tokens: Record<string, unknown>; usage?: EngineWeeklyUsage[] };
@@ -173,14 +173,14 @@ export function createRealPort(options: RealPortOptions): WorkspacePort {
 
   type RepoRead = ProjectRepo & { openBranch: string; defaultBranch: string; taskDiffs?: Record<string,{files:FileDiff[];reason?:string}> };
   const repoReads = new Map<string, { at: number; pending: Promise<RepoRead | null>; running: boolean; value: RepoRead | null; error: boolean }>();
-  async function repositoryFacts(id: string) {
+  async function repositoryFacts(id: string, fresh = false) {
     let entry = repoReads.get(id);
-    if (!entry || (!entry.running && Date.now() - entry.at > 3000)) {
+    if (!entry || (!entry.running && (fresh || Date.now() - entry.at > 3000))) {
       const previous = entry?.value ?? null;
       entry = { at: Date.now(), pending: machine<RepoRead | null>("repo.snapshot", id), running: true, value: previous, error: false };
       repoReads.set(id, entry);
       const current = entry;
-      let deferred = false;
+      let deferred = previous !== null;
       current.pending = current.pending.then(value => {
         current.value = value;
         if (deferred && repoReads.get(id) === current) {
@@ -193,6 +193,8 @@ export function createRealPort(options: RealPortOptions): WorkspacePort {
         }
         return value;
       }).catch(() => { current.error = true; return current.value; }).finally(() => { current.running = false; current.at = Date.now(); });
+      // Cached facts render immediately; the single in-flight read publishes its replacement.
+      if (previous !== null) return entry;
       // Only fast Git belongs on the coherent task refresh path. A large checkout finishes separately.
       let timer: ReturnType<typeof setTimeout> | undefined;
       await Promise.race([current.pending, new Promise<void>(resolve => { timer = setTimeout(() => { deferred = true; resolve(); }, 50); })]);
@@ -201,12 +203,12 @@ export function createRealPort(options: RealPortOptions): WorkspacePort {
     return entry;
   }
 
-  async function factsOf(project: ProjectLocator): Promise<ProjectFacts> {
+  async function factsOf(project: ProjectLocator, fresh = false): Promise<ProjectFacts> {
     const id = project.projectId;
     let product = await machine<Product>("product.read", id);
     // Queue scheduling and planning result adoption belong to the owning service child.
     // Reading the screen never starts work.
-    const repository = await repositoryFacts(id), read = repository.value;
+    const repository = await repositoryFacts(id, fresh), read = repository.value;
     // A copy, never the cached read itself: the next reads share that one, and the poll compares these facts with the last sent.
     const repo = read && { ...read, checkouts: read.checkouts.map(c => ({ ...c, draft: localDrafts.get(c.id) ?? c.draft })) };
     const started = [...tasks].filter(([, t]) => t.projectId === id && t.executionId).map(([taskId]) => taskId);
@@ -731,7 +733,7 @@ export function createRealPort(options: RealPortOptions): WorkspacePort {
       const wanted = (p: ProjectLocator) => projectId ? p.projectId === projectId : !readScope.size || readScope.has(p.projectId);
       if (operation === "project.facts") {
         presentationRead++;
-        const facts = machineOn ? Promise.all(projects.filter(wanted).map(factsOf)) : Promise.resolve([]);
+        const facts = machineOn ? Promise.all(projects.filter(wanted).map(p => factsOf(p, (parameters as QueryParameters["project.facts"]).fresh))) : Promise.resolve([]);
         if (!projectId) readScope = new Set();
         return facts.then(all => { for (const f of all) sent.set(f.projectId, f); return all; }).finally(() => { presentationRead++; }) as Promise<QueryResults[O]>;
       }
@@ -849,20 +851,19 @@ export function createRealPort(options: RealPortOptions): WorkspacePort {
     },
     subscribe(listener: (update: PortUpdate) => void) {
       observers.add(listener);
-      let active = true, wait = FACTS_POLL_MS, timer: ReturnType<typeof setTimeout> | undefined, lastRound = Date.now(), machineRead = Date.now();
+      let active = true, wait = FACTS_POLL_MS, timer: ReturnType<typeof setTimeout> | undefined, machineRead = Date.now();
       // A slow repository must not stack reads behind itself: the next round starts when this one ended.
       const running = new Set<string>();
       const once = (key: string, read: () => Promise<void>) => { if (running.has(key)) return Promise.resolve(); running.add(key); return read().catch(() => {}).finally(() => { running.delete(key); }); };
       const hidden = () => typeof document !== "undefined" && document.hidden;
       const plan = () => { clearTimeout(timer); timer = active && !hidden() ? setTimeout(round, wait) : undefined; };
-      const round = () => {
+      const round = (fresh = false) => {
         if (!active || hidden()) return;
-        lastRound = Date.now();
         if (!machineOn) { plan(); return; }
         let moved = false;
         const reads = projects.map(project => once(project.projectId, () => {
           const generation = presentationRead;
-          return factsOf(project).then(facts => {
+          return factsOf(project, fresh).then(facts => {
             if (!active || generation !== presentationRead || same(sent.get(project.projectId), facts)) return;
             sent.set(project.projectId, facts);
             moved = true;
@@ -876,7 +877,7 @@ export function createRealPort(options: RealPortOptions): WorkspacePort {
         void Promise.all(reads).then(() => { wait = moved ? FACTS_POLL_MS : Math.min(wait * 2, FACTS_POLL_MAX_MS); plan(); });
       };
       // Coming back from another window is exactly when Git may have moved.
-      const back = () => { if (hidden()) { plan(); return; } wait = FACTS_POLL_MS; if (Date.now() - lastRound >= FACTS_FOCUS_MIN_MS) round(); else plan(); };
+      const back = () => { if (hidden()) { plan(); return; } wait = FACTS_POLL_MS; round(true); };
       const page = typeof document !== "undefined" ? document : undefined, screen = typeof window !== "undefined" ? window : undefined;
       page?.addEventListener("visibilitychange", back);
       screen?.addEventListener("focus", back);
