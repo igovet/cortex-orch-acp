@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Simpler task screen: three concepts</title>
+<script>(function(){var r=document.documentElement,t=new URLSearchParams(location.search).get('theme');try{t=t||localStorage.getItem('cw-theme')}catch(e){}r.dataset.theme=t==='light'?'light':'dark'})()</script>
+<link rel="stylesheet" href="../mockups/styles.css">
+<style>
+html, body { height: auto; }
+body.cx { display: block; min-height: 100vh; overflow-x: hidden; overflow-y: auto; user-select: text; }
+.wrap { display: grid; gap: 20px; max-width: 880px; margin: 0 auto; padding: 40px max(24px, env(safe-area-inset-right)) 56px max(24px, env(safe-area-inset-left)); }
+.head { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 12px; }
+.head h1 { font-size: 18px; line-height: 26px; font-weight: 500; }
+.head p { max-width: 64ch; margin-top: 4px; font-size: var(--t-ui); line-height: 21px; color: var(--fg-2); }
+.cards { display: grid; gap: 12px; }
+.concept { display: grid; gap: 4px; padding: 14px 16px; border: 1px solid var(--line-strong); border-radius: var(--r-card); background: var(--bg-raised); }
+.concept:hover { border-color: var(--line-ctl); }
+.concept h2 { font-size: var(--t-content); line-height: 22px; font-weight: 500; }
+.concept p { font-size: var(--t-ui); line-height: 21px; color: var(--fg-2); }
+.concept .open { margin-top: 6px; font-size: var(--t-sec); color: var(--fg); text-decoration: underline; text-underline-offset: 2px; }
+.foot { font-size: var(--t-cap); line-height: 17px; color: var(--fg-3); }
+@media (max-width: 600px) {
+  .wrap { padding: 24px max(16px, env(safe-area-inset-right)) 40px max(16px, env(safe-area-inset-left)); }
+  .cx .btn { height: auto; min-height: 44px; }
+  .concept { min-height: 44px; }
+}
+</style>
+</head>
+<body class="cx">
+<main class="wrap">
+  <div class="head">
+    <div class="grow">
+      <h1>A simpler task screen: three concepts</h1>
+      <p>Same look as the current app, simpler logic. Each concept shows the same task in three states: before start, waiting for your answer, and a finished result from another task.</p>
+    </div>
+    <button type="button" class="btn btn-line" id="theme">Light theme</button>
+  </div>
+  <div class="cards">
+    <a class="concept" href="simple-a.html">
+      <h2>Next action</h2>
+      <p>Open a task and immediately see the one thing you need to do, with everything else available when you want it.</p>
+      <span class="open">Open Next action</span>
+    </a>
+    <a class="concept" href="simple-b.html">
+      <h2>Conversation</h2>
+      <p>Talk to Cortex in one thread; answer its questions and review its result where they appear.</p>
+      <span class="open">Open Conversation</span>
+    </a>
+    <a class="concept" href="simple-c.html">
+      <h2>Three steps</h2>
+      <p>Understand the work in three plain steps, Plan, Work and Result, and see only the step you open.</p>
+      <span class="open">Open Three steps</span>
+    </a>
+  </div>
+  <p class="foot">Exploratory prototypes. Nothing is connected to the app, and they do not change the accepted design direction. Use the Sample buttons at the top of each concept to switch states, and resize the window to see the tablet and phone layouts.</p>
+</main>
+<script>
+(function () {
+  var r = document.documentElement, b = document.getElementById('theme');
+  function sync() { b.textContent = r.dataset.theme === 'light' ? 'Dark theme' : 'Light theme'; }
+  b.addEventListener('click', function () { r.dataset.theme = r.dataset.theme === 'light' ? 'dark' : 'light'; try { localStorage.setItem('cw-theme', r.dataset.theme); } catch (e) {} sync(); });
+  sync();
+})();
+</script>
+</body>
+</html>

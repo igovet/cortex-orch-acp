@@ -1,0 +1,22 @@
+import { expect, it } from "vitest";
+import { createMockWorkspace } from "../adapter/mock";
+import { createDemoBackend } from "../ui/demo-backend";
+import type { WorkspaceCommand } from "@cortex/workspace-domain";
+it("the labelled simulator preserves files, edits only unstarted tasks and archives the sprint container", async () => {
+  const b = createDemoBackend(createMockWorkspace,1), local=b.state().machines[0].id;
+  const send = (payload: WorkspaceCommand) => b.port.command({requestId:"r",operation:payload.type,expectedVersion:null,payload});
+  await send({type:"add_project",id:"p",machineId:local,name:"Synthetic",repository:"fictional/p",openBranch:"main",defaultBranch:"main"});
+  const sprint=(await send({type:"create_sprint",projectId:"p",description:"Sprint",runMode:"manual",checkout:{kind:"main"}})).entityId!;
+  const file={name:"scope.txt",mimeType:"text/plain",data:"aGk="};
+  const task=(await send({type:"create_task",projectId:"p",sprintId:sprint,description:"Original",attachments:[file],checkout:{kind:"main"}})).entityId!;
+  const edit={type:"edit_task" as const,taskId:task,expectedVersion:"1",title:"Edited",description:"New prompt",attachments:[file],settings:b.state().tasks.find(t => t.id===task)!.settings,checkout:{kind:"main" as const}};
+  expect((await send(edit)).ok).toBe(true);
+  expect(await b.port.readTaskAttachments!(task)).toEqual([file]);
+  expect((await send(edit)).ok).toBe(false);
+  expect((await send({type:"start_task",taskId:task})).ok).toBe(true);
+  expect((await send({...edit,expectedVersion:"2"})).ok).toBe(false);
+  expect((await send({type:"close_sprint",sprintId:sprint,confirmed:true})).ok).toBe(true);
+  expect(b.state().sprints.find(s => s.id===sprint)!.archivedAt).toBeTruthy();
+  expect(b.state().tasks.find(t => t.id===task)!.status).toBe("working");
+  expect((await send({type:"run_sprint",sprintId:sprint})).ok).toBe(false);
+});

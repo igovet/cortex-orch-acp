@@ -22,7 +22,7 @@ export type TaskOverlay = Partial<Pick<Task, "title" | "titleState" | "acceptanc
  * One project's facts from the machine itself: Git, workers and owner decisions. They move on their own, without the
  * runtime's project version moving, so they are not a projection and each read replaces the last.
  */
-export type ProjectFacts = { projectId: string; openBranch: string; defaultBranch: string; repo: ProjectRepo | null; workers: Worker[]; reviews: TaskChanges[]; overlays: Record<string, TaskOverlay>; sprints: Sprint[];
+export type ProjectFacts = { hasGit?: boolean; projectId: string; openBranch: string; defaultBranch: string; repo: ProjectRepo | null; workers: Worker[]; reviews: TaskChanges[]; overlays: Record<string, TaskOverlay>; sprints: Sprint[];
   /** What the owner said or queued in this app. The runtime keeps no owner messages a screen can read back. */
   messages?: Message[];
   /** Answers kept for a batch of questions, which the machine takes only as a whole. By decision. */
@@ -152,10 +152,10 @@ export function applyFacts(state: WorkspaceState, facts: ProjectFacts): Workspac
   const planning = new Set(Object.entries(facts.overlays).flatMap(([id, o]) => o.planning === true ? [id] : []));
   return {
     ...state,
-    projects: state.projects.map(p => p.id === facts.projectId ? { ...p, openBranch: facts.openBranch, defaultBranch: facts.defaultBranch, issue: facts.issue ?? null, hasGit: facts.repo?.hasGit ?? facts.repo !== null } : p),
+    projects: state.projects.map(p => p.id === facts.projectId ? { ...p, openBranch: facts.openBranch, defaultBranch: facts.defaultBranch, issue: facts.issue ?? null, hasGit: facts.hasGit ?? facts.repo?.hasGit ?? (facts.repo ? true : p.hasGit) } : p),
     tasks: state.tasks.filter(t => !own(t) || !gone(t.id)).map(t => own(t) ? overlayTask(t, facts.overlays[t.id], facts.openBranch) : t),
     workers: reinstall(state.workers, w => ids.has(w.taskId), facts.workers, w => w.id),
-    repos: reinstall(state.repos, r => r.projectId === facts.projectId, facts.repo ? [facts.repo] : [], r => r.projectId),
+    repos: reinstall(state.repos, r => r.projectId === facts.projectId, facts.repo ? [facts.repo] : facts.hasGit === false ? [] : state.repos.filter(r => r.projectId === facts.projectId), r => r.projectId),
     reviews: reinstall(state.reviews, r => ids.has(r.taskId), facts.reviews, r => r.taskId),
     sprints: reinstall(state.sprints, s => s.projectId === facts.projectId, facts.sprints, s => s.id),
     messages: reinstall(state.messages, m => ids.has(m.taskId), facts.messages ?? [], m => m.id),

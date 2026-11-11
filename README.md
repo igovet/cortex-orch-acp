@@ -40,7 +40,7 @@ Workspace supports editing a never-started task's saved request and adding draft
 
 Workspace keeps working indicators static instead of scheduling permanent animation frames. Conversation history is reused by task/execution version, and slow Git completion publishes facts rather than starting another full refresh. See [CPU measurements and limits](docs/cortex-workspace/performance.md#recorded-on-the-reference-machine).
 
-Workspace Git status, diff and log inspect raw content without requiring installed clean/smudge filters. Write commands retain normal filter and hook requirements; repository configuration is not changed.
+Workspace Git keeps the last known checkout visible while refreshing repository details; a pending read never means the folder has no repository. Commit sends one request, including when nothing is staged. Workspace Git status, diff and log inspect raw content without requiring installed clean/smudge filters. Write commands retain normal filter and hook requirements; repository configuration is not changed.
 
 Ready desktop results retain an explicit Accept control in Conversation and the diff review, separate from committing or merging. Same-branch tasks use Finish and Commit wording in review, the sidebar and inspector as well as their action controls; completed inspector outcomes appear once. Finished worker summaries unescape prose consistently, and worker notes use the full activity column rather than the icon column.
 

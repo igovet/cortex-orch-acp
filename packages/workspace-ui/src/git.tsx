@@ -40,12 +40,10 @@ function Status(props: { repo: ProjectRepo; c: RepoCheckout; codeAt: (path: stri
   // Staging and committing are one action: the button stays busy to the end, and neither a click nor Ctrl+Enter starts it twice.
   const commit = () => {
     if (blocked() || committing || ws.gate("git_commit")) return;
-    const id = c().id, message = c().draft, all = stagesAll() ? [...c().files] : [];
+    const id = c().id, message = c().draft;
     committing = true;
-    void ws.busy((async () => {
-      for (const f of all) { const r = await ws.run({ type: "git_stage", checkoutId: id, path: f.path, staged: true }); if (!r.ok) return; }
-      await ws.run({ type: "git_commit", checkoutId: id, message, now: ws.store.clock() });
-    })().finally(() => { committing = false; }), commitButton);
+    void ws.busy(ws.run({ type: "git_commit", checkoutId: id, message, now: ws.store.clock() })
+      .finally(() => { committing = false; }), commitButton);
   };
   const generate = () => { const count = group("staged").length || c().files.length; ws.run({ type: "git_draft", checkoutId: c().id, message: count ? `Update ${count} file${count === 1 ? "" : "s"}` : "Update the work in this checkout" }); };
   const last = () => props.repo.commits.find(x => x.branch === c().branch);
@@ -182,7 +180,7 @@ export function GitView(props: { summary: ProjectSummary; repo: ProjectRepo | nu
   const ws = useWs();
   const task = createMemo(() => { const id = props.checkout?.taskId; return id ? ws.store.index().byId.get(id) ?? null : null; });
   const stuck = () => { const t = task(); return t && inConflict(t.task) && t.task.conflict !== "resolving" ? t : null; };
-  return <Show when={props.summary.project.hasGit !== false && props.repo && props.checkout} fallback={<Show when={props.summary.project.hasGit === false} fallback={<div class="note-panel"><span class="w500">No Git record for this project</span><span>{ws.t("noGitFacts")}</span></div>}><NoGit projectId={props.summary.project.id} /></Show>}>
+  return <Show when={props.summary.project.hasGit !== false} fallback={<NoGit projectId={props.summary.project.id} />}><Show when={props.repo && props.checkout} fallback={<div class="note-panel"><span class="w500">No Git record for this project</span><span>{ws.t("noGitFacts")}</span></div>}>
     <Show when={stuck()}>{v => <div class="strip bad"><I n="alert" s={14} class="st-bad" /><span>Merging <span class="mono">{v().task.merge?.source}</span> into <span class="mono">{v().task.merge?.into}</span>: {conflictFacts(v().task.merge!).leftFiles} file{conflictFacts(v().task.merge!).leftFiles === 1 ? "" : "s"} with conflicts.</span>
       <span class="acts"><A class="btn btn-primary btn-sm" to={{ name: "task", machine: v().machine.id, task: v().id, tab: "changes", sub: "conflict" }}>Resolve</A><button class="btn btn-line btn-sm" {...ws.needs("resolve_with_cortex")} onClick={() => ws.open({ kind: "cortex", taskId: v().id })}>Resolve automatically…</button><button class="btn btn-line btn-sm" {...ws.needs("abort_merge")} onClick={() => ws.run({ type: "abort_merge", taskId: v().id, now: ws.store.clock() })}>Abort merge</button></span></div>}</Show>
     <div class="git-body">
@@ -195,7 +193,7 @@ export function GitView(props: { summary: ProjectSummary; repo: ProjectRepo | nu
         <Show when={props.right === "history"} fallback={<Worktrees repo={props.repo} summary={props.summary} pick={props.onPick} />}><History repo={props.repo!} c={props.checkout!} /></Show>
       </section>
     </div>
-  </Show>;
+  </Show></Show>;
 }
 
 /** Chooses which checkout the Code and Git views show. */

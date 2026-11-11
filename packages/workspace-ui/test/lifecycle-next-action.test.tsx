@@ -104,7 +104,7 @@ it("an unaccepted Ready task without Git still has a way to finish", async () =>
   expect(control("Close as is…")?.getAttribute("aria-disabled")).toBeNull();
 });
 
-it("Commit stays busy for the whole stage-and-commit sequence, and the keyboard cannot send it twice", async () => {
+it("Commit stays busy for the single helper request, and the keyboard cannot send it twice", async () => {
   const files = [{ path: "a.md", status: "U", stage: "untracked", add: 1, del: 0, hunks: [] }, { path: "b.md", status: "U", stage: "untracked", add: 1, del: 0, hunks: [] }] as never;
   const checkout = { id: "p:main", projectId: "p", kind: "main", branch: "main", path: "/p", base: "main", ahead: 0, behind: 0, behindOf: {}, taskId: null, files, draft: "Add docs", sources: {} } as unknown as RepoCheckout;
   const s = world(); s.repos = [{ projectId: "p", remote: "", tree: [], sources: {}, commits: [], branches: [], checkouts: [checkout], fetchedAt: null } as unknown as ProjectRepo];
@@ -112,18 +112,15 @@ it("Commit stays busy for the whole stage-and-commit sequence, and the keyboard 
   const commit = document.querySelector<HTMLButtonElement>(".commit-box .btn-primary")!;
   commit.click(); await settle();
   expect(commit.hasAttribute("data-busy")).toBe(true);
-  p.receipt(true); await settle();
-  expect(ops(p)).toEqual(["git_stage", "git_stage"]);
-  expect(commit.hasAttribute("data-busy")).toBe(true);
+  expect(ops(p)).toEqual(["git_commit"]);
   const box = document.querySelector<HTMLTextAreaElement>(".commit-box textarea")!;
   box.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", ctrlKey: true, bubbles: true }));
   await settle();
-  p.receipt(true); await settle();
-  expect(ops(p)).toEqual(["git_stage", "git_stage", "git_commit"]);
+  expect(ops(p)).toEqual(["git_commit"]);
   expect(commit.hasAttribute("data-busy")).toBe(true);
   p.receipt(true); await settle();
   expect(commit.hasAttribute("data-busy")).toBe(false);
-  expect(ops(p)).toEqual(["git_stage", "git_stage", "git_commit"]);
+  expect(ops(p)).toEqual(["git_commit"]);
 });
 
 it("a busy button keeps its label and icon readable, so it never seems to vanish", () => {

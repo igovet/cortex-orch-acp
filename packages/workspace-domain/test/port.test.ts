@@ -17,6 +17,16 @@ describe("versions", () => {
 });
 
 describe("projections", () => {
+  it("does not turn a pending repository read into a no-Git fact", () => {
+    for (const hasGit of [undefined, true]) {
+      const state = {...emptyWorkspace(), projects:[{...project,hasGit}]};
+      const facts: ProjectFacts = {projectId:"p",openBranch:"",defaultBranch:"",repo:null,workers:[],reviews:[],overlays:{},sprints:[]};
+      expect(applyFacts(state, facts).projects[0].hasGit).toBe(hasGit);
+      expect(applyFacts(state, {...facts,hasGit:true}).projects[0].hasGit).toBe(true);
+      expect(applyFacts(state, {...facts,hasGit:false}).projects[0].hasGit).toBe(false);
+    }
+  });
+
   it("a reopened runtime task cannot retain acceptance or Ready to merge", () => {
     const task = {id:"t",status:"working",process:"live",observedPhase:"planning",checkout:{kind:"main",branch:"main"},acceptance:null,result:null} as Task;
     const next = overlayTask(task, {status:"ready_to_merge",automaticReady:true,acceptance:{version:1,digest:"old",at:1,open:null}}, "main");

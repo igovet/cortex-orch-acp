@@ -1,0 +1,1912 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<title>Sprint planning, large plan (proposal) - Cortex Workspace mockup</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script>(function(){var r=document.documentElement,t=new URLSearchParams(location.search).get('theme');try{t=t||localStorage.getItem('cw-theme')}catch(e){}t=t||'system';r.dataset.themeChoice=t;r.dataset.theme=t==='system'?(matchMedia('(prefers-color-scheme: light)').matches?'light':'dark'):t})()</script>
+<link rel="stylesheet" href="styles.css">
+<style>
+/* Page-local styles for the large-plan graph proposal. Every colour is an existing token. */
+body { grid-template-rows: var(--titlebar-h) 36px minmax(0, 1fr); }
+.proposal-chip { color: var(--warn); border-color: var(--warn-line); background: var(--warn-tint); }
+.sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+
+/* App tab strip, same geometry as the product's. */
+.gtabs { display: flex; align-items: stretch; height: 36px; border-bottom: 1px solid var(--line); background: var(--bg-sidebar); overflow: hidden; }
+.gtab { display: flex; align-items: center; gap: 2px; flex: 0 1 200px; min-width: 96px; padding: 0 6px 0 10px; border-right: 1px solid var(--line); color: var(--fg-2); font-size: var(--t-sec); }
+.gtab[data-on] { background: var(--bg-canvas); color: var(--fg); }
+.gtab .x { display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 18px; border-radius: 4px; color: var(--fg-3); margin-left: auto; }
+
+/* Regions are stacked, never layered. */
+.gv-plan { display: flex; flex-direction: row; min-width: 0; min-height: 0; }
+.gv-col { flex: 1 1 0; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
+.gv-head { display: flex; align-items: center; gap: 8px; flex: none; height: 40px; padding: 0 12px 0 8px; border-bottom: 1px solid var(--line); font-size: var(--t-sec); font-weight: 500; white-space: nowrap; }
+.gv-head .r { margin-left: auto; display: flex; align-items: center; gap: 6px; font-weight: 400; }
+.gv-head .ib { width: 26px; height: 26px; }
+.gv-head .ib[aria-pressed="false"] { color: var(--panel-off); }
+.gv-head .ib[aria-pressed="true"] { color: var(--panel-on); }
+.gv-head .seg > * { height: 22px; }
+.gv-tag { font-size: var(--t-cap); font-weight: 400; color: var(--fg-2); }
+
+.gv-bar { display: flex; align-items: center; gap: 4px; flex: none; height: 40px; padding: 0 8px; border-bottom: 1px solid var(--line); white-space: nowrap; overflow: hidden; }
+.gv-bar .ib { width: 26px; height: 26px; }
+.gv-bar .ib[aria-pressed="true"] { color: var(--fg); background: var(--bg-selected); }
+.gv-bar .ib[aria-disabled="true"], .gv-bar .btn[aria-disabled="true"] { color: var(--fg-3); opacity: .7; }
+.gv-search { position: relative; width: 180px; flex: none; }
+.gv-search .i { position: absolute; left: 7px; top: 6px; color: var(--fg-3); pointer-events: none; }
+.gv-search input { height: 26px; padding-left: 26px; font-size: var(--t-cap); }
+.gv-bar[data-tier="1"] .gv-search, .gv-bar[data-tier="2"] .gv-search, .gv-bar[data-tier="3"] .gv-search { width: 120px; }
+.gv-count { width: 66px; flex: none; text-align: center; font-size: var(--t-cap); color: var(--fg-2); font-variant-numeric: tabular-nums; }
+.gv-sep { flex: none; width: 1px; height: 18px; margin: 0 4px; background: var(--line); }
+.gv-zoom { min-width: 44px; justify-content: center; font-variant-numeric: tabular-nums; }
+.gv-bar[data-tier="2"] .t-tier2, .gv-bar[data-tier="3"] .t-tier2, .gv-bar[data-tier="3"] .t-tier3 { display: none; }
+.gv-bar:not([data-tier="2"], [data-tier="3"]) .t-more { display: none; }
+#fit-m.off { visibility: hidden; }
+.gv-title { font-size: var(--t-sec); font-weight: 500; }
+
+.gv-canvas { position: relative; flex: 1 1 0; min-height: 0; overflow: hidden; background: var(--bg-canvas); touch-action: none; }
+.gv-canvas svg.gsv { display: block; width: 100%; height: 100%; font-family: var(--font); }
+.gv-canvas[data-pan] { cursor: grabbing; }
+.gsv text { fill: var(--fg-2); }
+.gsv .n, .gsv .lh, .gsv .band { outline: none; }
+.gsv .bx { fill: var(--bg-raised); stroke: var(--line-ctl); stroke-width: 1; vector-effect: non-scaling-stroke; }
+.gsv .l1, .gsv .ts, .gsv .num { fill: var(--fg); }
+.gsv .no { font-weight: 600; fill: var(--fg-2); }
+.gsv .w { font-size: .9167em; fill: var(--fg-2); }
+.gsv .num { font-size: .9167em; font-variant-numeric: tabular-nums; }
+.gsv .ic { color: var(--fg-2); }
+.gsv [data-t="st-warn"] .ic, .gsv [data-t="st-warn"] .w { color: var(--warn); fill: var(--warn); }
+.gsv [data-t="st-bad"] .ic, .gsv [data-t="st-bad"] .w { color: var(--danger); fill: var(--danger); }
+.gsv [data-t="st-run"] .ic, .gsv [data-t="st-run"] .w { color: var(--run); fill: var(--run); }
+.gsv [data-t="st-merge"] .ic, .gsv [data-t="st-merge"] .w { color: var(--merged); fill: var(--merged); }
+.gsv .e { fill: none; stroke: var(--line-ctl); stroke-width: 1; vector-effect: non-scaling-stroke; marker-end: url(#a0); }
+.gsv .ec { fill: var(--fg-2); font-size: .9167em; }
+.gsv[data-moving] .e, .gsv[data-low] .e:not(.need, .block) { marker-end: none; }
+.gsv .e.need { stroke: var(--fg); stroke-width: 1.6; marker-end: url(#a1); }
+.gsv .e.block { stroke: var(--fg); stroke-width: 1.6; stroke-dasharray: 5 4; marker-end: url(#a1); }
+.gsv .e.dim { stroke: var(--line); stroke-opacity: .6; marker-end: url(#a2); }
+
+/* Detail level by one attribute on the root: per-level content is switched here. */
+.gsv .l1, .gsv .l2, .gsv .ls, .gsv .ln { display: none; }
+.gsv[data-lod="detail"] .l1, .gsv[data-lod="detail"] .l2 { display: inline; }
+.gsv[data-lod="title"] .ls { display: inline; }
+.gsv[data-lod="number"] .ln { display: inline; }
+.gsv[data-lod="number"]:not([data-ni]) .ln .ic { display: none; }
+.gsv[data-lod="overview"] .lh { display: none; }
+.gsv .ht2 { display: none; }
+.gsv[data-lod="number"] .ht1 { display: none; }
+.gsv[data-lod="number"] .ht2 { display: inline; }
+
+/* Box treatment by state at low zoom. Colour is reinforced by stroke weight and dash. */
+.gsv[data-low] [data-f="needs"] .bx { stroke: var(--warn); fill: var(--warn-tint); stroke-width: 1.5; }
+.gsv[data-low] [data-f="problem"] .bx { stroke: var(--danger); fill: var(--danger-tint); stroke-width: 1.5; }
+.gsv[data-low] [data-f="working"] .bx { stroke: var(--run); stroke-width: 1.5; }
+.gsv[data-low] [data-f="stopped"] .bx { stroke: var(--idle); }
+.gsv[data-low] [data-f="review"] .bx { stroke: var(--fg-2); }
+.gsv[data-low] [data-f="finish"] .bx { stroke: var(--merged); }
+.gsv[data-low] [data-f="ready"] .bx { stroke: var(--line-ctl); }
+.gsv[data-low] [data-f="waiting"] .bx { stroke: var(--line); }
+.gsv[data-low] [data-f="done"] .bx { fill: var(--bg-input); stroke: none; }
+.gsv [data-f="unknown"] .bx { stroke: var(--idle); stroke-dasharray: 4 3; fill: none; }
+
+/* Selection and matches: colour only, never weight, size or position. */
+.gsv .n.lk .bx, .gsv .n.mt .bx { stroke: var(--fg-2); }
+.gsv .n.lk text { fill: var(--fg); }
+.gsv .n.picked .bx { fill: var(--bg-selected); stroke: var(--fg); stroke-width: 1.5; }
+.gsv .n.picked text { fill: var(--fg); }
+.gsv .n.cur .bx { stroke: var(--fg); stroke-width: 1.5; }
+.gsv .n.dim .bx { fill: none; stroke: var(--line); }
+/* Dimmed text is the quieter text colour, never transparency or a state colour: 4.5:1 on the canvas in both themes. */
+.gsv .n.dim text, .gsv .n.dim .w, .gsv .n.dim .no { fill: var(--fg-3); }
+.gsv .n.dim .ic { color: var(--line-ctl); }
+.gsv .band .bx { fill: var(--bg-raised); stroke: var(--line-ctl); stroke-width: 1; vector-effect: non-scaling-stroke; }
+.gsv .band.dim .bx { fill: var(--bg-canvas); stroke: var(--line); }
+.gsv .band.dim text { fill: var(--fg-3); }
+.gsv .band.lk .bx { stroke: var(--fg-2); }
+.gsv .bt0 { fill: var(--fg); font-weight: 500; }
+.gsv .bwarn { fill: var(--warn); } .gsv .bbad { fill: var(--danger); }
+.gsv .lh .ht1, .gsv .lh .ht2 { fill: var(--fg-3); }
+.gsv .lh:hover .ht1, .gsv .lh:hover .ht2 { fill: var(--fg); }
+.gsv .lh .ic { color: var(--fg-3); }
+.gsv .pin rect { fill: var(--bg-raised); stroke: var(--line-strong); stroke-width: 1; vector-effect: non-scaling-stroke; }
+.gsv .pin text { fill: var(--fg); }
+.gsv #ring { display: none; fill: none; stroke: var(--fg-3); stroke-width: 1; vector-effect: non-scaling-stroke; }
+body[data-keyboard] .gsv #ring { display: inline; }
+
+.gv-map { position: absolute; right: 8px; bottom: 8px; width: 176px; height: 112px; background: var(--bg-sidebar); border: 1px solid var(--line-strong); border-radius: 6px; overflow: hidden; }
+.gv-map:focus-visible { outline: var(--focus-line); outline-offset: 1px; }
+.gv-map svg { display: block; width: 100%; height: 100%; }
+.gv-map .m0 { fill: var(--line-ctl); }
+.gv-map .m-needs { fill: var(--warn); }
+.gv-map .m-problem { fill: var(--danger); }
+.gv-map .m-unknown { fill: none; stroke: var(--idle); stroke-width: 1; }
+.gv-map .m-match { fill: var(--fg); }
+.gv-map .mv { fill: var(--bg-hover); stroke: var(--fg-2); stroke-width: 1; vector-effect: non-scaling-stroke; }
+
+.gv-tip { position: absolute; z-index: 3; max-width: 340px; padding: 5px 8px; border-radius: 6px; background: var(--bg-raised); box-shadow: var(--shadow-float); font-size: var(--t-cap); line-height: 16px; color: var(--fg); pointer-events: none; white-space: normal; }
+.gv-tip .s { display: block; color: var(--fg-2); }
+
+.gv-band { display: flex; align-items: center; gap: 8px; flex: none; height: 40px; padding: 0 12px; border-top: 1px solid var(--line); white-space: nowrap; font-size: var(--t-cap); }
+.gv-band .tx { color: var(--fg); flex: none; font-variant-numeric: tabular-nums; }
+.gv-band .ti { flex: 0 1 auto; min-width: 40px; }
+.gv-band .sp { flex: 1 1 auto; min-width: 8px; }
+
+.gv-det { flex: none; width: 300px; display: flex; flex-direction: column; min-height: 0; border-left: 1px solid var(--line); background: var(--bg-canvas); }
+.gv-det.wide { flex: 1 1 0; width: auto; border-left: 0; }
+.gv-det-h { display: flex; align-items: center; gap: 6px; flex: none; height: 40px; padding: 0 8px 0 12px; border-bottom: 1px solid var(--line); font-size: var(--t-sec); }
+.gv-det-b { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 12px; font-size: var(--t-sec); line-height: 19px; }
+.gv-det-b h3 { font-size: var(--t-ui); line-height: 20px; font-weight: 500; margin-bottom: 10px; }
+.gv-det-b dt { margin-top: 10px; font-size: var(--t-cap); color: var(--fg-3); }
+.gv-det-b dd { margin: 2px 0 0; color: var(--fg-2); }
+.gv-det-b .lnk-n { color: var(--fg); padding: 0 3px; border-radius: 4px; }
+.gv-det-b .lnk-n:hover { background: var(--bg-hover); }
+.gv-det-f { display: flex; flex: none; padding: 8px 12px; border-top: 1px solid var(--line); }
+
+.gv-list { flex: 1 1 0; min-height: 0; overflow-y: auto; scrollbar-gutter: stable; }
+.gv-list .dep .st { white-space: normal; }
+.gv-open-row { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-bottom: 1px solid var(--line); font-size: var(--t-sec); color: var(--fg-2); }
+.gv-open-row .btn { margin-left: auto; }
+
+.gv-pop { position: fixed; inset: auto; margin: 0; }
+.gv-pop .mi { font-size: var(--t-sec); min-height: 28px; padding: 3px 8px; }
+.gv-pop label.mi input { margin: 0 2px 0 0; accent-color: var(--fg-2); }
+.gv-pop .ct { margin-left: auto; font-size: var(--t-cap); color: var(--fg-3); font-variant-numeric: tabular-nums; }
+.gv-pop .scroll { max-height: min(56vh, 380px); overflow-y: auto; }
+.keys { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 3px 12px; padding: 4px 8px 8px; font-size: var(--t-cap); color: var(--fg-2); }
+.keys b { font-weight: 500; color: var(--fg); white-space: nowrap; }
+</style>
+</head>
+<body data-state="created">
+<input class="pt" type="checkbox" id="pt-sidebar" aria-label="Toggle sidebar">
+
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
+  <symbol id="g-question" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M7.9 20A9 9 0 1 0 4 16.1L2 22Z"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3M12 17h.01"/></symbol>
+  <symbol id="g-alert" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3"/><path d="M12 9v4M12 17h.01"/></symbol>
+  <symbol id="g-x-circle" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="m15 9-6 6M9 9l6 6"/></symbol>
+  <symbol id="g-loader" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-6.22-8.56"/></symbol>
+  <symbol id="g-pause" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M10 15V9M14 15V9"/></symbol>
+  <symbol id="g-hourglass" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 22h14M5 2h14M17 22v-4.17a2 2 0 0 0-.59-1.41L12 12l-4.41 4.42A2 2 0 0 0 7 17.83V22M7 2v4.17a2 2 0 0 0 .59 1.41L12 12l4.41-4.42A2 2 0 0 0 17 6.17V2"/></symbol>
+  <symbol id="g-eye" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M2.06 12.35a1 1 0 0 1 0-.7 10.75 10.75 0 0 1 19.88 0 1 1 0 0 1 0 .7 10.75 10.75 0 0 1-19.88 0"/><circle cx="12" cy="12" r="3"/></symbol>
+  <symbol id="g-merge" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><path d="M6 21V9a9 9 0 0 0 9 9"/></symbol>
+  <symbol id="g-play" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3l14 9-14 9z"/></symbol>
+  <symbol id="g-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></symbol>
+  <symbol id="g-circle" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/></symbol>
+  <symbol id="g-help" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3M12 17h.01"/></symbol>
+  <symbol id="g-down" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></symbol>
+  <symbol id="g-right" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></symbol>
+</defs></svg>
+
+<header class="titlebar">
+  <label class="ib tb-toggle" for="pt-sidebar" title="Sidebar (Ctrl+B)"><i class="i i-panel-left"></i></label>
+  <div class="tb-side">
+    <button class="machine" popovertarget="m-machine" title="Switch machine">
+      <i class="i i-laptop"></i><span class="trunc">This machine</span>
+      <span class="st st-ok" style="margin-left:auto">Connected</span><i class="i s12 i-chevrons-v faint"></i>
+    </button>
+  </div>
+  <div class="tb-main">
+    <a class="ib" href="board.html" title="Back (Alt+Left)"><i class="i i-arrow-left"></i></a>
+    <button class="ib" title="Forward (Alt+Right)" aria-disabled="true"><i class="i i-arrow-right"></i></button>
+    <div class="crumbs"><a href="board.html">atlas-api</a><span class="sep">/</span><span class="cur trunc">Sprint: Audit platform rollout</span></div>
+    <span class="grow"></span>
+    <div class="tb-fixed">
+      <button class="mock-chip proposal-chip" id="prop-b" popovertarget="m-proposal" title="The owner approved this layout on 2026-11-10">Approved layout</button>
+      <a class="mock-chip" href="index.html" title="Static mockup. Back to the screen list">Mock</a>
+      <button class="ib" aria-disabled="true" title="Terminal (Ctrl+J). Open a project or task to use a terminal"><i class="i i-panel-bottom"></i></button>
+      <button class="ib" aria-disabled="true" title="This screen has no inspector"><i class="i i-panel-right"></i></button>
+    </div>
+    <div class="win" aria-hidden="true">
+      <button tabindex="-1"><i class="i s14 i-minus"></i></button>
+      <button tabindex="-1"><i class="i s12 i-square"></i></button>
+      <button tabindex="-1"><i class="i s14 i-x"></i></button>
+    </div>
+  </div>
+</header>
+
+<div class="gtabs" role="tablist" aria-label="Open tabs">
+  <div class="gtab"><span class="trunc">atlas-api</span><span class="x"><i class="i s12 i-x"></i></span></div>
+  <div class="gtab" data-on><span class="trunc">Audit platform rollout</span><span class="x"><i class="i s12 i-x"></i></span></div>
+</div>
+
+<div class="workspace">
+  <nav class="sidebar" aria-label="Workspace">
+    <div class="sb-top">
+      <a class="nav" href="new-task.html"><i class="i i-plus"></i>New task<span class="kbd">Ctrl+N</span></a>
+      <a class="nav" href="#"><i class="i i-inbox"></i>Inbox<span class="count">4</span></a>
+      <a class="nav" href="#"><i class="i i-search"></i>Search<span class="kbd">Ctrl+K</span></a>
+      <a class="nav" href="home.html"><i class="i i-home"></i>Home</a>
+      <a class="nav" href="archive.html"><i class="i i-archive"></i>Archive<span class="count">18</span></a>
+    </div>
+    <div class="sb-scroll">
+      <div class="sb-h"><span>Pinned</span></div>
+      <a class="task-row" style="padding-left:8px" href="task.html"><i class="i s14 i-pin faint"></i><span class="trunc">Fix token refresh race</span></a>
+      <div class="sb-h"><span>Projects</span></div>
+      <a class="proj" href="board.html"><span class="mono-tile t1">A</span><span class="trunc">atlas-api</span><span class="sig st-bad">Conflict</span></a>
+      <div class="tasks">
+        <a class="task-row" href="task.html"><i class="i s14 i-question st-warn"></i><span class="trunc">Fix token refresh race</span><span class="sig">Question</span></a>
+        <a class="task-row" href="board.html?scope=sprint"><i class="i s14 i-layers faint"></i><span class="trunc">Sprint: Usage billing</span><span class="sig tnum">2/5</span></a>
+        <a class="task-row" href="sprint-graph.html" aria-current="page"><i class="i s14 i-layers faint"></i><span class="trunc">Sprint: Audit platform rollout</span><span class="sig tnum" id="sb-count"></span></a>
+        <a class="task-row all" href="board.html">All 15</a>
+      </div>
+      <a class="proj" href="#"><span class="mono-tile t2">B</span><span class="trunc">billing-service</span><span class="sig st-warn">Needs you 1</span></a>
+      <a class="proj" href="#"><span class="mono-tile t3">N</span><span class="trunc">northwind-web</span><span class="sig st-warn">Needs you 1</span></a>
+      <a class="proj" href="#"><span class="mono-tile t4">M</span><span class="trunc">mobile-app</span><span class="sig muted">In review 1</span></a>
+      <a class="proj" href="#"><span class="mono-tile t5">I</span><span class="trunc">infra-terraform</span></a>
+    </div>
+    <div class="sb-foot">
+      <button class="btn btn-sm" title="Add project"><i class="i s14 i-folder-plus"></i>Add project</button>
+      <span class="grow"></span>
+      <a class="ib" href="settings.html" title="Settings (Ctrl+,)"><i class="i i-settings"></i></a>
+    </div>
+  </nav>
+
+  <main class="main">
+    <div class="sp-h">
+      <span class="tt">Audit platform rollout</span>
+      <span id="sp-state"></span>
+      <span class="grow"></span>
+      <div class="seg" role="group" aria-label="Sprint run mode">
+        <button aria-current="true" title="You start each task" data-seg>Manual</button>
+        <button aria-current="false" title="One task at a time in dependency order" data-seg>Automatic</button>
+      </div>
+      <button class="chip" popovertarget="m-target" id="target-b" title="Target branch for this sprint"><span class="faint">Merge into</span><span class="mono">main</span><i class="i s12 i-chevron-down"></i></button>
+      <button class="btn btn-primary" id="sp-primary"></button>
+    </div>
+    <div class="tabs" role="tablist" aria-label="Sprint views">
+      <a class="tab" role="tab" href="sprint-graph.html" aria-selected="true">Planning</a>
+      <a class="tab" role="tab" href="board.html?scope=sprint" aria-selected="false">Board</a>
+      <a class="tab" role="tab" href="sprint-summary.html" aria-selected="false">Summary</a>
+      <span class="grow"></span>
+    </div>
+    <div class="strip info" id="info-strip"><i class="i s14 i-layers faint"></i><span class="trunc" id="info-text"></span></div>
+    <div class="strip warn" id="warn-strip" hidden><i class="i s14 i-alert st-warn"></i><span class="trunc">1 task could not be loaded and 1 task has an unknown process state. Neither is shown as done.</span><span class="acts"><button class="btn btn-sm btn-line">Retry</button></span></div>
+
+    <div class="sp-body" id="sp-body">
+      <section class="sp-conv" id="conv" aria-label="Planning conversation">
+        <div class="timeline"><div class="tl-in">
+          <div class="brief">We need one audit trail for every admin, login, billing and API action, searchable and exportable, kept for a year.<div class="meta"><span>Created 14:32</span></div></div>
+          <div class="ai">I read the admin routes, the export code and the event bus. This is a large change, so Plan v3 splits it into separate tasks with their dependencies.</div>
+          <div class="answered"><i class="i s14 i-question"></i>You answered: keep events for 12 months<span class="faint">14:36</span></div>
+          <div class="mine">Keep the export server side, no client paging.</div>
+          <div class="mine-meta"><i class="i s12 i-check"></i>Plan v3 updated<span>14:41</span></div>
+          <div class="dc">
+            <div class="dc-h"><i class="i s14 i-question"></i>Question from Cortex<span class="r">waiting 1m</span></div>
+            <div class="dc-q">Should the export include failed login attempts?</div>
+            <div class="dc-opts">
+              <button class="opt"><span class="n">1</span>Yes, all of them</button>
+              <button class="opt"><span class="n">2</span>Only for admin accounts</button>
+              <button class="opt"><span class="n">&hellip;</span>Other answer</button>
+            </div>
+          </div>
+        </div></div>
+        <div class="dock"><div class="composer">
+          <textarea id="plan-input" aria-label="Message the planner" placeholder="Ask for changes to the plan&hellip;"></textarea>
+          <div class="c-bar">
+            <div class="c-route"><span class="cap faint">Opus, High</span></div>
+            <div class="c-end"><button class="btn btn-primary btn-sm c-send" aria-disabled="true" title="Type a message first" style="width:28px;height:28px;padding:0;border-radius:50%"><i class="i s14 i-arrow-up"></i></button></div>
+          </div>
+        </div></div>
+      </section>
+
+      <section class="sp-plan gv-plan" aria-label="Plan">
+        <div class="gv-col" id="gv-col">
+          <div class="gv-head" id="gv-head">
+            <button class="ib" id="conv-t" aria-pressed="true" aria-label="Planning conversation" title="Planning conversation (Ctrl+\)"><i class="i i-panel-left"></i></button>
+            <button class="chip" id="conv-chip" hidden></button>
+            <span id="plan-name"></span>
+            <span class="gv-tag" id="plan-tag" hidden></span>
+            <span class="seg" id="view-seg" role="group" aria-label="Plan view">
+              <button data-view="list" aria-current="false">List</button>
+              <button data-view="graph" aria-current="true">Graph</button>
+            </span>
+            <span class="r" id="head-actions"></span>
+          </div>
+
+          <div class="gv-bar" id="bar" data-tier="0" role="toolbar" aria-label="Graph controls">
+            <button class="btn btn-sm btn-line" id="exit-full" hidden>Exit full view</button>
+            <span class="gv-title" id="bar-title" hidden></span>
+            <div class="gv-search" id="s-wrap"><i class="i s14 i-search"></i><input class="inp" id="q" type="text" placeholder="Search tasks" aria-label="Search tasks in the graph" spellcheck="false" autocomplete="off"></div>
+            <span class="gv-count" id="count"></span>
+            <button class="ib" id="prev" aria-label="Previous match"><i class="i s14 i-arrow-left"></i></button>
+            <button class="ib" id="next" aria-label="Next match"><i class="i s14 i-arrow-right"></i></button>
+            <button class="btn btn-sm off" id="fit-m">Fit matches</button>
+            <span class="gv-sep t-tier2"></span>
+            <button class="chip t-tier3" id="status-b">Status</button>
+            <button class="chip t-tier2" id="layers-b">Layers</button>
+            <span class="grow"></span>
+            <button class="ib" id="z-out" aria-label="Zoom out" title="Zoom out (-)"><i class="i s14 i-minus"></i></button>
+            <button class="btn btn-sm gv-zoom" id="z-pct" aria-haspopup="true" title="Zoom presets">100%</button>
+            <button class="ib" id="z-in" aria-label="Zoom in" title="Zoom in (+)"><i class="i s14 i-plus"></i></button>
+            <button class="btn btn-sm" id="fit" title="Fit the whole graph (F)">Fit</button>
+            <button class="ib t-tier2" id="map-t" aria-pressed="true" aria-label="Minimap" title="Minimap (M)"><i class="i s14 i-board"></i></button>
+            <button class="btn btn-sm" id="full-t" title="Full view (E)"><i class="i s14 i-expand"></i>Full view</button>
+            <button class="ib t-more" id="more" aria-label="More graph controls" title="More"><i class="i s14 i-more"></i></button>
+          </div>
+
+          <div class="gv-canvas" id="canvas">
+            <svg class="gsv" id="gsv" role="group" aria-roledescription="dependency graph" data-lod="detail"></svg>
+            <div class="gv-map" id="map" tabindex="0" role="group" aria-label="Minimap. Arrow keys move the view." hidden>
+              <svg id="map-s" preserveAspectRatio="none"></svg>
+            </div>
+            <div class="gv-tip" id="tip" role="tooltip" hidden></div>
+            <div class="note-panel" id="empty" hidden><span style="color:var(--fg)">No plan yet</span><span>Linked tasks appear here after the conversation.</span></div>
+          </div>
+
+          <div class="gv-list" id="list" hidden></div>
+          <div class="gv-band" id="band"></div>
+        </div>
+        <aside class="gv-det" id="det" aria-label="Task details" hidden></aside>
+      </section>
+    </div>
+  </main>
+</div>
+
+<div class="sr" id="live" role="status" aria-live="polite" aria-atomic="true"></div>
+
+<div popover id="m-status" class="gv-pop"><div class="mi-h">Show tasks by status</div><div id="status-rows"></div></div>
+<div popover id="m-layers" class="gv-pop" style="width:240px"><div class="mi-h">Dependency layers</div><div class="scroll" id="layer-rows"></div><div class="mi-sep"></div><div id="layer-actions"></div></div>
+<div popover id="m-zoom" class="gv-pop" style="min-width:170px">
+  <button class="mi" data-z="fit"><span class="grow">Fit</span><span class="kbd">F</span></button>
+  <button class="mi" data-z="match"><span class="grow">Fit matches</span><span class="kbd">Shift+F</span></button>
+  <button class="mi" data-z="1"><span class="grow">100%</span><span class="kbd">0</span></button>
+  <button class="mi" data-z=".75"><span class="grow">75%</span></button>
+  <button class="mi" data-z=".5"><span class="grow">50%</span></button>
+</div>
+<div popover id="m-more" class="gv-pop" style="min-width:170px">
+  <button class="mi t-m-status"><span class="grow">Status</span></button>
+  <button class="mi t-m-layers"><span class="grow">Layers</span></button>
+  <button class="mi t-m-map"><span class="grow">Minimap</span><span class="kbd">M</span></button>
+</div>
+<div popover id="m-proposal" class="gv-pop" style="width:340px">
+  <div class="mi-h">Approved layout</div>
+  <div class="keys" style="display:block;padding-bottom:6px">The owner approved this layout on 2026-11-10, and the Workspace builds it. No data here is real.</div>
+  <div class="mi-h">Keys, when the graph has focus</div>
+  <div class="keys">
+    <b>Arrows</b><span>Move along dependencies and within a layer</span>
+    <b>Shift+Left, Right</b><span>Next dependency or dependent of the same task</span>
+    <b>Space</b><span>Select a task and highlight its links</span>
+    <b>Enter</b><span>Open Details, or expand a collapsed layer</span>
+    <b>C</b><span>Collapse or expand this task's layer</span>
+    <b>+ - 0</b><span>Zoom in, out, 100%</span>
+    <b>F, Shift+F</b><span>Fit all, fit matches</span>
+    <b>Ctrl+Arrow</b><span>Pan</span>
+    <b>/ or Ctrl+F</b><span>Search</span>
+    <b>M, T, E</b><span>Minimap, Direct or Whole chain, Full view</span>
+    <b>Esc</b><span>Undo one step</span>
+    <b>Ctrl+B, Ctrl+\</b><span>Sidebar, conversation</span>
+  </div>
+</div>
+<div popover id="m-machine" class="pop-tl">
+  <div class="mi-h">Machines</div>
+  <a class="mi" href="home.html"><i class="i i-laptop"></i><span class="grow">This machine<span class="sub">Local, connected</span></span><i class="i s14 i-check"></i></a>
+</div>
+<div popover id="m-target" class="gv-pop" style="width:280px">
+  <div class="mi-h">Merge into</div>
+  <button class="mi"><span class="grow"><span class="mono">main</span><span class="sub">Git default branch</span></span><i class="i s14 i-check"></i></button>
+  <button class="mi"><span class="grow"><span class="mono">release/2.4</span></span></button>
+</div>
+
+<script>
+(function () {
+'use strict';
+var $ = function (s) { return document.querySelector(s); };
+var q = new URLSearchParams(location.search);
+
+/* ---------- Synthetic plan: title, dependencies ---------- */
+var PLAN = [
+ ['Add the audit events table', []],
+ ['Define the audit event schema and its versioning rules', []],
+ ['Add a retention policy setting per workspace', []],
+ ['Create the object storage bucket for exports', []],
+ ['Write the audit event ingestion queue', [1, 2]],
+ ['Add the outbox table and relay worker', [1]],
+ ['Partition the audit table by month and add the retention index', [1, 3]],
+ ['Set up the signing key and its rotation job', [4]],
+ ['Emit audit events from admin routes', [2, 5]],
+ ['Emit audit events from the login and session flow, including failed attempts and account lockouts', [2, 5]],
+ ['Emit audit events from billing webhooks', [2, 5]],
+ ['Emit audit events from workspace settings', [2, 5]],
+ ['Emit audit events from API tokens', [2, 5]],
+ ['Emit audit events from role changes', [2, 5]],
+ ['Emit audit events from file sharing', [2, 5]],
+ ['Emit audit events from SSO provisioning', [2, 5]],
+ ['Emit audit events from data exports', [2, 5]],
+ ['Emit audit events from integrations', [2, 5]],
+ ['Emit audit events from support impersonation, with the ticket reference and the agent reason', [2, 5]],
+ ['Emit audit events from mobile sync', [2, 5]],
+ ['Emit audit events from scheduled jobs', [2, 5]],
+ ['Emit audit events from the CLI', [2, 5]],
+ ['Emit audit events from the public API', [2, 5]],
+ ['Backfill historic admin actions from the access log', [7, 9]],
+ ['Add the retention sweeper job', [3, 7]],
+ ['Deduplicate retried events by idempotency key', [6, 9]],
+ ['Build the event search index', [7, 9]],
+ ['Add the audit query service', [27]],
+ ['Stream the export as CSV', [4, 28]],
+ ['Stream the export as JSON Lines', [4, 28]],
+ ['Sign export manifests', [8, 29, 30]],
+ ['Add row level access checks on audit queries, so a workspace admin never sees another tenant', [14, 28]],
+ ['Add the admin audit API', [28, 32]],
+ ['Add rate limits to the audit API', [33]],
+ ['Add pagination and stable cursors', [33]],
+ ['Add the audit log page', [33]],
+ ['Add the date range picker', [36]],
+ ['Add actor and action filters', [36]],
+ ['Add the event details panel', [36]],
+ ['Add the export dialog', [29, 36]],
+ ['Add the export history view', [40]],
+ ['Add empty and error states across the audit screens', [37, 38, 39]],
+ ['Keyboard and screen reader pass on the audit screens', [42]],
+ ['Translate the audit screens', [42]],
+ ['Notify admins when an export is ready', [31, 40]],
+ ['Add webhook delivery for audit events', [26, 33]],
+ ['Add the SIEM connector for Splunk', [46]],
+ ['Add the SIEM connector for Datadog', [46]],
+ ['Add the archive sink with object lock', [8, 46]],
+ ['Load test ingestion at 5k events per second', [9, 26]],
+ ['Load test the export with 10M rows and confirm it stays under 200 MB', [29, 30]],
+ ['Chaos test the outbox relay during a database failover', [6, 26]],
+ ['Penetration test of the audit API', [33, 34]],
+ ['Contract tests for every admin route', [9, 33]],
+ ['Contract tests for public API events', [23, 33]],
+ ['Migration dry run on a production copy', [24, 25]],
+ ['Runbook for sweeper and export failures', [25, 41, 52]],
+ ['Update dashboards and alerts', [50, 51]],
+ ['Write the feature flag rollout plan', [54, 55, 56]],
+ ['Beta rollout to three pilot workspaces', [43, 59]],
+ ['Admin guide: reading the audit log and the retention policy', [41, 42]],
+ ['SOC 2 evidence mapping for the audit controls', [53, 61]],
+ ['General availability rollout and the announcement for every workspace', [58, 60, 62]],
+ ['Remove the legacy activity feed and its tables', [63]]
+];
+var STATE = {
+ 1:'Merged',2:'Merged',3:'Merged',4:'Merged',5:'Merged',6:'Merged',7:'Merged',8:'Merged',
+ 9:'Committed to main',14:'Committed to main',20:'Closed as is',21:'Done outside the app',22:'Run cancelled',23:'Paused',
+ 10:'Ready to merge',13:'Ready to merge',11:'Review',17:'Review',12:'Working',27:'Working',15:'Stopping',
+ 16:'Needs you',26:'Needs you',18:'Conflict',19:'Run failed',44:'Cancelled',47:'Blocked',53:'Blocked'
+};
+var WORDS = {
+ 'Needs you':['needs','question','st-warn'],'Conflict':['problem','alert','st-bad'],'Run failed':['problem','x-circle','st-bad'],
+ 'Working':['working','loader','st-run'],'Paused':['stopped','pause','st-idle'],'Stopping':['stopped','hourglass','st-idle'],'Run cancelled':['stopped','x-circle','st-idle'],
+ 'Review':['review','eye','st-idle'],'Ready to merge':['finish','merge','st-merge'],'Ready':['ready','play','st-idle'],'Blocked':['waiting','hourglass','st-idle'],
+ 'Merged':['done','merge','st-idle'],'Committed to main':['done','check','st-idle'],'Closed as is':['done','circle','st-idle'],'Done outside the app':['done','circle','st-idle'],'Cancelled':['done','x-circle','st-idle'],
+ 'Process state unknown':['unknown','help','st-idle'],'Not loaded':['unknown','help','st-idle']
+};
+var FAMS = [['needs','Needs you','question'],['problem','Problem','alert'],['working','Working','loader'],['stopped','Stopped','pause'],['review','In review','eye'],['finish','Ready to finish','merge'],['ready','Ready to start','play'],['waiting','Waiting','hourglass'],['done','Done','check'],['unknown','Unknown','help']];
+var FAM_LABEL = {}; FAMS.forEach(function (f) { FAM_LABEL[f[0]] = f[1]; });
+var DONE = function (w) { return w && WORDS[w] && WORDS[w][0] === 'done' && w !== 'Cancelled'; };
+var GROUPS = [[8,'Foundations for the audit trail.','Migration applies and rolls back on a copy'],[23,'Records who did what at this source, using the shared event schema.','Contract test for each emitted event'],[28,'Storage and retrieval of audit events.','Query budget holds on a year of events'],[35,'Audit data through the server API.','Tenant isolation and error cases tested'],[45,'The audit screens for workspace admins.','Keyboard run through, empty and error states'],[49,'Delivery of audit events to other systems.','Delivery retries and failure alerts tested'],[58,'Proof that the system holds up in production conditions.','Result attached to the release notes'],[64,'Rollout to customers and removal of the old feed.','Signed off by the owner']];
+
+function items(mode) {
+  var src = PLAN, n = src.length;
+  if (mode === 'empty') return [];
+  if (mode === 'one') src = PLAN.slice(0, 1);
+  else if (mode === 'small') src = PLAN.slice(0, 5);
+  else if (STATE_MODE === 'past') src = PLAN.slice(0, 54);
+  var out = src.map(function (r, i) {
+    var num = i + 1, g = GROUPS.filter(function (x) { return num <= x[0]; })[0];
+    return { n: num, title: r[0], deps: r[1].filter(function (d) { return d <= src.length; }), desc: g[1], acc: g[2], word: null, fam: null, tone: null, icon: null };
+  });
+  var byN = new Map(out.map(function (i) { return [i.n, i]; }));
+  out.forEach(function (it) {
+    var w = STATE[it.n];
+    if (it.n === 28 && q.get('warn')) w = 'Process state unknown';
+    if (it.n === 46 && q.get('warn')) w = 'Not loaded';
+    if (!w) {
+      var open = it.deps.filter(function (d) { var x = STATE[d] || (byN.get(d) && byN.get(d).word); return !DONE(x); });
+      w = open.length ? 'Waits for ' + open.slice(0, 3).join(', ') + (open.length > 3 ? ' and ' + (open.length - 3) + ' more' : '') : 'Ready';
+      it.word = w;
+      var m = WORDS[open.length ? 'Blocked' : 'Ready'];
+      it.fam = m[0]; it.icon = open.length ? 'hourglass' : 'play'; it.tone = m[2];
+      if (!open.length) { it.word = 'Ready'; }
+      return;
+    }
+    var m2 = WORDS[w];
+    it.word = w; it.fam = m2[0]; it.icon = m2[1]; it.tone = m2[2];
+  });
+  return out;
+}
+
+var STATE_MODE = q.get('state') || 'created';      /* created, planning, past, draft */
+var PLAN_MODE = q.get('plan') || 'default';        /* default, small, one, empty */
+var ITEMS = items(PLAN_MODE);
+var N = ITEMS.length;
+var BY = new Map(ITEMS.map(function (i) { return [i.n, i]; }));
+var HAS_STATES = STATE_MODE === 'created';
+var deps = BY, dependents = new Map();
+ITEMS.forEach(function (i) { dependents.set(i.n, []); });
+ITEMS.forEach(function (i) { i.deps.forEach(function (d) { dependents.get(d).push(i.n); }); });
+
+function afterText(it) { return it.deps.length ? 'After ' + it.deps.slice(0, 3).join(', ') + (it.deps.length > 3 ? ' and ' + (it.deps.length - 3) + ' more' : '') : 'Starts first'; }
+function wordOf(it) { return HAS_STATES ? it.word : afterText(it); }
+function list5(a) { return a.length <= 5 ? a.join(', ') : a.slice(0, 5).join(', ') + ' and ' + (a.length - 5) + ' more'; }
+
+/* ---------- Layout: pure function of keys and dependencies ---------- */
+var NW = 200, NH = 44, GAP = 48, ROW = 56, DUMMY = 14, BANDW = 120, BANDH = 160, HEAD = 28, CHAN = 72, PAD = 28, LANEGAP = 16;
+
+function computeLayout(collapsed) {
+  var depth = new Map();
+  function d(n, st) {
+    if (depth.has(n)) return depth.get(n);
+    if (st.has(n)) return 0;
+    st.add(n);
+    var it = BY.get(n), m = -1;
+    it.deps.forEach(function (k) { if (BY.has(k)) m = Math.max(m, d(k, st)); });
+    st.delete(n);
+    depth.set(n, m + 1);
+    return m + 1;
+  }
+  ITEMS.forEach(function (it) { d(it.n, new Set()); });
+  var nL = 0; depth.forEach(function (v) { if (v + 1 > nL) nL = v + 1; });
+  var layerTasks = []; for (var L = 0; L < nL; L++) layerTasks.push([]);
+  ITEMS.forEach(function (it) { layerTasks[depth.get(it.n)].push(it.n); });
+
+  var verts = new Map();
+  var V = layerTasks.map(function (tasks, L) {
+    if (collapsed.has(L)) {
+      var b = { id: 'b' + L, type: 'band', layer: L, num: tasks[0], h: BANDH, w: BANDW, tasks: tasks };
+      verts.set(b.id, b); return [b];
+    }
+    return tasks.map(function (n) { var v = { id: 't' + n, type: 'task', layer: L, num: n, h: NH, w: NW, n: n }; verts.set(v.id, v); return v; });
+  });
+  function vis(n) { var L = depth.get(n); return collapsed.has(L) ? 'b' + L : 't' + n; }
+
+  var agg = new Map();
+  ITEMS.forEach(function (it) {
+    it.deps.forEach(function (d0) {
+      var u = vis(d0), v = vis(it.n), k = u + '>' + v;
+      if (!agg.has(k)) agg.set(k, { u: u, v: v, real: [] });
+      agg.get(k).real.push([d0, it.n]);
+    });
+  });
+
+  var edges = [], chains = [];
+  agg.forEach(function (e) {
+    var a = verts.get(e.u), b = verts.get(e.v), chain = [a];
+    for (var l = a.layer + 1; l < b.layer; l++) {
+      var dm = { id: 'd' + edges.length + '_' + l, type: 'dummy', layer: l, num: a.num, h: 2, w: 0 };
+      verts.set(dm.id, dm); V[l].push(dm); chain.push(dm);
+    }
+    chain.push(b);
+    e.idx = edges.length; edges.push(e); chains.push(chain);
+  });
+
+  var up = new Map(), down = new Map();
+  verts.forEach(function (v) { up.set(v.id, []); down.set(v.id, []); });
+  chains.forEach(function (c) { for (var i = 1; i < c.length; i++) { down.get(c[i - 1].id).push(c[i].id); up.get(c[i].id).push(c[i - 1].id); } });
+
+  function positions() { var p = new Map(); V.forEach(function (col) { col.forEach(function (v, i) { p.set(v.id, i); }); }); return p; }
+  function crossings() {
+    var p = positions(), c = 0;
+    for (var L = 0; L + 1 < V.length; L++) {
+      var es = [];
+      V[L].forEach(function (v) { down.get(v.id).forEach(function (w) { es.push([p.get(v.id), p.get(w)]); }); });
+      for (var i = 0; i < es.length; i++) for (var j = i + 1; j < es.length; j++) if ((es[i][0] - es[j][0]) * (es[i][1] - es[j][1]) < 0) c++;
+    }
+    return c;
+  }
+  function median(a) { a.sort(function (x, y) { return x - y; }); var m = a.length >> 1; return a.length % 2 ? a[m] : (a[m - 1] + a[m]) / 2; }
+  function sortCol(L, nb) {
+    var p = positions();
+    var keyed = V[L].map(function (v, i) { var ns = nb.get(v.id); return { v: v, k: ns.length ? median(ns.map(function (x) { return p.get(x); })) : i }; });
+    keyed.sort(function (a, b) { return a.k - b.k || a.v.num - b.v.num; });
+    V[L] = keyed.map(function (x) { return x.v; });
+  }
+  var best = V.map(function (c) { return c.slice(); }), bestC = crossings();
+  for (var s = 0; s < 8; s++) {
+    if (s % 2 === 0) for (var a = 1; a < V.length; a++) sortCol(a, up);
+    else for (var b2 = V.length - 2; b2 >= 0; b2--) sortCol(b2, down);
+    var c0 = crossings();
+    if (c0 < bestC) { bestC = c0; best = V.map(function (c) { return c.slice(); }); }
+  }
+  V = best;
+
+  /* Lanes for tall layers */
+  var R = Math.max(12, Math.round(Math.sqrt(N * 0.5625 * 248 / 56)));
+  var cols = V.map(function (col, L) {
+    var ts = col.filter(function (v) { return v.type === 'task'; });
+    var bandV = col.filter(function (v) { return v.type === 'band'; })[0];
+    var isB = !!bandV;
+    var lanes = !isB && ts.length > R ? Math.min(8, Math.ceil(ts.length / R)) : 1;
+    var width = isB ? BANDW : lanes * NW + (lanes - 1) * LANEGAP;
+    var rows = lanes > 1 ? Math.ceil(ts.length / lanes) : 0;
+    var dummies = col.filter(function (v) { return v.type === 'dummy'; });
+    var laneCap = lanes > 1 ? 2 * Math.max(0, rows - 1) : 0;
+    var estH = isB ? BANDH + dummies.length * DUMMY : lanes > 1 ? rows * ROW + Math.max(0, dummies.length - laneCap) * DUMMY : ts.length * ROW + dummies.length * DUMMY;
+    return { L: L, lanes: lanes, width: width, rows: rows, tasks: ts, dummies: dummies, band: bandV || null, estH: estH };
+  });
+
+  /* Bands: smallest count whose Fit zoom on the reference canvas is near the best */
+  function partition(k) {
+    var total = cols.reduce(function (s0, c) { return s0 + c.width; }, 0) + GAP * (cols.length - 1);
+    var cap = Math.max.apply(null, cols.map(function (c) { return c.width; }).concat([total / k]));
+    while (true) {
+      var res = [[]], cur = -GAP;
+      cols.forEach(function (c) {
+        if (res[res.length - 1].length && cur + GAP + c.width > cap) { res.push([]); cur = -GAP; }
+        res[res.length - 1].push(c); cur += GAP + c.width;
+      });
+      if (res.length <= k) return res;
+      cap += 16;
+    }
+  }
+  function fitOf(bs) {
+    var w = 0, h = 0;
+    bs.forEach(function (b, i) {
+      var bw = b.reduce(function (t, c) { return t + c.width; }, 0) + GAP * (b.length - 1);
+      w = Math.max(w, bw);
+      h += HEAD + Math.max.apply(null, b.map(function (c) { return c.estH; })) + (i ? CHAN : 0);
+    });
+    return Math.min(1, (1400 - 48) / (w + 2 * PAD), (744 - 48) / h);
+  }
+  var cand = [], bestFit = 0;
+  for (var k = 1; k <= Math.min(20, cols.length); k++) { var bs = partition(k); var f = fitOf(bs); cand.push({ k: k, bs: bs, f: f }); bestFit = Math.max(bestFit, f); }
+  var chosen = cand.filter(function (c) { return c.f >= 0.95 * bestFit; })[0];
+  var bands = chosen.bs;
+
+  /* Coordinates */
+  var bandOf = new Map();
+  bands.forEach(function (b, bi) { b.forEach(function (c) { bandOf.set(c.L, bi); }); });
+  var colByL = new Map(cols.map(function (c) { return [c.L, c]; }));
+
+  function init(c) {
+    var y = 0;
+    if (c.band) { c.band.y = 0; y = BANDH + 12; c.dummies.forEach(function (d0) { d0.y = y; y += DUMMY; }); return; }
+    if (c.lanes > 1) {
+      c.tasks.forEach(function (v, i) { v.lane = i % c.lanes; v.row = Math.floor(i / c.lanes); v.y = v.row * ROW; });
+      /* Passing lines run through the row gutters, two per gutter; only overflow goes below the block. */
+      var cap = 2 * Math.max(0, c.rows - 1), dn = c.dummies.length, used = {};
+      y = c.rows * ROW;
+      c.dummies.forEach(function (d0, i) {
+        if (i < cap) {
+          var gut = Math.min(c.rows - 2, Math.floor(i * (c.rows - 1) / Math.min(dn, cap)));
+          while ((used[gut] || 0) >= 2) gut = (gut + 1) % (c.rows - 1);
+          var slot = used[gut] || 0; used[gut] = slot + 1;
+          d0.y = (gut + 1) * ROW - 6 + (slot ? 3 : -3) - 1;
+        } else { d0.y = y; y += DUMMY; }
+      });
+      return;
+    }
+    V[c.L].forEach(function (v) { v.lane = 0; v.y = y; y += v.type === 'task' ? ROW : DUMMY; });
+  }
+  cols.forEach(init);
+
+  function centers(ids) { return ids.map(function (id) { var v = verts.get(id); return v.y + v.h / 2; }); }
+  function sameBand(L, id) { return bandOf.get(verts.get(id).layer) === bandOf.get(L); }
+  function want(v, nbs, L) { var ns = nbs.filter(function (id) { return sameBand(L, id); }); return ns.length ? median(centers(ns)) : v.y + v.h / 2; }
+  function place(c, nb) {
+    if (c.band) return;
+    if (c.lanes > 1) {
+      var cs = [];
+      c.tasks.forEach(function (v) { nb.get(v.id).filter(function (id) { return sameBand(c.L, id); }).forEach(function (id) { var w = verts.get(id); cs.push(w.y + w.h / 2); }); });
+      if (!cs.length) return;
+      var blockH = c.rows * ROW - 12, cur = c.tasks[0].y + blockH / 2, dy = median(cs) - cur;
+      c.tasks.forEach(function (v) { v.y += dy; }); c.dummies.forEach(function (d0) { d0.y += dy; });
+      return;
+    }
+    var col = V[c.L];
+    var des = col.map(function (v) { return want(v, nb.get(v.id), c.L) - v.h / 2; });
+    function sep(i) { return col[i].h + (col[i].type === 'dummy' ? 12 : 12); }
+    var dn = des.slice(), upv = des.slice(), i;
+    for (i = 1; i < col.length; i++) dn[i] = Math.max(dn[i], dn[i - 1] + sep(i - 1));
+    for (i = col.length - 2; i >= 0; i--) upv[i] = Math.min(upv[i], upv[i + 1] - sep(i));
+    col.forEach(function (v, j) { v.y = (dn[j] + upv[j]) / 2; });
+  }
+  for (var p0 = 0; p0 < 3; p0++) {
+    if (p0 % 2 === 0) { for (var l1 = 0; l1 < cols.length; l1++) place(cols[l1], up); }
+    else { for (var l2 = cols.length - 1; l2 >= 0; l2--) place(cols[l2], down); }
+  }
+
+  /* Keep each column near its natural height so the overview is not wasted on white space. */
+  cols.forEach(function (c) {
+    if (c.band || c.lanes > 1) return;
+    var col = V[c.L]; if (col.length < 2) return;
+    var natural = 0, i; for (i = 0; i + 1 < col.length; i++) natural += col[i].h + 12;
+    var first = col[0].y, last = col[col.length - 1].y, span = last - first;
+    if (span <= natural * 1.1) return;
+    var y = (first + last) / 2 - natural / 2;
+    col.forEach(function (v) { v.y = y; y += v.h + 12; });
+  });
+
+  var tops = [], top = 0, maxW = 0;
+  bands.forEach(function (b, bi) {
+    var minY = Infinity, maxY = -Infinity;
+    b.forEach(function (c) { V[c.L].forEach(function (v) { minY = Math.min(minY, v.y); maxY = Math.max(maxY, v.y + v.h); }); });
+    var x = PAD;
+    b.forEach(function (c) {
+      c.x = x; c.top = top;
+      V[c.L].forEach(function (v) {
+        v.y = v.y - minY + top + HEAD;
+        if (v.type === 'dummy') { v.x = x; v.w = c.width; }
+        else if (v.type === 'task') { v.x = x + (c.lanes > 1 ? v.lane * (NW + LANEGAP) : 0); }
+        else v.x = x;
+      });
+      x += c.width + GAP;
+    });
+    x = x - GAP + PAD;
+    maxW = Math.max(maxW, x);
+    var bottom = top + HEAD + (maxY - minY);
+    tops.push({ top: top, bottom: bottom, right: x });
+    top = bottom + CHAN;
+  });
+  var H = top - CHAN + 8, W = maxW;
+
+  /* Edge paths */
+  var trackN = new Map();
+  chains.forEach(function (ch, ei) {
+    var e = edges[ei], path = '', a = ch[0], col = colByL.get(a.layer);
+    var px, py;
+    if (a.type === 'task' && col.lanes > 1 && a.lane < col.lanes - 1) {
+      var gy = a.y + NH + 6, right = col.x + col.width, sx = a.x + NW;
+      path = 'M' + sx + ' ' + (a.y + NH / 2) + 'L' + (sx + 8) + ' ' + (a.y + NH / 2) + 'L' + (sx + 8) + ' ' + gy + 'L' + right + ' ' + gy;
+      px = right; py = gy;
+    } else {
+      px = a.x + a.w; py = a.y + a.h / 2; path = 'M' + px + ' ' + py;
+    }
+    var lx = px + 10, ly = py - 4;
+    for (var i = 1; i < ch.length; i++) {
+      var pv = ch[i - 1], b = ch[i], cl = colByL.get(b.layer), qy, qx, tail = '';
+      if (b.type === 'dummy') { qx = b.x; qy = b.y + 1; tail = 'L' + (b.x + b.w) + ' ' + qy; }
+      else if (b.type === 'task' && cl.lanes > 1 && b.lane > 0) {
+        qy = b.y - 6; qx = cl.x;
+        tail = 'L' + (b.x - 8) + ' ' + qy + 'L' + (b.x - 8) + ' ' + (b.y + NH / 2) + 'L' + b.x + ' ' + (b.y + NH / 2);
+      } else { qx = b.x; qy = b.y + b.h / 2; }
+      if (bandOf.get(pv.layer) !== bandOf.get(b.layer)) {
+        var bi = bandOf.get(pv.layer), t = trackN.get(bi) || 0; trackN.set(bi, t + 1);
+        var cy = tops[bi].bottom + 8 + (t % 8) * 8;
+        var gR = px + 16 + (t % 3) * 5, gL = qx - 16 - (t % 3) * 5;
+        path += 'L' + gR + ' ' + py + 'L' + gR + ' ' + cy + 'L' + gL + ' ' + cy + 'L' + gL + ' ' + qy + 'L' + qx + ' ' + qy;
+      } else {
+        var mx = (px + qx) / 2;
+        path += 'C' + mx + ' ' + py + ' ' + mx + ' ' + qy + ' ' + qx + ' ' + qy;
+      }
+      path += tail;
+      if (b.type === 'dummy') { px = b.x + b.w; py = qy; }
+      else if (b.type === 'task' && cl.lanes > 1 && b.lane > 0) { px = b.x; py = qy; }
+      else { px = qx; py = qy; }
+    }
+    e.path = path; e.lx = lx; e.ly = ly; e.count = e.real.length; e.id = 'e' + ei;
+  });
+
+  var laycols = cols.map(function (c) {
+    return { L: c.L, x: c.x, w: c.width, top: c.top, tasks: layerTasks[c.L], collapsed: !!c.band, lanes: c.lanes };
+  });
+  return { verts: verts, edges: edges, cols: laycols, W: W, H: H, nL: nL, depth: depth, vis: vis, up: up, down: down, band: bands.length };
+}
+
+/* ---------- Application state ---------- */
+var S = {
+  view: q.get('view') === 'list' ? 'list' : 'graph',
+  full: q.get('full') === '1',
+  prefSb: q.get('sb') !== '0', prefConv: q.get('conv') !== '0', lastOpened: 'none',
+  detail: null, sel: null, chain: false, map: true, mapExplicit: false,
+  focus: null, query: '', status: new Set(), matches: [], cur: -1, coll: new Set(),
+  fitLocked: true
+};
+var A = { sb: true, conv: true, det: false, replaced: false, G: 0 };
+var VW = { z: 1, x: 24, y: 24 }, CANVAS = { w: 0, h: 0 };
+var LAYOUT = null, DOM = { nodes: new Map(), edges: new Map(), bands: new Map() }, world = null;
+
+var svg = $('#gsv'), canvas = $('#canvas');
+
+/* ---------- Text measurement ---------- */
+var mctx = document.createElement('canvas').getContext('2d');
+var FF = getComputedStyle(document.body).fontFamily;
+var seg = window.Intl && Intl.Segmenter ? new Intl.Segmenter() : null;
+function tw(s, px, w) { mctx.font = (w || 400) + ' ' + px + 'px ' + FF; return mctx.measureText(s).width; }
+function graphemes(s) { if (seg) { var o = []; for (var g of seg.segment(s)) o.push(g.segment); return o; } return Array.from(s); }
+function firstLine(s) { return s.split('\n')[0]; }
+function fitText(s, avail, px, w) {
+  s = firstLine(s);
+  if (tw(s, px, w) <= avail) return s;
+  var g = graphemes(s), lo = 0, hi = g.length;
+  while (lo < hi) { var m = (lo + hi + 1) >> 1; if (tw(g.slice(0, m).join('').trimEnd() + '…', px, w) <= avail) lo = m; else hi = m - 1; }
+  return lo ? g.slice(0, lo).join('').trimEnd() + '…' : '';
+}
+function esc(s) { return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;'); }
+function announce(t) { $('#live').textContent = t; }
+
+/* ---------- Render ---------- */
+function icon(name, x, y, sz) { return '<use class="ic" href="#g-' + name + '" x="' + x + '" y="' + y + '" width="' + sz + '" height="' + sz + '"/>'; }
+
+function render() {
+  var t0 = performance.now();
+  var keepDom = !!(document.activeElement && document.activeElement.closest && document.activeElement.closest('.gsv'));
+  var wasFocus = S.focus;
+  LAYOUT = computeLayout(S.coll);
+  performance.measure('sg-layout', { start: t0, end: performance.now() });
+  var L = LAYOUT, h = '';
+  h += '<defs>';
+  [['a0', 'var(--line-ctl)'], ['a1', 'var(--fg)'], ['a2', 'var(--line)']].forEach(function (m) {
+    h += '<marker id="' + m[0] + '" viewBox="0 0 8 8" refX="7.5" refY="4" markerUnits="userSpaceOnUse" markerWidth="8" markerHeight="8" orient="auto"><path d="M0 0L8 4L0 8z" style="fill:' + m[1] + '"/></marker>';
+  });
+  h += '</defs><g id="world">';
+  h += '<g id="eg">';
+  L.edges.forEach(function (e) {
+    h += '<path class="e" data-e="' + e.id + '" d="' + e.path + '"/>';
+    if (e.count > 1) h += '<text class="ec" x="' + e.lx + '" y="' + e.ly + '">x' + e.count + '</text>';
+  });
+  h += '</g><g id="lg">';
+  L.cols.forEach(function (c) {
+    if (c.collapsed) return;
+    h += '<g class="lh" data-l="' + c.L + '" transform="translate(' + c.x + ' ' + c.top + ')"><rect width="' + c.w + '" height="24" fill="transparent"/>' +
+      '<text class="ht1" y="16">Layer ' + (c.L + 1) + ' · ' + c.tasks.length + '</text><text class="ht2" y="16">Layer ' + (c.L + 1) + '</text>' +
+      '<g class="chev"><use class="ic" href="#g-down" width="12" height="12" y="6" x="' + (c.w - 14) + '"/></g></g>';
+  });
+  h += '</g><g id="ng">';
+  L.verts.forEach(function (v) {
+    if (v.type === 'task') {
+      var it = BY.get(v.n), f = HAS_STATES ? it.fam : '', t = HAS_STATES ? it.tone : '', ic = HAS_STATES ? it.icon : 'circle';
+      h += '<g class="n" data-id="' + v.id + '" data-f="' + f + '" data-t="' + t + '" tabindex="-1" role="button" aria-pressed="false" transform="translate(' + v.x + ' ' + v.y + ')">' +
+        '<rect class="bx" width="' + NW + '" height="' + NH + '" rx="6"/><g transform="translate(0 22)">' +
+        '<text class="l1" x=".75em" y="-.25em"></text>' +
+        '<g class="l2">' + (HAS_STATES ? icon(ic, '.75em', '.2em', '1em') : '') + '<text class="w" x="' + (HAS_STATES ? '2.1em' : '.82em') + '" y="1.12em"></text></g>' +
+        '<g class="ls">' + (HAS_STATES ? icon(ic, '.75em', '-.5em', '1em') : '') + '<text class="ts" x="' + (HAS_STATES ? '2.1em' : '.75em') + '" y=".35em"></text></g>' +
+        '<g class="ln">' + (HAS_STATES ? icon(ic, '.6em', '-.46em', '.92em') : '') + '<text class="num" x="' + (NW / 2) + '" y=".35em" text-anchor="middle">' + v.n + '</text></g>' +
+        '</g></g>';
+    } else if (v.type === 'band') {
+      h += '<g class="band" data-id="' + v.id + '" data-l="' + v.layer + '" tabindex="-1" role="button" aria-expanded="false" transform="translate(' + v.x + ' ' + v.y + ')">' +
+        '<rect class="bx" width="' + BANDW + '" height="' + BANDH + '" rx="6"/>' +
+        '<g class="brows"></g><use class="ic" href="#g-right" width="12" height="12" y="8" x="' + (BANDW - 18) + '"/></g>';
+    }
+  });
+  h += '</g><g id="pins"></g><rect id="ring" rx="8"/></g>';
+  svg.innerHTML = h;
+  svg.setAttribute('aria-label', 'Dependency graph, ' + N + ' tasks');
+  world = svg.querySelector('#world');
+  DOM.nodes = new Map(); DOM.edges = new Map(); DOM.bands = new Map();
+  svg.querySelectorAll('.n').forEach(function (g) { DOM.nodes.set(g.dataset.id, { g: g, cls: '', pressed: false }); });
+  svg.querySelectorAll('.band').forEach(function (g) { DOM.bands.set(g.dataset.id, { g: g, cls: '', sig: '' }); });
+  svg.querySelectorAll('.e').forEach(function (p) { DOM.edges.set(p.dataset.e, { p: p, cls: '' }); });
+  L.verts.forEach(function (v) {
+    if (v.type !== 'task') return;
+    var it = BY.get(v.n), rec = DOM.nodes.get(v.id), g = rec.g;
+    var parts = 'Task ' + it.n + ', ' + it.title + '. ' + (HAS_STATES ? it.word + '. ' : '') + (it.deps.length ? 'Needs ' + it.deps.join(', ') + '. ' : 'Starts first. ') + (dependents.get(it.n).length ? 'Unblocks ' + dependents.get(it.n).join(', ') + '.' : '');
+    g.setAttribute('aria-label', parts);
+  });
+  if (!S.focus || !(DOM.nodes.has(S.focus) || DOM.bands.has(S.focus))) {
+    var mapped = null;
+    if (wasFocus && wasFocus[0] === 't' && BY.has(+wasFocus.slice(1))) mapped = L.vis(+wasFocus.slice(1));
+    if (wasFocus && wasFocus[0] === 'b') { var lc = L.cols.filter(function (c) { return 'b' + c.L === wasFocus; })[0]; if (lc && lc.tasks.length) mapped = L.vis(lc.tasks[0]); }
+    var it0 = ITEMS[0]; S.focus = mapped || (it0 ? L.vis(it0.n) : null);
+  }
+  roving();
+  if (keepDom) { var ng = (DOM.nodes.get(S.focus) || DOM.bands.get(S.focus)); if (ng) ng.g.focus({ preventScroll: true }); }
+  buildMini();
+  labels();
+  highlight();
+}
+
+function roving() {
+  var all = svg.querySelectorAll('.n,.band');
+  all.forEach(function (g) { g.setAttribute('tabindex', g.dataset.id === S.focus ? '0' : '-1'); });
+}
+
+function lod() { var z = VW.z; return z >= 0.8 ? 'detail' : z >= 0.5 ? 'title' : z >= 0.3 ? 'number' : 'overview'; }
+
+/* Font size, truncated labels and band text: updated once when input settles. */
+function labels() {
+  if (!LAYOUT) return;
+  var z = VW.z, u = Math.min(z, 1), level = lod(), fs = 12 / u;
+  world.style.fontSize = fs + 'px';
+  svg.dataset.lod = level;
+  if (level === 'number' || level === 'overview') svg.dataset.low = '1'; else delete svg.dataset.low;
+  if (level === 'number' && z >= 0.42) svg.dataset.ni = '1'; else delete svg.dataset.ni;
+  var arrow = 8 / u;
+  ['a0', 'a1', 'a2'].forEach(function (id) { var m = svg.querySelector('#' + id); if (m) { m.setAttribute('markerWidth', arrow); m.setAttribute('markerHeight', arrow); } });
+  svg.querySelectorAll('.lh .ht1, .lh .ht2').forEach(function (t) { t.setAttribute('y', 20); });
+  svg.querySelectorAll('.lh .chev use').forEach(function (u0) {
+    var sz = 12 / u; u0.setAttribute('width', sz); u0.setAttribute('height', sz); u0.setAttribute('y', 22 - sz);
+    var c = LAYOUT.cols.filter(function (x) { return x.L === +u0.closest('.lh').dataset.l; })[0];
+    u0.setAttribute('x', c.w - sz);
+  });
+  var boxW = NW * u, pad = 9;
+  LAYOUT.verts.forEach(function (v) {
+    if (v.type !== 'task') return;
+    var it = BY.get(v.n), g = DOM.nodes.get(v.id).g;
+    var numW = tw(v.n + ' ', 12, 600);
+    if (level === 'detail') {
+      var l1 = g.querySelector('.l1');
+      l1.innerHTML = '<tspan class="no">' + v.n + '</tspan> ' + esc(fitText(it.title, boxW - pad - numW - pad, 12));
+      g.querySelector('.w').textContent = fitText(wordOf(it), boxW - (HAS_STATES ? pad + 16 : pad) - pad, 11);
+    } else if (level === 'title') {
+      var ts = g.querySelector('.ts');
+      ts.innerHTML = '<tspan class="no">' + v.n + '</tspan> ' + esc(fitText(it.title, boxW - (HAS_STATES ? pad + 16 : pad) - numW - pad, 12));
+    }
+  });
+  bandTexts();
+  pins();
+  ringUpdate();
+}
+
+function tally(col) {
+  var c = {}; col.tasks.forEach(function (n) { var f = BY.get(n).fam; c[f] = (c[f] || 0) + 1; });
+  var order = ['needs', 'problem', 'unknown', 'working', 'stopped', 'review', 'finish', 'ready', 'waiting', 'done'];
+  return order.filter(function (f) { return c[f]; }).map(function (f) { return { f: f, n: c[f], label: FAM_LABEL[f] }; });
+}
+
+function bandTexts() {
+  if (!LAYOUT) return;
+  var z = VW.z, u = Math.min(z, 1), level = lod(), low = level === 'number' || level === 'overview', matches = new Set(S.matches);
+  DOM.bands.forEach(function (rec, id) {
+    var col = LAYOUT.cols.filter(function (c) { return 'b' + c.L === id; })[0];
+    var nHits = col.tasks.filter(function (n) { return matches.has(n); }).length;
+    var linked = S.sel ? col.tasks.filter(function (n) { return S.linked && S.linked.has(n); }).length : 0;
+    var rows = [];
+    if (low) {
+      rows = [{ t: String(col.tasks.length), c: 'bt0' }];
+    } else {
+      var avail = BANDW * u - 16, chevW = 14, maxR = Math.floor((BANDH * u - 8) / 16);
+      rows.push({ t: fitText('Layer ' + (col.L + 1), avail - chevW, 12, 500), c: 'bt0' });
+      var cnt = col.tasks.length + ' tasks';
+      rows.push({ t: tw(cnt, 12) <= avail ? cnt : String(col.tasks.length), c: '' });
+      if (nHits) rows.push({ t: fitText(nHits + (nHits === 1 ? ' match' : ' matches'), avail, 12), c: '' });
+      if (linked) rows.push({ t: fitText(linked + ' linked', avail, 12), c: '' });
+      if (HAS_STATES) tally(col).slice(0, 3).forEach(function (t) { rows.push({ t: fitText(t.n + ' ' + t.label, avail, 12), c: t.f === 'needs' ? 'bwarn' : t.f === 'problem' ? 'bbad' : '' }); });
+      rows = rows.slice(0, maxR);
+    }
+    var sig = rows.map(function (r) { return r.t; }).join('|') + '/' + u.toFixed(3);
+    if (rec.sig !== sig) {
+      rec.sig = sig;
+      var html = '';
+      rows.forEach(function (r, i) {
+        var y = low ? 'y="50%"' : 'y="' + (1.5 + i * 1.33) + 'em"';
+        html += '<text class="' + r.c + '" x="' + (low ? BANDW / 2 : '.7em') + '" ' + y + (low ? ' text-anchor="middle" dominant-baseline="middle"' : '') + '>' + esc(r.t) + '</text>';
+      });
+      rec.g.querySelector('.brows').innerHTML = html;
+      rec.g.setAttribute('aria-label', 'Layer ' + (col.L + 1) + ', collapsed, ' + col.tasks.length + ' tasks' + (nHits ? ', ' + nHits + (nHits === 1 ? ' match' : ' matches') : '') + (linked ? ', ' + linked + ' linked' : ''));
+      var chev = rec.g.querySelector(':scope > .ic');
+      chev.style.display = low ? 'none' : '';
+      var sz = 12 / u; chev.setAttribute('width', sz); chev.setAttribute('height', sz); chev.setAttribute('x', BANDW - 4 / u - sz); chev.setAttribute('y', 8 / u - 2 / u);
+    }
+  });
+}
+
+/* Label pins for the selected, current, focused and matching tasks at low zoom, at most 12. */
+function pins() {
+  var g = svg.querySelector('#pins'); if (!g) return;
+  var level = lod();
+  if (level !== 'number' && level !== 'overview') { g.innerHTML = ''; return; }
+  var ids = [], push = function (n) { if (n && ids.indexOf(n) < 0 && ids.length < 12) ids.push(n); };
+  push(S.sel); if (S.cur >= 0) push(S.matches[S.cur]);
+  if (S.focus && S.focus[0] === 't' && document.body.dataset.keyboard && document.activeElement && document.activeElement.closest && document.activeElement.closest('.gsv')) push(+S.focus.slice(1));
+  S.matches.forEach(push);
+  var z = VW.z, u = Math.min(z, 1), html = '', placed = [];
+  function free(x, y, w, h) { return x >= 2 && y >= 0 && x + w <= CANVAS.w - 2 && y + h <= CANVAS.h - 2 && !placed.some(function (p) { return x < p.x + p.w && x + w > p.x && y < p.y + p.h && y + h > p.y; }); }
+  ids.forEach(function (n) {
+    var v = LAYOUT.verts.get('t' + n); if (!v) return;
+    var it = BY.get(n), txt = n + ' ' + fitText(it.title, 240, 12), w = tw(txt, 12) + 10, h = 18;
+    var sx = v.x * z + VW.x, sy = v.y * z + VW.y, sb = (v.y + v.h) * z + VW.y, sr = (v.x + v.w) * z + VW.x;
+    var cands = [[sx, sy - h - 3], [sr - w, sy - h - 3], [sx, sb + 3], [sr - w, sb + 3]];
+    var pick = cands.filter(function (c) { return free(c[0], c[1], w, h); })[0];
+    if (!pick) {
+      if (n !== S.sel && !(S.cur >= 0 && S.matches[S.cur] === n)) return;
+      pick = [clamp(sx, 2, Math.max(2, CANVAS.w - w - 2)), clamp(sy - h - 3, 0, Math.max(0, CANVAS.h - h - 2))];
+    }
+    placed.push({ x: pick[0], y: pick[1], w: w, h: h });
+    html += '<g class="pin" transform="translate(' + (pick[0] - VW.x) / z + ' ' + (pick[1] - VW.y) / z + ')"><rect width="' + w / u + '" height="' + h / u + '" rx="' + 4 / u + '"/><text x="' + 5 / u + '" y="' + 13 / u + '">' + esc(txt) + '</text></g>';
+  });
+  g.innerHTML = html;
+}
+
+function ringUpdate() {
+  var r = svg.querySelector('#ring'); if (!r || !S.focus || !LAYOUT) return;
+  var v = LAYOUT.verts.get(S.focus); if (!v) return;
+  var o = 2 / Math.min(VW.z, 1), w = v.w, h = v.h;
+  r.setAttribute('x', v.x - o); r.setAttribute('y', v.y - o); r.setAttribute('width', w + 2 * o); r.setAttribute('height', h + 2 * o);
+}
+
+/* Toggle classes on the difference only. */
+function linkSets() {
+  var need = new Set(), block = new Set();
+  if (S.sel) {
+    if (S.chain) {
+      var walk = function (n, get, set) { get(n).forEach(function (m) { if (!set.has(m)) { set.add(m); walk(m, get, set); } }); };
+      walk(S.sel, function (n) { return BY.get(n).deps; }, need);
+      walk(S.sel, function (n) { return dependents.get(n); }, block);
+    } else {
+      BY.get(S.sel).deps.forEach(function (d) { need.add(d); });
+      dependents.get(S.sel).forEach(function (d) { block.add(d); });
+    }
+  }
+  S.need = need; S.block = block; S.linked = new Set([].concat(Array.from(need), Array.from(block)));
+}
+function matchSet() { return new Set(S.matches); }
+function highlight() {
+  if (!LAYOUT) return;
+  linkSets();
+  var active = !!S.query.trim() || S.status.size > 0, ms = matchSet(), cur = S.cur >= 0 ? S.matches[S.cur] : null;
+  var bright = function (n) { if (S.sel) return n === S.sel || S.linked.has(n) || (active && ms.has(n)); return !active || ms.has(n); };
+  DOM.nodes.forEach(function (rec, id) {
+    var n = +id.slice(1), c = [];
+    if (n === S.sel) c.push('picked'); else if (S.linked.has(n)) c.push('lk');
+    if (active && ms.has(n)) c.push('mt');
+    if (n === cur) c.push('cur');
+    if (!bright(n)) c.push('dim');
+    var cs = c.join(' ');
+    if (rec.cls !== cs) { rec.cls = cs; rec.g.setAttribute('class', 'n ' + cs); }
+    var pressed = n === S.sel;
+    if (rec.pressed !== pressed) { rec.pressed = pressed; rec.g.setAttribute('aria-pressed', pressed); }
+  });
+  DOM.bands.forEach(function (rec, id) {
+    var col = LAYOUT.cols.filter(function (c) { return 'b' + c.L === id; })[0];
+    var any = col.tasks.some(bright), lk = S.sel && col.tasks.some(function (n) { return S.linked.has(n) || n === S.sel; });
+    var cs = lk ? 'lk' : any ? '' : 'dim';
+    if (rec.cls !== cs) { rec.cls = cs; rec.g.setAttribute('class', 'band ' + cs); }
+  });
+  LAYOUT.edges.forEach(function (e) {
+    var rec = DOM.edges.get(e.id), role = '';
+    if (S.sel) {
+      for (var i = 0; i < e.real.length && !role; i++) {
+        var a = e.real[i][0], b = e.real[i][1];
+        if (S.chain) {
+          if ((b === S.sel || S.need.has(b)) && S.need.has(a)) role = 'need';
+          else if ((a === S.sel || S.block.has(a)) && S.block.has(b)) role = 'block';
+        } else {
+          if (b === S.sel) role = 'need'; else if (a === S.sel) role = 'block';
+        }
+      }
+    }
+    if (!role) {
+      var live = e.real.some(function (p) { return active ? (ms.has(p[0]) && ms.has(p[1])) : !S.sel; });
+      if (!live) role = 'dim';
+    }
+    if (rec.cls !== role) { rec.cls = role; rec.p.setAttribute('class', 'e ' + role); }
+  });
+  bandTexts();
+  miniMatches();
+  pins();
+}
+
+/* ---------- Minimap: one path per mark type ---------- */
+var mapScale = 1, mapOX = 0, mapOY = 0;
+function buildMini() {
+  if (!LAYOUT) return;
+  var L = LAYOUT, mw = 174, mh = 110, s = Math.min((mw - 8) / L.W, (mh - 8) / L.H);
+  mapScale = s; mapOX = (mw - L.W * s) / 2; mapOY = (mh - L.H * s) / 2;
+  var paths = { m0: '', 'm-needs': '', 'm-problem': '', 'm-unknown': '' };
+  L.verts.forEach(function (v) {
+    if (v.type === 'dummy') return;
+    var x = mapOX + v.x * s, y = mapOY + v.y * s, w = Math.max(2, v.w * s), h = Math.max(2, v.h * s), d = 'M' + x + ' ' + y + 'h' + w + 'v' + h + 'h' + (-w) + 'z';
+    var f = v.type === 'task' && HAS_STATES ? BY.get(v.n).fam : '';
+    paths[f === 'needs' ? 'm-needs' : f === 'problem' ? 'm-problem' : f === 'unknown' ? 'm-unknown' : 'm0'] += d;
+  });
+  var h = '';
+  Object.keys(paths).forEach(function (k) { h += '<path class="' + k + '" d="' + paths[k] + '"/>'; });
+  h += '<path class="m-match" id="mm"/><rect class="mv" id="mv"/>';
+  $('#map-s').innerHTML = h;
+  $('#map-s').setAttribute('viewBox', '0 0 174 110');
+  miniMatches();
+}
+function miniMatches() {
+  var p = $('#mm'); if (!p || !LAYOUT) return;
+  var d = '', s = mapScale;
+  S.matches.forEach(function (n) {
+    var v = LAYOUT.verts.get('t' + n) || LAYOUT.verts.get(LAYOUT.vis(n)); if (!v) return;
+    var x = mapOX + v.x * s, y = mapOY + v.y * s, w = Math.max(3, v.w * s), h = Math.max(3, v.h * s);
+    d += 'M' + x + ' ' + y + 'h' + w + 'v' + h + 'h' + (-w) + 'z';
+  });
+  p.setAttribute('d', d);
+}
+function miniRect() {
+  var r = $('#mv'); if (!r) return;
+  var z = VW.z, s = mapScale, x = -VW.x / z, y = -VW.y / z;
+  r.setAttribute('x', mapOX + x * s); r.setAttribute('y', mapOY + y * s);
+  r.setAttribute('width', CANVAS.w / z * s); r.setAttribute('height', CANVAS.h / z * s);
+}
+function offScreen() {
+  var z = VW.z, x = -VW.x / z, y = -VW.y / z, w = CANVAS.w / z, h = CANVAS.h / z, L = LAYOUT, t = 1;
+  return x > t || y > t || x + w < L.W - t || y + h < L.H - t;
+}
+function mapOn() { return S.mapExplicit ? S.map : S.map && CANVAS.w >= 760; }
+function mapUpdate() {
+  var map = $('#map');
+  if (!LAYOUT) { map.hidden = true; return; }
+  var on = mapOn();
+  var show = on && N > 0 && offScreen();
+  map.hidden = !show;
+  $('#map-t').setAttribute('aria-pressed', on);
+  $('#map-t').title = (on ? 'Minimap on (M). Shows when part of the graph is off screen' : 'Minimap off (M)');
+}
+
+/* ---------- View ---------- */
+var raf = 0, settleT = 0, pendingMove = false;
+function clamp(v, lo, hi) { return Math.min(hi, Math.max(lo, v)); }
+function fitZoom() {
+  var L = LAYOUT; if (!L || CANVAS.w < 60 || CANVAS.h < 60) return 1;
+  return Math.min(1, (CANVAS.w - 48) / L.W, (CANVAS.h - 48) / L.H);
+}
+function zMin() { return Math.min(fitZoom(), 0.5); }
+function clampView() {
+  var L = LAYOUT; if (!L) return;
+  var z = VW.z;
+  VW.x = clamp(VW.x, 48 - L.W * z, CANVAS.w - 48);
+  VW.y = clamp(VW.y, 48 - L.H * z, CANVAS.h - 48);
+}
+function apply() {
+  raf = 0;
+  if (!world) return;
+  world.setAttribute('transform', 'translate(' + VW.x + ' ' + VW.y + ') scale(' + VW.z + ')');
+  miniRect();
+  $('#z-pct').textContent = Math.round(VW.z * 100) + '%';
+}
+function kick(moving) {
+  clampView();
+  if (moving) svg.dataset.moving = '1';
+  if (!raf) raf = requestAnimationFrame(apply);
+  clearTimeout(settleT);
+  settleT = setTimeout(settle, 120);
+}
+function settle() {
+  delete svg.dataset.moving;
+  labels();
+  mapUpdate();
+  guardMap();
+  if (!tip.hidden && tip.dataset.for) tipFor(tip.dataset.for);
+}
+function now() { clearTimeout(settleT); if (raf) { cancelAnimationFrame(raf); raf = 0; } clampView(); apply(); settle(); }
+function setZoom(z, cx, cy, moving) {
+  z = clamp(z, zMin(), 1.5);
+  var keepFocus = false;
+  if (cx === undefined) {
+    var r0 = S.focus && document.activeElement && document.activeElement.closest && document.activeElement.closest('.gsv') ? screenRect(S.focus) : null;
+    if (r0) { cx = (r0.l + r0.r) / 2; cy = (r0.t + r0.b) / 2; keepFocus = true; }
+    else { cx = CANVAS.w / 2; cy = CANVAS.h / 2; }
+  }
+  var wx = (cx - VW.x) / VW.z, wy = (cy - VW.y) / VW.z;
+  VW.z = z; VW.x = cx - wx * z; VW.y = cy - wy * z;
+  S.fitLocked = false;
+  if (moving) kick(true); else now();
+  if (keepFocus) reveal(S.focus, 48);
+}
+function fitAll() {
+  VW.z = fitZoom(); VW.x = 24; VW.y = 24; S.fitLocked = true;
+  now();
+}
+function fitBox(ids) {
+  var L = LAYOUT, x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  ids.forEach(function (id) { var v = L.verts.get(id); if (!v) return; x0 = Math.min(x0, v.x); y0 = Math.min(y0, v.y); x1 = Math.max(x1, v.x + v.w); y1 = Math.max(y1, v.y + v.h); });
+  if (x0 === Infinity) return;
+  var z = clamp(Math.min(1, (CANVAS.w - 48) / (x1 - x0), (CANVAS.h - 48) / (y1 - y0)), zMin(), 1.5);
+  VW.z = z; VW.x = (CANVAS.w - (x1 - x0) * z) / 2 - x0 * z; VW.y = (CANVAS.h - (y1 - y0) * z) / 2 - y0 * z;
+  S.fitLocked = false; now();
+}
+function fitMatches() {
+  if (!S.matches.length) return;
+  fitBox(S.matches.map(function (n) { return LAYOUT.vis(n); }));
+}
+function screenRect(id) {
+  var v = LAYOUT.verts.get(id); if (!v) return null;
+  var z = VW.z; return { l: v.x * z + VW.x, t: v.y * z + VW.y, r: (v.x + v.w) * z + VW.x, b: (v.y + v.h) * z + VW.y };
+}
+function mapRect() {
+  var m = $('#map'); if (m.hidden) return null;
+  return { l: CANVAS.w - 8 - 176, t: CANVAS.h - 8 - 112, r: CANVAS.w - 8, b: CANVAS.h - 8 };
+}
+function overlapsMap(r) { var m = mapRect(); return m && r.l < m.r && r.r > m.l && r.t < m.b && r.b > m.t ? m : null; }
+function reveal(id, margin) {
+  var r = screenRect(id); if (!r) return;
+  var dx = 0, dy = 0, m = margin;
+  var fw = r.r - r.l, fh = r.b - r.t;
+  if (fw + 2 * m > CANVAS.w) dx = (CANVAS.w - fw) / 2 - r.l;
+  else if (r.l < m) dx = m - r.l; else if (r.r > CANVAS.w - m) dx = CANVAS.w - m - r.r;
+  if (fh + 2 * m > CANVAS.h) dy = (CANVAS.h - fh) / 2 - r.t;
+  else if (r.t < m) dy = m - r.t; else if (r.b > CANVAS.h - m) dy = CANVAS.h - m - r.b;
+  VW.x += dx; VW.y += dy;
+  var after = { l: r.l + dx, r: r.r + dx, t: r.t + dy, b: r.b + dy }, mr = overlapsMap(after);
+  if (mr) {
+    var left = after.r - mr.l + 8, up0 = after.b - mr.t + 8;
+    if (up0 < left) VW.y -= up0; else VW.x -= left;
+  }
+  if (dx || dy || mr) now();
+}
+function guardMap() {
+  if (!S.focus || !document.activeElement || !document.activeElement.closest || !document.activeElement.closest('.gsv')) return;
+  var r = screenRect(S.focus); if (r && overlapsMap(r)) reveal(S.focus, 0);
+}
+
+/* ---------- Tooltip ---------- */
+var tipT = 0;
+var tip = $('#tip');
+function tipFor(id, at) {
+  var v = LAYOUT.verts.get(id); if (!v) { tip.hidden = true; return; }
+  if (v.type !== 'task') { tip.hidden = true; return; }
+  var it = BY.get(v.n);
+  tip.innerHTML = esc(it.n + ' · ' + it.title) + '<span class="s">' + esc(HAS_STATES ? it.word : afterText(it)) + '</span>';
+  tip.hidden = false;
+  var r = screenRect(id), w = tip.offsetWidth, h = tip.offsetHeight;
+  var x = at ? at.x + 12 : r.l, y = at ? at.y + 16 : r.t - h - 6;
+  if (y < 4) y = (at ? at.y : r.b) + 6;
+  tip.style.left = clamp(x, 4, Math.max(4, CANVAS.w - w - 4)) + 'px';
+  tip.style.top = clamp(y, 4, Math.max(4, CANVAS.h - h - 4)) + 'px';
+}
+function tipHide() { clearTimeout(tipT); tip.hidden = true; }
+
+/* ---------- Selection, details, status band ---------- */
+function select(n) {
+  S.sel = n;
+  highlight(); band(); listSync();
+  if (n) { var it = BY.get(n); announce('Task ' + n + ' selected. ' + (it.deps.length ? 'Needs ' + list5(it.deps) + '. ' : '') + (dependents.get(n).length ? 'Unblocks ' + list5(dependents.get(n)) + '.' : '')); }
+}
+function openDetails(n) {
+  if (!n) return;
+  S.detail = n; if (!S.sel) S.sel = n; S.lastOpened = 'details';
+  highlight(); arrange(); detailsRender(); band();
+}
+function closeDetails() {
+  S.detail = null; arrange(); detailsRender(); band();
+  var g = focusEl(); if (g) g.focus({ preventScroll: true });
+}
+function detailsRender() {
+  var d = $('#det');
+  if (!S.detail) { d.hidden = true; return; }
+  var it = BY.get(S.detail); d.hidden = false;
+  var deps0 = it.deps.length ? it.deps.map(function (x) { return '<button class="lnk-n" data-go="' + x + '">Task ' + x + '</button>'; }).join(', ') : 'None, this task starts first';
+  var unbl = dependents.get(it.n).length ? dependents.get(it.n).map(function (x) { return '<button class="lnk-n" data-go="' + x + '">Task ' + x + '</button>'; }).join(', ') : 'Nothing waits for this task';
+  var stateLine = HAS_STATES ? '<span class="st ' + it.tone + '"><i class="i s12 i-' + it.icon + '"></i>' + esc(it.word) + '</span>' : '<span class="muted">' + esc(afterText(it)) + '</span>';
+  d.innerHTML = '<div class="gv-det-h">' + (A.replaced ? '<button class="btn btn-sm" id="det-back"><i class="i s14 i-arrow-left"></i>Back to graph</button>' : '') + '<span>Task ' + it.n + ' of ' + N + '</span><span class="grow"></span><button class="ib" id="det-x" aria-label="Close details"><i class="i s14 i-x"></i></button></div>' +
+    '<div class="gv-det-b"><h3>' + esc(it.title) + '</h3><dl style="margin:0"><dt>State</dt><dd>' + stateLine + '</dd><dt>Depends on</dt><dd>' + deps0 + '</dd><dt>Unblocks</dt><dd>' + unbl + '</dd><dt>Description</dt><dd>' + esc(it.desc) + '</dd><dt>Acceptance</dt><dd>' + esc(it.acc) + '</dd></dl></div>' +
+    '<div class="gv-det-f"><a class="btn btn-sm btn-line" href="task.html">Open task<i class="i s14 i-arrow-right"></i></a></div>';
+}
+function band() {
+  var b = $('#band'), html = '', active = !!S.query.trim(), noRes = (active || S.status.size) && !S.matches.length;
+  if (PLAN_MODE === 'empty') { b.hidden = true; return; }
+  b.hidden = false;
+  if (S.view === 'graph' && noRes) {
+    var msg = active ? 'No task matches "' + esc(S.query.trim()) + '"' + (S.status.size ? ' with this status.' : '.') : 'No task has this status.';
+    html = '<span class="tx">' + msg + '</span><span class="sp"></span>' + (active ? '<button class="btn btn-sm btn-line" id="b-clear">Clear search</button>' : '') + (S.status.size ? '<button class="btn btn-sm btn-line" id="b-clears">Clear status</button>' : '');
+  } else if (S.sel && S.view === 'graph') {
+    var it = BY.get(S.sel), n0 = dependents.get(S.sel);
+    var line = 'Task ' + it.n + (it.deps.length ? ' · Needs ' + list5(it.deps) : ' · Starts first') + (n0.length ? ' · Unblocks ' + list5(n0) : '');
+    html = '<span class="tx">' + line + '</span><span class="trunc muted ti" title="' + esc(it.title) + '">' + esc(it.title) + '</span><span class="sp"></span>' +
+      '<span class="seg" role="group" aria-label="Links shown"><button data-c="0" aria-current="' + !S.chain + '">Direct</button><button data-c="1" aria-current="' + S.chain + '">Whole chain</button></span>' +
+      (HAS_STATES && it.fam === 'ready' ? '<a class="btn btn-sm btn-primary" href="task.html">Start</a>' : '') +
+      (HAS_STATES ? '<a class="btn btn-sm btn-line" href="task.html">Open task</a>' : '') +
+      '<button class="btn btn-sm btn-line" id="b-det">Details</button><button class="btn btn-sm btn-line" id="b-req">Request changes</button>';
+  } else if (STATE_MODE === 'draft' && S.view === 'graph') {
+    html = '<span class="tx">Change titles and dependencies in List.</span><span class="sp"></span><button class="btn btn-sm btn-line" id="b-list">Open list</button>';
+  } else {
+    html = '<span class="tx">' + counts() + '</span><span class="sp"></span>' + (S.view === 'graph' ? '<span class="cap muted" style="white-space:nowrap">Every task ends at Ready to merge and waits for you.</span>' : '') + (STATE_MODE === 'past' ? '' : '<button class="btn btn-sm btn-line" id="b-req">Request changes</button>');
+  }
+  b.innerHTML = html;
+  reqSync();
+}
+function counts() { return N + (N === 1 ? ' task in ' : ' tasks in ') + LAYOUT.nL + (LAYOUT.nL === 1 ? ' layer' : ' layers'); }
+
+/* ---------- Focus ---------- */
+function focusEl() { var r = DOM.nodes.get(S.focus) || DOM.bands.get(S.focus); return r ? r.g : null; }
+function focusId(id) {
+  S.focus = id; roving();
+  var g = focusEl(); if (g) g.focus({ preventScroll: true });
+}
+function nbrs(id, dir) {
+  var L = LAYOUT, src = id[0] === 't' ? [+id.slice(1)] : LAYOUT.cols.filter(function (c) { return 'b' + c.L === id; })[0].tasks;
+  var out = new Set();
+  src.forEach(function (n) { (dir > 0 ? dependents.get(n) : BY.get(n).deps).forEach(function (m) { var v = L.vis(m); if (v !== id) out.add(v); }); });
+  var c = L.verts.get(id), cx = c.x + c.w / 2, cy = c.y + c.h / 2;
+  return Array.from(out).map(function (x) { var v = L.verts.get(x); return { id: x, d: Math.hypot(v.x + v.w / 2 - cx, v.y + v.h / 2 - cy), n: v.num }; }).sort(function (a, b) { return a.d - b.d || a.n - b.n; }).map(function (x) { return x.id; });
+}
+function sameLayer(id) {
+  var L = LAYOUT, v = L.verts.get(id), arr = [];
+  L.verts.forEach(function (o) { if (o.layer === v.layer && o.type !== 'dummy') arr.push(o); });
+  arr.sort(function (a, b) { return a.y - b.y || a.x - b.x; });
+  return arr.map(function (x) { return x.id; });
+}
+var cyc = { origin: null, dir: 0, i: 0 };
+function navigate(key, shift) {
+  var id = S.focus; if (!id) return;
+  if (key === 'Left' || key === 'Right') {
+    var dir = key === 'Right' ? 1 : -1;
+    if (shift) {
+      if (cyc.origin === null || cyc.dir !== dir) { cyc = { origin: id, dir: dir, i: -1 }; }
+      var list = nbrs(cyc.origin, dir); if (!list.length) return;
+      cyc.i = (cyc.i + 1) % list.length; focusId(list[cyc.i]); return;
+    }
+    cyc.origin = null;
+    var l2 = nbrs(id, dir); if (l2.length) focusId(l2[0]);
+    return;
+  }
+  cyc.origin = null;
+  var arr = sameLayer(id), i = arr.indexOf(id), j = key === 'Up' ? i - 1 : i + 1;
+  if (j >= 0 && j < arr.length) focusId(arr[j]);
+}
+
+/* ---------- Layers ---------- */
+function setColl(L, on, step) {
+  var col = LAYOUT.cols.filter(function (c) { return c.L === L; })[0];
+  var wx = col.x, wy = col.top, sx = wx * VW.z + VW.x, sy = wy * VW.z + VW.y;
+  if (on) S.coll.add(L); else S.coll.delete(L);
+  render();
+  var c2 = LAYOUT.cols.filter(function (c) { return c.L === L; })[0];
+  VW.x = sx - c2.x * VW.z; VW.y = sy - c2.top * VW.z;
+  if (!S.fitLocked) now(); else fitAll();
+  S.fitLocked = false;
+  layersRender(); runSearch();
+  if (on && S.focus && !LAYOUT.verts.get(S.focus)) focusId('b' + L);
+  if (!on && step === undefined) announce('Layer ' + (L + 1) + ' expanded.');
+  if (on) announce('Layer ' + (L + 1) + ' collapsed.');
+}
+function setAll(fn) {
+  var had = new Set(S.coll);
+  LAYOUT.cols.forEach(function (c) { if (fn(c)) S.coll.add(c.L); else S.coll.delete(c.L); });
+  if (had.size === S.coll.size && Array.from(had).every(function (x) { return S.coll.has(x); })) return;
+  render(); fitAll(); layersRender(); runSearch();
+}
+function layersRender() {
+  var h = '';
+  LAYOUT.cols.forEach(function (c) {
+    h += '<label class="mi"><input type="checkbox" data-layer="' + c.L + '"' + (c.collapsed ? '' : ' checked') + '><span class="grow">Layer ' + (c.L + 1) + '</span><span class="ct">' + c.tasks.length + ' tasks</span></label>';
+  });
+  $('#layer-rows').innerHTML = h;
+  var a = '<button class="mi" id="l-col">Collapse all</button><button class="mi" id="l-exp">Expand all</button>';
+  if (HAS_STATES) a += '<button class="mi" id="l-fin">Collapse finished layers</button>';
+  $('#layer-actions').innerHTML = a;
+}
+
+/* ---------- Search and status ---------- */
+function runSearch(step) {
+  var query = S.query.trim().toLowerCase(), byNum = null;
+  if (/^#?\d+$/.test(query)) byNum = +query.replace('#', '');
+  var ms = ITEMS.filter(function (it) {
+    if (S.status.size && !S.status.has(it.fam)) return false;
+    if (!query) return true;
+    return (byNum !== null && it.n === byNum) || it.title.toLowerCase().indexOf(query) >= 0 || String(it.n) === query;
+  }).map(function (it) { return it.n; });
+  if (byNum !== null && ms.indexOf(byNum) > 0) { ms.splice(ms.indexOf(byNum), 1); ms.unshift(byNum); }
+  var active = !!query || S.status.size > 0;
+  S.matches = active ? ms : [];
+  if (active && S.matches.length) { if (S.cur < 0 || S.cur >= S.matches.length || step) { S.cur = 0; } }
+  else S.cur = -1;
+  if (step === 'keep') S.cur = S.matches.length ? 0 : -1;
+  countUpdate();
+  highlight(); band();
+  if (query && S.cur >= 0) {
+    var cur = S.matches[S.cur], v = LAYOUT.vis(cur);
+    reveal(v, 12);
+    var it = BY.get(cur);
+    announce(S.matches.length + (S.matches.length === 1 ? ' match. ' : ' matches. ') + (S.cur + 1) + ' of ' + S.matches.length + ', task ' + it.n + ', ' + it.title + '.');
+  }
+}
+function countUpdate() {
+  var c = $('#count'), active = !!S.query.trim(), has = S.matches.length > 0;
+  if (active || S.status.size) {
+    if (!has) c.textContent = 'No matches';
+    else if (active) c.textContent = (S.cur + 1) + ' of ' + S.matches.length;
+    else c.textContent = S.matches.length + ' of ' + N;
+  } else c.textContent = '';
+  ['#prev', '#next'].forEach(function (s) {
+    var b = $(s), off = !has;
+    b.setAttribute('aria-disabled', off);
+    b.title = off ? (active || S.status.size ? 'No tasks match' : 'Type in the search box first') : (s === '#prev' ? 'Previous match (Shift+Enter)' : 'Next match (Enter)');
+  });
+  $('#fit-m').classList.toggle('off', !has);
+  $('#fit-m').setAttribute('aria-hidden', !has);
+  $('#fit-m').tabIndex = has ? 0 : -1;
+  $('#status-b').textContent = S.status.size ? 'Status · ' + S.status.size : 'Status';
+}
+function step(dir) {
+  if (!S.matches.length) return;
+  S.cur = (S.cur + dir + S.matches.length) % S.matches.length;
+  var n = S.matches[S.cur], L = LAYOUT.depth.get(n);
+  if (S.coll.has(L)) { setColl(L, false, true); announce('Layer ' + (L + 1) + ' opened.'); }
+  countUpdate(); highlight(); band();
+  reveal('t' + n, 12);
+  var it = BY.get(n);
+  if (S.query.trim()) announce((S.cur + 1) + ' of ' + S.matches.length + ', task ' + it.n + ', ' + it.title + '.');
+}
+var sT = 0;
+function clearSearch() { $('#q').value = ''; S.query = ''; S.cur = -1; runSearch(); }
+function statusRender() {
+  var c = {}; ITEMS.forEach(function (it) { c[it.fam] = (c[it.fam] || 0) + 1; });
+  var h = '';
+  FAMS.forEach(function (f) {
+    if (!c[f[0]]) return;
+    h += '<label class="mi"><input type="checkbox" data-f="' + f[0] + '"' + (S.status.has(f[0]) ? ' checked' : '') + '><i class="i s14 i-' + f[2] + '"></i><span class="grow">' + f[1] + '</span><span class="ct">' + c[f[0]] + '</span></label>';
+  });
+  h += '<div class="mi-sep"></div><button class="mi" id="s-clear"><span class="grow">Clear status</span></button>';
+  $('#status-rows').innerHTML = h;
+}
+
+/* ---------- Panels ---------- */
+function minMain() { return S.view === 'graph' ? 640 : 420; }
+/* The conversation opened last gives up only when the plan pane would drop below its minimum with Sidebar and Details gone. */
+function convRoom() { return window.innerWidth - 340 >= minMain(); }
+function reqSync() {
+  var b = $('#b-req'); if (!b) return;
+  if (convRoom()) { b.removeAttribute('aria-disabled'); b.removeAttribute('title'); return; }
+  b.setAttribute('aria-disabled', 'true');
+  b.title = 'Widen the window to ' + (minMain() + 340) + ' px to show the conversation';
+}
+function requestChanges() {
+  if (!convRoom()) { announce($('#b-req').title + '.'); return; }
+  S.prefConv = true; S.lastOpened = 'conv';
+  if (S.full) setFull(false);
+  else { arrange(); measure(); if (S.fitLocked) fitAll(); else now(); }
+  listRender();
+  $('#plan-input').focus();
+}
+function arrange() {
+  var w = window.innerWidth, h = window.innerHeight;
+  var sb = S.prefSb, conv = S.prefConv, det = S.detail !== null;
+  var minW = minMain();
+  var full = S.full && S.view === 'graph';
+  if (full) { sb = false; conv = false; }
+  var cw = 400;
+  function avail() { return w - (sb ? 260 : 0) - (det ? 300 : 0); }
+  function width() { if (w >= 1800) return 520; return avail() - 400 >= minW ? 400 : 340; }
+  function g() { cw = width(); return avail() - (conv ? cw : 0); }
+  if (!full) {
+    var guard = 0;
+    while (g() < minW && guard++ < 6) {
+      if (S.lastOpened === 'conv') { if (det) { det = false; S.detail = null; } else if (sb) sb = false; else if (conv) conv = false; else break; }
+      else if (S.lastOpened === 'sb') { if (det) { det = false; S.detail = null; } else if (conv) conv = false; else if (sb) sb = false; else break; }
+      else { if (conv) conv = false; else if (sb) sb = false; else break; }
+    }
+  }
+  var G = g();
+  var replaced = det && G < minW;
+  A = { sb: sb, conv: conv, det: det, replaced: replaced, G: G };
+  $('#pt-sidebar').checked = !sb;
+  document.body.toggleAttribute('data-full', full);
+  $('#conv').hidden = !conv;
+  $('#sp-body').style.gridTemplateColumns = conv ? cw + 'px minmax(0,1fr)' : 'minmax(0,1fr)';
+  $('#gv-col').hidden = replaced;
+  var d = $('#det'); d.classList.toggle('wide', replaced);
+  var hideChrome = full;
+  document.querySelector('.sp-h').hidden = hideChrome;
+  document.querySelector('.tabs').hidden = hideChrome;
+  var short = h < 800 && S.view === 'graph';
+  $('#info-strip').hidden = hideChrome || short;
+  $('#gv-head').hidden = full;
+  $('#exit-full').hidden = !full; $('#bar-title').hidden = !full;
+  $('#conv-t').setAttribute('aria-pressed', conv);
+  var chip = $('#conv-chip');
+  chip.hidden = conv || full;
+  chip.innerHTML = '<i class="i s12 i-question st-warn"></i>Question waiting';
+  chip.className = 'chip st-warn';
+  $('#full-t').innerHTML = '<i class="i s14 i-expand"></i>' + (full ? 'Exit full view' : 'Full view');
+  $('#full-t').hidden = full;
+  detailsRender();
+  requestAnimationFrame(toolbarFit);
+}
+function toolbarFit() {
+  var bar = $('#bar'); if (bar.hidden || !bar.clientWidth) return;
+  var g = bar.clientWidth, tier = g < 640 ? 3 : g < 760 ? 2 : 0;
+  bar.dataset.tier = tier;
+  while (bar.scrollWidth > bar.clientWidth + 1 && tier < 3) { tier++; bar.dataset.tier = tier; }
+}
+
+/* ---------- Toolbar visibility by plan size ---------- */
+function planChrome() {
+  var bar = $('#bar'), seg0 = $('#view-seg');
+  var layers = LAYOUT ? LAYOUT.nL : 0;
+  var hasSearch = N >= 8, hasStatus = HAS_STATES && N >= 8, hasLayers = N >= 13 && layers >= 2, hasMap = N > 1;
+  $('#s-wrap').hidden = !hasSearch; $('#count').hidden = !hasSearch; $('#prev').hidden = !hasSearch; $('#next').hidden = !hasSearch; $('#fit-m').hidden = !hasSearch;
+  $('#status-b').hidden = !hasStatus; $('#layers-b').hidden = !hasLayers; $('#map-t').hidden = !hasMap;
+  var sep = bar.querySelector('.gv-sep'); sep.hidden = !hasSearch || (!hasStatus && !hasLayers);
+  var mm = $('.t-m-status'), ml = $('.t-m-layers'), mp = $('.t-m-map');
+  mm.hidden = !hasStatus; ml.hidden = !hasLayers; mp.hidden = !hasMap;
+  $('#more').hidden = !(hasStatus || hasLayers || hasMap);
+  seg0.hidden = PLAN_MODE === 'empty';
+  bar.hidden = PLAN_MODE === 'empty' || S.view !== 'graph';
+  $('#canvas').hidden = S.view !== 'graph';
+  $('#gsv').style.display = PLAN_MODE === 'empty' ? 'none' : '';
+  $('#empty').hidden = PLAN_MODE !== 'empty';
+  $('#list').hidden = S.view !== 'list';
+  document.querySelectorAll('#view-seg [data-view]').forEach(function (b) { b.setAttribute('aria-current', b.dataset.view === S.view); });
+}
+
+var PLANV = STATE_MODE === 'past' ? 2 : 3;
+function headRender() {
+  var a = $('#head-actions'), name = $('#plan-name'), tag = $('#plan-tag');
+  var t = 'Plan v' + PLANV + (N ? ' · ' + N + (N === 1 ? ' task' : ' tasks') : '');
+  name.textContent = t; $('#bar-title').textContent = t;
+  tag.hidden = true;
+  if (STATE_MODE === 'past') { tag.hidden = false; tag.textContent = 'Past version · read only'; }
+  if (STATE_MODE === 'draft') { tag.hidden = false; tag.textContent = 'Draft · not saved'; }
+  var h = '';
+  if (STATE_MODE === 'created' || STATE_MODE === 'planning') h = '<button class="btn btn-sm" id="h-edit">Edit</button><button class="btn btn-sm" id="h-prev">Previous plan</button>';
+  else if (STATE_MODE === 'past') h = '<button class="btn btn-sm" id="h-back">Back to v3</button>';
+  else if (STATE_MODE === 'draft') h = '<button class="btn btn-sm" id="h-cancel">Cancel</button><button class="btn btn-sm btn-line" id="h-done">Done editing</button>';
+  a.innerHTML = N ? h : '';
+  var created = STATE_MODE === 'created';
+  $('#sp-state').innerHTML = created ? '<span class="st st-idle"><i class="i s12 i-check-circle"></i>' + N + ' tasks created from Plan v3</span>' : '<span class="st st-idle"><i class="i s12 i-pencil"></i>Planning</span>';
+  $('#sp-primary').textContent = created ? 'Run sprint' : 'Create ' + N + ' tasks from Plan v' + PLANV;
+  $('#info-text').textContent = created ? 'Sprint running in Manual mode. A task starts only when you start it, and every task ends at Ready to merge and waits for you.' : 'Sprint planning. No tasks are running, and nothing is spent on them until you create and start them.';
+  var done = ITEMS.filter(function (i) { return i.fam === 'done'; }).length;
+  $('#sb-count').textContent = created ? done + '/' + N : 'Planning';
+  $('#warn-strip').hidden = !q.get('warn');
+}
+
+function listRender() {
+  var el = $('#list');
+  if (S.view !== 'list' || PLAN_MODE === 'empty') { el.innerHTML = ''; return; }
+  var edit = STATE_MODE === 'draft', h = '<div class="pt-row th"><span>#</span><span>Task</span><span>Acceptance and checks</span><span>Depends on</span></div>';
+  ITEMS.forEach(function (it) {
+    var dep = HAS_STATES ? '<span class="st ' + it.tone + '"><i class="i s12 i-' + it.icon + '"></i>' + esc(it.word) + '</span>' : '<span class="muted">' + esc(afterText(it)) + '</span>';
+    if (edit) h += '<div class="pt-row" style="cursor:default"><span class="no">' + it.n + '</span><span><input class="inp" style="height:28px" value="' + esc(it.title) + '" aria-label="Task ' + it.n + ' title"></span><span class="ac">' + esc(it.acc) + '</span><span class="dep">' + dep + '</span></div>';
+    else h += '<button class="pt-row" data-n="' + it.n + '" aria-selected="' + (S.sel === it.n) + '"><span class="no">' + it.n + '</span><span><span class="tt">' + esc(it.title) + '</span><span class="ds">' + esc(it.desc) + '</span></span><span class="ac">' + esc(it.acc) + '</span><span class="dep">' + dep + '</span></button>';
+  });
+  h += inlineGraph();
+  el.innerHTML = h;
+}
+function listSync() {
+  if (S.view !== 'list') return;
+  $('#list').querySelectorAll('[data-n]').forEach(function (b) { var on = +b.dataset.n === S.sel; if ((b.getAttribute('aria-selected') === 'true') !== on) b.setAttribute('aria-selected', on); });
+}
+/* Inline graph keeps today's geometry, and only when its labels stay readable. */
+function inlineGraph() {
+  var nodeW = 120, nodeH = 34, colW = 176, rowH = 46, pad = 12, depth = LAYOUT.depth, cols = [];
+  ITEMS.forEach(function (it) { var d = depth.get(it.n); (cols[d] = cols[d] || []).push(it); });
+  var rows = Math.max.apply(null, cols.map(function (c) { return c.length; }));
+  var w = cols.length * colW - (colW - nodeW) + pad * 2, h = rows * rowH - (rowH - nodeH) + pad * 2;
+  var paneW = (S.sel ? A.G : A.G) - 24;
+  var scale = Math.min(1, paneW / w, 320 / h);
+  if (scale < 0.92) return '<div class="gv-open-row"><span>Dependency graph · ' + N + ' tasks in ' + LAYOUT.nL + ' layers</span><button class="btn btn-sm btn-line" data-view="graph">Open graph</button></div>';
+  var pos = new Map(), body = '';
+  cols.forEach(function (c, x) { c.forEach(function (it, y) { pos.set(it.n, [pad + x * colW, pad + y * rowH + (rows - c.length) * rowH / 2]); }); });
+  ITEMS.forEach(function (it) { it.deps.forEach(function (d) { var a = pos.get(d), b = pos.get(it.n), mx = (a[0] + nodeW + b[0]) / 2; body += '<path class="e" d="M' + (a[0] + nodeW) + ' ' + (a[1] + nodeH / 2) + 'C' + mx + ' ' + (a[1] + nodeH / 2) + ' ' + mx + ' ' + (b[1] + nodeH / 2) + ' ' + b[0] + ' ' + (b[1] + nodeH / 2) + '"/>'; }); });
+  ITEMS.forEach(function (it) { var p = pos.get(it.n); body += '<rect class="nd" x="' + p[0] + '" y="' + p[1] + '" width="' + nodeW + '" height="' + nodeH + '" rx="7"/><text x="' + (p[0] + 12) + '" y="' + (p[1] + 21) + '">' + esc(fitText(it.n + ' ' + it.title, nodeW - 20, 12)) + '</text>'; });
+  return '<div class="depg" aria-label="Dependency graph"><svg style="max-height:none;width:' + w + 'px;max-width:100%" viewBox="0 0 ' + w + ' ' + h + '" role="img" aria-label="Dependency graph, ' + N + ' tasks">' + body + '</svg></div>';
+}
+
+function setView(v) {
+  S.view = v; planChrome(); arrange(); listRender(); band();
+  if (v === 'graph') { measure(); if (S.fitLocked) fitAll(); else now(); }
+}
+
+function setFull(on) {
+  S.full = on; arrange(); band();
+  measure();
+  if (S.fitLocked) fitAll(); else now();
+  if (on) announce('Full view.'); else announce('Left full view.');
+}
+function measure() {
+  var r = canvas.getBoundingClientRect();
+  CANVAS.w = r.width; CANVAS.h = r.height;
+}
+
+/* ---------- Popovers: positioned from the opener so they work without anchor support ---------- */
+function openPop(id, opener) {
+  var p = $(id);
+  if (p.matches(':popover-open')) { p.hidePopover(); return; }
+  document.querySelectorAll('[popover]:popover-open').forEach(function (o) { o.hidePopover(); });
+  p.showPopover();
+  var r = opener.getBoundingClientRect(), w = p.offsetWidth, h = p.offsetHeight;
+  p.style.left = clamp(r.left, 6, window.innerWidth - w - 6) + 'px';
+  var top = r.bottom + 4; if (top + h > window.innerHeight - 6) top = Math.max(6, r.top - h - 4);
+  p.style.top = top + 'px';
+  p._op = opener;
+  var first = p.querySelector('input,button'); if (first) first.focus({ preventScroll: true });
+}
+document.querySelectorAll('.gv-pop').forEach(function (p) {
+  p.addEventListener('toggle', function (e) {
+    if (e.newState !== 'closed') return;
+    if (p._op && document.contains(p._op) && !p.querySelector(':focus')) p._op.focus({ preventScroll: true });
+    p._op = null;
+  });
+});
+
+/* ---------- Pointer ---------- */
+var down = null, lastClick = { id: null, t: 0 };
+canvas.addEventListener('pointerdown', function (e) {
+  if (e.target.closest('#map') || e.button !== 0) return;
+  tipHide();
+  down = { x: e.clientX, y: e.clientY, vx: VW.x, vy: VW.y, moved: false, target: e.target, id: e.pointerId };
+  canvas.setPointerCapture(e.pointerId);
+  delete document.body.dataset.keyboard;
+});
+canvas.addEventListener('pointermove', function (e) {
+  if (down) {
+    var dx = e.clientX - down.x, dy = e.clientY - down.y;
+    if (!down.moved && Math.hypot(dx, dy) < 4) return;
+    if (!down.moved) { down.moved = true; canvas.dataset.pan = '1'; }
+    VW.x = down.vx + dx; VW.y = down.vy + dy; S.fitLocked = false;
+    kick(true);
+    return;
+  }
+  var r = canvas.getBoundingClientRect(), n = e.target.closest ? e.target.closest('.n') : null;
+  if (n) {
+    var id = n.dataset.id, at = { x: e.clientX - r.left, y: e.clientY - r.top };
+    if (tip.dataset.for !== id) {
+      tipHide(); tip.dataset.for = id;
+      tipT = setTimeout(function () { tipFor(id, at); }, 300);
+    } else if (!tip.hidden) { tipFor(id, at); }
+  } else { tipHide(); delete tip.dataset.for; }
+});
+canvas.addEventListener('pointerleave', function () { tipHide(); delete tip.dataset.for; });
+canvas.addEventListener('pointerup', function (e) {
+  var d = down; if (!d) return;
+  down = null; delete canvas.dataset.pan;
+  try { canvas.releasePointerCapture(d.id); } catch (x) {}
+  if (d.moved) return;
+  var t = d.target, lh = t.closest && t.closest('.lh'), bd = t.closest && t.closest('.band'), nd = t.closest && t.closest('.n');
+  if (lh) { var L = +lh.dataset.l; setColl(L, true); return; }
+  if (bd) { setColl(+bd.dataset.l, false); focusId(LAYOUT.vis(LAYOUT.cols.filter(function (c) { return c.L === +bd.dataset.l; })[0].tasks[0])); return; }
+  if (nd) {
+    var id = nd.dataset.id, n = +id.slice(1), now0 = Date.now();
+    focusId(id);
+    if (lastClick.id === id && now0 - lastClick.t < 350) { openDetails(n); lastClick = { id: null, t: 0 }; }
+    else { select(n); lastClick = { id: id, t: now0 }; }
+    return;
+  }
+  if (S.sel) select(null);
+});
+canvas.addEventListener('wheel', function (e) {
+  e.preventDefault(); tipHide();
+  if (e.ctrlKey) {
+    var r = canvas.getBoundingClientRect();
+    setZoom(VW.z * Math.exp(-e.deltaY * 0.0022), e.clientX - r.left, e.clientY - r.top, true);
+  } else if (e.shiftKey) { VW.x -= e.deltaY; S.fitLocked = false; kick(true); }
+  else { VW.y -= e.deltaY; VW.x -= e.deltaX; S.fitLocked = false; kick(true); }
+}, { passive: false });
+
+/* Minimap */
+var mapEl = $('#map'), mapDrag = null;
+function mapTo(e) {
+  var r = mapEl.getBoundingClientRect(), mx = (e.clientX - r.left), my = (e.clientY - r.top);
+  var wx = (mx - mapOX) / mapScale, wy = (my - mapOY) / mapScale;
+  VW.x = CANVAS.w / 2 - wx * VW.z; VW.y = CANVAS.h / 2 - wy * VW.z; S.fitLocked = false;
+}
+mapEl.addEventListener('pointerdown', function (e) { mapDrag = e.pointerId; mapEl.setPointerCapture(e.pointerId); mapTo(e); kick(true); e.stopPropagation(); });
+mapEl.addEventListener('pointermove', function (e) { if (mapDrag !== null) { mapTo(e); kick(true); } });
+mapEl.addEventListener('pointerup', function (e) { if (mapDrag !== null) { mapEl.releasePointerCapture(mapDrag); mapDrag = null; } });
+mapEl.addEventListener('keydown', function (e) {
+  var d = 80, h = { ArrowLeft: [d, 0], ArrowRight: [-d, 0], ArrowUp: [0, d], ArrowDown: [0, -d] }[e.key];
+  if (h) { e.preventDefault(); e.stopPropagation(); VW.x += h[0]; VW.y += h[1]; S.fitLocked = false; now(); }
+});
+
+/* ---------- Keyboard ---------- */
+var svgEl = svg;
+svgEl.addEventListener('focusin', function (e) {
+  var g = e.target.closest('.n,.band'); if (!g) return;
+  S.focus = g.dataset.id; roving(); ringUpdate(); pins();
+  if (document.body.dataset.keyboard) {
+    reveal(S.focus, 48);
+    tipFor(S.focus);
+    if (g.classList.contains('n')) { tip.dataset.for = S.focus; }
+  }
+});
+svgEl.addEventListener('focusout', function (e) {
+  if (!e.relatedTarget || !e.relatedTarget.closest || !e.relatedTarget.closest('.gsv')) { tipHide(); delete tip.dataset.for; }
+});
+function typing(t) { return t && t.matches && t.matches('input:not([type=checkbox]),textarea'); }
+function currentN() { return S.focus && S.focus[0] === 't' ? +S.focus.slice(1) : null; }
+document.addEventListener('keydown', function (e) {
+  var k = e.key, t = e.target;
+  if (['Tab', 'ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', ' ', 'Enter', 'Home', 'End'].indexOf(k) >= 0) document.body.dataset.keyboard = '1';
+  if ((e.ctrlKey || e.metaKey) && (k === 'b' || k === 'B')) { e.preventDefault(); toggleSidebar(); return; }
+  if ((e.ctrlKey || e.metaKey) && k === '\\') { e.preventDefault(); toggleConv(); return; }
+  if (document.querySelector('[popover]:popover-open')) return;
+  if (t && t.closest && t.closest('#det') && k !== 'Escape') return;
+  if ((k === '/' && !typing(t)) || ((e.ctrlKey || e.metaKey) && (k === 'f' || k === 'F'))) {
+    if (S.view === 'graph' && N >= 8) { e.preventDefault(); $('#q').focus(); $('#q').select(); }
+    return;
+  }
+  if (k === 'Escape') {
+    if (typing(t) && t.id !== 'q') return;
+    if (t.id === 'q') return;
+    if (S.query.trim()) { clearSearch(); return; }
+    if (S.detail !== null) { closeDetails(); return; }
+    if (S.sel) { select(null); return; }
+    if (S.full) { setFull(false); return; }
+    return;
+  }
+  if (typing(t) || S.view !== 'graph' || PLAN_MODE === 'empty') return;
+  var inCanvas = t === document.body || (t.closest && t.closest('#canvas'));
+  if (!inCanvas) return;
+  var cur = currentN();
+  if (e.ctrlKey || e.metaKey) {
+    var pan = { ArrowLeft: [80, 0], ArrowRight: [-80, 0], ArrowUp: [0, 80], ArrowDown: [0, -80] }[k];
+    if (pan) { e.preventDefault(); VW.x += pan[0]; VW.y += pan[1]; S.fitLocked = false; now(); }
+    return;
+  }
+  if (e.altKey) return;
+  var nav = { ArrowRight: 'Right', ArrowLeft: 'Left', ArrowUp: 'Up', ArrowDown: 'Down' }[k];
+  if (nav) {
+    e.preventDefault();
+    if (t === document.body) { focusId(S.focus); return; }
+    navigate(nav, e.shiftKey);
+    return;
+  }
+  switch (k) {
+    case 'Home': e.preventDefault(); focusId(LAYOUT.vis(ITEMS[0].n)); break;
+    case 'End': e.preventDefault(); focusId(LAYOUT.vis(ITEMS[N - 1].n)); break;
+    case ' ': e.preventDefault(); if (cur) select(cur); break;
+    case 'Enter':
+      e.preventDefault();
+      if (S.focus && S.focus[0] === 'b') { var lb = +S.focus.slice(1); setColl(lb, false); focusId(LAYOUT.vis(LAYOUT.cols.filter(function (c) { return c.L === lb; })[0].tasks[0])); }
+      else if (cur) openDetails(cur);
+      break;
+    case 'c': case 'C': {
+      if (!S.focus) break;
+      if (S.focus[0] === 'b') setColl(+S.focus.slice(1), false);
+      else setColl(LAYOUT.depth.get(cur), true);
+      break;
+    }
+    case '+': case '=': e.preventDefault(); setZoom(VW.z * 1.25); break;
+    case '-': case '_': e.preventDefault(); setZoom(VW.z / 1.25); break;
+    case '0': e.preventDefault(); setZoom(1); break;
+    case 'f': e.preventDefault(); fitAll(); break;
+    case 'F': e.preventDefault(); fitMatches(); break;
+    case 'm': case 'M': e.preventDefault(); toggleMap(); break;
+    case 't': case 'T': e.preventDefault(); toggleChain(); break;
+    case 'e': case 'E': e.preventDefault(); setFull(!S.full); break;
+  }
+});
+function toggleMap() { var on = mapOn(); S.mapExplicit = true; S.map = !on; mapUpdate(); guardMap(); }
+function toggleChain() { if (!S.sel) return; S.chain = !S.chain; highlight(); band(); announce(S.chain ? 'Whole chain.' : 'Direct links.'); }
+function toggleSidebar() {
+  if (S.full) return;
+  var shown = A.sb; S.prefSb = !shown; if (S.prefSb) S.lastOpened = 'sb';
+  arrange(); listRender(); measure(); if (S.fitLocked) fitAll(); else now();
+}
+function toggleConv() {
+  if (S.full) return;
+  var shown = A.conv; S.prefConv = !shown; if (S.prefConv) S.lastOpened = 'conv';
+  arrange(); listRender(); measure(); if (S.fitLocked) fitAll(); else now();
+}
+
+$('#pt-sidebar').addEventListener('change', function () {
+  if (S.full) { this.checked = true; return; }
+  S.prefSb = !this.checked; if (S.prefSb) S.lastOpened = 'sb'; arrange(); listRender(); measure(); if (S.fitLocked) fitAll(); else now();
+});
+document.addEventListener('click', function (e) {
+  var t = e.target, c = t.closest && t.closest('button,label,a');
+  if (!c) return;
+  if (c.id === 'conv-t' || c.id === 'conv-chip') { toggleConv(); return; }
+  if (c.dataset.view) { setView(c.dataset.view); return; }
+  if (c.hasAttribute('data-seg')) { c.parentNode.querySelectorAll('button').forEach(function (b) { b.setAttribute('aria-current', b === c); }); return; }
+  if (c.dataset.c !== undefined) { S.chain = c.dataset.c === '1'; highlight(); band(); return; }
+  if (c.dataset.go) { var n = +c.dataset.go; if (S.coll.has(LAYOUT.depth.get(n))) setColl(LAYOUT.depth.get(n), false); S.sel = n; S.detail = n; highlight(); detailsRender(); band(); document.body.dataset.keyboard = document.body.dataset.keyboard || ''; focusId(LAYOUT.vis(n)); reveal('t' + n, 48); return; }
+  if (c.dataset.n) { select(+c.dataset.n); var dbl = lastClick.id === 'l' + c.dataset.n && Date.now() - lastClick.t < 350; lastClick = { id: 'l' + c.dataset.n, t: Date.now() }; if (dbl) openDetails(+c.dataset.n); return; }
+  if (c.dataset.z) {
+    $('#m-zoom').hidePopover();
+    if (c.dataset.z === 'fit') fitAll(); else if (c.dataset.z === 'match') fitMatches(); else setZoom(+c.dataset.z);
+    return;
+  }
+  var id = c.id;
+  if (id === 'prev') { if (S.matches.length) step(-1); return; }
+  if (id === 'next') { if (S.matches.length) step(1); return; }
+  if (id === 'fit-m') { fitMatches(); return; }
+  if (id === 'fit') { fitAll(); return; }
+  if (id === 'z-in') { setZoom(VW.z * 1.25); return; }
+  if (id === 'z-out') { setZoom(VW.z / 1.25); return; }
+  if (id === 'z-pct') { openPop('#m-zoom', c); return; }
+  if (id === 'map-t') { toggleMap(); return; }
+  if (id === 'full-t' || id === 'exit-full') { setFull(!S.full); return; }
+  if (id === 'status-b') { statusRender(); openPop('#m-status', c); return; }
+  if (id === 'layers-b') { layersRender(); openPop('#m-layers', c); return; }
+  if (id === 'more') { openPop('#m-more', c); return; }
+  if (c.classList.contains('t-m-status')) { statusRender(); openPop('#m-status', $('#more')); return; }
+  if (c.classList.contains('t-m-layers')) { layersRender(); openPop('#m-layers', $('#more')); return; }
+  if (c.classList.contains('t-m-map')) { $('#m-more').hidePopover(); toggleMap(); return; }
+  if (id === 's-clear' ) { S.status.clear(); statusRender(); runSearch(); return; }
+  if (id === 'l-col') { setAll(function () { return true; }); return; }
+  if (id === 'l-exp') { setAll(function () { return false; }); return; }
+  if (id === 'l-fin') { setAll(function (col) { return col.tasks.every(function (n) { return BY.get(n).fam === 'done'; }); }); return; }
+  if (id === 'det-x') { closeDetails(); return; }
+  if (id === 'det-back') { closeDetails(); return; }
+  if (id === 'b-det') { openDetails(S.sel); return; }
+  if (id === 'b-req') { requestChanges(); return; }
+  if (id === 'b-clear') { clearSearch(); return; }
+  if (id === 'b-clears') { S.status.clear(); runSearch(); return; }
+  if (id === 'b-list') { setView('list'); return; }
+  if (id === 'h-edit') { go({ state: 'draft', view: 'list' }); return; }
+  if (id === 'h-prev') { go({ state: 'past', view: S.view }); return; }
+  if (id === 'h-back' || id === 'h-cancel' || id === 'h-done') { go({ state: 'created', view: S.view }); return; }
+  if (c.matches('a[href$=".html"],a[href*=".html?"]')) { e.preventDefault(); var u = new URL(c.href); u.searchParams.set('theme', document.documentElement.dataset.themeChoice); location.href = u.href; }
+});
+function go(p) {
+  var u = new URL(location.href);
+  Object.keys(p).forEach(function (k) { u.searchParams.set(k, p[k]); });
+  ['q', 'status', 'select', 'details', 'zoom', 'collapse'].forEach(function (k) { u.searchParams.delete(k); });
+  location.href = u.href;
+}
+$('#m-status').addEventListener('change', function (e) { var f = e.target.dataset.f; if (!f) return; if (e.target.checked) S.status.add(f); else S.status.delete(f); runSearch(); });
+$('#m-layers').addEventListener('change', function (e) { var l = e.target.dataset.layer; if (l === undefined) return; setColl(+l, !e.target.checked); var x = $('#layer-rows [data-layer="' + l + '"]'); if (x) x.focus({ preventScroll: true }); });
+
+var qi = $('#q');
+qi.addEventListener('input', function () { clearTimeout(sT); sT = setTimeout(function () { S.query = qi.value; S.cur = -1; runSearch(); }, 80); });
+qi.addEventListener('keydown', function (e) {
+  if (e.key === 'Enter') { e.preventDefault(); if (S.matches.length) step(e.shiftKey ? -1 : 1); }
+  else if (e.key === 'Escape') {
+    e.preventDefault(); e.stopPropagation();
+    if (qi.value) { clearSearch(); } else { var g = focusEl(); if (g) { document.body.dataset.keyboard = '1'; g.focus({ preventScroll: true }); } }
+  }
+});
+
+/* ---------- Resize ---------- */
+var ro = new ResizeObserver(function () {
+  var r = canvas.getBoundingClientRect();
+  if (!r.width || !r.height) return;
+  if (Math.abs(r.width - CANVAS.w) < .5 && Math.abs(r.height - CANVAS.h) < .5) return;
+  CANVAS.w = r.width; CANVAS.h = r.height;
+  if (!LAYOUT) return;
+  if (S.fitLocked) fitAll(); else now();
+  toolbarFit();
+});
+window.addEventListener('resize', function () { arrange(); listRender(); reqSync(); });
+
+/* ---------- Start ---------- */
+if (N) render();
+if (LAYOUT) ro.observe(canvas);
+headRender(); planChrome(); arrange(); measure();
+if (LAYOUT) {
+  var coll = q.get('collapse');
+  if (coll) { coll.split(',').forEach(function (x) { S.coll.add(+x - 1); }); render(); }
+  fitAll(); layersRender();
+  var z0 = q.get('zoom');
+  if (z0) { VW.z = +z0 / 100; VW.x = 24; VW.y = 24; S.fitLocked = false; now(); }
+  var qq = q.get('q');
+  if (qq) { qi.value = qq; S.query = qq; }
+  var st = q.get('status');
+  if (st) st.split(',').forEach(function (s) { S.status.add(s); });
+  if (qq || st) runSearch();
+  var sl = +q.get('select');
+  if (sl && BY.has(sl)) { S.focus = LAYOUT.vis(sl); S.sel = sl; roving(); highlight(); reveal(LAYOUT.vis(sl), 48); }
+  var dt = +q.get('details');
+  if (dt && BY.has(dt)) { openDetails(dt); measure(); if (S.fitLocked) fitAll(); else now(); }
+  statusRender();
+  if (q.get('map') === '0') { S.mapExplicit = true; S.map = false; mapUpdate(); }
+}
+listRender(); band(); requestAnimationFrame(toolbarFit);
+
+/* ---------- Regression, only with ?selftest=. The result is the tab title and <html data-selftest>. ---------- */
+function selfTest(kind, expect) {
+  var bad = [];
+  function ok(c, m) { if (!c) bad.push(m); }
+  function isFull() { return document.body.hasAttribute('data-full'); }
+  function pressMap() {
+    if (kind === 'map') document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'm', bubbles: true }));
+    else { $('#more').click(); $('.t-m-map').click(); }
+  }
+  function testMap() {
+    var narrow = canvas.getBoundingClientRect().width < 760;
+    ok((expect === 'narrow') === narrow, 'canvas width does not match expect=' + expect);
+    ok(offScreen(), 'part of the graph must be off screen');
+    var want = narrow ? [false, true, false] : [true, false, true];
+    want.forEach(function (on, i) {
+      if (i) pressMap();
+      ok($('#map').hidden === !on, 'press ' + i + ': minimap should be ' + (on ? 'shown' : 'hidden'));
+      ok($('#map-t').getAttribute('aria-pressed') === String(on), 'press ' + i + ': aria-pressed should be ' + on);
+    });
+  }
+  function testRequest() {
+    var room = window.innerWidth >= 980, fit = S.fitLocked, hadDetails = S.detail !== null;
+    ok((expect === 'room') === room, 'window width does not match expect=' + expect);
+    $('#full-t').click();
+    ok(isFull() && $('#conv').hidden, 'Full view hides the conversation');
+    var sel = S.sel, picked = svg.querySelector('.n.picked'), t = world.getAttribute('transform'), b = $('#b-req');
+    ok(sel && picked && picked.dataset.id === 't' + sel, 'a task must be selected before the request');
+    if (!room) {
+      ok(b.getAttribute('aria-disabled') === 'true' && b.title.indexOf('980') >= 0, 'without room the button says why it cannot open');
+      b.click();
+      ok(isFull() && $('#conv').hidden && document.activeElement !== $('#plan-input'), 'without room Full view stays');
+      ok(world.getAttribute('transform') === t, 'without room the viewport stays');
+      return;
+    }
+    ok(!b.hasAttribute('aria-disabled'), 'with room the button is enabled');
+    b.click();
+    ok(!isFull(), 'Request changes leaves Full view');
+    ok(!$('#conv').hidden, 'the conversation is shown');
+    ok(document.activeElement === $('#plan-input'), 'the composer has focus');
+    ok(S.sel === sel && svg.querySelector('.n.picked') && svg.querySelector('.n.picked').dataset.id === 't' + sel, 'the selection is kept');
+    ok($('#band').textContent.indexOf('Task ' + sel) === 0, 'the status band still names the selection');
+    if (fit) ok(S.fitLocked && VW.z === fitZoom(), 'a view locked to Fit stays locked to Fit');
+    else ok(world.getAttribute('transform') === t, 'a view the owner moved keeps its zoom and pan');
+    if (hadDetails) ok(S.detail === null, 'Details gives way to the conversation when both do not fit');
+    var a = $('#conv').getBoundingClientRect(), c = canvas.getBoundingClientRect();
+    ok(a.right <= c.left + .5, 'the conversation and the graph do not overlap');
+  }
+  try { if (kind === 'request') testRequest(); else testMap(); } catch (x) { bad.push('threw: ' + x.message); }
+  var r = bad.length ? 'FAIL: ' + bad.join(' | ') : 'PASS';
+  document.documentElement.dataset.selftest = r;
+  document.title = r + ' - ' + document.title;
+}
+if (q.get('selftest')) setTimeout(function () { selfTest(q.get('selftest'), q.get('expect')); }, 250);
+})();
+</script>
+</body>
+</html>

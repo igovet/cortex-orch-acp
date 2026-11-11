@@ -1,0 +1,605 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Three steps: task screen concept</title>
+<script>(function(){var r=document.documentElement,t=new URLSearchParams(location.search).get('theme');try{t=t||localStorage.getItem('cw-theme')}catch(e){}r.dataset.theme=t==='light'?'light':'dark'})()</script>
+<link rel="stylesheet" href="../mockups/styles.css">
+<style>
+/* Layout for this concept only. Tokens, type, controls and cards come from ../mockups/styles.css. */
+html, body { height: auto; }
+html { scroll-padding-top: 64px; }
+@media (max-width: 600px) { html { scroll-padding-top: 64px; } }
+body.cx { display: block; min-height: 100vh; overflow-x: hidden; overflow-y: auto; user-select: text; }
+.cx button, .cx a, .cx label.opt { user-select: none; }
+.skip { position: absolute; left: 12px; top: -80px; z-index: 30; padding: 8px 12px; border-radius: var(--r-ctl); background: var(--primary); color: var(--primary-fg); font-size: var(--t-sec); }
+.skip:focus { top: 8px; }
+
+/* Prototype controls sit outside the simulated app. */
+.proto { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 14px; padding: 6px max(24px, env(safe-area-inset-right)) 6px max(24px, env(safe-area-inset-left)); background: var(--bg-sidebar); border-bottom: 1px solid var(--line); font-size: var(--t-cap); color: var(--fg-3); }
+.proto-g { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.seg > [aria-pressed="true"], .seg > [aria-checked="true"] { background: var(--bg-canvas); color: var(--fg); box-shadow: 0 0 0 1px var(--line-strong); }
+
+/* Shell. */
+.cx-shell { display: grid; grid-template-columns: 232px minmax(0, 1fr); min-height: calc(100vh - 41px); }
+.cx-side { display: flex; flex-direction: column; gap: 2px; padding: 10px 8px; background: var(--bg-sidebar); border-right: 1px solid var(--line); }
+.cx-side .task-row { height: auto; min-height: 30px; padding-top: 5px; padding-bottom: 5px; line-height: 18px; }
+.cx-side .task-row .tt { flex: 1 1 auto; min-width: 0; }
+.cx-body { min-width: 0; }
+.cx-top { position: sticky; top: 0; z-index: 6; display: flex; align-items: center; gap: 8px; min-height: 48px; padding: 6px max(24px, env(safe-area-inset-right)) 6px max(24px, env(safe-area-inset-left)); background: var(--bg-canvas); border-bottom: 1px solid var(--line); }
+.cx-main { padding: 24px max(24px, env(safe-area-inset-right)) 56px max(24px, env(safe-area-inset-left)); }
+.cx-main:focus { outline: none; }
+.cx-col { display: grid; gap: 16px; width: 100%; max-width: 880px; margin: 0 auto; min-width: 0; }
+.t-title { font-size: 18px; line-height: 26px; font-weight: 500; overflow-wrap: anywhere; }
+.t-status { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 8px; font-size: var(--t-ui); line-height: 20px; color: var(--fg-2); }
+.t-status .st { font-size: var(--t-ui); line-height: 20px; white-space: normal; }
+.sec-h { font-size: var(--t-sec); line-height: 18px; font-weight: 500; color: var(--fg-2); }
+.note { font-size: var(--t-cap); line-height: 16px; color: var(--fg-3); }
+
+/* Plan | Work | Result. Three equal targets; the selected step is navigation, never a command. */
+.steps { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); width: 100%; max-width: 520px; }
+.steps > [role="tab"] { justify-content: center; gap: 6px; height: 32px; padding: 0 8px; font-size: var(--t-sec); white-space: nowrap; }
+.steps > [aria-selected="true"] { background: var(--bg-canvas); color: var(--fg); box-shadow: 0 0 0 1px var(--line-strong); }
+.steps .sw { font-size: var(--t-cap); color: var(--fg-3); }
+.steps [aria-selected="true"] .sw { color: var(--fg-2); }
+.panel { display: grid; gap: 16px; min-width: 0; }
+.panel:focus { outline: none; }
+.more { display: flex; flex-wrap: wrap; gap: 8px; }
+
+/* Question. */
+.ask fieldset { min-width: 0; margin: 0; padding: 0; border: 0; }
+.ask legend { padding: 4px 12px 4px; }
+.ask-why { padding: 0 12px 10px; font-size: var(--t-sec); line-height: 19px; color: var(--fg-2); }
+.ask-opts { display: grid; gap: 4px; padding: 0 8px 8px; }
+.ask .opt { flex-wrap: wrap; column-gap: 9px; min-height: 36px; padding: 6px 10px; }
+.ask .opt input { flex: none; width: 14px; height: 14px; margin: 0; accent-color: var(--fg); }
+.ask .opt input:focus-visible { outline: none; }
+.ask .opt:has(input:focus-visible) { outline: var(--focus-line); outline-offset: 1px; }
+.ask .opt:has(input:checked) { background: var(--bg-selected); border-color: var(--line-ctl); }
+.ask .opt .sub { white-space: normal; }
+.other { display: grid; gap: 6px; padding: 0 8px 8px; }
+.other > label { padding: 0 4px; font-size: var(--t-cap); color: var(--fg-2); }
+.field { display: block; width: 100%; min-height: 76px; padding: 8px 10px; border: 1px solid var(--line-ctl); border-radius: var(--r-ctl); background: var(--bg-input); resize: vertical; font-size: var(--t-ui); line-height: 20px; }
+.act { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; padding: 4px 12px 12px; }
+.reason { font-size: var(--t-cap); line-height: 16px; color: var(--fg-2); }
+.btn-fixed { min-width: 116px; }
+.quiet { display: grid; gap: 10px; padding: 12px; border: 1px solid var(--line); border-radius: var(--r-card); background: var(--bg-raised); }
+.quiet:focus { outline: none; }
+.quiet .act { padding: 0; }
+.facts { display: grid; gap: 8px; margin: 0; font-size: var(--t-sec); line-height: 19px; }
+.facts > div { display: grid; grid-template-columns: 112px minmax(0, 1fr); gap: 2px 12px; }
+.facts dt { color: var(--fg-2); }
+.facts dd { margin: 0; overflow-wrap: anywhere; }
+
+/* Result. */
+.rcard-h { flex-wrap: wrap; }
+.rcard-h .r { white-space: normal; }
+.rcard-f { flex-wrap: wrap; }
+.decide { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 12px; border-top: 1px solid var(--line); }
+.decide .reason { flex: 1 1 100%; }
+.req { display: grid; gap: 8px; padding: 0 12px 12px; }
+.req > label { font-size: var(--t-cap); color: var(--fg-2); }
+.req .act { padding: 0; }
+
+/* Lists. */
+.list { border: 1px solid var(--line); border-radius: var(--r-card); background: var(--bg-raised); }
+.li { display: grid; grid-template-columns: 16px minmax(0, 1fr) auto; align-items: start; column-gap: 10px; padding: 8px 12px; border-top: 1px solid var(--line); font-size: var(--t-sec); line-height: 18px; }
+.li:first-child { border-top: 0; }
+.li > .i { margin-top: 1px; }
+.li .d { display: block; font-size: var(--t-cap); line-height: 16px; color: var(--fg-2); overflow-wrap: anywhere; }
+.li .t { overflow-wrap: anywhere; }
+
+/* Changes and Checks: one detail that docks or replaces the body. */
+.cx-detail { display: grid; align-content: start; gap: 12px; min-width: 0; }
+.cx-detail:focus { outline: none; }
+.d-top { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.d-top h2 { font-size: var(--t-content); line-height: 22px; font-weight: 500; }
+.lab-close { display: none; }
+.cx-main.has-detail { display: grid; grid-template-columns: minmax(0, 1fr) minmax(320px, 400px); align-items: start; gap: 24px; }
+.cx-main.has-detail .cx-detail { position: sticky; top: 72px; }
+@media (min-width: 1280px) { .lab-back { display: none; } .lab-close { display: inline; } }
+@media (max-width: 1279px) {
+  .cx-main.has-detail { display: block; }
+  .cx-main.has-detail > .cx-col { display: none; }
+  .cx-main.has-detail .cx-detail { position: static; max-width: 880px; margin: 0 auto; }
+}
+@media (max-width: 1099px) { .cx-shell { grid-template-columns: minmax(0, 1fr); } .cx-side { display: none; } }
+@media (max-width: 600px) {
+  .proto, .cx-top { padding-left: max(16px, env(safe-area-inset-left)); padding-right: max(16px, env(safe-area-inset-right)); }
+  .cx-main { padding: 16px max(16px, env(safe-area-inset-right)) 40px max(16px, env(safe-area-inset-left)); }
+  .cx .btn, .cx .btn-sm { height: auto; min-height: 44px; min-width: 44px; padding-top: 6px; padding-bottom: 6px; white-space: normal; }
+  .cx .ib { width: 44px; height: 44px; }
+  .cx .opt { min-height: 44px; }
+  .cx .seg > *, .steps > [role="tab"] { height: auto; min-height: 44px; }
+  .steps > [role="tab"] { flex-direction: column; gap: 0; padding: 4px; line-height: 18px; }
+  .steps { max-width: none; }
+  .cx .mi { min-height: 44px; }
+  .cx-top .crumbs .sep, .cx-top .crumbs .cur { display: none; }
+  .cx-top .crumbs a, .proto .lnk { display: inline-flex; align-items: center; min-height: 44px; min-width: 44px; }
+  .skip { min-height: 44px; display: inline-flex; align-items: center; }
+  .proto .p-long { display: none; }
+  .proto .grow { order: 1; }
+  .proto #theme { order: 2; }
+  .proto .proto-g { order: 3; flex: 1 1 100%; }
+  .proto .proto-g .seg { width: 100%; }
+  .proto .proto-g .seg > * { flex: 1 1 0; justify-content: center; text-align: center; }
+  .facts > div { grid-template-columns: minmax(0, 1fr); }
+  .nv { grid-template-columns: 16px minmax(0, 1fr); }
+  .nv .src { grid-column: 2; }
+  .outc > div { padding: 8px; }
+  .rcard-f .grow { display: none; }
+}
+</style>
+</head>
+<body class="cx">
+<a class="skip" href="#main">Skip to the task</a>
+
+<div class="proto" role="region" aria-label="Prototype controls">
+  <span class="p-long">Prototype: Three steps. Nothing here is connected to the app.</span>
+  <a class="lnk" href="index.html">All concepts</a>
+  <span class="grow"></span>
+  <div class="proto-g" role="group" aria-label="Sample">
+    <span class="p-long">Sample</span>
+    <span class="seg">
+      <button type="button" data-pick="draft" aria-pressed="false">Before start</button>
+      <button type="button" data-pick="question" aria-pressed="true">Needs your answer</button>
+      <button type="button" data-pick="result" aria-pressed="false">Result, another task</button>
+    </span>
+  </div>
+  <button type="button" class="btn btn-line btn-sm" id="theme">Light theme</button>
+</div>
+
+<div class="cx-shell">
+  <nav class="cx-side" aria-label="Workspace">
+    <a class="nav" href="#"><i class="i i-plus"></i>New task</a>
+    <a class="nav" href="#"><i class="i i-home"></i>Home</a>
+    <a class="nav" href="#"><i class="i i-inbox"></i>Needs you<span class="count">2</span></a>
+    <div class="sb-h"><span>atlas-api</span></div>
+    <a class="task-row" href="?sample=question" data-goto="question"><i class="i s14 i-question st-warn"></i><span class="tt">Fix token refresh race</span><span class="sig">Question</span></a>
+    <a class="task-row" href="#"><i class="i s14 i-loader st-run"></i><span class="tt">Meter API calls per workspace</span><span class="sig">Working</span></a>
+    <a class="task-row" href="?sample=result" data-goto="result"><i class="i s14 i-eye faint"></i><span class="tt">Rate-limit the export endpoint</span><span class="sig">Result</span></a>
+  </nav>
+
+  <div class="cx-body">
+    <header class="cx-top">
+      <a class="ib" href="#" title="Back to atlas-api" aria-label="Back to atlas-api"><i class="i i-arrow-left"></i></a>
+      <div class="crumbs"><a href="#">atlas-api</a><span class="sep">/</span><span class="cur" id="crumb-title">Fix token refresh race</span></div>
+      <span class="grow"></span>
+      <button type="button" class="ib" popovertarget="task-menu" aria-label="Task actions" title="Task actions"><i class="i i-more"></i></button>
+    </header>
+    <div popover id="task-menu" aria-label="Task actions">
+      <button type="button" class="mi" data-note="Pause task asks for confirmation in the app. You can resume afterwards."><i class="i i-pause"></i>Pause task&hellip;</button>
+      <button type="button" class="mi" data-note="Task details show the effective model, effort, access, language, context and usage."><i class="i i-sliders"></i>Task details</button>
+      <div class="mi-sep"></div>
+      <button type="button" class="mi" data-note="Code opens the editor for this task in the app."><i class="i i-code"></i>Code</button>
+      <button type="button" class="mi" data-note="Terminal opens a shell in this task's folder in the app."><i class="i i-terminal"></i>Terminal</button>
+      <button type="button" class="mi" data-note="Git opens commit and merge actions. Each one asks for its own confirmation."><i class="i i-branch"></i>Git</button>
+    </div>
+
+    <main id="main" class="cx-main" tabindex="-1">
+      <div class="cx-col">
+        <p class="note" id="menu-note" role="status" hidden></p>
+
+        <!-- Sample: saved draft, not started -->
+        <div class="cx-col" data-sample="draft" data-entry="plan" hidden>
+          <h1 class="t-title">Fix token refresh race</h1>
+          <div class="seg steps" role="tablist" aria-label="Task steps">
+            <button type="button" role="tab" data-step="plan" id="d-t-plan" aria-controls="d-p-plan"><span>Plan</span><span class="sw">Now</span></button>
+            <button type="button" role="tab" data-step="work" id="d-t-work" aria-controls="d-p-work"><span>Work</span><span class="sw">Not yet</span></button>
+            <button type="button" role="tab" data-step="result" id="d-t-result" aria-controls="d-p-result"><span>Result</span><span class="sw">Not yet</span></button>
+          </div>
+          <p class="t-status" role="status" id="draft-status"><span class="st st-idle"><i class="i s14 i-circle"></i>Not started.</span><span>Saved as a draft. Nothing runs until you start it.</span></p>
+          <section class="panel" role="tabpanel" id="d-p-plan" aria-labelledby="d-t-plan" data-panel="plan" tabindex="-1">
+            <section class="quiet" id="draft-card" tabindex="-1" aria-label="Ready to start">
+              <div class="brief">Clients get random 401s when two tabs refresh at once. Find the race in the token refresh path, fix it, and prove it with a concurrency test. Keep the public API unchanged.</div>
+              <dl class="facts">
+                <div><dt>Works in</dt><dd>New worktree <span class="mono">cw/fix-token-refresh</span> from <span class="mono">main</span> at <span class="mono">4f2a91c</span>. Your current checkout is not edited.</dd></div>
+                <div><dt>Access</dt><dd>Development, your default</dd></div>
+                <div><dt>Cortex uses</dt><dd>Opus, High effort, language Auto. Your defaults.</dd></div>
+              </dl>
+              <div class="act">
+                <button type="button" class="btn btn-primary btn-fixed" id="start">Start task</button>
+                <span class="reason">Starting begins planning. There is nothing else to approve.</span>
+              </div>
+            </section>
+          </section>
+          <section class="panel" role="tabpanel" id="d-p-work" aria-labelledby="d-t-work" data-panel="work" tabindex="-1" hidden>
+            <p class="quiet sec muted">Work begins after Cortex has a plan. Start the task in Plan first.</p>
+          </section>
+          <section class="panel" role="tabpanel" id="d-p-result" aria-labelledby="d-t-result" data-panel="result" tabindex="-1" hidden>
+            <p class="quiet sec muted">No result yet. Accept appears here when a result is ready.</p>
+          </section>
+        </div>
+
+        <!-- Sample: question waiting -->
+        <div class="cx-col" data-sample="question" data-entry="work">
+          <h1 class="t-title">Fix token refresh race</h1>
+          <div class="seg steps" role="tablist" aria-label="Task steps">
+            <button type="button" role="tab" data-step="plan" id="q-t-plan" aria-controls="q-p-plan"><span>Plan</span><span class="sw">Done</span></button>
+            <button type="button" role="tab" data-step="work" id="q-t-work" aria-controls="q-p-work"><span>Work</span><span class="sw">Now</span></button>
+            <button type="button" role="tab" data-step="result" id="q-t-result" aria-controls="q-p-result"><span>Result</span><span class="sw">Not yet</span></button>
+          </div>
+          <p class="t-status" role="status" id="q-status"><span class="st st-warn"><i class="i s14 i-question"></i>Your answer is needed.</span><span>Backend Dev is still working.</span></p>
+
+          <section class="panel" role="tabpanel" id="q-p-plan" aria-labelledby="q-t-plan" data-panel="plan" tabindex="-1" hidden>
+            <div class="brief">Clients get random 401s when two tabs refresh at once. Find the race in the token refresh path, fix it, and prove it with a concurrency test. Keep the public API unchanged.
+              <div class="meta"><span>Created 13:41</span><span>Worktree <span class="mono">cw/fix-token-refresh</span> from <span class="mono">main</span> at <span class="mono">4f2a91c</span></span></div></div>
+            <div class="list" aria-label="Plan r2">
+              <div class="li"><i class="i s14 i-list faint"></i><span class="t w500">Plan r2<span class="d">Changed from r1: added the migration after the race was traced</span></span><span></span></div>
+              <div class="li"><i class="i s14 i-check-circle st-ok"></i><span class="t">Trace the 401 race<span class="d">Code Explorer</span></span><span class="st st-ok">Done</span></div>
+              <div class="li"><i class="i s14 i-check-circle st-ok"></i><span class="t">Reproduce it with a failing test<span class="d">Test Author</span></span><span class="st st-ok">Done</span></div>
+              <div class="li"><i class="i s14 i-loader spin st-run"></i><span class="t">Lock the refresh path<span class="d">Backend Dev</span></span><span class="st st-run">Working</span></div>
+              <div class="li"><i class="i s14 i-question st-warn"></i><span class="t">Concurrency regression suite<span class="d">QA Engineer</span></span><span class="st st-warn">Waiting for you</span></div>
+              <div class="li"><i class="i s14 i-hourglass faint"></i><span class="t">Add the token version migration<span class="d">Migration Dev, after the lock</span></span><span class="st st-idle">Pending</span></div>
+            </div>
+          </section>
+
+          <section class="panel" role="tabpanel" id="q-p-work" aria-labelledby="q-t-work" data-panel="work" tabindex="-1">
+            <section class="dc ask" id="q-card" aria-labelledby="q-legend">
+              <div class="dc-h"><i class="i s14 i-question"></i>QA Engineer needs your answer<span class="r">waiting 3m</span></div>
+              <form id="q-form" novalidate>
+                <fieldset>
+                  <legend class="dc-q" id="q-legend">Which concurrency level should the regression test assert?</legend>
+                  <p class="ask-why">The regression suite checks one fixed number of parallel refreshes. Backend Dev keeps working on the lock while you decide.</p>
+                  <div class="ask-opts">
+                    <label class="opt"><input type="radio" name="lvl" value="50 parallel refreshes"><span class="grow">50 parallel refreshes</span><span class="sub">Matches production peak</span></label>
+                    <label class="opt"><input type="radio" name="lvl" value="200 parallel refreshes"><span class="grow">200 parallel refreshes</span><span class="sub">Stress, 40s per run</span></label>
+                    <label class="opt"><input type="radio" name="lvl" value="Both, with 200 marked slow"><span class="grow">Both, with 200 marked slow</span></label>
+                    <label class="opt"><input type="radio" name="lvl" value="other"><span class="grow">Other answer</span></label>
+                  </div>
+                  <div class="other" id="q-other" hidden>
+                    <label for="q-other-text">Your answer to QA Engineer</label>
+                    <textarea class="field" id="q-other-text" rows="3"></textarea>
+                    <div><button type="button" class="btn btn-line btn-sm"><i class="i s14 i-clip"></i>Attach files</button></div>
+                  </div>
+                </fieldset>
+                <div class="act">
+                  <button type="submit" class="btn btn-primary btn-fixed" id="q-send" aria-disabled="true" aria-describedby="q-reason">Send answer</button>
+                  <span class="reason" id="q-reason">Choose an answer first. Choosing does not send it.</span>
+                </div>
+              </form>
+            </section>
+            <section class="quiet" id="q-done" tabindex="-1" hidden aria-label="Your answer">
+              <div class="answered"><i class="i s14 i-check"></i><span>You answered QA Engineer: <span id="q-done-text" class="w500"></span></span><span class="faint">just now</span></div>
+              <p class="sec muted">Cortex is working. No action needed.</p>
+            </section>
+
+            <section aria-labelledby="q-latest-h">
+              <h2 class="sec-h" id="q-latest-h">Latest from Cortex</h2>
+              <div class="ai" style="margin-top:6px">The lock and the regression suite touch different files, so they run side by side. The migration waits for the lock.</div>
+            </section>
+
+            <div class="more" role="group" aria-label="More about the work">
+              <button type="button" class="btn btn-line" aria-expanded="false" aria-controls="q-team" data-toggle><i class="i s14 i-users"></i>Team</button>
+              <button type="button" class="btn btn-line" aria-expanded="false" aria-controls="q-activity" data-toggle><i class="i s14 i-activity"></i>Activity</button>
+              <button type="button" class="btn btn-line" aria-expanded="false" aria-controls="q-compose" data-toggle><i class="i s14 i-message"></i>Message Cortex</button>
+            </div>
+            <div class="list" id="q-team" hidden aria-label="Team">
+              <div class="li"><i class="i s14 i-loader spin st-run"></i><span class="t w500">Cortex<span class="d">Coordinator. Started 3 workers for plan r2</span></span><span class="st st-run">Working</span></div>
+              <div class="li"><i class="i s14 i-loader spin st-run"></i><span class="t w500">Backend Dev<span class="d">Editing auth/refresh.py, <span class="add">+18</span> <span class="del">&minus;4</span></span></span><span class="st st-run">Working</span></div>
+              <div class="li"><i class="i s14 i-question st-warn"></i><span class="t w500">QA Engineer<span class="d">Asked which concurrency level to assert</span></span><span class="st st-warn">Waiting for you</span></div>
+              <div class="li"><i class="i s14 i-hourglass faint"></i><span class="t w500">Migration Dev<span class="d">Waits for Lock the refresh path</span></span><span class="st st-idle">Pending</span></div>
+              <div class="li"><i class="i s14 i-check-circle faint"></i><span class="t w500">Code Explorer<span class="d">Traced the 401 race</span></span><span class="st st-ok">Finished</span></div>
+              <div class="li"><i class="i s14 i-check-circle faint"></i><span class="t w500">Test Author<span class="d">Reproduced it with a failing test</span></span><span class="st st-ok">Finished</span></div>
+            </div>
+            <div class="list" id="q-activity" hidden aria-label="Activity">
+              <div class="li"><i class="i s14 i-chevron-right faint"></i><span class="t">Cortex worked 4m 12s, 18 steps, 6 files<span class="d">Steps are folded by turn</span></span><span></span></div>
+              <div class="li"><i class="i s14 i-shield faint"></i><span class="t">You allowed once: run the test database outside the sandbox<span class="d">14:01</span></span><span></span></div>
+              <div class="li"><i class="i s14 i-message faint"></i><span class="t">You: Keep the 30 second refresh timeout. Do not raise it to make the test pass.<span class="d">14:04, received, applies after the current step</span></span><span></span></div>
+              <div class="li"><i class="i s14 i-question faint"></i><span class="t">QA Engineer asked which concurrency level to assert<span class="d">Waiting for your answer</span></span><span></span></div>
+            </div>
+            <section id="q-compose" hidden aria-label="Message Cortex">
+              <div class="composer">
+                <textarea aria-label="Message Cortex" aria-describedby="q-mode-hint" placeholder="Tell Cortex something about this task"></textarea>
+                <div class="c-bar">
+                  <button type="button" class="ib" aria-label="Attach files" title="Attach files"><i class="i i-plus"></i></button>
+                  <button type="button" class="btn btn-sm" aria-expanded="false" aria-controls="q-queue" data-toggle><i class="i s14 i-queue"></i>Queued messages: 2</button>
+                  <span class="grow"></span>
+                  <span class="seg" role="radiogroup" aria-label="When Cortex gets it" data-mode>
+                    <button type="button" role="radio" aria-checked="true" data-hint="Keep queued: delivered after the current step.">Keep queued</button>
+                    <button type="button" role="radio" aria-checked="false" data-hint="Send now: Cortex reads it during the current step. Work is not stopped.">Send now</button>
+                  </span>
+                  <button type="button" class="btn btn-line btn-sm">Send</button>
+                </div>
+              </div>
+              <p class="note" id="q-mode-hint" style="margin-top:6px">Keep queued: delivered after the current step.</p>
+              <div class="list" id="q-queue" hidden style="margin-top:8px" aria-label="Queued messages, not sent yet">
+                <div class="li"><i class="i s14 i-queue faint"></i><span class="t">When the lock lands, also update the auth runbook.</span><span class="row"><button type="button" class="btn btn-sm">Edit</button><button type="button" class="btn btn-sm">Remove</button></span></div>
+                <div class="li"><i class="i s14 i-queue faint"></i><span class="t">Then split the fix into two commits for review.</span><span class="row"><button type="button" class="btn btn-sm">Edit</button><button type="button" class="btn btn-sm">Remove</button></span></div>
+              </div>
+            </section>
+          </section>
+
+          <section class="panel" role="tabpanel" id="q-p-result" aria-labelledby="q-t-result" data-panel="result" tabindex="-1" hidden>
+            <div class="quiet">
+              <p class="w500">No result yet. Cortex is still working.</p>
+              <p class="sec muted">When a result is ready, Work shows Result available and you choose when to open it. Accept appears only here, bound to that exact result.</p>
+            </div>
+          </section>
+        </div>
+
+        <!-- Sample: result of another task -->
+        <div class="cx-col" data-sample="result" data-entry="result" hidden>
+          <h1 class="t-title">Rate-limit the export endpoint</h1>
+          <div class="seg steps" role="tablist" aria-label="Task steps">
+            <button type="button" role="tab" data-step="plan" id="r-t-plan" aria-controls="r-p-plan"><span>Plan</span><span class="sw">Done</span></button>
+            <button type="button" role="tab" data-step="work" id="r-t-work" aria-controls="r-p-work"><span>Work</span><span class="sw" id="r-work-sw">Done</span></button>
+            <button type="button" role="tab" data-step="result" id="r-t-result" aria-controls="r-p-result"><span>Result</span><span class="sw" id="r-result-sw">Now</span></button>
+          </div>
+          <p class="t-status" role="status" id="r-status"><span class="st st-bad"><i class="i s14 i-x-circle"></i>Result v2 has a failing check.</span><span>Your decision is needed.</span></p>
+
+          <section class="panel" role="tabpanel" id="r-p-plan" aria-labelledby="r-t-plan" data-panel="plan" tabindex="-1" hidden>
+            <div class="brief">Limit the data export endpoint to 60 requests per minute per workspace, and return a clear 429 with Retry-After when a client goes over.
+              <div class="meta"><span>Created 13:02</span><span>Base <span class="mono">main</span> at <span class="mono">a03be17</span></span></div></div>
+            <div class="answered"><i class="i s14 i-question"></i>You answered: count per workspace, not per user<span class="faint">13:11</span></div>
+            <p class="ai">Plan r1 ran to the end. Backend Dev added the Redis limiter, Test Author covered it, and Security Reviewer approved it.</p>
+          </section>
+
+          <section class="panel" role="tabpanel" id="r-p-work" aria-labelledby="r-t-work" data-panel="work" tabindex="-1" hidden>
+            <p class="t-status"><span class="st st-ok"><i class="i s14 i-check-circle"></i>Work finished.</span><span>Cortex review and checks finished 14:22. Worked 41m, 96 steps, 6 files.</span></p>
+            <div class="list" aria-label="Team">
+              <div class="li"><i class="i s14 i-check-circle faint"></i><span class="t w500">Cortex<span class="d">Coordinator. Coordinated 5 workers</span></span><span class="st st-ok">Finished</span></div>
+              <div class="li"><i class="i s14 i-check-circle faint"></i><span class="t w500">Code Explorer</span><span class="st st-ok">Finished</span></div>
+              <div class="li"><i class="i s14 i-check-circle faint"></i><span class="t w500">Backend Dev<span class="d">Added the Redis limiter</span></span><span class="st st-ok">Finished</span></div>
+              <div class="li"><i class="i s14 i-check-circle faint"></i><span class="t w500">Test Author<span class="d">Covered the limiter with tests</span></span><span class="st st-ok">Finished</span></div>
+              <div class="li"><i class="i s14 i-check-circle faint"></i><span class="t w500">Security Reviewer<span class="d">Approved the change</span></span><span class="st st-ok">Finished</span></div>
+              <div class="li"><i class="i s14 i-x faint"></i><span class="t w500">One more worker</span><span class="st st-idle">Cancelled</span></div>
+            </div>
+          </section>
+
+          <section class="panel" role="tabpanel" id="r-p-result" aria-labelledby="r-t-result" data-panel="result" tabindex="-1">
+            <section class="rcard" id="r-card" aria-labelledby="r-h">
+              <div class="rcard-h"><i class="i s14 i-eye faint"></i><h2 id="r-h" class="w500" style="font-size:inherit">Result v2</h2><span class="r">Cortex review and checks finished 14:22</span></div>
+              <div class="rcard-b">The export endpoint now allows 60 requests per minute per workspace and answers 429 with <code>Retry-After</code> beyond that. Counters live in Redis. One load check is over its limit.</div>
+              <div class="outc" aria-label="Checks for result v2">
+                <div><span class="v st-ok"><i class="i i-check-circle"></i>5</span><span class="l">Passed</span></div>
+                <div><span class="v st-bad"><i class="i i-x-circle"></i>1</span><span class="l">Failed</span></div>
+                <div><span class="v st-idle"><i class="i i-circle"></i>2</span><span class="l">Not run</span></div>
+                <div><span class="v st-idle"><i class="i i-help"></i>1</span><span class="l">Unverified</span></div>
+              </div>
+              <div aria-label="Checks that did not pass">
+                <div class="nv"><i class="i s14 i-x-circle st-bad"></i><span><code>pytest tests/load/test_export_burst.py</code><span class="why">Failed: p95 was 410 ms, the limit is 300 ms</span></span><span class="src">Recorded by runtime</span></div>
+                <div class="nv"><i class="i s14 i-circle faint"></i><span>Full integration suite<span class="why">Not run: test database was busy</span></span><span class="src">Reported by worker</span></div>
+                <div class="nv"><i class="i s14 i-circle faint"></i><span>OpenAPI contract check<span class="why">Not run: no schema tool on this machine</span></span><span class="src">Recorded by runtime</span></div>
+                <div class="nv"><i class="i s14 i-help faint"></i><span>Redis failover keeps the counters<span class="why">Unverified: worker says it passed, no command receipt</span></span><span class="src">Reported by worker</span></div>
+              </div>
+              <div class="rcard-f">
+                <span class="cap muted tnum">6 files, <span class="add">+120</span> <span class="del">&minus;14</span></span><span class="grow"></span>
+                <button type="button" class="btn btn-line btn-sm" data-detail="changes">View changes</button>
+                <button type="button" class="btn btn-line btn-sm" data-detail="checks">Checks</button>
+              </div>
+              <div class="decide" id="r-decide">
+                <button type="button" class="btn btn-primary" id="r-req" aria-expanded="false" aria-controls="r-form">Request changes</button>
+                <button type="button" class="btn btn-line" aria-disabled="true" aria-describedby="r-why">Accept v2</button>
+                <p class="reason" id="r-why">Accept is unavailable while a check fails. Ask for changes, then a new result is checked again.</p>
+              </div>
+              <form class="req" id="r-form" hidden novalidate>
+                <label for="r-text">What should change</label>
+                <textarea class="field" id="r-text" rows="3">Bring the export burst load check under the 300 ms p95 limit, then rerun the checks that did not run.</textarea>
+                <div class="act">
+                  <button type="submit" class="btn btn-primary btn-fixed" id="r-send">Send request</button>
+                  <button type="button" class="btn btn-line" id="r-cancel">Cancel</button>
+                </div>
+              </form>
+              <div class="decide" id="r-sent" tabindex="-1" hidden>
+                <p class="sec"><i class="i s14 i-check faint"></i> Request sent. Work is running again. Result v2 stays here as the previous result and cannot be accepted.</p>
+              </div>
+            </section>
+            <p class="note">Accepting a result never commits or merges. Git stays a separate action in Task actions.</p>
+          </section>
+        </div>
+      </div>
+
+      <aside class="cx-detail" id="detail" tabindex="-1" hidden aria-labelledby="detail-h">
+        <div class="d-top">
+          <button type="button" class="btn btn-line" id="detail-close"><i class="i s14 i-arrow-left lab-back"></i><span class="lab-back">Back to Result</span><span class="lab-close">Close</span></button>
+          <h2 id="detail-h">Changes</h2>
+        </div>
+        <div data-d="changes">
+          <p class="sec muted">Result v2, read-only. Back returns to the same result.</p>
+          <div class="list" style="margin-top:8px">
+            <div class="li"><i class="i s14 i-file faint"></i><span class="t mono">atlas/export/api.py<span class="d">Modified</span></span><span class="cap tnum"><span class="add">+7</span> <span class="del">&minus;1</span></span></div>
+            <div class="li"><i class="i s14 i-file faint"></i><span class="t mono">atlas/export/limits.py<span class="d">Added</span></span><span class="cap tnum"><span class="add">+8</span></span></div>
+            <div class="li"><i class="i s14 i-file faint"></i><span class="t mono">atlas/settings.py<span class="d">Modified</span></span><span class="cap tnum"><span class="add">+6</span> <span class="del">&minus;2</span></span></div>
+            <div class="li"><i class="i s14 i-file faint"></i><span class="t mono">tests/export/test_rate_limit.py<span class="d">Added</span></span><span class="cap tnum"><span class="add">+77</span></span></div>
+            <div class="li"><i class="i s14 i-file faint"></i><span class="t mono">tests/load/test_export_burst.py<span class="d">Added</span></span><span class="cap tnum"><span class="add">+22</span></span></div>
+            <div class="li"><i class="i s14 i-file faint"></i><span class="t mono">docs/api/export.md<span class="d">Modified</span></span><span class="cap tnum"><span class="del">&minus;11</span></span></div>
+          </div>
+        </div>
+        <div data-d="checks">
+          <p class="sec muted">Checks for result v2. Missing evidence is never counted as a pass.</p>
+          <div class="list" style="margin-top:8px">
+            <div class="li"><i class="i s14 i-x-circle st-bad"></i><span class="t"><code>pytest tests/load/test_export_burst.py</code><span class="d">Failed, exit code recorded by runtime. p95 was 410 ms, the limit is 300 ms.</span></span><span class="st st-bad">Failed</span></div>
+            <div class="li"><i class="i s14 i-circle faint"></i><span class="t">Full integration suite<span class="d">Reported by worker: test database was busy</span></span><span class="st st-idle">Not run</span></div>
+            <div class="li"><i class="i s14 i-circle faint"></i><span class="t">OpenAPI contract check<span class="d">Recorded by runtime: no schema tool on this machine</span></span><span class="st st-idle">Not run</span></div>
+            <div class="li"><i class="i s14 i-help faint"></i><span class="t">Redis failover keeps the counters<span class="d">Reported by worker, no command receipt</span></span><span class="st st-idle">Unverified</span></div>
+            <div class="li"><i class="i s14 i-check-circle st-ok"></i><span class="t">5 checks passed<span class="d">Their names are not part of this sample</span></span><span class="st st-ok">Passed</span></div>
+          </div>
+        </div>
+      </aside>
+    </main>
+  </div>
+</div>
+
+<script>
+(function () {
+  var root = document.documentElement, main = document.getElementById('main');
+  var params = new URLSearchParams(location.search);
+  function setParam(k, v) { params.set(k, v); history.replaceState(null, '', '?' + params.toString()); }
+
+  var themeBtn = document.getElementById('theme');
+  function syncTheme() { themeBtn.textContent = root.dataset.theme === 'light' ? 'Dark theme' : 'Light theme'; }
+  themeBtn.addEventListener('click', function () {
+    root.dataset.theme = root.dataset.theme === 'light' ? 'dark' : 'light';
+    try { localStorage.setItem('cw-theme', root.dataset.theme); } catch (e) {}
+    setParam('theme', root.dataset.theme); syncTheme();
+  });
+  syncTheme();
+
+  /* Steps: selected step is remembered per task and never changes on its own. */
+  var selected = {};
+  function selectStep(sample, step, focusTab) {
+    var box = document.querySelector('[data-sample="' + sample + '"]');
+    selected[sample] = step;
+    box.querySelectorAll('[role="tab"]').forEach(function (t) {
+      var on = t.dataset.step === step;
+      t.setAttribute('aria-selected', String(on)); t.tabIndex = on ? 0 : -1;
+      if (on && focusTab) t.focus();
+    });
+    box.querySelectorAll('[role="tabpanel"]').forEach(function (p) { p.hidden = p.dataset.panel !== step; });
+    if (sample === params.get('sample')) setParam('step', step);
+  }
+  document.querySelectorAll('[data-sample]').forEach(function (box) {
+    var tabs = [].slice.call(box.querySelectorAll('[role="tab"]'));
+    tabs.forEach(function (t, i) {
+      t.addEventListener('click', function () { selectStep(box.dataset.sample, t.dataset.step); });
+      t.addEventListener('keydown', function (e) {
+        var n = null;
+        if (e.key === 'ArrowRight') n = tabs[(i + 1) % tabs.length];
+        if (e.key === 'ArrowLeft') n = tabs[(i - 1 + tabs.length) % tabs.length];
+        if (e.key === 'Home') n = tabs[0];
+        if (e.key === 'End') n = tabs[tabs.length - 1];
+        if (n) { e.preventDefault(); selectStep(box.dataset.sample, n.dataset.step, true); }
+      });
+    });
+    selectStep(box.dataset.sample, box.dataset.entry);
+  });
+
+  var titles = { draft: 'Fix token refresh race', question: 'Fix token refresh race', result: 'Rate-limit the export endpoint' };
+  function show(name, focus) {
+    if (!titles[name]) name = 'question';
+    closeDetail(false);
+    document.querySelectorAll('[data-sample]').forEach(function (s) { s.hidden = s.dataset.sample !== name; });
+    document.querySelectorAll('[data-pick]').forEach(function (b) { b.setAttribute('aria-pressed', String(b.dataset.pick === name)); });
+    document.querySelectorAll('[data-goto]').forEach(function (a) { if (a.dataset.goto === name || (name === 'draft' && a.dataset.goto === 'question')) a.setAttribute('aria-current', 'page'); else a.removeAttribute('aria-current'); });
+    document.getElementById('crumb-title').textContent = titles[name];
+    document.title = titles[name] + ': Three steps concept';
+    setParam('sample', name); setParam('step', selected[name]);
+    if (focus) main.focus();
+  }
+  document.querySelectorAll('[data-pick]').forEach(function (b) { b.addEventListener('click', function () { show(b.dataset.pick, true); }); });
+  document.querySelectorAll('[data-goto]').forEach(function (a) { a.addEventListener('click', function (e) { e.preventDefault(); show(a.dataset.goto, true); }); });
+
+  var menu = document.getElementById('task-menu'), note = document.getElementById('menu-note');
+  menu.addEventListener('beforetoggle', function (e) {
+    if (e.newState !== 'open') return;
+    var b = document.querySelector('[popovertarget="task-menu"]').getBoundingClientRect();
+    menu.style.position = 'fixed'; menu.style.inset = 'auto';
+    menu.style.top = Math.round(b.bottom + 4) + 'px';
+    menu.style.right = Math.max(8, Math.round(window.innerWidth - b.right)) + 'px';
+  });
+  menu.querySelectorAll('[data-note]').forEach(function (m) {
+    m.addEventListener('click', function () { menu.hidePopover(); note.textContent = m.dataset.note + ' Not part of this prototype.'; note.hidden = false; });
+  });
+
+  document.querySelectorAll('[data-toggle]').forEach(function (b) {
+    b.addEventListener('click', function () {
+      var t = document.getElementById(b.getAttribute('aria-controls')), open = b.getAttribute('aria-expanded') !== 'true';
+      b.setAttribute('aria-expanded', String(open)); t.hidden = !open;
+    });
+  });
+
+  document.querySelectorAll('[data-mode]').forEach(function (g) {
+    var opts = g.querySelectorAll('[role="radio"]'), hint = document.getElementById(g.closest('.composer').querySelector('textarea').getAttribute('aria-describedby'));
+    function pick(o, focus) { opts.forEach(function (x) { x.setAttribute('aria-checked', String(x === o)); x.tabIndex = x === o ? 0 : -1; }); hint.textContent = o.dataset.hint; if (focus) o.focus(); }
+    opts.forEach(function (o, i) {
+      o.tabIndex = o.getAttribute('aria-checked') === 'true' ? 0 : -1;
+      o.addEventListener('click', function () { pick(o); });
+      o.addEventListener('keydown', function (e) {
+        if (e.key === 'ArrowRight' || e.key === 'ArrowDown') { e.preventDefault(); pick(opts[(i + 1) % opts.length], true); }
+        if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') { e.preventDefault(); pick(opts[(i - 1 + opts.length) % opts.length], true); }
+      });
+    });
+  });
+
+  var detail = document.getElementById('detail'), detailH = document.getElementById('detail-h'), lastTrigger = null;
+  var names = { changes: 'Changes in result v2', checks: 'Checks for result v2' };
+  function openDetail(key, trigger) {
+    lastTrigger = trigger;
+    detail.querySelectorAll('[data-d]').forEach(function (d) { d.hidden = d.dataset.d !== key; });
+    detailH.textContent = names[key];
+    detail.hidden = false; main.classList.add('has-detail');
+    detail.focus({ preventScroll: true });
+    if (getComputedStyle(main.querySelector('.cx-col')).display === 'none') window.scrollTo(0, 0);
+  }
+  function closeDetail(restore) {
+    if (detail.hidden) return;
+    detail.hidden = true; main.classList.remove('has-detail');
+    if (restore && lastTrigger) { lastTrigger.scrollIntoView({ block: 'center' }); lastTrigger.focus({ preventScroll: true }); }
+  }
+  document.querySelectorAll('[data-detail]').forEach(function (b) { b.addEventListener('click', function () { openDetail(b.dataset.detail, b); }); });
+  document.getElementById('detail-close').addEventListener('click', function () { closeDetail(true); });
+  document.addEventListener('keydown', function (e) { if (e.key === 'Escape' && !detail.hidden && detail.contains(document.activeElement)) closeDetail(true); });
+
+  function busy(btn, label) { btn.setAttribute('aria-busy', 'true'); btn.setAttribute('aria-disabled', 'true'); btn.innerHTML = '<i class="i s14 i-loader spin"></i>' + label; }
+
+  var start = document.getElementById('start');
+  start.addEventListener('click', function () {
+    if (start.getAttribute('aria-busy') === 'true') return;
+    busy(start, 'Starting');
+    setTimeout(function () {
+      document.getElementById('draft-status').innerHTML = '<span class="st st-run"><i class="i s14 i-loader spin"></i>Cortex is planning.</span><span>No action needed.</span>';
+      var card = document.getElementById('draft-card');
+      card.innerHTML = '<p class="w500">Cortex is planning</p><p class="sec muted">The plan appears here when it is ready. Work then starts on its own; there is no Next button to press.</p>';
+      card.focus();
+    }, 900);
+  });
+
+  var form = document.getElementById('q-form'), send = document.getElementById('q-send'), reason = document.getElementById('q-reason');
+  var otherBox = document.getElementById('q-other'), otherText = document.getElementById('q-other-text');
+  function chosen() {
+    var c = form.querySelector('input[name="lvl"]:checked');
+    if (!c) return '';
+    return c.value === 'other' ? otherText.value.trim() : c.value;
+  }
+  function update() {
+    if (send.getAttribute('aria-busy') === 'true') return;
+    var c = form.querySelector('input[name="lvl"]:checked');
+    otherBox.hidden = !(c && c.value === 'other');
+    var v = chosen();
+    send.setAttribute('aria-disabled', v ? 'false' : 'true');
+    reason.textContent = v ? 'QA Engineer gets this answer when you send it.' : (c ? 'Type your answer first.' : 'Choose an answer first. Choosing does not send it.');
+  }
+  form.addEventListener('change', update); otherText.addEventListener('input', update);
+  form.addEventListener('submit', function (e) {
+    e.preventDefault();
+    if (send.getAttribute('aria-busy') === 'true') return;
+    var v = chosen();
+    if (!v) { reason.textContent = form.querySelector('input[name="lvl"]:checked') ? 'Type your answer first.' : 'Choose an answer first.'; return; }
+    busy(send, 'Sending');
+    form.querySelectorAll('input, textarea').forEach(function (x) { x.disabled = true; });
+    reason.textContent = 'Sending. Your choice is kept until Cortex confirms it.';
+    setTimeout(function () {
+      document.getElementById('q-card').hidden = true;
+      document.getElementById('q-done-text').textContent = v;
+      var done = document.getElementById('q-done'); done.hidden = false; done.focus();
+      document.getElementById('q-status').innerHTML = '<span class="st st-run"><i class="i s14 i-loader spin"></i>Working.</span><span>No action needed. Your answer was delivered to QA Engineer.</span>';
+    }, 900);
+  });
+
+  var req = document.getElementById('r-req'), rform = document.getElementById('r-form');
+  req.addEventListener('click', function () { var open = req.getAttribute('aria-expanded') !== 'true'; req.setAttribute('aria-expanded', String(open)); rform.hidden = !open; if (open) document.getElementById('r-text').focus(); });
+  document.getElementById('r-cancel').addEventListener('click', function () { req.setAttribute('aria-expanded', 'false'); rform.hidden = true; req.focus(); });
+  rform.addEventListener('submit', function (e) {
+    e.preventDefault();
+    var b = document.getElementById('r-send');
+    if (b.getAttribute('aria-busy') === 'true') return;
+    busy(b, 'Sending');
+    setTimeout(function () {
+      rform.hidden = true; document.getElementById('r-decide').hidden = true;
+      var s = document.getElementById('r-sent'); s.hidden = false; s.focus();
+      /* The runtime step moves back to Work; the owner stays on the step they are reading. */
+      document.getElementById('r-work-sw').textContent = 'Now';
+      document.getElementById('r-result-sw').textContent = 'Previous';
+      document.getElementById('r-status').innerHTML = '<span class="st st-run"><i class="i s14 i-loader spin"></i>Working on your changes.</span><span>No action needed.</span>';
+    }, 900);
+  });
+
+  var first = params.get('sample') || 'question';
+  if (/^(plan|work|result)$/.test(params.get('step') || '') && titles[first]) selectStep(first, params.get('step'));
+  show(first, false);
+})();
+</script>
+</body>
+</html>

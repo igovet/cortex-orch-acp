@@ -278,6 +278,47 @@ describe("real port", () => {
       return { s, p, asked, ready: async () => { await p.query("capabilities.get", {}); await p.query("project.snapshot", {}); await p.query("project.facts", {}); await p.query("machine.facts", {}); } };
     };
 
+    it("keeps cached Git facts after an action and publishes the fresh snapshot later", async () => {
+      vi.useFakeTimers();
+      let stop = () => {};
+      try {
+        const {s,p,ready} = helper({hasGit:true});
+        await ready();
+        const answer = s.answers["machine.call"]!;
+        let finish!: (v: unknown) => void;
+        s.answers["machine.call"] = message => (message as {op:string}).op === "repo.snapshot"
+          ? new Promise(resolve => {finish = resolve;}) : answer(message);
+        const updates: PortUpdate[] = [];
+        stop = p.subscribe(update => updates.push(update));
+        await p.command(envelope({type:"git_stage",checkoutId:"p:main",path:"a.txt",staged:true}));
+        const reading = p.query("project.facts", {});
+        await vi.advanceTimersByTimeAsync(51);
+        const facts = await reading;
+        expect(facts[0].hasGit).toBe(true);
+        expect(facts[0].repo).toEqual(repo);
+        const fresh = {...repo, openBranch:"next"};
+        finish({ok:true,result:fresh});
+        await vi.advanceTimersByTimeAsync(0);
+        expect(updates).toContainEqual(expect.objectContaining({kind:"facts",facts:expect.objectContaining({repo:fresh})}));
+      } finally { stop(); vi.useRealTimers(); }
+    });
+
+    it("uses authoritative repository presence while the first Git snapshot is pending", async () => {
+      vi.useFakeTimers();
+      try {
+        for (const hasGit of [true, false]) {
+          const {s,p} = helper({hasGit});
+          const answer = s.answers["machine.call"]!;
+          s.answers["machine.call"] = message => (message as {op:string}).op === "repo.snapshot"
+            ? new Promise(() => {}) : answer(message);
+          await p.query("capabilities.get", {});
+          const reading = p.query("project.facts", {});
+          await vi.advanceTimersByTimeAsync(51);
+          expect((await reading)[0]).toMatchObject({hasGit,repo:null});
+        }
+      } finally { vi.useRealTimers(); }
+    });
+
     it("publishes slow Git facts without triggering a full-read feedback loop", async () => {
       vi.useFakeTimers();
       let stop = () => {};

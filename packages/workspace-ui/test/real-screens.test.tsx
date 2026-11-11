@@ -81,6 +81,61 @@ const type = (label: string, value: string) => { const el = $<HTMLTextAreaElemen
 const prompts = (s: ReturnType<typeof machine>) => s.calls.filter(c => c.operation === "executions.prompt").map(c => (c.message as { text: string }).text);
 const TASK = `/m/${LOCAL_MACHINE_ID}/t/task-1`;
 
+describe("Git on real data", () => {
+  it("commits unstaged files in one request and opens cached Git while the next snapshot is pending", async () => {
+    const s = machine([]);
+    const answer = s.answers["machine.call"]!;
+    const changed = {...repo, checkouts:[{...repo.checkouts[0], draft:"Save changes", files:[
+      {path:"a.txt",status:"M",add:1,del:0,hunks:[],stage:"unstaged"},
+      {path:"b.txt",status:"A",add:1,del:0,hunks:[],stage:"untracked"},
+    ]}]};
+    let pending = false, finish: ((value: unknown) => void) | undefined;
+    s.answers["machine.call"] = message => {
+      const {op} = message as {op:string};
+      if (op === "repo.snapshot") return pending ? new Promise(resolve => {finish = resolve;}) : {ok:true,result:changed};
+      if (op === "product.read") return {ok:true,result:{hasGit:true,tasks:{},sprints:[]}};
+      if (op === "git") { pending = true; return {ok:true,result:{}}; }
+      return answer(message);
+    };
+    await open(s, `/m/${LOCAL_MACHINE_ID}/p/p/git`);
+    expect(button("Commit")).toBeDefined();
+    button("Commit")!.click();
+    await settled();
+    const actions = s.calls.filter(c => c.operation === "machine.call" && (c.message as {op:string}).op === "git");
+    expect(actions.map(c => (c.message as {params:{action:string}}).params.action)).toEqual(["commit"]);
+    expect(finish).toBeDefined();
+    // Reopen the tab before Git has answered. The last known checkout is immediately usable.
+    all<HTMLAnchorElement>("a").find(a => a.textContent?.trim() === "Board")!.click();
+    await settled();
+    all<HTMLAnchorElement>("a").find(a => a.textContent?.trim() === "Git")!.click();
+    expect($('[aria-label="Status"]')?.textContent).toContain("a.txt");
+    expect(button("Create empty repository")).toBeUndefined();
+    finish!({ok:true,result:{...changed,checkouts:[{...changed.checkouts[0],files:[],draft:""}]}});
+    await settled();
+    expect($('[aria-label="Status"]')?.textContent).toContain("No uncommitted changes.");
+  });
+
+  it("offers Git initialization only after the helper confirms no repository", async () => {
+    const s = machine([]);
+    const answer = s.answers["machine.call"]!;
+    let finish!: (value: unknown) => void;
+    s.answers["machine.call"] = message => {
+      const {op} = message as {op:string};
+      if (op === "repo.snapshot") return new Promise(resolve => {finish = resolve;});
+      if (op === "product.read") return {ok:true,result:{tasks:{},sprints:[]}};
+      return answer(message);
+    };
+    await open(s, `/m/${LOCAL_MACHINE_ID}/p/p/git`);
+    await new Promise(resolve => setTimeout(resolve, 60));
+    expect(document.querySelector("main")?.textContent).toContain("No Git record for this project");
+    expect(button("Create empty repository")).toBeUndefined();
+    finish({ok:true,result:{...repo,hasGit:false}});
+    await settled();
+    expect(document.querySelector("main")?.textContent).toContain("This project has no Git repository");
+    expect(button("Create empty repository")).toBeDefined();
+  });
+});
+
 describe("task session on real data", () => {
   it("keeps planning visible in All work before it has created tasks", async () => {
     const s = machine(), answer = s.answers["machine.call"]!;

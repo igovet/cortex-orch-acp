@@ -61,7 +61,7 @@ const unsupported = (requestId: string): CommandReceipt => ({ requestId, ok: fal
  * What is left is outside Git and config: a quiet round waits longer, and returning to the window reads at once.
  */
 export const FACTS_POLL_MS = 30_000, FACTS_POLL_MAX_MS = 120_000, FACTS_FOCUS_MIN_MS = 5_000, MACHINE_POLL_MS = 300_000;
-type Product = { tasks: Record<string, TaskOverlay>; sprints: (Sprint & { planningTaskId?: string })[]; drafts?: Record<string, string>; messages?: Message[]; comments?: Record<string, TaskChanges["comments"]> };
+type Product = { hasGit?: boolean; tasks: Record<string, TaskOverlay>; sprints: (Sprint & { planningTaskId?: string })[]; drafts?: Record<string, string>; messages?: Message[]; comments?: Record<string, TaskChanges["comments"]> };
 type MachineRead = Partial<Machine> & { name: string };
 type ConfigRead = { config: MachineConfig; connections: EngineConnection[]; tokens: Record<string, unknown>; usage?: EngineWeeklyUsage[] };
 class Refusal extends Error { constructor(readonly code: string, message: string) { super(message); } }
@@ -135,7 +135,12 @@ export function createRealPort(options: RealPortOptions): WorkspacePort {
   async function machine<T>(op: string, projectId?: string, params?: unknown): Promise<T> {
     const reply = await transport.request("machine.call", { op, ...(projectId ? { projectId } : {}), ...(params === undefined ? {} : { params }) }) as { ok?: boolean; result?: T; code?: string; message?: string };
     if (reply?.ok !== true) throw new Refusal(reply?.code ?? "refused", reply?.message ?? OUTCOME_WORDS.unsupported);
-    if (projectId && ["git", "git_init", "repo.file.save", "product.task", "product.integrate"].includes(op)) repoReads.delete(projectId);
+    if (projectId && ["git", "git_init", "repo.file.save", "product.task", "product.integrate"].includes(op)) {
+      const cached = repoReads.get(projectId);
+      // Retain the last confirmed repository while a post-action read catches up.
+      // Replacing the entry also prevents an older in-flight read from publishing over it.
+      if (cached) repoReads.set(projectId, { ...cached, at: -Infinity, running: false });
+    }
     return reply.result as T;
   }
   const projectOfCheckout = (checkoutId: string) => checkoutId.split(":")[0];
@@ -214,7 +219,7 @@ export function createRealPort(options: RealPortOptions): WorkspacePort {
     for (let i = messages.length - 1; i >= 0; i--) if (tasks.get(messages[i].taskId)?.projectId === id) messages.splice(i, 1);
     messages.push(...ownMessages);
     const reviews: TaskChanges[] = started.filter(taskId => product.tasks[taskId]?.status !== "done").map(taskId => ({ taskId, sha: "", unavailableReason: repo?.taskDiffs?.[taskId]?.reason ?? (!repo || repository.error ? "Repository details are updating or unavailable. Refresh Code or inspect Git before reviewing changes." : undefined), files: repo?.taskDiffs?.[taskId]?.files ?? changesOf(repo, taskId, product.tasks[taskId]), scopes: [], comments: product.comments?.[taskId] ?? [] }));
-    return { projectId: id, issue: await issueOf(project), openBranch: repo?.openBranch ?? "", defaultBranch: repo?.defaultBranch ?? "", repo, workers, reviews, overlays: product.tasks, sprints: product.sprints.map(withPlanning), messages: messages.filter(m => tasks.get(m.taskId)?.projectId === id),
+    return { projectId: id, hasGit: product.hasGit, issue: await issueOf(project), openBranch: repo?.openBranch ?? "", defaultBranch: repo?.defaultBranch ?? "", repo, workers, reviews, overlays: product.tasks, sprints: product.sprints.map(withPlanning), messages: messages.filter(m => tasks.get(m.taskId)?.projectId === id),
       heldAnswers: Object.fromEntries([...held.values()].flatMap(batch => [...batch].filter(([decisionId]) => decisions.get(decisionId)?.projectId === id).map(([decisionId, answer]) => [decisionId, answer.answer.text]))) };
   }
 

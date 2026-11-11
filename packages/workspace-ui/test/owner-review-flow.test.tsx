@@ -157,15 +157,16 @@ it("a local-only repository offers no remote controls, so an empty push cannot b
   expect(document.querySelector("dialog[open]")).toBeNull();
 });
 
-it("Commit with nothing staged stages every change and then commits", async () => {
+it("Commit with nothing staged delegates staging and commit in one request", async () => {
   const files = [{ path: "a.md", status: "U", stage: "untracked", add: 1, del: 0, hunks: [] }, { path: "b.md", status: "U", stage: "untracked", add: 1, del: 0, hunks: [] }] as never;
   const s = world(); s.repos = [repo({ checkouts: [checkout({ files, draft: "Add docs" })] })];
   const p = await mount(s, `/m/${LOCAL_MACHINE_ID}/p/p/git`);
   const commit = document.querySelector<HTMLButtonElement>(".commit-box .btn-primary")!;
   expect(commit.getAttribute("aria-disabled")).toBeNull();
   commit.click(); await settle();
-  for (let i = 0; i < 3 && p.commands.length < 3; i++) { p.receipt(true); await settle(); }
-  expect(p.commands.map(c => c.operation).slice(0, 3)).toEqual(["git_stage", "git_stage", "git_commit"]);
+  expect(p.commands.map(c => c.operation)).toEqual(["git_commit"]);
+  p.receipt(true); await settle();
+  expect(p.commands.map(c => c.operation)).toEqual(["git_commit"]);
 });
 
 it("shows times in the computer's own time zone", () => {
