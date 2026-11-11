@@ -120,6 +120,30 @@ def test_status_includes_nested_untracked_cache_paths_unless_git_ignores_them(ma
     assert all(f["status"] == "U" and f["add"] == 1 for f in files if f["stage"] == "untracked")
 
 
+def test_large_untracked_dependency_tree_collapses_without_hiding_other_files(machine):
+    (machine.repo / "app").mkdir()
+    (machine.repo / "app/package.json").write_text("{}\n")
+    machine.git("add", "app/package.json")
+    machine.git("commit", "-m", "app")
+    packages = [f"app/node_modules/pkg{i}/index.js" for i in range(2_100)]
+    small = ["new.txt", "cache/.vitest-cache/_metadata.json", "cache/.vite/CACHEDIR.TAG"]
+    for name in packages + small:
+        file = machine.repo / name
+        file.parent.mkdir(parents=True, exist_ok=True)
+        file.write_text("new\n")
+    snapshot = ok(machine("repo.snapshot"))
+    untracked = [f for f in snapshot["checkouts"][0]["files"] if f["stage"] == "untracked"]
+    # The dependency tree is one entry; smaller untracked directories and loose files stay individual.
+    assert sorted(f["path"] for f in untracked) == sorted(small + ["app/node_modules"])
+    assert next(f for f in untracked if f["path"] == "app/node_modules")["hunks"] == []
+    assert set(small) | {"app/package.json"} <= set(snapshot["tree"])
+    assert not any(name.startswith("app/node_modules") for name in snapshot["tree"]) and not snapshot["treeTruncated"]
+    # Committing with an empty index still includes everything listed, collapsed directories too.
+    ok(machine("git", {"action": "commit", "message": "everything"}))
+    committed = subprocess.run(["git", "ls-files"], cwd=machine.repo, check=True, capture_output=True, text=True).stdout.split()
+    assert set(packages + small) <= set(committed)
+
+
 def test_stage_commit_and_revert_change_the_repository(machine):
     (machine.repo / "a.txt").write_text("one\nchanged\n")
     ok(machine("git", {"action": "stage", "path": "a.txt", "staged": True}))

@@ -67,7 +67,7 @@ def test_missing_required_filter_reads_do_not_weaken_writes(machine):
     assert subprocess.check_output(["git", "config", "--get", "filter.missing.required"], cwd=repo, text=True).strip() == "true"
 
 
-def test_snapshot_prunes_untracked_dependencies_but_keeps_tracked_files(machine):
+def test_snapshot_bounds_untracked_dependencies_but_keeps_tracked_files(machine):
     repo = machine.repo
     (repo / "node_modules").mkdir()
     (repo / "node_modules/tracked.txt").write_text("tracked\n")
@@ -76,15 +76,19 @@ def test_snapshot_prunes_untracked_dependencies_but_keeps_tracked_files(machine)
     for prefix in ["node_modules", "nested/node_modules", ".venv", "nested/__pycache__"]:
         directory = repo / prefix
         directory.mkdir(parents=True, exist_ok=True)
-        for n in range(150):
+        for n in range(600):
             (directory / f"untracked-{n}.txt").write_text("dependency\n")
     (repo / "node_modules/tracked.txt").write_text("changed\n")
     (repo / "new.txt").write_text("user file\n")
     before = fingerprint(repo)
     snapshot = ok(machine("repo.snapshot"))
-    assert "new.txt" in snapshot["tree"]
-    assert "node_modules/tracked.txt" in snapshot["tree"]
-    assert not any("untracked-" in path for path in snapshot["tree"])
+    # 2,401 untracked files exceed the bound: Git's wholly untracked folders collapse, smallest
+    # expanded first; files beside tracked ones are never collapsed. Names alone exclude nothing.
+    loose = {f"node_modules/untracked-{n}.txt" for n in range(600)}
+    venv = {f".venv/untracked-{n}.txt" for n in range(600)}
+    assert {"new.txt", "node_modules/tracked.txt"} | loose | venv <= set(snapshot["tree"])
+    assert not any(path.startswith("nested") for path in snapshot["tree"])
     files = {f["path"]: f for f in snapshot["checkouts"][0]["files"]}
-    assert set(files) == {"new.txt", "node_modules/tracked.txt"}
+    assert set(files) == {"new.txt", "node_modules/tracked.txt", "nested"} | loose | venv
+    assert files["nested"]["stage"] == "untracked" and files["nested"]["hunks"] == []
     assert fingerprint(repo) == before

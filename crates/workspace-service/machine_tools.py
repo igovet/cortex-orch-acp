@@ -336,17 +336,49 @@ def parse_diff(text, staged):
     return files
 
 
+# Only the no-Git folder walk skips these names; a Git checkout follows its own ignore rules.
 UNTRACKED_SKIP = ("node_modules", ".venv", "__pycache__")
+# Untracked files listed one by one before wholly untracked directories collapse to one entry.
+MAX_UNTRACKED = 2_000
 
 
-def listed_files(path, *, untracked_only=False):
+def listed_files(path, *, directories=False):
+    """Untracked paths Git does not ignore; `directories` reports wholly untracked folders as `name/`."""
     args = ["ls-files", "-z", "--others", "--exclude-standard"]
-    if not untracked_only:
-        args.append("--cached")
+    if directories:
+        args.extend(("--directory", "--no-empty-directory"))
     # Only private helper state is hidden. Dependency/cache names are not ignore rules:
     # if Git reports them, the owner must see and be able to select them too.
     args.extend(f"--exclude={name}/" for name in sorted(RESERVED))
     return [name for name in out(path, *args).split("\0") if name]
+
+
+def untracked_entries(path):
+    """Untracked entries within MAX_UNTRACKED, and the directories among them shown as one entry.
+
+    A small set lists every file. A larger one keeps Git's collapsed wholly untracked directories
+    (as `git status` shows them without -uall), expanding the smallest first while the bound allows,
+    so an un-ignored dependency tree neither floods the snapshot nor hides other files. Staging or
+    committing a collapsed entry includes its whole directory.
+    """
+    names = listed_files(path)
+    if len(names) <= MAX_UNTRACKED:
+        return names, set()
+    folders = {name[:-1] for name in listed_files(path, directories=True) if name.endswith("/")}
+    groups, loose = {}, []
+    for name in names:
+        parts = name.split("/")
+        owner = next((prefix for prefix in ("/".join(parts[:i]) for i in range(1, len(parts))) if prefix in folders), None)
+        (groups.setdefault(owner, []) if owner else loose).append(name)
+    entries, collapsed = list(loose), set(groups)
+    room = MAX_UNTRACKED - len(loose) - len(groups)
+    for folder, members in sorted(groups.items(), key=lambda item: (len(item[1]), item[0])):
+        if len(members) - 1 > room:
+            break
+        room -= len(members) - 1
+        entries.extend(members)
+        collapsed.discard(folder)
+    return sorted(entries + sorted(collapsed)), collapsed
 
 
 def file_filters(path, names):
@@ -391,7 +423,7 @@ def status_files(path):
                 items.append(("staged", letter.get(xy[0], "M"), name))
             if xy[1] != ".":
                 items.append(("unstaged", letter.get(xy[1], "M"), name))
-    items.extend(("untracked", "U", name) for name in listed_files(path, untracked_only=True))
+    items.extend(("untracked", "U", name) for name in untracked_entries(path)[0])
     filters = file_filters(path, sorted({name for _, _, name in items}))
     exclusions = [f":(literal,exclude){name}" for name in filters]
     scope = ["--", ".", *exclusions]
@@ -524,8 +556,9 @@ def repo_snapshot(root, project, state):
         if not removed:
             files.extend({k:v for k,v in f.items() if k != "stage"} for f in status_files(path) if f["stage"] == "untracked")
         task_diffs[task] = {"files": files}
-    listing = listed_files(root)
-    tree = sorted({name for name in listing if name and name.split("/", 1)[0] not in RESERVED})
+    untracked, collapsed = untracked_entries(root)
+    listing = out(root, "ls-files", "-z", "--cached").split("\0") + untracked
+    tree = sorted({name for name in listing if name and name not in collapsed and name.split("/", 1)[0] not in RESERVED})
     truncated = len(tree) > MAX_TREE
     fetched = None
     marker = git(root, "rev-parse", "--git-path", "FETCH_HEAD", check=False).stdout.decode().strip()
