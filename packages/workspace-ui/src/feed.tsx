@@ -77,7 +77,7 @@ export function Fold(props: { text: string; open: boolean; onToggle: () => void;
     <div class="fold-h">
       <button class="fold" aria-expanded={props.open ? "true" : "false"} onClick={() => props.onToggle()}>
         <I n={props.open ? "chevron-down" : "chevron-right"} s={14} />
-        <Show when={props.loading}><I n="loader" s={12} class="spin" /></Show>
+        <Show when={props.loading}><I n="loader" s={12} class="spin ws-wait" /></Show>
         <span class="fold-t">{props.text}</span>
       </button>
       <Show when={props.right}><span class="fold-r">{props.right}</span></Show>

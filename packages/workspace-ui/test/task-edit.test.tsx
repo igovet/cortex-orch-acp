@@ -72,6 +72,22 @@ it("rereads attachments for a saved draft edit, not for every live task update",
   f.set({...f.state,tasks:[{...f.state.tasks[0],sourceVersion:"7",executionId:"e",status:"working"}]});
   await flush(); expect(f.read).toHaveBeenCalledTimes(3);
 });
+it.each([undefined,10])("offers destructive deletion even for archived sprints, retaining a refused confirmation for retry (%s)", async archivedAt => {
+  const f = fixture();
+  const sprint: Sprint = {id:"s",projectId:"p",title:"Delivery",description:"Scope",runMode:"automatic",planning:"created",conversation:[],plan:null,materializedVersion:1,taskIds:["t"],queueState:"paused",pauseReason:null,targetBranch:null,archivedAt};
+  f.mount(() => <SprintActions sprint={sprint} tab="summary" />);
+  button("Delete sprint…").click();
+  const confirmation = (f.ws.open as ReturnType<typeof vi.fn>).mock.calls[0][0];
+  expect(f.commands).toEqual([]);
+  expect(confirmation.note).toContain("all 1 tasks");
+  expect(confirmation.note).toContain("running work will be stopped");
+  expect(await confirmation.go()).toBe(false);
+  expect(confirmation.note).toContain("The task changed");
+  f.succeed();
+  expect(await confirmation.go()).toBe(true);
+  expect(f.commands[1]).toEqual({type:"delete_sprint",projectId:"p",sprintId:"s",confirmed:true});
+  expect(f.ws.go).toHaveBeenCalledWith({name:"home",machine:f.state.machines[0].id});
+});
 it("closes a sprint only after clear confirmation, hides it in active lists and retains it in Archive", async () => {
   const f = fixture();
   const sprint: Sprint = {id:"s",projectId:"p",title:"Delivery",description:"Scope",runMode:"automatic",planning:"created",conversation:[],plan:null,materializedVersion:1,taskIds:["t"],queueState:"running",pauseReason:null,targetBranch:null};

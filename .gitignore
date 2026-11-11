@@ -44,6 +44,7 @@ prototypes/cortex-workspace/desktop/node_modules/
 prototypes/cortex-workspace/desktop/dist/
 prototypes/cortex-workspace/desktop/src-tauri/target/
 prototypes/cortex-workspace/desktop/.design-evidence/
+prototypes/cortex-workspace/node_modules/
 
 # Credential-free native container build inputs, caches and artifacts.
 /.workspace-build/

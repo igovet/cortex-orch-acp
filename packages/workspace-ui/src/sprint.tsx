@@ -144,7 +144,22 @@ export function SprintActions(props: { sprint: Sprint; tab: SprintRoute["tab"] }
   const close = () => ws.open({kind:"confirm",title:"Close this sprint?",action:"Close sprint",
     note:"The sprint moves to Archive and its automatic queue stops. Unfinished tasks stay in the project, outside the active sprint lists; tasks already running continue. No task is cancelled, accepted, merged, archived or deleted. Close or archive individual tasks separately.",
     go:async () => { const r = await ws.run({type:"close_sprint",sprintId:props.sprint.id,confirmed:true}); if (r.ok) ws.go({name:"archive",machine:ws.machine().id}); return r.ok; }});
-  return <Show when={!props.sprint.archivedAt} fallback={<span class="st st-idle">Closed sprint</span>}><>
+  const remove = () => {
+    const id = props.sprint.id, projectId = props.sprint.projectId;
+    const count = new Set([...props.sprint.taskIds,...ws.store.state().tasks.filter(t => t.sprintId === id).map(t => t.id)]).size;
+    const [failure, setFailure] = createSignal("");
+    const note = `Permanently delete this sprint and all ${count} tasks? The queue and running work will be stopped. Only clean app-created worktrees are removed; other worktrees are kept and their paths shown. The project folder and Git branches are never deleted. This cannot be undone.`;
+    ws.open({kind:"confirm",title:"Delete this sprint and its tasks?",action:"Delete sprint",danger:true,
+      get note() { return note + (failure() ? "\n\n" + failure() : ""); },
+      go:async () => {
+        const r = await ws.run({type:"delete_sprint",projectId,sprintId:id,confirmed:true});
+        if (r.ok) ws.go({name:"home",machine:ws.machine().id});
+        else setFailure(r.message + (r.keptPaths?.length ? " Kept worktrees: " + r.keptPaths.join(", ") : ""));
+        return r.ok;
+      }});
+  };
+  const deleteButton = () => <button class="btn btn-line" {...ws.needs("delete_sprint")} onClick={remove}>Delete sprint…</button>;
+  return <Show when={!props.sprint.archivedAt} fallback={<><span class="st st-idle">Closed sprint</span>{deleteButton()}</>}><>
     <Show when={props.tab === "summary"}><QueueButton sprint={props.sprint} line /></Show>
     <Show when={props.sprint.planning === "created"}><button class="btn btn-line tb-fold" onClick={() => ws.newItem("task", props.sprint.projectId, props.sprint.id)}><I n="plus" s={14} />New task</button></Show>
     <button class="btn btn-line tb-fold" {...ws.needs("close_sprint")} onClick={close}>Close sprint…</button>
@@ -154,6 +169,7 @@ export function SprintActions(props: { sprint: Sprint; tab: SprintRoute["tab"] }
       <Show when={planning() && props.sprint.planning !== "cancelled"}><MenuItem icon="x" label="Cancel planning" needs="cancel_planning" onSelect={() => ws.run({ type: "cancel_planning", sprintId: props.sprint.id })} /></Show>
       <Show when={props.sprint.planning === "cancelled"}><MenuItem icon="play" label="Resume planning" needs="resume_planning" onSelect={() => ws.run({ type: "resume_planning", sprintId: props.sprint.id })} /></Show>
       <MenuItem icon="archive" label="Close sprint…" needs="close_sprint" onSelect={close} />
+      <MenuItem icon="trash" label="Delete sprint…" needs="delete_sprint" onSelect={remove} />
     </Pop>
   </></Show>;
 }

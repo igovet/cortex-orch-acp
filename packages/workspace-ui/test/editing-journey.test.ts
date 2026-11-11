@@ -67,5 +67,12 @@ it.skipIf(!socket || !project)("saves and edits through the production port, the
     expect(index.summaries.get(project!)!.sprints).toEqual([]);
     expect(index.byId.get(task.id)!.sprint).toBeNull();
     expect(index.byId.get(task.id)!.task.executionId).toBeNull();
+    expect((await command({type:"delete_sprint",projectId:project!,sprintId:id,confirmed:false})).ok).toBe(false);
+    const deleted = await command({type:"delete_sprint",projectId:project!,sprintId:id,confirmed:true});
+    expect(deleted.ok,JSON.stringify(deleted)).toBe(true);
+    expect(deleted.deletedTaskIds).toContain(task.id);
+    state=await read();
+    expect(state.sprints.some(s => s.id===id)).toBe(false);
+    expect(state.tasks.some(t => t.id===task.id)).toBe(false);
   } finally { for(const stream of streams) stream.destroy(); }
 },45000);

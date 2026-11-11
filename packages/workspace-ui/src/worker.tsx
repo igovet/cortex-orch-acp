@@ -5,7 +5,7 @@ import { reportHeight } from "./autogrow";
 import { AttachChips, createAttachments, createDictation, MessageComposer } from "./composer";
 import { useWs } from "./ctx";
 import { createBodyMark, createTicker, createUnsent } from "./freshness";
-import { A, Count, createFollow, I, MenuItem, Modal, Pop } from "./kit";
+import { A, Count, createFollow, I, Loading, MenuItem, Modal, Pop } from "./kit";
 import { ActionBar, Toolbar } from "./layout";
 import type { Route } from "./router";
 import { clock } from "./selectors";
@@ -66,7 +66,7 @@ function MessageBubble(props: { m: Accessor<Message>; item: Activity; workerActi
     <div class="b"><ResultText breaks text={m().text} /><AttachChips files={m().attachments} open /></div>
     <div class="ms">
       <Switch>
-        <Match when={m().delivery === "sending"}><I n="loader" s={12} class="spin" /><span>Sending…</span></Match>
+        <Match when={m().delivery === "sending"}><I n="loader" s={12} class="spin ws-wait" /><span>Sending…</span></Match>
         <Match when={m().delivery === "recorded"}><I n="clock" s={12} /><span>{stamp()}. Pending delivery at the next step</span>
           <span class="act"><button class="lnk" {...ws.needs("withdraw_message")} onClick={() => ws.run({ type: "withdraw_message", messageId: m().id })}>Withdraw</button></span></Match>
         <Match when={m().delivery === "delivered"}><I n="check" s={12} /><span>{stamp()}.{m().deliveredAt === null ? " Delivered." : ` Delivered ${clock(m().deliveredAt)}.`} Delivered does not mean read.</span></Match>
@@ -341,7 +341,7 @@ function Stream(props: { model: Accessor<SessionModel>; w: Worker; readOnly?: bo
   const running = () => props.w.status === "working";
   const typing = () => <Show when={running()}><WorkingIndicator activity={all()} /></Show>;
   const rows = () => <>
-    <Show when={loadingOlder()}><div class="cap faint" role="status">Loading recorded activity…</div></Show>
+    <Show when={loadingOlder()}><Loading class="cap faint" text="Loading recorded activity…" /></Show>
     <Show when={historyError()}><div class="cap st-warn" role="alert">{historyError()} <button class="lnk" onClick={() => void loadOlder()}>Retry</button></div></Show>
     <Show when={ws.t("activityNote")}><div class="cap faint">{ws.t("activityNote")}</div></Show>
     <For each={keys()}>{key => {
@@ -424,7 +424,7 @@ function Finished(props: { w: Worker }) {
     <Modal open={reportOpen()} onClose={closeReport} label="Worker report">
       <div class="dlg-h"><h2>{page()?.title ?? "Worker report"}</h2><button class="ib" aria-label="Close report" onClick={closeReport}><I n="x" /></button></div>
       <div class="dlg-b">
-        <Show when={loading()}><div role="status">Loading report…</div></Show>
+        <Show when={loading()}><Loading text="Loading report…" /></Show>
         <Show when={error()}><div role="alert">{error()} <button class="lnk" onClick={() => read()}>Retry</button></div></Show>
         <Show when={page()}>{p => <>
           <div class="cap muted">{p().totalCharacters} characters</div>
@@ -478,7 +478,7 @@ function CoordinatorFeed(props: { model: Accessor<SessionModel> }) {
   const noFeed = () => ws.store.mode !== "real" && error() !== "" && !feed();
   return <Show when={!noFeed()} fallback={<div class="d-scroll"><div class="res-sec"><div class="res-h">Now</div>{m().session.coordinator.note || ws.t("nothingToReport")}</div></div>}>
     <Show when={error()}><div class="cap st-warn ws-cf-err" role="alert">{error()} <button class="lnk" onClick={() => void load()}>Retry</button></div></Show>
-    <Show when={feed()} fallback={<Show when={!error()}><div class="d-scroll"><div class="res-sec cap faint">{loaded() ? "No activity recorded yet." : "Loading activity…"}</div></div></Show>}>
+    <Show when={feed()} fallback={<Show when={!error()}><div class="d-scroll"><Show when={loaded()} fallback={<Loading class="res-sec cap faint" text="Loading activity…" />}><div class="res-sec cap faint">No activity recorded yet.</div></Show></div></Show>}>
       {w => <Stream model={props.model} w={w()} readOnly />}
     </Show>
   </Show>;

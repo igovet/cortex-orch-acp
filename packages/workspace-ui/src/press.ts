@@ -50,6 +50,10 @@ export function createPress(): Press {
   };
   window.addEventListener("click", onClick, true);
   window.addEventListener("keydown", onKey, true);
+  /** A hidden window draws nothing anyone sees, so the stylesheet pauses every loader while it is hidden. */
+  const markHidden = () => document.documentElement.toggleAttribute("data-hidden", document.hidden);
+  markHidden();
+  document.addEventListener("visibilitychange", markHidden);
 
   const hold = (el: HTMLElement) => {
     const n = held.get(el) ?? 0;
@@ -81,6 +85,8 @@ export function createPress(): Press {
       clearTimeout(forget);
       window.removeEventListener("click", onClick, true);
       window.removeEventListener("keydown", onKey, true);
+      document.removeEventListener("visibilitychange", markHidden);
+      document.documentElement.removeAttribute("data-hidden");
     },
   };
 }

@@ -2,7 +2,7 @@ import { createRoot } from "solid-js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createRealPort, FACTS_POLL_MS, FACTS_POLL_MAX_MS, type ProjectLocator } from "../src/port/real";
 import { createWorkspaceStore, PUSH_GAP_MS } from "../src/store";
-import { capabilitiesWire, scriptedPort, scriptedTransport, snapshot } from "./support";
+import { capabilitiesWire, scriptedPort, scriptedTransport, snapshot, wireTask } from "./support";
 
 let dispose: () => void = () => {};
 beforeEach(() => { vi.useFakeTimers(); });
@@ -68,7 +68,7 @@ describe("the machine poll", () => {
     await port.query("capabilities.get", {});
     return port;
   };
-  const productReads = (s: ReturnType<typeof machine>) => s.calls.filter(c => c.operation === "machine.call" && (c.message as { op: string }).op === "product.read").length;
+  const productReads = (s: ReturnType<typeof machine>) => s.calls.filter(c => c.operation === "machine.call" && (c.message as { op: string }).op === "product.facts").length;
 
   it("reads nothing while the window is hidden", async () => {
     Object.defineProperty(document, "hidden", { configurable: true, get: () => true });
@@ -95,6 +95,35 @@ describe("the machine poll", () => {
     await settled(FACTS_POLL_MS);
     expect(productReads(s)).toBe(3);
     stop();
+  });
+
+  it("reconciles another project's consumed invalidation after a command reply", async () => {
+    const s = machine();
+    s.answers["projects.list"] = () => ["p","q"].map(id => ({projectId:id,displayName:id,canonicalRoot:"/"+id,activation:{actorId:"a"}}));
+    let title = "B old", hold = false, finish!: () => void;
+    s.answers["project.snapshot"] = message => {
+      const id = (message as {projectId:string}).projectId;
+      const value = snapshot("4", [wireTask({taskId:id+"-task",title:id === "q" ? title : "A",titleAvailability:"available"})], id);
+      if (hold && id === "q") return new Promise(resolve => {finish = () => resolve(value);});
+      return value;
+    };
+    const port = await opened(s);
+    const store = createRoot(d => {dispose=d;return createWorkspaceStore(port);});
+    await settled();
+    hold = true; title = "B new";
+    s.send({type:"invalidated",projectId:"q"});
+    await settled();
+    // The command itself is controlled; all reads and invalidation bookkeeping use the real port.
+    port.command = async envelope => ({requestId:envelope.requestId,ok:true,outcome:"recorded",message:"Recorded"});
+    expect((await store.dispatch({type:"rename_task",taskId:"p-task",title:"A new"})).ok).toBe(true);
+    expect(store.syncing()).toBe(true);
+    // A newer event must not narrow the replacement read away from q.
+    s.send({type:"invalidated",projectId:"p"});
+    hold = false; finish(); await settled();
+    expect(store.state().tasks.find(t => t.id === "q-task")?.title).toBe("B new");
+    expect(store.syncing()).toBe(false);
+    const read = s.calls.filter(c => c.operation === "project.snapshot").map(c => (c.message as {projectId:string}).projectId);
+    expect(read).toEqual(["p","q","q","p","q"]);
   });
 
   it("reads only the project its events came from", async () => {

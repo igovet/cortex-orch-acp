@@ -60,6 +60,7 @@ CREATE TABLE IF NOT EXISTS task_events (
  UNIQUE(task_id, dedup_key)
 );
 CREATE INDEX IF NOT EXISTS task_events_by_task ON task_events(task_id, id);
+CREATE INDEX IF NOT EXISTS task_events_by_activity_ref ON task_events(task_id, json_extract(payload_json,'$.activity_ref'), id);
 CREATE INDEX IF NOT EXISTS task_events_by_assignment ON task_events(task_id, assignment_ref);
 CREATE INDEX IF NOT EXISTS task_events_by_type ON task_events(task_id, event_type, id);
 CREATE INDEX IF NOT EXISTS task_events_unconsumed ON task_events(task_id, id) WHERE consumed_by IS NULL AND superseded=0;

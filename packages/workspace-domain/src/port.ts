@@ -42,15 +42,15 @@ export type CommandEnvelope = {
   payload: WorkspaceCommand;
 };
 /** That a command was recorded. It is not the new state: the screen changes only when a projection confirms it. */
-export type CommandReceipt = { requestId: string; ok: boolean; outcome: string; message: string; entityId?: string; entityVersion?: string };
+export type CommandReceipt = { requestId: string; ok: boolean; outcome: string; message: string; entityId?: string; entityVersion?: string; deletedTaskIds?: string[]; keptPaths?: string[] };
 
 /** One folder the machine found. `git` says a `.git` is there. */
 export type DirectoryEntry = { path: string; git: boolean };
 /** What a machine found for the text typed. `complete` is false when a limit ended the walk, and `cancelled` when a newer search took over. */
 export type DirectorySearch = { query: string; home: string; entries: DirectoryEntry[]; complete: boolean; cancelled?: boolean };
 
-/** `fresh` bypasses the repository cache age on open/focus, retaining its value and sharing any in-flight read. */
-export type QueryParameters = { "capabilities.get": Record<string, never>; "project.snapshot": { projectId?: string }; "project.facts": { projectId?: string; fresh?: boolean }; "machine.facts": Record<string, never> };
+/** `fresh` bypasses repository cache age; `full` rereads all projects even after event invalidations were consumed. */
+export type QueryParameters = { "capabilities.get": Record<string, never>; "project.snapshot": { projectId?: string; full?: boolean }; "project.facts": { projectId?: string; fresh?: boolean }; "machine.facts": Record<string, never> };
 export type QueryResults = { "capabilities.get": PortCapabilities; "project.snapshot": ProjectionUpdate[]; "project.facts": ProjectFacts[]; "machine.facts": MachineFacts[] };
 export type QueryOperation = keyof QueryResults;
 
@@ -180,4 +180,12 @@ export function applyProjection(state: WorkspaceState, update: ProjectionUpdate)
     tasks: [...state.tasks.filter(t => t.projectId !== project.id), ...tasks],
     sessions: [...state.sessions.filter(s => !owned.has(s.taskId)), ...sessions],
   };
+}
+
+/** Apply only a service-confirmed deletion, including all secondary task surfaces. */
+export function applySprintDeletion(state: WorkspaceState, sprintId: string, taskIds: ReadonlySet<string>): WorkspaceState {
+  return {...state,sprints:state.sprints.filter(s => s.id !== sprintId),
+    tasks:state.tasks.filter(t => !taskIds.has(t.id)),sessions:state.sessions.filter(s => !taskIds.has(s.taskId)),
+    workers:state.workers.filter(w => !taskIds.has(w.taskId)),messages:state.messages.filter(m => !taskIds.has(m.taskId)),
+    events:state.events.filter(e => !taskIds.has(e.taskId)),reviews:state.reviews.filter(r => !taskIds.has(r.taskId))};
 }

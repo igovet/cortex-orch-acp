@@ -7,6 +7,10 @@ import type { Fact } from "./selectors";
 export const I = (props: { n: string; s?: 12 | 14; class?: string }) =>
   <i class={`i ${props.s ? `s${props.s} ` : ""}i-${props.n}${props.class ? ` ${props.class}` : ""}`} aria-hidden="true" />;
 
+/** Words for something still on its way, with a loader that runs only as long as they are shown. */
+export const Loading = (props: { text: string; class?: string }) =>
+  <div class={`ws-loading${props.class ? ` ${props.class}` : ""}`} role="status"><I n="loader" s={12} class="spin" /><span>{props.text}</span></div>;
+
 /** A count beside a name. Nothing to count says nothing, so no list ever reads "All 0". */
 export const Count = (props: { n: number }) => <Show when={props.n > 0}><span class="n">{props.n}</span></Show>;
 

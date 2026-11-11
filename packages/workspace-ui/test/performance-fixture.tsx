@@ -8,6 +8,7 @@ import "../src/workspace.css";
 // Disposable, opt-in WebKit stress data. No service, engines or real stores.
 const s=withTask(emptyWorkspace(),"Inspect source-backed project documentation");
 s.machines[0].connection="connected";
+const settled={status:s.tasks[0].status,process:s.tasks[0].process};
 Object.assign(s.tasks[0],{status:"working",process:"live",executionId:"e"});
 const paragraph="Compared the documented behavior with the current source and checked every affected control. No remote systems were changed.";
 const section=(i:number)=>`## Finding ${i}: published verification\n\n${paragraph}\n\n| Check | Outcome |\n| --- | --- |\n| Local links | **Passed** |\n| Source | Inspected |\n\n1. Read the exact source\n2. Re-run the focused check\n\n\`\`\`sh\npython3 -B check.py --part ${i}\nprintf 'literal\\.text'\n\`\`\`\n`;
@@ -34,4 +35,6 @@ const port:any={mode:"real",readReport:async(_t:string,reportId:string,cursor?:s
 subscribe:(f:any)=>{listeners.add(f);setTimeout(emit,0);return()=>listeners.delete(f)},command:async()=>{throw Error("This is a read-only fixture")}};
 history.replaceState(null,"",new URLSearchParams(location.search).get("view")==="conversation"?"/m/local/t/t":"/m/local/t/t/workers/w");
 render(()=><Workspace port={port}/>,document.getElementById("root")!);
-(window as any).fixture={emit,reads,characters:report.length};
+/** Whether the task is running: a running task shows its long-running working status, a settled one shows nothing pending. */
+const working=(on:boolean)=>{Object.assign(s.tasks[0],on?{status:"working",process:"live"}:settled);emit();};
+(window as any).fixture={emit,working,reads,characters:report.length};

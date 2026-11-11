@@ -17,7 +17,7 @@ export const MACHINE_COMMANDS: readonly WorkspaceCommand["type"][] = [
   "clear_old", "rename_machine", "set_retention", "save_storage", "set_worktree_root", "run_diagnostics", "run_cleanup",
   "save_surface", "activate_profile", "save_profile", "revert_profile", "deactivate_profile", "create_profile", "rename_profile", "describe_profile", "delete_profile", "apply_preset", "reset_preset",
   "add_connection", "rename_connection", "check_connection", "refresh_models", "remove_connection", "set_sessions", "download_engine", "enable_opencode",
-  "edit_task", "close_sprint", "create_sprint", "set_sprint_settings", "rename_sprint", "set_run_mode", "edit_plan", "materialize_plan", "cancel_planning", "resume_planning", "run_sprint", "pause_sprint", "answer_planning", "plan_message",
+  "edit_task", "close_sprint", "delete_sprint", "create_sprint", "set_sprint_settings", "rename_sprint", "set_run_mode", "edit_plan", "materialize_plan", "cancel_planning", "resume_planning", "run_sprint", "pause_sprint", "answer_planning", "plan_message",
 ];
 
 /** Surfaces that are not one command. */

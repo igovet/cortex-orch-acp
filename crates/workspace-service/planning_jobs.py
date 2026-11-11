@@ -85,6 +85,14 @@ class PlanningJobs:
                 if existing[0].is_alive():
                     continue
                 self.jobs.pop(key)
+            if sprint.get("deleting"):
+                with machine.Locked(self.state):
+                    current = machine.product_of(self.state, api.project_id)
+                    saved = next((s for s in current["sprints"] if s["id"] == key), None)
+                    if saved and not saved.get("deletePlannerStopped"):
+                        saved["deletePlannerStopped"] = True
+                        machine.write_json(machine.product_path(self.state, api.project_id), current)
+                continue
             # Never silently rerun an interrupted or old hidden execution.
             if sprint.get("archivedAt") or sprint["planning"] != "planning" or sprint.get("planningTaskId") or self.shutdown.is_set():
                 continue

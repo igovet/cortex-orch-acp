@@ -11,10 +11,26 @@ const source = files(SRC).map(path => ({ path, text: readFileSync(path, "utf8").
 const hits = (rule: RegExp) => source.flatMap(f => f.text.split("\n").filter(line => rule.test(line)).map(line => `${f.path}: ${line.trim().slice(0, 120)}`));
 
 describe("interface rules", () => {
-  it("working indicators do not require continuous repaint frames", () => {
-    const css = readFileSync(join(SRC, "workspace.css"), "utf8");
-    expect(css).toMatch(/\.spin, \.typing \.tick, \.shimmer\s*\{[^}]*animation: none/);
-    expect(css).not.toMatch(/animation:[^;}]*infinite/);
+  it("working indicators move only while pending, by transform and opacity, and pause when nobody sees them", () => {
+    const css = readFileSync(join(SRC, "workspace.css"), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
+    // Every repeating animation sits on an indicator that exists only while something is pending.
+    const pending = /^(\.spin|\.ws-loading \.spin|\.spin\.ws-wait|\.shimmer|\[data-busy\]::after|\.btn\[aria-busy="true"\]::after)$/;
+    const looping = [...css.matchAll(/([^{}]+)\{([^{}]*)\}/g)].filter(m => /animation[^;]*infinite/.test(m[2]));
+    expect(looping.length).toBeGreaterThan(0);
+    for (const m of looping) for (const selector of m[1].split(",").map(s => s.trim())) expect(selector).toMatch(pending);
+    // What they run changes transform or opacity only: no layout, paint, shadow or filter per frame.
+    const used = new Set(looping.flatMap(m => [...m[2].matchAll(/animation(?:-name)?:\s*([^;]+)/g)].flatMap(a => a[1].split(/,(?![^(]*\))/).map(part => part.trim().split(/\s+/)[0]))));
+    const frames = new Map([...readFileSync(join(SRC, "mockup-styles.css"), "utf8").concat(css).matchAll(/@keyframes ([\w-]+) \{((?:[^{}]*\{[^}]*\})*)\s*\}/g)].map(k => [k[1], k[2]]));
+    for (const name of used) {
+      expect(frames.has(name), name).toBe(true);
+      for (const p of frames.get(name)!.matchAll(/([\w-]+)\s*:/g)) expect(p[1], name).toMatch(/^(transform|opacity)$/);
+    }
+    // A hidden window and a parked tab pause them, pseudo-element bars included.
+    expect(css).toMatch(/html\[data-hidden\] \*, html\[data-hidden\] \*::after \{[^}]*animation-play-state: paused/);
+    expect(css).toMatch(/\.ws-pane\[data-parked\] \*, \.ws-pane\[data-parked\] \*::after \{[^}]*animation-play-state: paused/);
+    // Reduced motion still shows life, as a slow pulse.
+    expect(css).toMatch(/prefers-reduced-motion: reduce\)\s*\{[^}]*\[data-busy\]::after[^{]*\{[^}]*animation: ws-pulse/);
+    expect(css).toMatch(/prefers-reduced-motion: reduce\)\s*\{\s*\.spin[^{]*\{[^}]*animation: ws-pulse/);
   });
 
   it("has hints and labels in English only", () => {

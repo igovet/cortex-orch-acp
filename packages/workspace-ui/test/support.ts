@@ -66,6 +66,15 @@ export function scriptedTransport(answers: Partial<Record<string, (message: unkn
       calls.push({ operation, message });
       const answer = answers[operation];
       if (!answer) throw new Error(`No answer scripted for ${operation}`);
+      if (operation === "machine.call" && (message as {op?:string}).op === "product.facts") {
+        // The fake helper composes the same two readers as the real bundled endpoint.
+        const request = message as {op:string;params?:{taskIds?:string[]}};
+        const product = await answer({...request,op:"product.read"}) as {ok:boolean;result:unknown};
+        if (!product.ok) return product;
+        const workers = request.params?.taskIds?.length ? await answer({...request,op:"workers"}) as {ok:boolean;result:unknown} : {ok:true,result:[]};
+        if (!workers.ok) return workers;
+        return {ok:true,result:{product:product.result,workers:workers.result}};
+      }
       return answer(message);
     },
     subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener); },

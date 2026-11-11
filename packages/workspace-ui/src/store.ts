@@ -1,5 +1,5 @@
 import { batch, createMemo, createSignal, onCleanup } from "solid-js";
-import { applyFacts, applyMachineFacts, applyProjection, capabilityOf, compareVersions, emptyWorkspace, FEATURES, hasCapability, noCapabilities, projectionKey } from "@cortex/workspace-domain";
+import { applyFacts, applyMachineFacts, applyProjection, applySprintDeletion, capabilityOf, compareVersions, emptyWorkspace, FEATURES, hasCapability, noCapabilities, projectionKey } from "@cortex/workspace-domain";
 import type { Attachment, CommandEnvelope, CommandReceipt, FileRead, FileSaveResult, MachineFacts, PortCapabilities, PortConnection, PortUpdate, ProjectFacts, ProjectionUpdate, WorkspaceCommand, WorkspacePort, WorkspaceState } from "@cortex/workspace-domain";
 import { downloadAttachment } from "./attachments";
 import { COPY } from "./copy";
@@ -35,9 +35,8 @@ function withConnection(state: WorkspaceState, connection: PortConnection): Work
 }
 
 /**
- * The screens' only view of a backend. A snapshot goes in by its version and nothing else changes what is shown: a command
- * returns a receipt, and the state moves when a confirmed projection arrives. A failure stays a failure; there is nothing
- * here to fall back to.
+ * The screens' only view of a backend. Versioned projections and acknowledged rename/queue patches change the display.
+ * A command receipt settles before its background reconciliation. A failure stays a failure; no requested effect is guessed.
  */
 export function createWorkspaceStore(port: WorkspacePort, options: StoreOptions = {}) {
   const now = options.now ?? Date.now();
@@ -48,7 +47,13 @@ export function createWorkspaceStore(port: WorkspacePort, options: StoreOptions 
   if (options.initial) versions.set("workspace", options.initial.version);
   const [projected, setHeld] = createSignal(options.initial?.state ?? emptyWorkspace());
   // Only what really changed reaches the screens: an unchanged read leaves every record the same object.
-  const setProjected = (change: (current: WorkspaceState) => WorkspaceState) => setHeld(current => share(current, change(current)));
+  const deletions = new Map<string, Set<string>>();
+  const setProjected = (change: (current: WorkspaceState) => WorkspaceState) => setHeld(current => {
+    let next = change(current);
+    // An older in-flight read cannot resurrect an acknowledged deletion.
+    for (const [sprintId, taskIds] of deletions) next = applySprintDeletion(next, sprintId, taskIds);
+    return share(current, next);
+  });
   const track = options.track ?? (<T,>(work: Promise<T>) => work);
   const running = new Map<string, Promise<CommandReceipt>>();
   // A read that changed nothing leaves these alone: every screen and the whole index hang off them.
@@ -56,6 +61,7 @@ export function createWorkspaceStore(port: WorkspacePort, options: StoreOptions 
   const [capabilities, setCapabilities] = createSignal(options.initial?.capabilities ?? noCapabilities(), { equals: (a, b) => JSON.stringify(a) === JSON.stringify(b) });
   const [ready, setReady] = createSignal(!!options.initial);
   const [readIssue, setReadIssue] = createSignal<string | null>(null);
+  const [syncing, setSyncing] = createSignal(false);
   const [rejected, setRejected] = createSignal(0);
   const [receipt, setReceipt] = createSignal<CommandReceipt | null>(null);
   const [acceptanceIssue, setAcceptanceIssue] = createSignal<{ taskId: string; message: string } | null>(null);
@@ -88,29 +94,46 @@ export function createWorkspaceStore(port: WorkspacePort, options: StoreOptions 
   const withSources = (held: ProjectFacts): ProjectFacts => !held.repo ? held : { ...held, repo: { ...held.repo, checkouts: held.repo.checkouts.map(c => ({ ...c, draft: checkoutDrafts.get(c.id) ?? c.draft, sources: Object.fromEntries([...sources].flatMap(([key, text]) => key.startsWith(`${c.id}|`) ? [[key.slice(c.id.length + 1), text]] : [])) })) } };
   const installFacts = (update: ProjectFacts) => { if (registered && !registered.has(update.projectId)) return; const held = withSources(update); facts.set(update.projectId, held); setProjected(current => applyFacts(current, held)); };
   const installMachine = (update: MachineFacts) => setProjected(current => applyMachineFacts(current, update));
-  const readFacts = async () => {
-    for (const update of await port.query("project.facts", {}) ?? []) installFacts(update);
-    for (const update of await port.query("machine.facts", {}) ?? []) installMachine(update);
+  let refreshing: Promise<void> | undefined, transientFailures = 0;
+  const queuedReads = new Set<string | undefined>();
+  let actionEpoch = 0, fullReadQueued = false;
+  const requeueRead = (projectId?: string) => {
+    queuedReads.add(projectId);
+    // The port may already have consumed an event's invalidation set.
+    if (!projectId) fullReadQueued = true;
   };
-  let refreshing: Promise<void> | undefined, refreshAgain = false, transientFailures = 0;
   let machineReading: Promise<void> | undefined;
-  const refresh = (): Promise<void> => {
-    if (refreshing) { refreshAgain = true; return refreshing; }
-    refreshing = readCoherent().finally(() => {
+  const refresh = (projectId?: string): Promise<void> => {
+    if (refreshing) { queuedReads.add(projectId); return refreshing; }
+    const full = !projectId && fullReadQueued;
+    if (!projectId) fullReadQueued = false;
+    refreshing = readCoherent(projectId, full).finally(() => {
       refreshing = undefined;
-      if (refreshAgain && active) { refreshAgain = false; void refresh(); }
+      if (queuedReads.size && active) {
+        // Always read again after a command reply, even when an older poll is in flight.
+        const next = queuedReads.has(undefined) ? undefined : queuedReads.values().next().value;
+        if (next === undefined) {
+          // Event-scoped reads may omit explicitly queued projects.
+          if (queuedReads.size > 1) fullReadQueued = true;
+          queuedReads.clear();
+        } else queuedReads.delete(next);
+        void refresh(next);
+      } else setSyncing(false);
     });
     return refreshing;
   };
-  const readCoherent = async () => {
+  const readCoherent = async (projectId?: string, full = false) => {
+    const epoch = actionEpoch;
     let serviceAnswered = false;
     try {
-      const offered = await port.query("capabilities.get", {});
-      const snapshots = await port.query("project.snapshot", {});
+      const offered = projectId ? capabilities() : await port.query("capabilities.get", {});
+      const parameters = projectId ? { projectId } : {};
+      const snapshots = await port.query("project.snapshot", full ? { full: true } : parameters);
       serviceAnswered = true;
       // Facts own sprint membership, hidden planning/purged rows and owner decisions.
-      const product = await port.query("project.facts", {}) ?? [];
+      const product = await port.query("project.facts", parameters) ?? [];
       if (!active) return;
+      if (epoch !== actionEpoch) { requeueRead(projectId); return; }
       batch(() => {
         setCapabilities(offered);
         for (const update of snapshots) install(update, true);
@@ -122,22 +145,24 @@ export function createWorkspaceStore(port: WorkspacePort, options: StoreOptions 
         lastRead = Date.now();
       });
     } catch (error) {
+      if (!active) return;
+      if (epoch !== actionEpoch) { requeueRead(projectId); return; }
       const quiet = ready() && transientRead(error) && ++transientFailures < 3;
       if (!quiet) setReadIssue(reasonOf(error));
       // A refused product/repository read is not evidence that the service is offline.
       if (serviceAnswered) setConnection({ state: "connected", reason: null, at: Date.now() });
-      else if (!quiet) {
+      else if (!quiet && !projectId) {
         setCapabilities(noCapabilities());
         setConnection({ state: "unavailable", reason: reasonOf(error), at: Date.now() });
       }
       // Nothing else would ask again, so a passing failure must not leave the app offline until the owner notices.
       clearTimeout(again);
-      if (active) again = setTimeout(() => void refresh(), RETRY_MS);
+      if (active) again = setTimeout(() => void refresh(projectId), RETRY_MS);
       return;
     }
     // Machine settings do not determine task placement.
     // Discovery/disk accounting must not keep ordinary actions spinning after task facts arrived.
-    if (!machineReading) machineReading = port.query("machine.facts", {}).then(updates => {
+    if (!projectId && !machineReading) machineReading = port.query("machine.facts", {}).then(updates => {
       for (const update of updates ?? []) if (active) installMachine(update);
     }).catch(() => {}).finally(() => { machineReading = undefined; });
   };
@@ -172,7 +197,12 @@ export function createWorkspaceStore(port: WorkspacePort, options: StoreOptions 
     }
     // Discard polls begun before this coherent read; they must not overwrite its newer facts.
     if (update.kind === "projection") { if (!refreshing) install(update); return; }
-    if (update.kind === "facts") { if (!refreshing) installFacts(update.facts); return; }
+    if (update.kind === "facts") {
+      // The port remembers this notification, so unchanged polls will not send it again.
+      // Reread rather than replaying potentially older facts over the coherent commit.
+      if (refreshing) requeueRead(update.facts.projectId); else installFacts(update.facts);
+      return;
+    }
     if (update.kind === "machine") { installMachine(update.facts); return; }
     if (update.kind === "refresh") { pushRefresh(); return; }
     const back = update.connection.state === "connected" && connection().state !== "connected";
@@ -190,7 +220,7 @@ export function createWorkspaceStore(port: WorkspacePort, options: StoreOptions 
     if (held) installFacts(held);
   };
   return {
-    mode: port.mode, state, index, ready, readIssue, now, receipt, acceptanceIssue, connection, rejected, can, reload: () => track(reload()),
+    mode: port.mode, state, index, ready, readIssue, syncing, now, receipt, acceptanceIssue, connection, rejected, can, reload: () => track(reload()),
     /** Opening Git keeps the confirmed display and asks only for this project's moving facts. */
     refreshProjectFacts: async (projectId: string) => {
       if (port.mode !== "real") return;
@@ -256,11 +286,35 @@ export function createWorkspaceStore(port: WorkspacePort, options: StoreOptions 
         if (held) installFacts(held);
       }
       const envelope: CommandEnvelope = { requestId: id, operation: command.type, expectedVersion: latest, payload: command };
-      const work = port.command(envelope).catch((): CommandReceipt => ({ requestId: id, ok: false, outcome: "unknown_outcome", message: UNKNOWN_OUTCOME })).then(async result => {
+      const work = port.command(envelope).catch((): CommandReceipt => ({ requestId: id, ok: false, outcome: "unknown_outcome", message: UNKNOWN_OUTCOME })).then(result => {
+        actionEpoch++;
+        if (result.ok) setProjected(state => ({ ...state,
+          tasks: command.type === "rename_task" ? state.tasks.map(t => t.id === command.taskId ? {...t,title:command.title} : t) : state.tasks,
+          sprints: state.sprints.map(s => {
+            if (!("sprintId" in command) || s.id !== command.sprintId) return s;
+            if (command.type === "rename_sprint") return {...s,title:command.title};
+            if (command.type === "run_sprint") return {...s,queueState:"running",pauseReason:null};
+            if (command.type === "pause_sprint") return {...s,queueState:"paused",pauseReason:"Paused by you"};
+            if (command.type === "set_run_mode") return {...s,runMode:command.runMode};
+            return s;
+          }),
+        }));
         if (result.ok && command.type === "git_commit" && checkoutDrafts.get(command.checkoutId) === command.message) checkoutDrafts.delete(command.checkoutId);
-        if (port.mode === "real" && result.outcome !== "local" && (result.ok || command.type === "rerun_check" || ["stale_version","stale_epoch","stale_result","superseded","expired"].includes(result.outcome))) await refresh();
-        // A refusal changes nothing on the machine, but what the app held for it, such as a batch's answers, may be gone.
-        else if (port.mode === "real" && !result.ok) await readFacts().catch(() => undefined);
+        if (command.type === "delete_sprint" && result.ok) {
+          // This is the service's confirmed deletion, not an optimistic project refresh.
+          deletions.set(command.sprintId, new Set(result.deletedTaskIds ?? []));
+          setProjected(state => state);
+        }
+        // An acknowledgement is not a projection. Reconciliation never holds its button busy.
+        if (port.mode === "real" && result.outcome !== "local") {
+          setSyncing(true);
+          const projectId = ("projectId" in command && command.projectId)
+            || ("taskId" in command && state().tasks.find(t => t.id === command.taskId)?.projectId)
+            || ("sprintId" in command && state().sprints.find(s => s.id === command.sprintId)?.projectId)
+            || ("checkoutId" in command && state().repos.find(r => r.checkouts.some(c => c.id === command.checkoutId))?.projectId);
+          const registryChange = ["add_project","activate_project","rename_project","remove_project"].includes(command.type);
+          void refresh(registryChange ? undefined : projectId || undefined);
+        }
         return settle(result);
       }).finally(() => { running.delete(key); });
       running.set(key, work);

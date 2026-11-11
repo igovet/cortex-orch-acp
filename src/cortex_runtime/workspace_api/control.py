@@ -126,6 +126,9 @@ def handle(agent, params):
                                "WHERE t.project_id=? AND e.execution_id=?", (project, execution_id)).fetchone()
         if execution is None:
             raise WorkspaceError("not_found")
+        from . import task_options
+        if task_options.read(db, execution["task_id"]).get("deletingSprint") and action not in ("close_task", "command_stop"):
+            raise WorkspaceError("task_deleting")
         runtime_row, mapping, _ = _facts(db, execution, api.store.project_root)
         if mapping.state == "unknown":
             raise WorkspaceError("stale_epoch")

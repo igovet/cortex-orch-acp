@@ -9,7 +9,7 @@ import copy
 import json
 
 from ..workspace_contract import ContractError, capabilities, validate
-from . import decisions, history, projections, storage
+from . import decisions, history, projections, storage, task_options
 from .storage import (WorkspaceError, digest, new_identity, now, receipt,
                       record, replay, require_schema)
 
@@ -128,6 +128,8 @@ class WorkspaceAPI:
             elif command["expectedVersion"] != str(task["version"]):
                 outcome = "stale_version"
             elif task["execution_id"] is not None:
+                outcome = "busy"
+            elif task_options.read(db, task["task_id"]).get("deletingSprint"):
                 outcome = "busy"
             elif blocked:
                 outcome = "unsupported"

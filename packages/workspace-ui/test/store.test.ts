@@ -1,11 +1,11 @@
 import { createRoot } from "solid-js";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { emptyWorkspace, type WorkspaceState } from "@cortex/workspace-domain";
 import { createWorkspaceStore } from "../src/store";
 import { flush, projection, scriptedPort, withTask } from "./support";
 
 let dispose: (() => void) | undefined;
-afterEach(() => { dispose?.(); dispose = undefined; });
+afterEach(() => { dispose?.(); dispose = undefined; vi.useRealTimers(); });
 const storeOn = (port: Parameters<typeof createWorkspaceStore>[0], options: Parameters<typeof createWorkspaceStore>[1] = {}) => createRoot(d => { dispose = d; return createWorkspaceStore(port, options); });
 const titles = (state: WorkspaceState) => state.tasks.map(t => t.title);
 
@@ -194,6 +194,245 @@ describe("a real backend failure", () => {
     await store.reload();
     expect(store.connection().state).toBe("connected");
     expect(store.can("tasks.create")).toBe(true);
+  });
+
+  it("removes a confirmed deletion before a slow refresh, and fences late snapshots", async () => {
+    const s = scriptedPort({capabilities:{everything:true,operations:[]}});
+    const state = withTask(emptyWorkspace(),"Delete");
+    let finish!: (r: import("@cortex/workspace-domain").CommandReceipt) => void;
+    s.port.command = () => new Promise(resolve => { finish = resolve; });
+    const store = storeOn(s.port,{initial:{state,version:"1",capabilities:{everything:true,operations:[]}}});
+    s.port.query = (() => new Promise(() => {})) as typeof s.port.query;
+    const pending = store.dispatch({type:"delete_sprint",projectId:"p",sprintId:"s",confirmed:true});
+    expect(store.state().tasks).toHaveLength(1);
+    finish({ok:true,requestId:"r",outcome:"recorded",message:"Deleted",deletedTaskIds:["t"]});
+    expect((await pending).ok).toBe(true);
+    expect(store.state().tasks).toEqual([]);
+    s.emit(projection("2",state));
+    expect(store.state().tasks).toEqual([]);
+  });
+
+  it("settles an acknowledgement without waiting for facts and reads only its project", async () => {
+    const s = scriptedPort({capabilities:{everything:true,operations:[]}});
+    const state = withTask(emptyWorkspace(),"Before");
+    const store = storeOn(s.port,{initial:{state,version:"1",capabilities:{everything:true,operations:[]}}});
+    const asked: {operation:string;parameters:unknown}[] = [];
+    let release!: (facts: never[]) => void;
+    s.port.query = (async (operation: string, parameters: unknown) => {
+      asked.push({operation,parameters});
+      return operation === "project.facts" ? new Promise<never[]>(resolve => {release=resolve;}) : [];
+    }) as typeof s.port.query;
+    const before = performance.now();
+    const pending = store.dispatch({type:"rename_task",taskId:"t",title:"Confirmed"});
+    s.receipt();
+    expect((await pending).ok).toBe(true);
+    const elapsed = performance.now()-before;
+    expect(elapsed).toBeLessThan(100);
+    console.info("Receipt to confirmed local rename (fake transport, unresolved facts), ms:", elapsed);
+    expect(store.state().tasks[0].title).toBe("Confirmed");
+    expect(store.syncing()).toBe(true);
+    await flush();
+    expect(asked).toEqual([
+      {operation:"project.snapshot",parameters:{projectId:"p"}},
+      {operation:"project.facts",parameters:{projectId:"p"}},
+    ]);
+    release([]); await flush();
+    expect(store.syncing()).toBe(false);
+  });
+
+  it.each(["project.snapshot", "project.facts"])("reconciles facts suppressed during another project's %s even when later polls are unchanged", async heldOperation => {
+    const s = scriptedPort({capabilities:{everything:true,operations:[]}});
+    const state = withTask(emptyWorkspace(), "A old");
+    state.projects.push({...state.projects[0], id:"q", name:"Q"});
+    state.tasks.push({...state.tasks[0], id:"u", projectId:"q", title:"B old"});
+    const store = storeOn(s.port,{initial:{state,version:"1",capabilities:{everything:true,operations:[]}}});
+    const facts = (projectId: string, targetBranch: string) => ({
+      projectId, openBranch:"main", defaultBranch:"main", repo:null, workers:[], reviews:[], sprints:[],
+      overlays:{[projectId === "p" ? "t" : "u"]:{targetBranch}},
+    });
+    let releaseA!: () => void, releaseB!: () => void;
+    const asked: {operation:string;projectId?:string}[] = [];
+    s.port.query = (async (operation: string, parameters: {projectId?:string}) => {
+      asked.push({operation,projectId:parameters.projectId});
+      if (parameters.projectId === "p" && operation === heldOperation)
+        await new Promise<void>(resolve => { releaseA=resolve; });
+      if (parameters.projectId === "q" && operation === "project.snapshot")
+        await new Promise<void>(resolve => { releaseB=resolve; });
+      return operation === "project.facts" ? [facts(parameters.projectId!, "fresh")] : [];
+    }) as typeof s.port.query;
+    const command = store.dispatch({type:"rename_task",taskId:"t",title:"A new"});
+    s.receipt(); await command; await flush();
+
+    // The real port remembers sent facts before notifying; an unchanged poll emits nothing.
+    let sent = "";
+    const pollB = (branch: string) => {
+      if (sent === branch) return;
+      sent = branch;
+      s.emit({kind:"facts",facts:facts("q",branch)});
+    };
+    pollB("observed");
+    pollB("observed-again");
+    pollB("observed-again");
+    expect(store.state().tasks.find(t => t.id === "u")?.targetBranch).toBeNull();
+    releaseA(); await flush();
+    expect(asked.filter(r => r.operation === "project.snapshot").map(r => r.projectId)).toEqual(["p","q"]);
+    expect(store.syncing()).toBe(true);
+    releaseB(); await flush();
+    pollB("observed-again");
+    expect(store.state().tasks.find(t => t.id === "u")?.targetBranch).toBe("fresh");
+    expect(store.state().tasks.find(t => t.id === "t")?.title).toBe("A new");
+    expect(asked).toHaveLength(4);
+    expect(store.syncing()).toBe(false);
+  });
+
+  it.each([false, true])("keeps suppressed fact scopes when an event refresh is also queued (event first: %s)", async eventFirst => {
+    const s = scriptedPort({capabilities:{everything:true,operations:[]}});
+    const state = withTask(emptyWorkspace(), "A");
+    state.projects.push({...state.projects[0], id:"q", name:"Q"});
+    state.tasks.push({...state.tasks[0], id:"u", projectId:"q"});
+    const store = storeOn(s.port,{initial:{state,version:"1",capabilities:{everything:true,operations:[]}}});
+    const facts = {projectId:"q",openBranch:"main",defaultBranch:"main",repo:null,workers:[],reviews:[],sprints:[],overlays:{u:{targetBranch:"fresh"}}};
+    let release!: () => void, full = false;
+    const scopes: unknown[] = [];
+    s.port.query = (async (operation: string, parameters: {projectId?:string;full?:boolean}) => {
+      if (operation === "capabilities.get") return {everything:true,operations:[]};
+      if (operation === "project.snapshot") {
+        scopes.push(parameters);
+        if (parameters.projectId === "p") await new Promise<void>(resolve => { release=resolve; });
+        else full = !!parameters.full;
+      }
+      // Like the real adapter, an event-scoped unscoped read need not include Q.
+      return operation === "project.facts" && full ? [facts] : [];
+    }) as typeof s.port.query;
+    const command = store.dispatch({type:"rename_task",taskId:"t",title:"A new"});
+    s.receipt(); await command;
+    if (eventFirst) s.emit({kind:"refresh"});
+    s.emit({kind:"facts",facts});
+    if (!eventFirst) s.emit({kind:"refresh"});
+    release(); await flush();
+    expect(scopes).toEqual([{projectId:"p"},{full:true}]);
+    expect(store.state().tasks.find(t => t.id === "u")?.targetBranch).toBe("fresh");
+    expect(store.syncing()).toBe(false);
+  });
+
+  it("retries a failed dirty-project read without replaying the acknowledged command", async () => {
+    vi.useFakeTimers();
+    const s = scriptedPort({capabilities:{everything:true,operations:[]}});
+    const state = withTask(emptyWorkspace(), "A");
+    state.projects.push({...state.projects[0], id:"q", name:"Q"});
+    state.tasks.push({...state.tasks[0], id:"u", projectId:"q"});
+    const store = storeOn(s.port,{initial:{state,version:"1",capabilities:{everything:true,operations:[]}}});
+    const facts = {projectId:"q",openBranch:"main",defaultBranch:"main",repo:null,workers:[],reviews:[],sprints:[],overlays:{u:{targetBranch:"fresh"}}};
+    let release!: () => void, reads = 0;
+    s.port.query = (async (operation: string, parameters: {projectId?:string}) => {
+      if (operation === "project.snapshot" && parameters.projectId === "p")
+        await new Promise<void>(resolve => { release=resolve; });
+      if (operation === "project.facts" && parameters.projectId === "q") {
+        if (++reads === 1) throw Error("facts unavailable");
+        return [facts];
+      }
+      return [];
+    }) as typeof s.port.query;
+    const command = store.dispatch({type:"rename_task",taskId:"t",title:"A new"});
+    s.receipt(); await command;
+    s.emit({kind:"facts",facts});
+    release(); await vi.advanceTimersByTimeAsync(0);
+    expect(store.readIssue()).toBe("facts unavailable");
+    expect(store.state().tasks.find(t => t.id === "u")?.targetBranch).toBeNull();
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(reads).toBe(2);
+    expect(store.state().tasks.find(t => t.id === "u")?.targetBranch).toBe("fresh");
+    expect(store.readIssue()).toBeNull();
+    expect(s.commands).toHaveLength(1);
+  });
+
+  it("does a new scoped read after a pre-command poll, never installing that old reply", async () => {
+    const s = scriptedPort({capabilities:{everything:true,operations:[]}});
+    const state = withTask(emptyWorkspace(),"Before");
+    const store = storeOn(s.port,{initial:{state,version:"1",capabilities:{everything:true,operations:[]}}});
+    let finish!: (updates: ReturnType<typeof projection>[]) => void;
+    let reads = 0;
+    s.port.query = (async (operation: string) => {
+      if (operation === "capabilities.get") return {everything:true,operations:[]};
+      if (operation === "project.snapshot") {
+        reads++;
+        return reads === 1 ? new Promise<ReturnType<typeof projection>[]>(resolve => {finish=resolve;}) : [projection("3",withTask(emptyWorkspace(),"Confirmed"))];
+      }
+      return [];
+    }) as typeof s.port.query;
+    const reload = store.reload(); await flush();
+    const pending = store.dispatch({type:"rename_task",taskId:"t",title:"Confirmed"});
+    s.receipt(); await pending;
+    finish([projection("2",state)]);
+    await reload;
+    expect(store.state().tasks[0].title).toBe("Confirmed");
+    await flush();
+    expect(reads).toBe(2);
+    expect(store.syncing()).toBe(false);
+  });
+
+  it.each([false, true])("requeues all projects when an unscoped read is fenced (failed read: %s)", async failed => {
+    const s = scriptedPort({capabilities:{everything:true,operations:[]}});
+    const state = withTask(emptyWorkspace(), "A old");
+    state.projects.push({...state.projects[0], id:"q", name:"Q"});
+    state.tasks.push({...state.tasks[0], id:"u", projectId:"q", title:"B old"});
+    const store = storeOn(s.port,{initial:{state,version:"1",capabilities:{everything:true,operations:[]}}});
+    let finish!: () => void, release!: () => void;
+    const scopes: unknown[] = [];
+    s.port.query = (async (operation: string, parameters: unknown) => {
+      if (operation === "capabilities.get") return {everything:true,operations:[]};
+      if (operation === "project.snapshot") {
+        scopes.push(parameters);
+        if (scopes.length === 1) return new Promise<ReturnType<typeof projection>[]>((resolve, reject) => {
+          finish = () => failed ? reject(Error("old read failed")) : resolve([projection("2",state)]);
+        });
+        return new Promise<ReturnType<typeof projection>[]>(resolve => { release = () => {
+          const current = structuredClone(state);
+          current.tasks[0].title = "A new"; current.tasks[1].title = "B new";
+          resolve([projection("3",current)]);
+        }; });
+      }
+      if (operation === "project.facts") return [{projectId:"q", openBranch:"main", defaultBranch:"main", repo:null, workers:[], reviews:[], overlays:{u:{targetBranch:"new-target"}}, sprints:[]}];
+      return [];
+    }) as typeof s.port.query;
+    const reload = store.reload(); await flush();
+    const command = store.dispatch({type:"rename_task",taskId:"t",title:"A new"});
+    s.receipt(); await command;
+    finish(); await reload; await flush();
+    expect(store.syncing()).toBe(true);
+    expect(store.state().tasks.find(t => t.id === "u")?.title).toBe("B old");
+    expect(scopes).toEqual([{}, {full:true}]);
+    release(); await flush();
+    expect(titles(store.state())).toEqual(["A new", "B new"]);
+    expect(store.state().tasks.find(t => t.id === "u")?.targetBranch).toBe("new-target");
+    expect(store.syncing()).toBe(false);
+  });
+
+  it("returns refusals and unknown outcomes immediately without applying a requested rename", async () => {
+    const s = scriptedPort({capabilities:{everything:true,operations:[]}});
+    const store = storeOn(s.port,{initial:{state:withTask(emptyWorkspace(),"Before"),version:"1",capabilities:{everything:true,operations:[]}}});
+    s.port.query = (() => new Promise(() => {})) as typeof s.port.query;
+    const pending = store.dispatch({type:"rename_task",taskId:"t",title:"Not confirmed"});
+    s.receipt(false);
+    expect((await pending).ok).toBe(false);
+    expect(store.state().tasks[0].title).toBe("Before");
+    s.port.command = () => Promise.reject(Error("lost"));
+    expect((await store.dispatch({type:"rename_task",taskId:"t",title:"Unknown"})).outcome).toBe("unknown_outcome");
+    expect(store.state().tasks[0].title).toBe("Before");
+  });
+
+  it("refreshes registry and capabilities after project activation or removal", async () => {
+    const s = scriptedPort({capabilities:{everything:true,operations:[]}});
+    const store = storeOn(s.port,{initial:{state:withTask(emptyWorkspace(),"Before"),version:"1",capabilities:{everything:true,operations:[]}}});
+    const asked: string[] = [], query = s.port.query;
+    s.port.query = ((operation: Parameters<typeof query>[0], parameters: never) => {asked.push(operation);return query(operation,parameters);}) as typeof query;
+    const activate = store.dispatch({type:"activate_project",projectId:"p"});
+    s.receipt(); await activate; await flush();
+    expect(asked).toContain("capabilities.get");
+    asked.length=0;
+    const remove = store.dispatch({type:"remove_project",projectId:"p",confirmed:true});
+    s.receipt(); await remove; await flush();
+    expect(asked).toContain("capabilities.get");
   });
 
   it("stops listening when the screen goes away", async () => {

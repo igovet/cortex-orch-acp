@@ -101,6 +101,7 @@ def prepare(store, task_id, environ):
     legacy = base / group / task_id
     path = Path(checkout["path"]) if checkout.get("path") else legacy if legacy.exists() else base / group / leaf
     branch = checkout.get("branch") or "cw/" + (task_id if path == legacy else leaf)
+    managed = checkout.get("createdByWorkspace", False)
     if path.exists():
         # An interrupted start is never blindly reused as a different checkout.
         if git(path, "branch", "--show-current") != branch or git(path, "rev-parse", "--path-format=absolute", "--git-common-dir") != project:
@@ -108,6 +109,7 @@ def prepare(store, task_id, environ):
     else:
         path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         git(store.project_root, "worktree", "add", "-b", branch, str(path))
-    options["checkout"] = {"kind": "worktree", "path": str(path), "branch": branch}
+        managed = True
+    options["checkout"] = {"kind": "worktree", "path": str(path), "branch": branch, "createdByWorkspace": managed}
     store.immediate_write(lambda db: save(db, task_id, options))
     return str(path)

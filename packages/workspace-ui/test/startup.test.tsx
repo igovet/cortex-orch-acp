@@ -79,18 +79,21 @@ it("keeps asking for the logo at the page's first address after the router moves
   history.replaceState(null, "", "/");
 });
 
-it("says it is loading only after two seconds, and more after fifteen, without a spinner", async () => {
+it("says it is loading only after two seconds, with a loader but no progress figure, and more after fifteen", async () => {
   vi.useFakeTimers();
   const notice = <div class="strip info">Codex: Installing the qualified adapter…</div>;
   mount({ notice });
   await vi.advanceTimersByTimeAsync(1900);
   expect(slot()).toBe("");
+  expect(document.querySelector(".l-startup .spin")).toBeNull();
   await vi.advanceTimersByTimeAsync(200);
   expect(slot()).toBe("Loading workspace…");
+  expect(document.querySelector(".l-startup .spin")).not.toBeNull();
   await vi.advanceTimersByTimeAsync(13000);
   expect(slot()).toContain("Still waiting for the service. The first start can take longer.");
   expect(slot()).toContain("Installing the qualified adapter");
-  expect(document.querySelector(".l-startup .spin, .l-startup [role=progressbar]")).toBeNull();
+  expect(document.querySelector(".l-startup .spin")).not.toBeNull();
+  expect(document.querySelector(".l-startup [role=progressbar]")).toBeNull();
 });
 
 it("keeps a failure on screen with its reason and a working Try again, and a later success reveals the interface", async () => {

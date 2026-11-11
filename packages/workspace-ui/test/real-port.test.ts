@@ -278,6 +278,20 @@ describe("real port", () => {
       return { s, p, asked, ready: async () => { await p.query("capabilities.get", {}); await p.query("project.snapshot", {}); await p.query("project.facts", {}); await p.query("machine.facts", {}); } };
     };
 
+    it("routes sprint controls from held facts without scanning project products", async () => {
+      const sprint = {id:"sp",projectId:"p",planning:"created",materializedVersion:1,taskIds:[],conversation:[],history:[]};
+      const {p,ready,s} = helper({sprints:[sprint]});
+      await ready(); s.calls.length=0;
+      expect((await p.command(envelope({type:"run_sprint",sprintId:"sp"}))).ok).toBe(true);
+      expect(s.calls.filter(c => c.operation === "machine.call").map(c => (c.message as {op:string}).op)).toEqual(["product.sprint"]);
+      s.calls.length=0;
+      await p.query("project.facts",{projectId:"p"});
+      const ops = s.calls.filter(c => c.operation === "machine.call").map(c => (c.message as {op:string}).op);
+      expect(ops).toContain("product.facts");
+      expect(ops).not.toContain("product.read");
+      expect(ops).not.toContain("workers");
+    });
+
     it("keeps cached Git facts after an action and publishes the fresh snapshot later", async () => {
       vi.useFakeTimers();
       let stop = () => {};

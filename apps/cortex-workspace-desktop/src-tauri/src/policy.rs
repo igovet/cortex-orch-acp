@@ -42,6 +42,7 @@ const MACHINE_OPERATIONS: &[&str] = &[
     "git",
     "workers",
     "product.read",
+    "product.facts",
     "product.task",
     "product.integrate",
     "product.sprint",

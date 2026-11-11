@@ -237,7 +237,7 @@ function AddServer(props: { tab?: string }) {
       <Match when={tab() === "connect"}>
         <div class="surface ws-pad ws-connect">
           <Switch>
-            <Match when={c.busy()}><div class="row"><I n="refresh" s={14} class="spin" /><span>Starting the server…</span><span class="ws-push"></span><button class="btn btn-line btn-sm" onClick={c.cancel}>{ws.demo ? "Cancel" : "Dismiss (server stops at deadline)"}</button></div></Match>
+            <Match when={c.busy()}><div class="row"><I n="refresh" s={14} class="spin ws-wait" /><span>Starting the server…</span><span class="ws-push"></span><button class="btn btn-line btn-sm" onClick={c.cancel}>{ws.demo ? "Cancel" : "Dismiss (server stops at deadline)"}</button></div></Match>
             <Match when={c.result()?.ok && seen()}>
               <div class="row"><span class="st st-ok"><I n="check-circle" s={12} />Connected</span><span class="w500">{seen()!.name}</span><span class="cap muted tnum">{seen()!.version}</span><span class="tnum">{seen()!.tools.length} tools</span><span class="cap muted tnum">Observed {clock(seen()!.at)}</span><span class="ws-push"></span><button class="btn btn-primary btn-sm" onClick={() => go("access")}>Go to Tool access</button></div>
             </Match>
@@ -309,7 +309,7 @@ function EditServer(props: { name: string; tab?: string }) {
         </Match>
         <Match when={tab() === "tools"}>
           <Show when={failed()}>{f => <div class="note-box bad" role="alert"><I n="x-circle" s={14} /><span>{f()} Stored grants stay, and the matrix stays editable.</span><button class="btn btn-line btn-sm" disabled={c.busy() || !!locked()} onClick={c.start}>Retry</button></div>}</Show>
-          <Show when={c.busy()}><div class="note-box plain"><I n="refresh" s={14} class="spin" /><span>Starting the server…</span></div></Show>
+          <Show when={c.busy()}><div class="note-box plain"><I n="refresh" s={14} class="spin ws-wait" /><span>Starting the server…</span></div></Show>
           <Show when={diff()}>{x => <div class="note-box plain" role="status"><I n="check" s={14} /><span>{x()}. Nothing else changed.</span></div>}</Show>
           <div class="row ws-gap4"><Show when={seen()}>{o => <span class="cap muted tnum">Last check {clock(o().at)}, {o().name} {o().version}, {o().tools.length} tools</span>}</Show><span class="ws-push"></span><Outcome c={c} id="m-edit-outcome" /></div>
           <Matrix server={server()} seen={seen()} set={set} off={locked()} check={c.start} checking={c.busy()} problems={problems()} prefix={props.name} />

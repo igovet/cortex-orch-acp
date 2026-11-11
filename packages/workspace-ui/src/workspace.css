@@ -86,18 +86,23 @@ html:not([data-keyboard]) [data-placed-focus] { --focus-line: 1px solid var(--fg
 
 /*
  * The pressed control carries its own loading state. Its box never changes, and a quick action shows nothing at all.
- * The label and icon stay readable, so the button never seems to vanish: a short bar runs along its lower edge instead.
+ * The label and icon stay readable, so the button never seems to vanish: a short bar sweeps along its lower edge instead.
+ * The bar exists only while the work is pending, so it runs only then. It moves by transform and fades by opacity alone,
+ * so each frame is a compositor change, never layout or paint.
  */
-[data-busy] { position: relative; cursor: default; }
-[data-busy]::after { content: ""; position: absolute; left: 6px; right: 6px; bottom: 3px; height: 2px; border-radius: 1px; pointer-events: none; opacity: 0;
-  background: currentColor; animation: ws-busy-in 1ms linear 150ms forwards; }
-@keyframes ws-busy-in { to { opacity: .6; } }
+[data-busy], .btn[aria-busy="true"] { position: relative; cursor: default; }
+[data-busy]::after, .btn[aria-busy="true"]::after { content: ""; position: absolute; left: 6px; right: 6px; bottom: 3px; height: 2px; border-radius: 1px; pointer-events: none; opacity: 0;
+  background: currentColor; transform: scaleX(.3); will-change: transform; animation: ws-busy-in 1ms linear 150ms forwards, ws-busy-run .9s ease-in-out 150ms infinite alternate; }
+@keyframes ws-busy-in { to { opacity: .7; } }
+@keyframes ws-busy-run { from { transform: translateX(-35%) scaleX(.3); } to { transform: translateX(35%) scaleX(.3); } }
+@keyframes ws-pulse { from { opacity: 1; } to { opacity: .4; } }
 /* Busy is not disabled-looking: the button keeps its fill, border, size and label. */
 .btn[data-busy][disabled], .ib[data-busy][disabled] { opacity: 1; }
 .btn-primary[data-busy][disabled] { background: var(--primary); }
 .btn-danger[data-busy][disabled] { background: var(--danger); }
+/* Reduced motion keeps a loader alive without travel: the whole bar breathes slowly. */
 @media (prefers-reduced-motion: reduce) {
-  [data-busy]::after { opacity: .6; animation: none; background: currentColor; }
+  [data-busy]::after, .btn[aria-busy="true"]::after { transform: none; will-change: opacity; animation: ws-pulse 2s ease-in-out 150ms infinite alternate; }
 }
 
 /* Long row lists (RowList): rows in normal flow, so scrolling them runs no script. */
@@ -708,10 +713,21 @@ body[data-tab="conversation"] .task-body { grid-template-columns: minmax(0, 1fr)
   body[data-tab="workers"] .tb-main { overflow-x: auto; }
   body[data-tab="workers"] .crumbs { flex: 1 0 100px; }
 }
-/* Working is a recorded state, not a request for permanent compositor frames.
-   Keep its icon and words visible; only real progress changes the screen. */
-.spin, .typing .tick, .shimmer { animation: none; }
-.shimmer { background: none; -webkit-text-fill-color: currentColor; }
+/* A loader icon turns only while it is on screen, and it is on screen only while something is pending. The turn is stepped,
+   twelve positions a turn, so the page draws a few frames a second, not sixty, and each is a transform of a small layer.
+   A working status, which can last for hours, turns slowly; a wait for a reply (`ws-wait`, and the words of a loading
+   list or page) turns briskly. A parked tab and a hidden window pause every one of them. */
+.spin { animation: spin 2.4s steps(12, end) infinite; will-change: transform; }
+.ws-loading .spin, .spin.ws-wait { animation-duration: .9s; }
+.typing .tick { animation: none; }
+.shimmer { background: none; -webkit-text-fill-color: currentColor; will-change: opacity; animation: ws-pulse 1.2s ease-in-out infinite alternate; }
+html[data-hidden] *, html[data-hidden] *::after { animation-play-state: paused !important; }
+@media (prefers-reduced-motion: reduce) {
+  .spin, .ws-loading .spin, .spin.ws-wait { will-change: opacity; animation: ws-pulse 2s ease-in-out infinite alternate !important; }
+  .shimmer { animation: ws-pulse 2s ease-in-out infinite alternate !important; }
+}
+/* Words for something still on its way, with the loader beside them. */
+.ws-loading { display: flex; align-items: center; gap: 6px; }
 
 /* A frameless window takes the outer 5px of each edge for resizing, ahead of the page. Scrollers at the window's right and
    bottom edge stop short of it, so a scrollbar is always grabbed and an edge always resizes. The desktop bridge widens the
@@ -896,7 +912,7 @@ button.step-row:hover { background: var(--bg-hover); color: var(--fg); }
 }
 .ws-pane { position: absolute; inset: 0; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
 .ws-pane[data-parked] { visibility: hidden; pointer-events: none; }
-.ws-pane[data-parked] * { animation-play-state: paused !important; }
+.ws-pane[data-parked] *, .ws-pane[data-parked] *::after { animation-play-state: paused !important; }
 
 /* A composer's reason stands between its choices and its send controls, and takes no room from either until there is space. */
 .c-bar > .l-reason { order: 1; flex: 1 1 0; min-width: 0; margin-inline: 6px 4px; }

@@ -50,6 +50,7 @@ CREATE TABLE IF NOT EXISTS runtime_requests (
  operation TEXT NOT NULL, digest TEXT NOT NULL, result_json TEXT NOT NULL,
  PRIMARY KEY(task_id,actor,request_key)
 );
+CREATE INDEX IF NOT EXISTS runtime_requests_by_operation ON runtime_requests(task_id,actor,operation);
 '''
 
 TRANSITIONS = {

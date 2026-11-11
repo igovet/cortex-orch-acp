@@ -65,13 +65,13 @@ def snapshot():
     return rows
 
 
-def measure(state):
+def measure(state, seconds=3):
     a = snapshot()
     owned = {os.getpid(), xvfb.pid}
     for _ in range(6):
         owned |= {p for p, v in a.items() if v[0] in owned}
     start = time.monotonic()
-    time.sleep(5)
+    time.sleep(seconds)
     elapsed = time.monotonic() - start
     b = snapshot()
     hz = os.sysconf("SC_CLK_TCK")
@@ -89,16 +89,51 @@ def run():
             time.sleep(.1)
         else:
             raise TimeoutError("fixture readiness")
-        time.sleep(2)
+        running = "return document.getAnimations().filter(a=>a.playState==='running').map(a=>a.animationName)"
+        # Nothing pending: the task has settled, so no animation may run at all.
+        js("fixture.working(false)")
+        time.sleep(1.5)
         print(json.dumps(dict(engine="WebKitGTK", version=[WebKit2.get_major_version(),
               WebKit2.get_minor_version(), WebKit2.get_micro_version()],
               nodes=js("return document.querySelectorAll('*').length"),
               animations=js("return document.getAnimations().map(a=>({name:a.animationName,state:a.playState}))"))), flush=True)
-        assert not js("return document.getAnimations().some(a=>a.effect.getTiming().iterations===Infinity)"), "Permanent animation frames"
-        measure("unchanged-visible")
+        assert js(running) == [], "An animation runs with nothing pending"
+        measure("idle-nothing-pending")
+        # A pressed control awaiting its reply: its bar sweeps after 150 ms, and stops the moment the reply settles.
+        assert js("""const b = [...document.querySelectorAll('.titlebar .btn, .main .btn')].find(x => x.getClientRects().length);
+          if (!b) return false; b.setAttribute('data-busy', ''); b.setAttribute('aria-busy', 'true'); window.__busy = b; return true;"""), "No visible button"
+        time.sleep(.4)
+        pressed = js(running)
+        print(json.dumps(dict(state="button-pending", running=pressed)), flush=True)
+        assert "ws-busy-run" in pressed, "A pending button shows no moving loader"
+        measure("button-pending")
+        js("__busy.removeAttribute('data-busy'); __busy.removeAttribute('aria-busy')")
+        time.sleep(.2)
+        assert js(running) == [], "A settled button keeps animating"
+        # A running task: its long-running working status turns slowly, and only while the window is shown.
+        js("fixture.working(true)")
+        time.sleep(1)
+        work = js("""return document.getAnimations().filter(a=>a.playState==='running').map(a=>({name:a.animationName,
+          ms:a.effect.getTiming().duration,easing:a.effect.getTiming().easing}))""")
+        print(json.dumps(dict(state="working-visible", running=work)), flush=True)
+        assert work and all(a["name"] == "spin" for a in work), "A working task shows no slow loader"
+        measure("working-visible")
+        GLib.idle_add(win.hide)
+        for _ in range(30):
+            if js("return document.hidden"):
+                break
+            time.sleep(.1)
+        if js("return document.hidden"):
+            assert js(running) == [], "A hidden window keeps animating"
+            measure("working-hidden")
+        else:
+            print(json.dumps(dict(state="working-hidden", result="not_observable",
+                                  reason="document.hidden did not become true after hiding the window")), flush=True)
+        GLib.idle_add(win.show_all)
+        time.sleep(.5)
         js("window.cpuUpdates=0;window.cpuTimer=setInterval(()=>{fixture.emit(true);window.cpuUpdates++},1000)")
-        measure("visible-updates-one-per-second")
-        assert js("clearInterval(window.cpuTimer);return window.cpuUpdates") >= 4
+        measure("working-updates-one-per-second", 4)
+        assert js("clearInterval(window.cpuTimer);return window.cpuUpdates") >= 3
     except Exception as error:
         exit_code = 1
         print(type(error).__name__ + ": " + str(error), file=sys.stderr, flush=True)

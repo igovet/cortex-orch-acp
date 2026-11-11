@@ -128,6 +128,11 @@ export function createRealPort(options: RealPortOptions): WorkspacePort {
   let attachmentSupport = false, presentationRead = 0;
   // The facts each project's screens last received, by the coherent read or the poll. A poll sends only what differs.
   const sent = new Map<string, ProjectFacts>();
+  const sprintProjects = new Map<string, string>();
+  const rememberSprints = (id: string, product: Product) => {
+    for (const [sprintId, projectId] of sprintProjects) if (projectId === id) sprintProjects.delete(sprintId);
+    for (const sprint of product.sprints) sprintProjects.set(sprint.id, id);
+  };
   /** Projects whose events arrived since the last refresh; the next refresh reads these and leaves the rest. */
   let invalidated = new Set<string>(), readScope = new Set<string>();
   let offered: string[] = [], serviceMethods: string[] = [], machineOn = false, configTokens: Record<string, unknown> = {}, configRead: ConfigRead | null = null;
@@ -141,12 +146,14 @@ export function createRealPort(options: RealPortOptions): WorkspacePort {
       // Replacing the entry also prevents an older in-flight read from publishing over it.
       if (cached) repoReads.set(projectId, { ...cached, at: -Infinity, running: false });
     }
+    if (op === "product.read" && projectId && !(params as { attachments?: boolean } | undefined)?.attachments) rememberSprints(projectId, reply.result as Product);
     return reply.result as T;
   }
   const projectOfCheckout = (checkoutId: string) => checkoutId.split(":")[0];
   const projectOfTask = (taskId: string) => tasks.get(taskId)?.projectId ?? null;
   const projectOfSprint = async (sprintId: string) => {
-    for (const project of projects) if ((await machine<Product>("product.read", project.projectId)).sprints.some(s => s.id === sprintId)) return project.projectId;
+    const id = sprintProjects.get(sprintId);
+    if (id) return id;
     throw new Refusal("unknown_sprint", "Unknown sprint.");
   };
 
@@ -186,9 +193,9 @@ export function createRealPort(options: RealPortOptions): WorkspacePort {
         if (deferred && repoReads.get(id) === current) {
           // A slow Git reply is new facts, not a new task snapshot. A full refresh
           // could outlast the cache and spawn the next slow Git read forever.
-          const project = projects.find(p => p.projectId === id);
+          const project = projects.find(p => p.projectId === id), generation = presentationRead;
           if (project) void factsOf(project).then(facts => {
-            if (repoReads.get(id) === current) { sent.set(id, facts); for (const notify of observers) notify({kind:"facts",facts}); }
+            if (generation === presentationRead && repoReads.get(id) === current) { sent.set(id, facts); for (const notify of observers) notify({kind:"facts",facts}); }
           }).catch(() => {}); // Keep the last confirmed facts; the normal poll retries.
         }
         return value;
@@ -205,14 +212,17 @@ export function createRealPort(options: RealPortOptions): WorkspacePort {
 
   async function factsOf(project: ProjectLocator, fresh = false): Promise<ProjectFacts> {
     const id = project.projectId;
-    let product = await machine<Product>("product.read", id);
-    // Queue scheduling and planning result adoption belong to the owning service child.
-    // Reading the screen never starts work.
-    const repository = await repositoryFacts(id, fresh), read = repository.value;
+    const started = [...tasks].filter(([, t]) => t.projectId === id && t.executionId).map(([taskId]) => taskId);
+    // Independent reads overlap; neither Git nor workers delays sending the product read.
+    const [bundle, repository] = await Promise.all([
+      machine<{ product: Product; workers: Worker[] }>("product.facts", id, { taskIds: project.activated === false ? [] : started }),
+      repositoryFacts(id, fresh),
+    ]);
+    const { product, workers } = bundle;
+    rememberSprints(id, product);
+    const read = repository.value;
     // A copy, never the cached read itself: the next reads share that one, and the poll compares these facts with the last sent.
     const repo = read && { ...read, checkouts: read.checkouts.map(c => ({ ...c, draft: localDrafts.get(c.id) ?? c.draft })) };
-    const started = [...tasks].filter(([, t]) => t.projectId === id && t.executionId).map(([taskId]) => taskId);
-    const workers = project.activated === false || !started.length ? [] : await machine<Worker[]>("workers", id, { taskIds: started });
     for (const w of workers) {
       workerTasks.set(w.id, w.taskId);
       if (w.result) w.result = {...w.result, checks:w.result.checks.map(c => ({...c, detail:readableCheckReason(c.detail)}))};
@@ -542,6 +552,16 @@ export function createRealPort(options: RealPortOptions): WorkspacePort {
         catch { return {...made,ok:false,outcome:"partial_effect",message:"The task was saved outside the sprint, but joining the sprint was not confirmed. Refresh the project; do not create it again."}; }
         return made;
       }
+      case "delete_sprint": {
+        const reply = await machine<{done:boolean;reason?:string;taskIds?:string[];keptPaths?:string[]}>("product.sprint", command.projectId,
+          {action:"delete",sprintId:command.sprintId,confirmed:command.confirmed});
+        invalidated.add(command.projectId);
+        const cached = repoReads.get(command.projectId);
+        if (cached) repoReads.set(command.projectId, {...cached,at:-Infinity,running:false});
+        return {...ok(),ok:reply.done,outcome:reply.done ? "recorded" : "partial_effect",
+          message:reply.done ? (reply.keptPaths?.length ? "Sprint deleted. Kept worktrees: " + reply.keptPaths.join(", ") : "Sprint and tasks deleted.") : reply.reason ?? "Deletion is incomplete. Retry Delete sprint.",
+          deletedTaskIds:reply.taskIds,keptPaths:reply.keptPaths};
+      }
       case "close_sprint": await machine("product.sprint", await projectOfSprint(command.sprintId), {action:"close",sprintId:command.sprintId,confirmed:command.confirmed}); return ok();
       case "rename_task": await taskCall(task(command.taskId), { action: "rename", taskId: command.taskId, title: command.title }); return ok();
       case "archive_task": await taskCall(task(command.taskId), { action: "archive", taskId: command.taskId }); return ok();
@@ -630,6 +650,7 @@ export function createRealPort(options: RealPortOptions): WorkspacePort {
         const selected = command.settings?.model?.trim();
         if (!selected || !ENGINE_KEYS.some(engine => available.config.catalogue[engine].models.some(m => (m.routeId ?? m.id) === selected || m.id === selected))) throw new Refusal("model_required", "Connect an engine and select an available model before starting sprint planning. Your description is kept.");
         const { sprintId } = await machine<{ sprintId: string }>("product.sprint", command.projectId, { action: "create", description: command.description, attachments: wireAttachments(command.attachments), runMode: command.runMode, checkout: command.checkout, settings: command.settings, targetBranch: command.targetBranch });
+        sprintProjects.set(sprintId, command.projectId);
         // The service plans from descriptions without a runtime execution or project tools.
         return done(requestId, sprintId);
       }
@@ -729,7 +750,7 @@ export function createRealPort(options: RealPortOptions): WorkspacePort {
       if (operation === "machine.facts") return (machineOn ? machineFacts().then(f => [f]) : Promise.resolve([])) as Promise<QueryResults[O]>;
       const { projectId } = parameters as QueryParameters["project.snapshot"];
       // A refresh caused by one project's events rereads that project, not every project on the machine.
-      if (operation === "project.snapshot" && !projectId) { readScope = invalidated; invalidated = new Set(); }
+      if (operation === "project.snapshot" && !projectId) { readScope = (parameters as QueryParameters["project.snapshot"]).full ? new Set() : invalidated; invalidated = new Set(); }
       const wanted = (p: ProjectLocator) => projectId ? p.projectId === projectId : !readScope.size || readScope.has(p.projectId);
       if (operation === "project.facts") {
         presentationRead++;

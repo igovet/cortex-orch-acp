@@ -262,6 +262,11 @@ def _safety_agent_child():
             while not (project / ".git/walkthrough-release").exists() and time.monotonic() < deadline:
                 time.sleep(.05)
             assert (project / ".git/walkthrough-release").exists(), "walkthrough barrier not released"
+        if role != "worker-code-reviewer" and goal == "sprint-delete-running":
+            mcp_tools.dispatch(store, channel, "command_run", dict(
+                argv=["python3", "-B", "-c", "import os,time; from pathlib import Path; Path('a.txt').write_text(str(os.getpid())); time.sleep(40)"],
+                timeout_seconds=50, request_key="delete-running-command"))
+            return PromptOutcome(StopReason.CANCELLED, "Stopped disposable command.")
         if role != "worker-code-reviewer":
             if (path / ".git").is_file() and git(path, "rev-parse", "--verify", "MERGE_HEAD", check=False).returncode == 0:
                 (path / "a.txt").write_text("resolved\n")

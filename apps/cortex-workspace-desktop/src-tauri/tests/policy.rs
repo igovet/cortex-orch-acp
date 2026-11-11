@@ -261,6 +261,34 @@ fn machine_calls_are_a_closed_set_and_cannot_name_a_root() {
     .is_err());
 }
 
+/// Every machine operation the bundled real port names must pass the bridge, or the
+/// whole workspace fails to load with `bridge_request_refused` (startup reads `product.facts`).
+#[test]
+fn every_machine_operation_the_real_port_names_is_allowed() {
+    let source = include_str!("../../../../packages/workspace-ui/src/port/real.ts");
+    let mut ops = Vec::new();
+    for (at, _) in source.match_indices("machine") {
+        let rest = &source[at + "machine".len()..];
+        // `machine("op"` or `machine<Type>("op"`; the generic may hold one nested `<...>`.
+        let rest = if rest.starts_with('<') {
+            let mut depth = 0;
+            let Some(end) = rest.char_indices().find_map(|(i, c)| {
+                match c { '<' => depth += 1, '>' => { depth -= 1; if depth == 0 { return Some(i + 1); } } _ => {} }
+                None
+            }) else { continue };
+            &rest[end..]
+        } else { rest };
+        if let Some(op) = rest.strip_prefix("(\"").and_then(|tail| tail.split('"').next()) {
+            if !ops.contains(&op) { ops.push(op); }
+        }
+    }
+    assert!(ops.contains(&"product.facts") && ops.contains(&"repo.snapshot") && ops.len() >= 15, "{ops:?}");
+    for op in ops {
+        let call = json!({"operation":"machine.call","message":{"op":op,"projectId":"wp_1","params":{}}});
+        assert!(authorize("main", "tauri://localhost/", call).is_ok(), "the bridge refuses machine op {op}");
+    }
+}
+
 #[test]
 fn owner_check_reruns_name_only_retained_result_evidence() {
     let body = json!({"operation":"executions.control","message":{

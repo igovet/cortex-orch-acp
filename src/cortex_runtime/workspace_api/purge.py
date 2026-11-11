@@ -3,7 +3,7 @@ from ..cleanup import finish_deletions, protected_active_tasks, _reclaim_space
 from .storage import WorkspaceError, append_public_tx
 
 
-def purge_task(store, project_id, task_id):
+def purge_task(store, project_id, task_id, *, reclaim=True):
     with store.connection(exclusive=True) as db:
         db.execute("BEGIN IMMEDIATE")
         row = db.execute("SELECT * FROM workspace_tasks WHERE project_id=? AND task_id=?", (project_id, task_id)).fetchone()
@@ -26,7 +26,8 @@ def purge_task(store, project_id, task_id):
             remove_adapter_task(db, project_id, task_id)
         db.commit()
         result = {"deleted": True}
-        result.update(_reclaim_space(store, db))
+        if reclaim:
+            result.update(_reclaim_space(store, db))
         return result
 
 

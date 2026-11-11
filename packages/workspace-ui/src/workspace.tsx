@@ -89,10 +89,10 @@ function NotLoaded() {
 function Receipt() {
   const ws = useWs();
   let timer: ReturnType<typeof setTimeout> | undefined;
-  // Every message leaves on its own, and any click, key or move to another screen takes it away sooner: nothing stays stuck.
+  // Ordinary messages expire; retained worktree paths stay readable until dismissed or replaced.
   createEffect(on(ws.store.receipt, r => {
     clearTimeout(timer);
-    if (r) timer = setTimeout(() => ws.store.clearReceipt(), r.ok ? 3000 : 8000);
+    if (r && !r.keptPaths?.length) timer = setTimeout(() => ws.store.clearReceipt(), r.ok ? 3000 : 8000);
   }));
   createEffect(on(() => ws.router.route(), () => { if (ws.store.receipt()?.ok === false) ws.store.clearReceipt(); }, { defer: true }));
   const dismiss = () => { if (ws.store.receipt()) ws.store.clearReceipt(); };
@@ -103,7 +103,7 @@ function Receipt() {
   onCleanup(() => { clearTimeout(timer); document.removeEventListener("pointerdown", onPointer, true); document.removeEventListener("keydown", onKey, true); });
   return <>
     <div class="ws-live" role="status" aria-live="polite">{ws.store.receipt()?.message ?? ""}</div>
-    <Show when={ws.store.receipt()?.ok === false}><div class="ws-receipt">{ws.store.receipt()!.message}</div></Show>
+    <Show when={ws.store.receipt()?.ok === false || ws.store.receipt()?.keptPaths?.length}><div class="ws-receipt">{ws.store.receipt()!.message}<Show when={ws.store.receipt()?.keptPaths?.length}><button class="btn btn-sm" onClick={dismiss}>Dismiss</button></Show></div></Show>
   </>;
 }
 
@@ -390,6 +390,9 @@ export function Workspace(props: WorkspaceProps) {
           <main class="main" ref={main} tabindex="-1">
             <TabStrip tabs={tabs} title={titleOf} onSelect={selectTab} onClose={askClose} />
             <ConnectionNotice />
+            <Show when={store.ready() && store.syncing()}>
+              <div class="strip" role="status">Updating confirmed state…</div>
+            </Show>
             <Show when={store.ready() && store.readIssue() && store.connection().state === "connected"}>
               <div class="strip warn" role="alert"><span>Workspace refresh failed. Showing the last loaded view.</span>
                 <button class="lnk" onClick={() => void store.reload()}>Retry</button>

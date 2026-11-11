@@ -523,7 +523,7 @@ describe("the one loading system", () => {
 
   it("draws in the control's own box, and shows nothing for an action that is over at once", () => {
     const css = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "../src/workspace.css"), "utf8");
-    expect(css).toMatch(/\[data-busy\]::after \{[^}]*position: absolute[^}]*opacity: 0[^}]*150ms/);
+    expect(css).toMatch(/\[data-busy\]::after[^{]*\{[^}]*position: absolute[^}]*opacity: 0[^}]*150ms/);
     expect(css).not.toMatch(/\[data-busy\][^{]*\{[^}]*(width: auto|padding|margin: 0 )/);
   });
 });

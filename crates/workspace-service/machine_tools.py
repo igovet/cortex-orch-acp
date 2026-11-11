@@ -26,7 +26,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from cortex_runtime.project_storage import project_store_directory
 from cortex_runtime.workspace_contract import LIMITS
-from cortex_runtime.workspace_api.attachments import checked as checked_attachments
 
 FRAME_BUDGET = LIMITS["frameBytes"] - 64 * 1024
 GIT_TIMEOUT = 25
@@ -1109,12 +1108,14 @@ def worker_history(db, runtime, refs, channel, task_id, worker_id, status, bindi
                 # Recover split input/status updates even across a page boundary.
                 canonical = "tool:" + ref[len("tool-error:"):] if ref.startswith("tool-error:") else ref
                 error_ref = "tool-error:" + canonical[len("tool:"):] if canonical.startswith("tool:") else canonical
+                # Unary + keeps SQLite from preferring a broad assignment/id scan
+                # over the activity expression index, without requiring ANALYZE.
                 call_sql = ("SELECT id,event_type,created_at,payload_json FROM task_events WHERE task_id=? "
-                    "AND assignment_ref IN (" + marks + ") AND json_extract(payload_json,'$.activity_ref') IN (?,?) "
+                    "AND +assignment_ref IN (" + marks + ") AND json_extract(payload_json,'$.activity_ref') IN (?,?) "
                     "AND id<? ")
                 args = (runtime, *refs, canonical, error_ref, before_t)
-                related = db.execute(call_sql + "ORDER BY id DESC LIMIT 100", args).fetchall()[::-1]
-                initial = db.execute(call_sql + "ORDER BY id LIMIT 1", args).fetchone()
+                related = db.execute(call_sql + "ORDER BY +id DESC LIMIT 100", args).fetchall()[::-1]
+                initial = db.execute(call_sql + "ORDER BY +id LIMIT 1", args).fetchone()
                 if initial and initial["id"] != related[0]["id"]:
                     related.insert(0, initial)
             if len(related) >= 100:
@@ -1334,6 +1335,8 @@ def _review_save(state, project, seen):
 
 def product_read(root, state, project, *, review=True):
     product = product_of(state, project)
+    has_git = is_repo(root)
+    branch = common = None
     db = store_reader(root)
     if db is not None:
         try:
@@ -1347,9 +1350,12 @@ def product_read(root, state, project, *, review=True):
                         record.update(title=options["draftTitle"], titleState="user")
                     checkout = record.get("checkout")
                     if checkout and checkout["kind"] == "main":
-                        checkout["branch"] = out(root, "branch", "--show-current").strip() if is_repo(root) else ""
-                    elif checkout and "path" not in checkout and is_repo(root):
-                        common = out(root, "rev-parse", "--path-format=absolute", "--git-common-dir").strip()
+                        if branch is None:
+                            branch = out(root, "branch", "--show-current").strip() if has_git else ""
+                        checkout["branch"] = branch
+                    elif checkout and "path" not in checkout and has_git:
+                        if common is None:
+                            common = out(root, "rev-parse", "--path-format=absolute", "--git-common-dir").strip()
                         group = hashlib.sha256(common.encode()).hexdigest()[:16]
                         from cortex_runtime.workspace_api.task_options import checkout_leaf
                         base = Path(machine_settings(state)["worktreeRoot"]).expanduser() / group
@@ -1396,7 +1402,7 @@ def product_read(root, state, project, *, review=True):
     for task, record in product["tasks"].items():
         if review and record.get("status") == "ready_to_merge":
             record["integrationFacts"] = task_git.integration_facts(sys.modules[__name__], root, record, task)
-    product["hasGit"] = is_repo(root)
+    product["hasGit"] = has_git
     product["ghAvailable"] = bool(shutil.which("gh"))
     return product
 
@@ -1662,6 +1668,9 @@ def integrate(root, project, state, params):
 
 
 def validate_attachments(items):
+    if items == []:
+        return []
+    from cortex_runtime.workspace_api.attachments import checked as checked_attachments
     try:
         return checked_attachments(items)
     except ValueError:
@@ -1681,6 +1690,103 @@ def check_product_size(product):
     drop_retained_files(product)
     if len(json.dumps(product, ensure_ascii=False).encode()) > FRAME_BUDGET:
         raise Refused("product_full", "Saved attachments and conversation exceed this project's display limit. Reduce the new attachments or remove queued items before retrying.")
+
+
+def delete_sprint(root, project, state, params):
+    """Two service phases: fence starts first, then purge only confirmed quiet tasks."""
+    from cortex_runtime.store import Store
+    from cortex_runtime.workspace_api import task_options
+    from cortex_runtime.workspace_api.purge import purge_task
+    from cortex_runtime.workspace_api.storage import WorkspaceError
+    if params.get("confirmed") is not True:
+        raise Refused("confirmation_required", "Confirm before deleting the sprint and its tasks.")
+    with Locked(state):
+        product = product_read(root, state, project, review=False)
+        sprint_id = params.get("sprintId")
+        sprint = next((s for s in product["sprints"] if s["id"] == sprint_id), None)
+        if sprint is None:
+            saved = product.get("deletedSprints", {}).get(sprint_id)
+            if saved is not None:
+                return saved
+            raise Refused("unknown_sprint", "Unknown sprint.")
+        # Membership is frozen under the same lock as linking and queue starts.
+        members = list(dict.fromkeys(sprint.get("deleteTaskIds", sprint["taskIds"])))
+        for task, record in product["tasks"].items():
+            if record.get("sprintId") == sprint_id and task not in members:
+                members.append(task)
+        if sprint.get("planningTaskId") and sprint["planningTaskId"] not in members:
+            members.append(sprint["planningTaskId"])
+        # A corrupt/foreign membership must never grant deletion of another sprint's task.
+        if any(product["tasks"].get(t, {}).get("sprintId") not in (None, sprint_id) for t in members):
+            raise Refused("membership_changed", "A task now belongs to another sprint. Refresh and retry.")
+        sprint.update(deleting=True, archivedAt=sprint.get("archivedAt") or now_ms(),
+                      queueState="paused", pauseReason="Deletion pending — retry Delete sprint",
+                      deleteTaskIds=members)
+        write_json(product_path(state, project), product)
+        store = Store(project_store_directory(root), project_root=root)
+        def fence(db):
+            executions = []
+            for task in members:
+                row = db.execute("SELECT execution_id FROM workspace_tasks WHERE project_id=? AND task_id=?", (project, task)).fetchone()
+                if row is None:
+                    continue
+                options = task_options.read(db, task)
+                options["deletingSprint"] = sprint_id
+                task_options.save(db, task, options)
+                if row[0]:
+                    execution = db.execute("SELECT e.execution_id,r.state FROM workspace_executions e LEFT JOIN runtime_tasks r ON r.task_id=e.runtime_task_id WHERE e.execution_id=?", (row[0],)).fetchone()
+                    if execution is None or execution["state"] not in ("COMPLETED", "FAILED", "CANCELLED"):
+                        executions.append(row[0])
+            return executions
+        executions = store.immediate_write(fence)
+        if params["action"] == "delete_prepare":
+            return {"done": False, "executionIds": executions}
+        kept = sprint.setdefault("keptWorktrees", [])
+        deleted = sprint.setdefault("deletedTaskIds", [])
+        blockers = []
+        if sprint.get("planningAttempt") and not sprint.get("deletePlannerStopped"):
+            return {"done": False, "reason": "Waiting for the sprint planner to stop. Retry Delete sprint.", "taskIds": deleted, "keptPaths": kept}
+        for task in members:
+            if task in deleted:
+                continue
+            record = product["tasks"].get(task, {})
+            checkout = record.get("checkout") or {}
+            # Save checkout evidence before deleting its runtime rows (restart-safe).
+            path = checkout.get("path") if checkout.get("kind") == "worktree" else None
+            if path and path not in kept:
+                kept.append(path)
+            write_json(product_path(state, project), product)
+            try:
+                with store.connection() as db:
+                    exists = db.execute("SELECT 1 FROM workspace_tasks WHERE project_id=? AND task_id=?", (project, task)).fetchone()
+                if exists:
+                    purge_task(store, project, task, reclaim=False)
+            except WorkspaceError as error:
+                blockers.append(task + ": " + str(error))
+                continue
+            # Non-forcing removal only for proven app-created checkouts. Never delete a branch.
+            if path and not Path(path).exists():
+                kept.remove(path)
+            elif path and checkout.get("createdByWorkspace") is True and Path(path).resolve() != Path(root).resolve():
+                try:
+                    import task_git
+                    verified = task_git.task_path(sys.modules[__name__], root, record)
+                    if not status_files(verified) and git(root, "worktree", "remove", verified, check=False).returncode == 0:
+                        kept.remove(path)
+                except (Refused, OSError):
+                    pass
+            product["tasks"][task] = {"purged": True}
+            product["messages"] = [m for m in product["messages"] if m["taskId"] != task]
+            product["comments"].pop(task, None)
+            deleted.append(task)
+            write_json(product_path(state, project), product)
+        if blockers:
+            return {"done": False, "reason": "Waiting for confirmed stop or cleanup: " + "; ".join(blockers) + ". Retry Delete sprint.", "taskIds": deleted, "keptPaths": kept}
+        result = {"done": True, "taskIds": members, "keptPaths": kept}
+        product["sprints"] = [s for s in product["sprints"] if s["id"] != sprint_id]
+        product.setdefault("deletedSprints", {})[sprint_id] = result
+        write_json(product_path(state, project), product)
+        return result
 
 
 def sprint_action(project, state, params):
@@ -2312,6 +2418,11 @@ def run(request):
         return git_action(root, project, state, params)
     if op == "workers":
         return workers_of(root, project, params.get("taskIds") or [], worker_id=params.get("workerId"), cursor=params.get("cursor"))
+    if op == "product.facts":
+        # One helper startup for the two project-store reads; Git stays in its own lane.
+        task_ids = (params or {}).get("taskIds") or []
+        return dict(product=product_read(root, state, project),
+                    workers=workers_of(root, project, task_ids) if task_ids else [])
     if op == "product.read":
         if params and params.get("attachments") is True:
             db = store_reader(root)
@@ -2333,6 +2444,8 @@ def run(request):
     if op == "product.integrate":
         return integrate(root, project, state, params)
     if op == "product.sprint":
+        if params.get("action") in ("delete_prepare", "delete_finish"):
+            return delete_sprint(root, project, state, params)
         return sprint_action(project, state, params)
     raise Refused("unsupported_action", "This machine does not support that yet.")
 

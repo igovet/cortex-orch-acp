@@ -147,7 +147,7 @@ function ResultSummary(props: { m: SessionModel }) {
   return <div class="rv-top-in">
     <div id={id} class={`rv-sum${more() ? " open" : ""}`}><ResultText text={r().summary} /></div>
     <Show when={r().summary.length > 280}><button class="lnk rv-more" aria-controls={id} aria-expanded={more()} onClick={() => setMore(!more())}>{more() ? "Show less" : "Show the whole result"}</button></Show>
-    <Show when={props.m.view.project.hasGit === false}><div class="rv-note"><I n="folder" s={14} class="faint" /><span>{ws.t("changesWithoutGit")}</span></div></Show>
+    <Show when={props.m.view.project.hasGit === false}><div class="rv-note"><I n="folder" s={14} class="faint" /><span><strong>No diff without Git.</strong> {ws.t("changesWithoutGit")}</span></div></Show>
   </div>;
 }
 

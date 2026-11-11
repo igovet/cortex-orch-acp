@@ -340,6 +340,7 @@ export type WorkspaceCommand =
   | { type: "cancel_planning" | "resume_planning"; sprintId: string }
   | { type: "rename_sprint"; sprintId: string; title: string }
   | { type: "close_sprint"; sprintId: string; confirmed: boolean }
+  | { type: "delete_sprint"; projectId: string; sprintId: string; confirmed: boolean }
   | { type: "set_sprint_settings"; sprintId: string; settings: Partial<TaskSettings> }
   | { type: "run_sprint" | "pause_sprint"; sprintId: string; now?: number }
   | { type: "set_run_mode"; sprintId: string; runMode: Sprint["runMode"] }
