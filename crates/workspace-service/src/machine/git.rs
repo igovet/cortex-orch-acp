@@ -155,7 +155,7 @@ impl Git {
                 error: String::from_utf8_lossy(&err).into_owned(),
             }))
         };
-        tokio::time::timeout(Duration::from_secs(25),run).await.map_err(|_|refuse("git_timeout","Git did not answer in time; a write may have completed. Inspect before retrying."))?
+        let __t=std::time::Instant::now(); let __r=tokio::time::timeout(Duration::from_secs(25),run).await; eprintln!("perf-git ms={} argv={:?}", __t.elapsed().as_millis(), argv.iter().take(6).collect::<Vec<_>>()); __r.map_err(|_|refuse("git_timeout","Git did not answer in time; a write may have completed. Inspect before retrying."))?
     }
     async fn raw(&self, path: &Path, argv: &[String], input: Option<Vec<u8>>) -> Result<Output> {
         self.raw_bounded(path, argv, input, workspace_protocol::FRAME_BYTES)
